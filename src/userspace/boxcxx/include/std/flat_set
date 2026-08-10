@@ -1,0 +1,1126 @@
+// boxcxx — <flat_set>
+// flat_set / flat_multiset ([flat.set], [flat.multiset]): sorted-container
+// adaptors, not associative containers -- they live in [container.adaptors]
+// next to stack and queue, and their deduction guides answer to
+// [container.adaptors.general]/6 rather than to [associative.reqmts].
+//
+// Both classes are the same machine with three switches (the ordering tag
+// they accept, lower_bound vs upper_bound as the insertion point, dedup or
+// no dedup), so the behaviour lives once in __flat::SetImpl and each class
+// is a facade that derives from it PRIVATELY and re-exports its surface by
+// name. Private, not public: a public base would publish the engine into
+// the type system -- is_base_of_v, slicing, base-typed overloads -- for a
+// type the standard says nothing about. `friend Impl` is what lets the
+// engine convert a Derived& back to its own base in swap and in the
+// comparison operators, and hidden friends declared in the base are still
+// found by ADL on the facade, since a private base is still an associated
+// class.
+//
+// iterator and const_iterator are BOTH KeyContainer::const_iterator. The
+// standard requires only random_access_iterator; taking the container's own
+// const_iterator makes flat_set<int> a contiguous_range whose data() is a
+// plain const int*, which is what lets the key block go out to DMA or
+// memcpy untouched. The consequence is that erase(iterator) and
+// erase(const_iterator) are one declaration, not two -- writing both would
+// be a redeclaration. Both reference libraries collapse them the same way.
+#ifndef BOXCXX_FLAT_SET
+#define BOXCXX_FLAT_SET
+
+#include <__bits/flat_engine>
+#include <__bits/ranges_core>
+#include <__bits/version_flat_set>
+#include <compare>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+template <typename Key, typename Compare = less<Key>,
+          typename KeyContainer = vector<Key>>
+class flat_set;
+template <typename Key, typename Compare = less<Key>,
+          typename KeyContainer = vector<Key>>
+class flat_multiset;
+
+namespace __flat {
+
+// [sequences.general]'s exposition-only iter-value-type, the spelling the
+// container-adaptor deduction guides are written in.
+template <typename It>
+using IterValueType = typename iterator_traits<It>::value_type;
+
+// ── the engine ──────────────────────────────────────────────────────────
+// Multi == false is [flat.set], Multi == true is [flat.multiset]. Every
+// difference between the two clauses is a branch on Multi:
+//   * SortedT     -- which ordering tag the constructors accept, so
+//                    flat_set(sorted_equivalent, v) is ill-formed for free;
+//   * the return type of emplace/insert (pair<iterator,bool> vs iterator);
+//   * lower_bound vs upper_bound as the insertion point, which is what
+//     makes an equivalent element land AFTER its equals in a multiset;
+//   * the dedup pass, which only the unique side runs;
+//   * the heterogeneous single-element insert, which [flat.multiset.defn]
+//     does not have at all.
+
+template <typename Key, typename Compare, typename KeyContainer, bool Multi>
+class SetImpl {
+    // [flat.set.overview]/8 is the ONLY ill-formedness rule the clause
+    // states. In particular there is no nothrow-swappable requirement on
+    // KeyContainer: /7 says "any sequence container supporting
+    // Cpp17RandomAccessIterator can be used", and the synopsis declares
+    // swap(flat_set&) unconditionally noexcept, which makes terminate --
+    // not a diagnostic -- the consequence the standard chose for a
+    // throwing swap ([except.spec]/5). Rejecting such a container outright
+    // would refuse code that never calls swap at all, and a deque over a
+    // stateful regional allocator is exactly that code here: boxcxx's
+    // deque::swap is correctly noexcept(is_always_equal), unlike either
+    // reference library's unconditionally-noexcept one.
+    static_assert(is_same_v<Key, typename KeyContainer::value_type>,
+                  "[flat.set.overview]/8: Key must denote KeyContainer::value_type");
+
+    using Derived = conditional_t<Multi, flat_multiset<Key, Compare, KeyContainer>,
+                                         flat_set<Key, Compare, KeyContainer>>;
+    using SortedT = conditional_t<Multi, sorted_equivalent_t, sorted_unique_t>;
+
+public:
+    using key_type               = Key;
+    using value_type             = Key;
+    using key_compare            = Compare;
+    using value_compare          = Compare;
+    using reference              = value_type &;
+    using const_reference        = const value_type &;
+    using size_type              = typename KeyContainer::size_type;
+    using difference_type        = typename KeyContainer::difference_type;
+    using iterator               = typename KeyContainer::const_iterator;
+    using const_iterator         = typename KeyContainer::const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using container_type         = KeyContainer;
+
+private:
+    // The container's own MUTABLE iterator. Everything the engine does to
+    // the container is expressed in this type; it converts to the public
+    // const_iterator on the way out.
+    using MutIt = typename KeyContainer::iterator;
+
+    KeyContainer keys;
+    Compare      compare;
+
+    // Both operands are frozen first: a container whose const_iterator is a
+    // distinct class (deque) has no mixed-constness operator-.
+    difference_type OffsetOf(MutIt i) const { return const_iterator(i) - keys.begin(); }
+    static const_iterator Freeze(MutIt i) { return const_iterator(i); }
+
+public:
+    // ── [flat.set.cons] / [flat.multiset.cons] ──────────────────────────
+    // The tag-less container forms sort (and, for the unique side, dedup);
+    // the tagged forms take the caller's word for it and only move. The
+    // twelve allocator forms are "equivalent to the corresponding
+    // non-allocator constructor except that c is constructed with
+    // uses-allocator construction", which is exactly MakeUsingAlloc.
+
+    SetImpl() : SetImpl(key_compare()) {}
+
+    explicit SetImpl(container_type cont, const key_compare &comp = key_compare())
+        : keys(std::move(cont)), compare(comp)
+    {
+        SortAndUnique();
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(const container_type &cont, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare()
+    {
+        SortAndUnique();
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(const container_type &cont, const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare(comp)
+    {
+        SortAndUnique();
+    }
+
+    SetImpl(SortedT, container_type cont, const key_compare &comp = key_compare())
+        : keys(std::move(cont)), compare(comp)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT, const container_type &cont, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare()
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT, const container_type &cont, const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare(comp)
+    {
+    }
+
+    explicit SetImpl(const key_compare &comp) : keys(), compare(comp) {}
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    explicit SetImpl(const Alloc &a) : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+    {
+    }
+
+    // [container.adaptors.general]/4: an iterator-pair constructor template
+    // drops out of overload resolution when the deduced type is not an
+    // input iterator -- without that, (vector, less<>) would be a candidate
+    // here as well as at the container constructor.
+    template <typename It>
+        requires __iter_impl::Cpp17InputIterator<It>
+    SetImpl(It first, It last, const key_compare &comp = key_compare())
+        : keys(), compare(comp)
+    {
+        insert(first, last);
+    }
+    template <typename It, typename Alloc>
+        requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
+    SetImpl(It first, It last, const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+    {
+        insert(first, last);
+    }
+    template <typename It, typename Alloc>
+        requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
+    SetImpl(It first, It last, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+    {
+        insert(first, last);
+    }
+
+    template <ContainerCompatibleRange<value_type> R>
+    SetImpl(from_range_t fr, R &&rg) : SetImpl(fr, std::forward<R>(rg), key_compare())
+    {
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    SetImpl(from_range_t, R &&rg, const key_compare &comp) : SetImpl(comp)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R, typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(from_range_t, R &&rg, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+    {
+        insert_range(std::forward<R>(rg));
+    }
+    template <ContainerCompatibleRange<value_type> R, typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(from_range_t, R &&rg, const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+    {
+        insert_range(std::forward<R>(rg));
+    }
+
+    template <typename It>
+        requires __iter_impl::Cpp17InputIterator<It>
+    SetImpl(SortedT, It first, It last, const key_compare &comp = key_compare())
+        : keys(first, last), compare(comp)
+    {
+    }
+    template <typename It, typename Alloc>
+        requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT, It first, It last, const key_compare &comp, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, first, last)), compare(comp)
+    {
+    }
+    template <typename It, typename Alloc>
+        requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT, It first, It last, const Alloc &a)
+        : keys(MakeUsingAlloc<KeyContainer>(a, first, last)), compare()
+    {
+    }
+
+    SetImpl(initializer_list<value_type> il, const key_compare &comp = key_compare())
+        : SetImpl(il.begin(), il.end(), comp)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(initializer_list<value_type> il, const key_compare &comp, const Alloc &a)
+        : SetImpl(il.begin(), il.end(), comp, a)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(initializer_list<value_type> il, const Alloc &a) : SetImpl(il.begin(), il.end(), a)
+    {
+    }
+
+    SetImpl(SortedT s, initializer_list<value_type> il,
+            const key_compare &comp = key_compare())
+        : SetImpl(s, il.begin(), il.end(), comp)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT s, initializer_list<value_type> il, const key_compare &comp,
+            const Alloc &a)
+        : SetImpl(s, il.begin(), il.end(), comp, a)
+    {
+    }
+    template <typename Alloc>
+        requires uses_allocator_v<container_type, Alloc>
+    SetImpl(SortedT s, initializer_list<value_type> il, const Alloc &a)
+        : SetImpl(s, il.begin(), il.end(), a)
+    {
+    }
+
+    Derived &operator=(initializer_list<value_type> il)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        keys.clear();
+        insert(il.begin(), il.end());
+        restore.Done();
+        return static_cast<Derived &>(*this);
+    }
+
+    // ── iterators ───────────────────────────────────────────────────────
+
+    iterator       begin() noexcept { return Freeze(keys.begin()); }
+    const_iterator begin() const noexcept { return keys.begin(); }
+    iterator       end() noexcept { return Freeze(keys.end()); }
+    const_iterator end() const noexcept { return keys.end(); }
+
+    reverse_iterator       rbegin() noexcept { return reverse_iterator(end()); }
+    const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
+    reverse_iterator       rend() noexcept { return reverse_iterator(begin()); }
+    const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
+
+    const_iterator         cbegin() const noexcept { return keys.begin(); }
+    const_iterator         cend() const noexcept { return keys.end(); }
+    const_reverse_iterator crbegin() const noexcept { return const_reverse_iterator(cend()); }
+    const_reverse_iterator crend() const noexcept { return const_reverse_iterator(cbegin()); }
+
+    // ── capacity ────────────────────────────────────────────────────────
+
+    [[nodiscard]] bool empty() const noexcept { return keys.empty(); }
+    size_type          size() const noexcept { return keys.size(); }
+    size_type          max_size() const noexcept { return keys.max_size(); }
+
+    // ── [flat.set.modifiers] / [flat.multiset.modifiers] ────────────────
+
+    template <typename... Args>
+        requires is_constructible_v<value_type, Args...>
+    conditional_t<Multi, iterator, pair<iterator, bool>> emplace(Args &&...args)
+    {
+        // When the one argument already IS a value_type its key is known
+        // without building anything, so the search can run against the
+        // argument itself and the element be built straight into place.
+        // Without this branch emplace would keep the behaviour insert has
+        // just shed: a wasted construct-and-discard on a present key, and
+        // an argument left moved-from even though nothing was inserted --
+        // the two halves of one class disagreeing, which is what made the
+        // insert defect worth fixing in the first place. Both reference
+        // libraries elide it here too.
+        if constexpr (sizeof...(Args) == 1 &&
+                      (is_same_v<remove_cvref_t<Args>, value_type> && ...)) {
+            return InsertValue(std::forward<Args>(args)...);
+        } else {
+            return EmplaceBuilt(std::forward<Args>(args)...);
+        }
+    }
+
+    template <typename... Args>
+        requires is_constructible_v<value_type, Args...>
+    iterator emplace_hint(const_iterator position, Args &&...args)
+    {
+        if constexpr (!Multi) {
+            // A unique set has exactly one legal position per key, so the
+            // hint carries no information the key does not already carry.
+            (void)position;
+            return emplace(std::forward<Args>(args)...).first;
+        } else {
+            // [associative.reqmts]: place the element as close as possible
+            // to just before the hint -- i.e. clamp the hint into the
+            // element's own equivalent range.
+            value_type      fresh(std::forward<Args>(args)...);
+            difference_type hinted = position - cbegin();
+            difference_type low    = OffsetOf(ranges::lower_bound(keys, fresh, compare));
+            difference_type high   = OffsetOf(ranges::upper_bound(keys, fresh, compare));
+            difference_type at     = hinted < low ? low : (hinted > high ? high : hinted);
+
+            return PlaceAt(keys.begin() + at, std::move(fresh));
+        }
+    }
+
+    // [associative.reqmts] a_uniq.insert(t)/63: "Inserts t IF AND ONLY IF
+    // there is no element in the container with key equivalent to the key
+    // of t." Routing these through emplace would build a value_type before
+    // the search and then throw it away on a present key -- a wasted heap
+    // allocation per failed insert for a key like string, and, for the
+    // rvalue form, an argument left moved-from even though nothing was
+    // inserted. Here the argument already IS the value, so one search
+    // answers both the "present?" test and the insertion point, and the
+    // element is built once the search has said it is needed. The
+    // heterogeneous insert(K&&) below has always worked this way; this is
+    // the same shape.
+    //
+    // The element is built BEFORE the guard is armed and handed over as an
+    // rvalue. That costs one extra move on a successful insertion, and buys
+    // the strong guarantee: a key whose copy or move constructor throws
+    // cannot take the container down with it, because at that moment the
+    // container has not been touched. Building inside the guard instead --
+    // by forwarding straight into keys.insert -- is what made a throwing
+    // key empty the set.
+    conditional_t<Multi, iterator, pair<iterator, bool>> insert(const value_type &x)
+    {
+        return InsertValue(x);
+    }
+    conditional_t<Multi, iterator, pair<iterator, bool>> insert(value_type &&x)
+    {
+        return InsertValue(std::move(x));
+    }
+    // A unique set has one legal position per key, so the hint carries no
+    // information and the hinted form is the unhinted one. A multiset must
+    // still honour the hint by clamping it into the equivalent range.
+    iterator insert(const_iterator position, const value_type &x)
+    {
+        if constexpr (!Multi)
+            return InsertValue(x).first;
+        else
+            return emplace_hint(position, x);
+    }
+    iterator insert(const_iterator position, value_type &&x)
+    {
+        if constexpr (!Multi)
+            return InsertValue(std::move(x)).first;
+        else
+            return emplace_hint(position, std::move(x));
+    }
+
+    // Heterogeneous single insert. [flat.set.modifiers]/1-4 -- and the
+    // (!Multi) gate is load-bearing: [flat.multiset.defn] has no such
+    // overload, and a shared engine would otherwise hand it to both.
+    // /2's precondition (x and the value_type it converts to find the same
+    // position) is what lets one binary search over x serve for both the
+    // "already present?" test and the insertion point.
+    template <typename K>
+        requires(!Multi) && Transparent<Compare> && is_constructible_v<value_type, K>
+    pair<iterator, bool> insert(K &&x)
+    {
+        MutIt at = ranges::lower_bound(keys, x, compare);
+        if (at != keys.end() && !compare(x, *at)) return {Freeze(at), false};
+
+        value_type fresh(std::forward<K>(x));
+        return PlaceAt(at, std::move(fresh));
+    }
+    template <typename K>
+        requires(!Multi) && Transparent<Compare> && is_constructible_v<value_type, K>
+    iterator insert(const_iterator, K &&x)
+    {
+        return insert(std::forward<K>(x)).first;
+    }
+
+    // [flat.set.modifiers]/5: append, sort the new tail only, merge the two
+    // sorted runs, then dedup. Sorting the whole thing would be N log N
+    // where /6 budgets N + M log M.
+    template <typename It>
+        requires __iter_impl::Cpp17InputIterator<It>
+    void insert(It first, It last)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        size_type                  old_size = keys.size();
+        keys.insert(keys.end(), first, last);
+        SortTailAndMerge(old_size, true);
+        restore.Done();
+    }
+    // /8 is "equivalent to insert(first, last)" with /9 Linear complexity:
+    // the caller has promised the tail is already sorted, so the only way
+    // to be linear is to believe them and skip the sort.
+    template <typename It>
+        requires __iter_impl::Cpp17InputIterator<It>
+    void insert(SortedT, It first, It last)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        size_type                  old_size = keys.size();
+        keys.insert(keys.end(), first, last);
+        SortTailAndMerge(old_size, false);
+        restore.Done();
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    void insert_range(R &&rg)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        size_type                  old_size = keys.size();
+        // [flat.set.modifiers]/10 spells the append out element by element,
+        // which is also what keeps append_range off KeyContainer's list of
+        // requirements.
+        for (const auto &e : rg) keys.insert(keys.end(), e);
+        SortTailAndMerge(old_size, true);
+        restore.Done();
+    }
+    void insert(initializer_list<value_type> il) { insert(il.begin(), il.end()); }
+    void insert(SortedT s, initializer_list<value_type> il) { insert(s, il.begin(), il.end()); }
+
+    // /14: "*this is emptied, EVEN IF the function exits via an exception."
+    // The return object is initialised before the local guard is destroyed,
+    // so the clear happens on both the normal and the throwing path.
+    container_type extract() &&
+    {
+        struct EmptyOnExit {
+            KeyContainer *target;
+            ~EmptyOnExit() { target->clear(); }
+        } emptier{&keys};
+        return std::move(keys);
+    }
+    // /16-17: the sortedness of cont is a precondition, not a check.
+    void replace(container_type &&cont) { keys = std::move(cont); }
+
+    // One declaration, not two: iterator and const_iterator are the same
+    // type here, so erase(iterator) and erase(const_iterator) would be a
+    // redeclaration of each other.
+    iterator erase(const_iterator position)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        MutIt                      after = keys.erase(position);
+        restore.Done();
+        return Freeze(after);
+    }
+    iterator erase(const_iterator first, const_iterator last)
+    {
+        RestoreGuard<KeyContainer> restore(keys);
+        MutIt                      after = keys.erase(first, last);
+        restore.Done();
+        return Freeze(after);
+    }
+    size_type erase(const key_type &x) { return EraseEquivalent(x); }
+    // [associative.reqmts]: the transparent erase must exclude anything
+    // convertible to an iterator, or -- with iterator being a bare const
+    // Key* here -- a pointer argument would be swallowed by the key
+    // overload instead of erasing the element it points at.
+    template <typename K>
+        requires Transparent<Compare> && (!is_convertible_v<K &&, iterator>) &&
+                 (!is_convertible_v<K &&, const_iterator>)
+    size_type erase(K &&x)
+    {
+        return EraseEquivalent(x);
+    }
+
+    void swap(Derived &other) noexcept
+    {
+        ranges::swap(compare, other.compare);
+        ranges::swap(keys, other.keys);
+    }
+    void clear() noexcept { keys.clear(); }
+
+    // ── observers ───────────────────────────────────────────────────────
+
+    key_compare   key_comp() const { return compare; }
+    value_compare value_comp() const { return compare; }
+
+    // ── set operations ──────────────────────────────────────────────────
+
+    iterator       find(const key_type &x) { return FindEquivalent(*this, x); }
+    const_iterator find(const key_type &x) const { return FindEquivalent(*this, x); }
+    template <typename K>
+        requires Transparent<Compare>
+    iterator find(const K &x)
+    {
+        return FindEquivalent(*this, x);
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    const_iterator find(const K &x) const
+    {
+        return FindEquivalent(*this, x);
+    }
+
+    size_type count(const key_type &x) const { return CountEquivalent(x); }
+    template <typename K>
+        requires Transparent<Compare>
+    size_type count(const K &x) const
+    {
+        return CountEquivalent(x);
+    }
+
+    bool contains(const key_type &x) const { return find(x) != cend(); }
+    template <typename K>
+        requires Transparent<Compare>
+    bool contains(const K &x) const
+    {
+        return find(x) != cend();
+    }
+
+    iterator lower_bound(const key_type &x) { return Freeze(ranges::lower_bound(keys, x, compare)); }
+    const_iterator lower_bound(const key_type &x) const
+    {
+        return ranges::lower_bound(keys, x, compare);
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    iterator lower_bound(const K &x)
+    {
+        return Freeze(ranges::lower_bound(keys, x, compare));
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    const_iterator lower_bound(const K &x) const
+    {
+        return ranges::lower_bound(keys, x, compare);
+    }
+
+    iterator upper_bound(const key_type &x) { return Freeze(ranges::upper_bound(keys, x, compare)); }
+    const_iterator upper_bound(const key_type &x) const
+    {
+        return ranges::upper_bound(keys, x, compare);
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    iterator upper_bound(const K &x)
+    {
+        return Freeze(ranges::upper_bound(keys, x, compare));
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    const_iterator upper_bound(const K &x) const
+    {
+        return ranges::upper_bound(keys, x, compare);
+    }
+
+    pair<iterator, iterator> equal_range(const key_type &x) { return RangeOf(x); }
+    pair<const_iterator, const_iterator> equal_range(const key_type &x) const
+    {
+        return RangeOf(x);
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    pair<iterator, iterator> equal_range(const K &x)
+    {
+        return RangeOf(x);
+    }
+    template <typename K>
+        requires Transparent<Compare>
+    pair<const_iterator, const_iterator> equal_range(const K &x) const
+    {
+        return RangeOf(x);
+    }
+
+    // ── comparisons ─────────────────────────────────────────────────────
+    // Hidden friends taking the FACADE type, so they are found by ADL on
+    // flat_set / flat_multiset and never on the engine.
+
+    friend bool operator==(const Derived &x, const Derived &y)
+    {
+        return x.keys.size() == y.keys.size() &&
+               std::equal(x.keys.begin(), x.keys.end(), y.keys.begin());
+    }
+    // The return type is DEDUCED rather than written out as the synopsis'
+    // synth-three-way-result<value_type>. A key ordered solely by an
+    // external comparator -- no operator< of its own -- is legal here
+    // ([flat.set] constrains Compare, not Key), and an eagerly instantiated
+    // synth-three-way-result would make the CLASS ill-formed for such a
+    // key, not just its <=>. The requires-clause then lets a concept probe
+    // answer false instead of hard-erroring: libstdc++ 15.2 answers false,
+    // libc++ 22 hard-errors inside the body.
+    friend auto operator<=>(const Derived &x, const Derived &y)
+        requires requires(const value_type &a, const value_type &b) {
+            __cmp::SynthThreeWay{}(a, b);
+        }
+    {
+        return std::lexicographical_compare_three_way(x.keys.begin(), x.keys.end(),
+                                                      y.keys.begin(), y.keys.end(),
+                                                      __cmp::SynthThreeWay{});
+    }
+    friend void swap(Derived &x, Derived &y) noexcept { x.swap(y); }
+
+private:
+    // The one place a single element is put into the container. Every
+    // insert/emplace path funnels through here, so all nine of them share
+    // one exception story instead of nine.
+    conditional_t<Multi, iterator, pair<iterator, bool>> PlaceAt(MutIt at, value_type &&fresh)
+    {
+        RestoreIfTouched<KeyContainer> restore(keys);
+        MutIt                          placed = keys.insert(at, std::move(fresh));
+        restore.Done();
+        if constexpr (Multi)
+            return Freeze(placed);
+        else
+            return {Freeze(placed), true};
+    }
+
+    // [associative.reqmts] a_uniq.insert(t)/63: "Inserts t IF AND ONLY IF
+    // there is no element in the container with key equivalent to the key
+    // of t" -- so the search runs against the argument and nothing is
+    // built at all when the key is already there.
+    template <typename T>
+    conditional_t<Multi, iterator, pair<iterator, bool>> InsertValue(T &&x)
+    {
+        if constexpr (Multi) {
+            MutIt      at = ranges::upper_bound(keys, x, compare);
+            value_type fresh(std::forward<T>(x));
+            return PlaceAt(at, std::move(fresh));
+        } else {
+            MutIt at = ranges::lower_bound(keys, x, compare);
+            if (at != keys.end() && !compare(x, *at)) return {Freeze(at), false};
+            value_type fresh(std::forward<T>(x));
+            return PlaceAt(at, std::move(fresh));
+        }
+    }
+
+    // The general emplace: the arguments are not already a value_type, so
+    // one has to be built before its key can be compared against anything.
+    template <typename... Args>
+    conditional_t<Multi, iterator, pair<iterator, bool>> EmplaceBuilt(Args &&...args)
+    {
+        value_type fresh(std::forward<Args>(args)...);
+        if constexpr (Multi) {
+            // [flat.multiset.modifiers]/2 verbatim: upper_bound, so an
+            // equivalent element joins the END of its equivalent group.
+            MutIt at = ranges::upper_bound(keys, fresh, compare);
+            return PlaceAt(at, std::move(fresh));
+        } else {
+            MutIt at = ranges::lower_bound(keys, fresh, compare);
+            if (at != keys.end() && !compare(fresh, *at)) return {Freeze(at), false};
+            return PlaceAt(at, std::move(fresh));
+        }
+    }
+
+    void SortAndUnique()
+    {
+        SortWhole(keys, compare);
+        if constexpr (!Multi) Dedup(keys, compare);
+    }
+
+    // old_size is captured as a COUNT, not as an iterator: the append that
+    // precedes this call can reallocate, so the run boundary has to be
+    // recomputed from the container's current begin().
+    void SortTailAndMerge(size_type old_size, bool sort_tail)
+    {
+        MutIt middle = keys.begin() + static_cast<difference_type>(old_size);
+        if (middle != keys.end()) {
+            // The is_sorted probe is not an optimization, it is the
+            // complexity contract. [flat.set.overview]/2 excepts exactly
+            // three things from [associative.reqmts] -- node handles,
+            // iterator invalidation, single-element operation complexity --
+            // and range-constructor complexity is not among them. So rows
+            // X(i,j,c)/25, X(i,j)/28, X(from_range,rg,c)/31,
+            // X(from_range,rg)/34 and a=il/40 all still apply, and each of
+            // them reads "N log N in general ... LINEAR if [i,j) is sorted
+            // with respect to value_comp()". Sorting unconditionally would
+            // make every one of those five N log N. SortWhole already
+            // carries the same probe for the container constructor.
+            if (sort_tail && !ranges::is_sorted(middle, keys.end(), compare))
+                ranges::sort(middle, keys.end(), compare);
+            MergeRuns(keys.begin(), middle, keys.end(), compare);
+        }
+        if constexpr (!Multi) Dedup(keys, compare);
+    }
+
+    // One body for the const and non-const find: iterator and
+    // const_iterator are the same type, so there is nothing to duplicate.
+    template <typename Self, typename K>
+    static const_iterator FindEquivalent(Self &self, const K &x)
+    {
+        auto at = ranges::lower_bound(self.keys, x, self.compare);
+        if (at == self.keys.end() || self.compare(x, *at)) return const_iterator(self.keys.end());
+        return const_iterator(at);
+    }
+
+    template <typename K>
+    size_type CountEquivalent(const K &x) const
+    {
+        if constexpr (!Multi) {
+            // A unique set answers with one search, not two.
+            return contains(x) ? size_type(1) : size_type(0);
+        } else {
+            auto found = ranges::equal_range(keys, x, compare);
+            return static_cast<size_type>(found.end() - found.begin());
+        }
+    }
+
+    template <typename K>
+    pair<const_iterator, const_iterator> RangeOf(const K &x) const
+    {
+        auto found = ranges::equal_range(keys, x, compare);
+        return {const_iterator(found.begin()), const_iterator(found.end())};
+    }
+    template <typename K>
+    pair<iterator, iterator> RangeOf(const K &x)
+    {
+        auto found = ranges::equal_range(keys, x, compare);
+        return {Freeze(found.begin()), Freeze(found.end())};
+    }
+
+    template <typename K>
+    size_type EraseEquivalent(const K &x)
+    {
+        if constexpr (!Multi) {
+            MutIt at = ranges::lower_bound(keys, x, compare);
+            if (at == keys.end() || compare(x, *at)) return 0;
+            RestoreGuard<KeyContainer> restore(keys);
+            keys.erase(at);
+            restore.Done();
+            return 1;
+        } else {
+            auto      found = ranges::equal_range(keys, x, compare);
+            size_type count  = static_cast<size_type>(found.end() - found.begin());
+            if (count) {
+                RestoreGuard<KeyContainer> restore(keys);
+                keys.erase(found.begin(), found.end());
+                restore.Done();
+            }
+            return count;
+        }
+    }
+};
+
+} // namespace __flat
+
+// ── [flat.set.defn] ─────────────────────────────────────────────────────
+
+template <typename Key, typename Compare, typename KeyContainer>
+class flat_set : private __flat::SetImpl<Key, Compare, KeyContainer, false> {
+    using Impl = __flat::SetImpl<Key, Compare, KeyContainer, false>;
+    friend Impl;
+
+public:
+    using typename Impl::key_type;
+    using typename Impl::value_type;
+    using typename Impl::key_compare;
+    using typename Impl::value_compare;
+    using typename Impl::reference;
+    using typename Impl::const_reference;
+    using typename Impl::size_type;
+    using typename Impl::difference_type;
+    using typename Impl::iterator;
+    using typename Impl::const_iterator;
+    using typename Impl::reverse_iterator;
+    using typename Impl::const_reverse_iterator;
+    using typename Impl::container_type;
+
+    // Inherited constructors keep their explicit-ness and their default
+    // arguments; the default constructor is never inherited, hence the
+    // explicit defaulted one.
+    using Impl::Impl;
+    flat_set() = default;
+    using Impl::operator=;
+
+    using Impl::begin;
+    using Impl::end;
+    using Impl::rbegin;
+    using Impl::rend;
+    using Impl::cbegin;
+    using Impl::cend;
+    using Impl::crbegin;
+    using Impl::crend;
+
+    using Impl::empty;
+    using Impl::max_size;
+    using Impl::size;
+
+    using Impl::emplace;
+    using Impl::emplace_hint;
+    using Impl::insert;
+    using Impl::insert_range;
+
+    using Impl::clear;
+    using Impl::erase;
+    using Impl::extract;
+    using Impl::replace;
+    using Impl::swap;
+
+    using Impl::key_comp;
+    using Impl::value_comp;
+
+    using Impl::contains;
+    using Impl::count;
+    using Impl::equal_range;
+    using Impl::find;
+    using Impl::lower_bound;
+    using Impl::upper_bound;
+};
+
+// ── [flat.multiset.defn] ────────────────────────────────────────────────
+
+template <typename Key, typename Compare, typename KeyContainer>
+class flat_multiset : private __flat::SetImpl<Key, Compare, KeyContainer, true> {
+    using Impl = __flat::SetImpl<Key, Compare, KeyContainer, true>;
+    friend Impl;
+
+public:
+    using typename Impl::key_type;
+    using typename Impl::value_type;
+    using typename Impl::key_compare;
+    using typename Impl::value_compare;
+    using typename Impl::reference;
+    using typename Impl::const_reference;
+    using typename Impl::size_type;
+    using typename Impl::difference_type;
+    using typename Impl::iterator;
+    using typename Impl::const_iterator;
+    using typename Impl::reverse_iterator;
+    using typename Impl::const_reverse_iterator;
+    using typename Impl::container_type;
+
+    using Impl::Impl;
+    flat_multiset() = default;
+    using Impl::operator=;
+
+    using Impl::begin;
+    using Impl::end;
+    using Impl::rbegin;
+    using Impl::rend;
+    using Impl::cbegin;
+    using Impl::cend;
+    using Impl::crbegin;
+    using Impl::crend;
+
+    using Impl::empty;
+    using Impl::max_size;
+    using Impl::size;
+
+    using Impl::emplace;
+    using Impl::emplace_hint;
+    using Impl::insert;
+    using Impl::insert_range;
+
+    using Impl::clear;
+    using Impl::erase;
+    using Impl::extract;
+    using Impl::replace;
+    using Impl::swap;
+
+    using Impl::key_comp;
+    using Impl::value_comp;
+
+    using Impl::contains;
+    using Impl::count;
+    using Impl::equal_range;
+    using Impl::find;
+    using Impl::lower_bound;
+    using Impl::upper_bound;
+};
+
+// A flat adaptor has no allocator of its own; it uses one exactly when its
+// key container does.
+template <typename Key, typename Compare, typename KeyContainer, typename Alloc>
+struct uses_allocator<flat_set<Key, Compare, KeyContainer>, Alloc>
+    : bool_constant<uses_allocator_v<KeyContainer, Alloc>> {};
+template <typename Key, typename Compare, typename KeyContainer, typename Alloc>
+struct uses_allocator<flat_multiset<Key, Compare, KeyContainer>, Alloc>
+    : bool_constant<uses_allocator_v<KeyContainer, Alloc>> {};
+
+// ── [flat.set.erasure] / [flat.multiset.erasure] ────────────────────────
+// Routed through the PUBLIC extract()/replace() pair, which gives the whole
+// specification for free: exactly size() predicate applications (one pass,
+// one call each), stable (survivors keep their order), and -- if the
+// predicate throws -- a valid-but-empty container, because extract() has
+// already emptied the set and replace() never runs. replace()'s sortedness
+// precondition holds by construction: deleting from a sorted range leaves
+// it sorted, and deleting from a range with no equal elements leaves it
+// with none.
+
+namespace __flat {
+
+template <typename S, typename Pred>
+typename S::size_type EraseIfVia(S &s, Pred &pred)
+{
+    auto cont  = std::move(s).extract();
+    auto first = cont.begin();
+    auto last  = cont.end();
+    auto out   = first;
+    for (; first != last; ++first)
+        if (!bool(pred(std::as_const(*first)))) {
+            if (out != first) *out = std::move(*first);
+            ++out;
+        }
+    auto removed = static_cast<typename S::size_type>(last - out);
+    cont.erase(out, last);
+    s.replace(std::move(cont));
+    return removed;
+}
+
+} // namespace __flat
+
+template <typename Key, typename Compare, typename KeyContainer, typename Pred>
+typename flat_set<Key, Compare, KeyContainer>::size_type
+erase_if(flat_set<Key, Compare, KeyContainer> &c, Pred pred)
+{
+    return __flat::EraseIfVia(c, pred);
+}
+template <typename Key, typename Compare, typename KeyContainer, typename Pred>
+typename flat_multiset<Key, Compare, KeyContainer>::size_type
+erase_if(flat_multiset<Key, Compare, KeyContainer> &c, Pred pred)
+{
+    return __flat::EraseIfVia(c, pred);
+}
+
+// ── deduction guides ────────────────────────────────────────────────────
+// Twelve per class. The constraints are [container.adaptors.general]/6
+// written out: /6.1 (InputIterator must be one) through the tree's
+// Cpp17InputIterator, /6.2 and /6.3 (a Compare or a KeyContainer parameter
+// must not deduce an allocator) through NotAllocatorLike / !AllocatorLike,
+// /6.4 (a lone Allocator parameter must deduce one) through AllocatorLike,
+// /6.6 (uses_allocator_v) and /6.7 (the comparator must be callable on two
+// keys) as requires-clauses.
+
+template <typename KeyContainer,
+          NotAllocatorLike Compare = less<typename KeyContainer::value_type>>
+    requires(!AllocatorLike<KeyContainer>) &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_set(KeyContainer, Compare = Compare())
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator>
+flat_set(KeyContainer, Allocator)
+    -> flat_set<typename KeyContainer::value_type,
+                less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <typename KeyContainer, NotAllocatorLike Compare, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator> &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_set(KeyContainer, Compare, Allocator)
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer,
+          NotAllocatorLike Compare = less<typename KeyContainer::value_type>>
+    requires(!AllocatorLike<KeyContainer>) &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_set(sorted_unique_t, KeyContainer, Compare = Compare())
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator>
+flat_set(sorted_unique_t, KeyContainer, Allocator)
+    -> flat_set<typename KeyContainer::value_type,
+                less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <typename KeyContainer, NotAllocatorLike Compare, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator> &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_set(sorted_unique_t, KeyContainer, Compare, Allocator)
+    -> flat_set<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <__iter_impl::Cpp17InputIterator InputIterator,
+          NotAllocatorLike Compare = less<__flat::IterValueType<InputIterator>>>
+flat_set(InputIterator, InputIterator, Compare = Compare())
+    -> flat_set<__flat::IterValueType<InputIterator>, Compare>;
+
+template <__iter_impl::Cpp17InputIterator InputIterator,
+          NotAllocatorLike Compare = less<__flat::IterValueType<InputIterator>>>
+flat_set(sorted_unique_t, InputIterator, InputIterator, Compare = Compare())
+    -> flat_set<__flat::IterValueType<InputIterator>, Compare>;
+
+template <ranges::input_range R, NotAllocatorLike Compare = less<ranges::range_value_t<R>>,
+          AllocatorLike Allocator = allocator<ranges::range_value_t<R>>>
+flat_set(from_range_t, R &&, Compare = Compare(), Allocator = Allocator())
+    -> flat_set<ranges::range_value_t<R>, Compare,
+                vector<ranges::range_value_t<R>,
+                       typename allocator_traits<Allocator>::template rebind_alloc<
+                           ranges::range_value_t<R>>>>;
+
+template <ranges::input_range R, AllocatorLike Allocator>
+flat_set(from_range_t, R &&, Allocator)
+    -> flat_set<ranges::range_value_t<R>, less<ranges::range_value_t<R>>,
+                vector<ranges::range_value_t<R>,
+                       typename allocator_traits<Allocator>::template rebind_alloc<
+                           ranges::range_value_t<R>>>>;
+
+template <typename Key, NotAllocatorLike Compare = less<Key>>
+flat_set(initializer_list<Key>, Compare = Compare()) -> flat_set<Key, Compare>;
+
+template <typename Key, NotAllocatorLike Compare = less<Key>>
+flat_set(sorted_unique_t, initializer_list<Key>, Compare = Compare()) -> flat_set<Key, Compare>;
+
+// N4950's two iterator-pair guides for flat_multiset are written
+// `-> flat_multiset<iter-value-type<It>, iter-value-type<It>, Compare>`,
+// which puts the key type where Compare belongs and Compare where
+// KeyContainer belongs -- a hard error on instantiation (less<int>::
+// value_type does not exist), not a deduction that merely picks something
+// odd. The current working draft carries the two-argument form below, and
+// libc++ implements that; there is no LWG issue, so it is editorial.
+
+template <typename KeyContainer,
+          NotAllocatorLike Compare = less<typename KeyContainer::value_type>>
+    requires(!AllocatorLike<KeyContainer>) &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_multiset(KeyContainer, Compare = Compare())
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator>
+flat_multiset(KeyContainer, Allocator)
+    -> flat_multiset<typename KeyContainer::value_type,
+                     less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <typename KeyContainer, NotAllocatorLike Compare, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator> &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_multiset(KeyContainer, Compare, Allocator)
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer,
+          NotAllocatorLike Compare = less<typename KeyContainer::value_type>>
+    requires(!AllocatorLike<KeyContainer>) &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_multiset(sorted_equivalent_t, KeyContainer, Compare = Compare())
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <typename KeyContainer, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator>
+flat_multiset(sorted_equivalent_t, KeyContainer, Allocator)
+    -> flat_multiset<typename KeyContainer::value_type,
+                     less<typename KeyContainer::value_type>, KeyContainer>;
+
+template <typename KeyContainer, NotAllocatorLike Compare, AllocatorLike Allocator>
+    requires(!AllocatorLike<KeyContainer>) && uses_allocator_v<KeyContainer, Allocator> &&
+            is_invocable_v<const Compare &, const typename KeyContainer::value_type &,
+                           const typename KeyContainer::value_type &>
+flat_multiset(sorted_equivalent_t, KeyContainer, Compare, Allocator)
+    -> flat_multiset<typename KeyContainer::value_type, Compare, KeyContainer>;
+
+template <__iter_impl::Cpp17InputIterator InputIterator,
+          NotAllocatorLike Compare = less<__flat::IterValueType<InputIterator>>>
+flat_multiset(InputIterator, InputIterator, Compare = Compare())
+    -> flat_multiset<__flat::IterValueType<InputIterator>, Compare>;
+
+template <__iter_impl::Cpp17InputIterator InputIterator,
+          NotAllocatorLike Compare = less<__flat::IterValueType<InputIterator>>>
+flat_multiset(sorted_equivalent_t, InputIterator, InputIterator, Compare = Compare())
+    -> flat_multiset<__flat::IterValueType<InputIterator>, Compare>;
+
+template <ranges::input_range R, NotAllocatorLike Compare = less<ranges::range_value_t<R>>,
+          AllocatorLike Allocator = allocator<ranges::range_value_t<R>>>
+flat_multiset(from_range_t, R &&, Compare = Compare(), Allocator = Allocator())
+    -> flat_multiset<ranges::range_value_t<R>, Compare,
+                     vector<ranges::range_value_t<R>,
+                            typename allocator_traits<Allocator>::template rebind_alloc<
+                                ranges::range_value_t<R>>>>;
+
+template <ranges::input_range R, AllocatorLike Allocator>
+flat_multiset(from_range_t, R &&, Allocator)
+    -> flat_multiset<ranges::range_value_t<R>, less<ranges::range_value_t<R>>,
+                     vector<ranges::range_value_t<R>,
+                            typename allocator_traits<Allocator>::template rebind_alloc<
+                                ranges::range_value_t<R>>>>;
+
+template <typename Key, NotAllocatorLike Compare = less<Key>>
+flat_multiset(initializer_list<Key>, Compare = Compare()) -> flat_multiset<Key, Compare>;
+
+template <typename Key, NotAllocatorLike Compare = less<Key>>
+flat_multiset(sorted_equivalent_t, initializer_list<Key>, Compare = Compare())
+    -> flat_multiset<Key, Compare>;
+
+} // namespace std
+
+#endif // BOXCXX_FLAT_SET
