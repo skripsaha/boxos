@@ -34048,6 +34048,209 @@ void Phase136()
            "and plain vector<int>\n");
 }
 
+// ── phase137: P2165R4 -- pair/tuple compatible with tuple-like objects ──
+
+void Phase137()
+{
+    using namespace std;
+
+    // ── (A) __cpp_lib_tuple_like intentionally left undefined ───────────
+    // Construction, assignment (both), and (for tuple) comparison against
+    // any tuple-like source are fully implemented below. The macro still
+    // stays undefined: [tuple.syn] also constrains tuple_cat/apply/
+    // make_from_tuple's argument with the tuple-like concept, and boxcxx's
+    // versions of those three still use the older duck-typed
+    // tuple_size_v/get check instead -- not 100% per the epic's
+    // "macro only when complete" policy (Ф31a-3).
+#ifdef __cpp_lib_tuple_like
+    Check(false, "phase137 __cpp_lib_tuple_like must stay undefined until tuple_cat/apply/"
+                 "make_from_tuple are also constrained by the tuple-like concept");
+#endif
+
+    // ── (B) pair from any tuple-like source ([pairs.pair]/14-17) ────────
+    {
+        tuple<int, int> t{7, 8};
+        pair<int, int>  p(t);
+        Check(p.first == 7 && p.second == 8, "phase137 (1) pair(tuple<int,int>&) via get<0>/get<1>");
+    }
+    static_assert(is_constructible_v<pair<int, char>, tuple<int, char>>,
+                  "phase137 (2) pair<int,char> constructible from tuple<int,char>");
+    static_assert(is_convertible_v<tuple<int, char>, pair<int, char>>,
+                  "phase137 (2b) ...and implicitly so (matches the explicit(...) computation)");
+    {
+        array<int, 2>  a{9, 10};
+        pair<int, int> p(a);
+        Check(p.first == 9 && p.second == 10, "phase137 (3) pair(array<int,2>&) via get<0>/get<1>");
+    }
+    static_assert(is_constructible_v<pair<int, int>, array<int, 2>>,
+                  "phase137 (4) pair<int,int> constructible from array<int,2>");
+    static_assert(is_convertible_v<array<int, 2>, pair<int, int>>,
+                  "phase137 (4b) ...and implicitly so");
+    {
+        // pair-to-pair must still resolve through the non-template copy/
+        // move constructors, never the new generic pair-like path.
+        pair<int, int> orig{5, 6};
+        pair<int, int> copy(orig);
+        pair<int, int> moved(std::move(orig));
+        Check(copy.first == 5 && copy.second == 6 && moved.first == 5 && moved.second == 6,
+              "phase137 (5) pair-to-pair copy/move still unambiguous with pair-like<P> present");
+    }
+    static_assert(!is_constructible_v<pair<int *, int *>, ranges::subrange<int *, int *>>,
+                  "phase137 (6) pair rejects ranges::subrange through the generic pair-like path "
+                  "(subrange owns its own dedicated conversion; boxcxx's doesn't implement one yet, "
+                  "so this must be false rather than ambiguous)");
+    static_assert(!is_constructible_v<pair<int, int>, int>,
+                  "phase137 (7) pair rejects a plain unrelated type cleanly (no hard error)");
+    struct Unrelated { int x; };
+    static_assert(!is_constructible_v<pair<int, int>, Unrelated>,
+                  "phase137 (7b) ...same for an unrelated struct");
+
+    // ── (C) pair-like reference-dangling deletion ([pairs.pair]/17) ─────
+    static_assert(is_constructible_v<pair<const int &, int>, tuple<int, int> &>,
+                  "phase137 (8) same-type reference bind: no temporary, must stay constructible");
+    static_assert(!is_constructible_v<pair<const long &, int>, tuple<int, int>>,
+                  "phase137 (9) int->long conversion on bind: reference_constructs_from_temporary_v, "
+                  "must be deleted (still selected, not silently skipped)");
+    static_assert(!is_constructible_v<pair<const long &, int>, array<int, 2>>,
+                  "phase137 (9b) ...same via array");
+    static_assert(is_constructible_v<pair<long, int>, tuple<int, int>>,
+                  "phase137 (9c) by-value members never dangle-check");
+
+    // ── (D) pair assignment from any tuple-like source ([pairs.pair]/42-47)
+    {
+        tuple<int, int> t{1, 2};
+        array<int, 2>   a{3, 4};
+        pair<int, int>  p{0, 0};
+        p = t;
+        bool ok = p.first == 1 && p.second == 2;
+        p = a;
+        ok = ok && p.first == 3 && p.second == 4;
+        Check(ok, "phase137 (10) pair::operator=(tuple-like)");
+    }
+    {
+        // const pair of REFERENCES still assigns through those references
+        // (P2321), now also from a tuple-like source, not just pair<U,V>.
+        int             x = 0, y = 0;
+        const pair<int &, int &> refs{x, y};
+        tuple<int, int>           t{11, 12};
+        refs = t;
+        Check(x == 11 && y == 12,
+              "phase137 (11) const pair<int&,int&>::operator=(tuple-like) writes through refs");
+    }
+
+    // ── (E) tuple from any tuple-like source ([tuple.cnstr]/28-31) ──────
+    {
+        array<int, 3>        a{7, 8, 9};
+        tuple<int, int, int> t(a);
+        Check(get<0>(t) == 7 && get<1>(t) == 8 && get<2>(t) == 9,
+              "phase137 (12) tuple(array<int,3>&) via get<0..2>");
+    }
+    static_assert(is_constructible_v<tuple<int, int>, array<int, 2>>,
+                  "phase137 (13) tuple<int,int> constructible from array<int,2>");
+    static_assert(is_convertible_v<array<int, 2>, tuple<int, int>>,
+                  "phase137 (13b) ...and implicitly so");
+    {
+        tuple<int, int> orig{5, 6};
+        tuple<int, int> copy(orig);
+        tuple<int, int> moved(std::move(orig));
+        Check(get<0>(copy) == 5 && get<1>(copy) == 6 && get<0>(moved) == 5 && get<1>(moved) == 6,
+              "phase137 (14) tuple-to-tuple copy/move still unambiguous with tuple-like<UTuple> present");
+    }
+    static_assert(!is_constructible_v<tuple<int *, int *>, ranges::subrange<int *, int *>>,
+                  "phase137 (15) tuple rejects ranges::subrange through the generic tuple-like path");
+    static_assert(!is_constructible_v<tuple<int, int>, int>,
+                  "phase137 (16) tuple rejects a plain unrelated type cleanly");
+
+    // ── (F) arity mismatch is a Constraints failure, never a hard error ──
+    static_assert(!is_constructible_v<tuple<int, int>, tuple<int, int, int>>,
+                  "phase137 (17) fewer target elements than source: clean SFINAE-false");
+    static_assert(!is_constructible_v<tuple<int, int, int>, tuple<int, int>>,
+                  "phase137 (17b) more target elements than source: clean SFINAE-false");
+    static_assert(!is_constructible_v<tuple<int, int>, array<int, 5>>,
+                  "phase137 (17c) ...same via array, would otherwise index tuple_element out of range");
+    static_assert(!is_convertible_v<array<int, 5>, tuple<int, int>>,
+                  "phase137 (17d) ...is_convertible_v must not hard-error either");
+
+    // ── (G) tuple-like reference-dangling deletion (LWG 4045) ───────────
+    // Not in the original P2165R4/N4950 wording -- current libstdc++ and
+    // libc++ both carry this fix already (confirmed empirically), so
+    // boxcxx implements it too rather than shipping a known, named defect.
+    static_assert(is_constructible_v<tuple<const int &, int>, tuple<int, int> &>,
+                  "phase137 (18) same-type reference bind stays constructible");
+    static_assert(!is_constructible_v<tuple<const long &, int>, array<int, 2>>,
+                  "phase137 (19) int->long conversion on bind must delete, not silently drop, the ctor");
+    static_assert(is_constructible_v<tuple<long, int>, tuple<int, int>>,
+                  "phase137 (19b) by-value members never dangle-check");
+
+    // ── (H) tuple assignment from any tuple-like source ([tuple.assign]/39-44)
+    {
+        array<int, 3>         a{1, 2, 3};
+        tuple<int, int, int>  t{0, 0, 0};
+        t = a;
+        Check(get<0>(t) == 1 && get<1>(t) == 2 && get<2>(t) == 3,
+              "phase137 (20) tuple::operator=(tuple-like)");
+    }
+    {
+        int                        x = 0, y = 0;
+        const tuple<int &, int &>  refs{x, y};
+        array<int, 2>              a{21, 22};
+        refs = a;
+        Check(x == 21 && y == 22,
+              "phase137 (21) const tuple<int&,int&>::operator=(tuple-like) writes through refs");
+    }
+
+    // ── (I) heterogeneous + homogeneous comparisons ([tuple.rel]) ───────
+    {
+        tuple<int, int> t{1, 1};
+        // Must remain unambiguous: BOTH the free tuple-vs-tuple
+        // operator==/<=> AND the tuple-vs-tuple-like hidden friend are
+        // viable candidates for this call unless the hidden friend
+        // correctly excludes every tuple (not just this exact one).
+        bool eqOk  = (t == t) && !(t != t);
+        bool cmpOk = (t <=> t) == 0;
+        Check(eqOk && cmpOk, "phase137 (22) tuple<T>==tuple<T> / <=> stay unambiguous "
+                             "next to the new tuple-vs-tuple-like hidden friends");
+    }
+    {
+        tuple<int, int> t{9, 10};
+        array<int, 2>   same{9, 10};
+        array<int, 2>   diff{9, 11};
+        Check(t == same, "phase137 (23) tuple == array, equal");
+        Check(t != diff, "phase137 (24) tuple == array, not equal");
+        Check((t <=> same) == 0, "phase137 (25) tuple <=> array, equivalent");
+        Check((t <=> diff) < 0, "phase137 (26) tuple <=> array, ordered");
+    }
+    {
+        tuple<int, int> t{3, 4};
+        pair<int, int>  p{3, 4};
+        Check(t == p, "phase137 (27) tuple == pair via the tuple-like hidden friend");
+    }
+
+    // ── (J) the motivating case: pair from the exact reference views::zip
+    // yields (flat_map::insert_range's OWN separate, pre-existing .first/
+    // .second bug -- documented at cxxtest.cpp phase136 -- still blocks
+    // flat_map(from_range, views::zip(...)) end-to-end; out of this
+    // session's scope, left for a follow-up).
+    {
+        vector<int> keys{3, 1, 2};
+        vector<int> vals{30, 10, 20};
+        auto        zipped = views::zip(keys, vals);
+        auto        it     = zipped.begin();
+        pair<int, int> p(*it);
+        bool ok = p.first == 3 && p.second == 30;
+        ++it;
+        pair<int, int> assigned{0, 0};
+        assigned = *it;
+        ok       = ok && assigned.first == 1 && assigned.second == 10;
+        Check(ok, "phase137 (28) pair from views::zip's tuple<int&,int&> reference (ctor + assign)");
+    }
+
+    printf("[CXX] PASS phase137: P2165R4 -- pair<->pair-like and tuple<->tuple-like "
+           "construction/assignment/comparison (array, tuple, pair cross-conversions; "
+           "subrange exclusion; dangling-reference deletion incl. LWG 4045; arity-mismatch "
+           "SFINAE safety; tuple==tuple/<=>tuple stay unambiguous)\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -34206,6 +34409,7 @@ int main()
     Phase134();
     Phase135();
     Phase136();
+    Phase137();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

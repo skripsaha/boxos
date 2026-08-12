@@ -82,6 +82,17 @@ constexpr const T &&LeafGet(const TupleLeaf<I, T> &&leaf) noexcept
     return static_cast<const T &&>(leaf.value);
 }
 
+// Is T (cvref-stripped) a tuple<...> specialization, of ANY arity — unlike
+// __bits::DifferentFrom (same EXACT type), this excludes every tuple, not
+// just the one it's compared against. Needed only by the tuple-like
+// comparison operators below: current libstdc++ guards those with
+// "!__is_tuple_v<U>" (broader than [tuple.rel]'s own prose, which doesn't
+// spell out an exclusion at all) — without it, "tuple<int>{1}==tuple<int>{1}"
+// is genuinely ambiguous between the tuple-vs-tuple free operator== and the
+// tuple-vs-tuple-like hidden friend; confirmed by testing.
+template <class T> inline constexpr bool IsTupleType = false;
+template <class... Us> inline constexpr bool IsTupleType<tuple<Us...>> = true;
+
 } // namespace __bits
 
 template <class... Ts>
@@ -104,6 +115,77 @@ class tuple : __bits::TupleBase<index_sequence_for<Ts...>, Ts...> {
     constexpr tuple(OtherTuple &&other, index_sequence<Is...>)
         : Base(get<Is>(forward<OtherTuple>(other))...)
     {
+    }
+
+    // Declared (never defined — used only under decltype) so the
+    // tuple-like operator<=> below can name its return type. Elems is
+    // tuple_element_t<0,UTuple>, ..., tuple_element_t<N-1,UTuple>, matched
+    // pairwise against Ts... ([tuple.rel]/6). The requires-clause checks
+    // UTuple's OWN arity (not sizeof...(Is), which is always sized from
+    // index_sequence_for<Ts...> by the caller and so would be a tautology)
+    // so an arity mismatch is a SUBSTITUTION failure here — operator<=>
+    // silently drops out of overload resolution instead of indexing
+    // tuple_element out of range — matching current libstdc++'s behavior,
+    // confirmed by testing.
+    template <class UTuple, size_t... Is>
+        requires(sizeof...(Is) == tuple_size_v<remove_cvref_t<UTuple>>)
+    static auto TupleLikeCmpCategory(index_sequence<Is...>) -> common_comparison_category_t<
+        __cmp::synth_three_way_result_t<Ts, tuple_element_t<Is, remove_cvref_t<UTuple>>>...>;
+
+    // Per-index fold checks backing the tuple-like ctor/assignment below
+    // ([tuple.cnstr]/28-31, [tuple.assign]/39-44). TupleLikeDangles is
+    // LWG 4045 ("tuple can create dangling references from tuple-like"):
+    // not in the original P2165R4 text, but already fixed in current
+    // libstdc++/libc++, confirmed by testing against both.
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeConstructible(index_sequence<Is...>)
+    {
+        return (... && is_constructible_v<Ts, decltype(get<Is>(declval<UTuple>()))>);
+    }
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeConvertible(index_sequence<Is...>)
+    {
+        return (... && is_convertible_v<decltype(get<Is>(declval<UTuple>())), Ts>);
+    }
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeDangles(index_sequence<Is...>)
+    {
+        return (... || reference_constructs_from_temporary_v<
+                            Ts, decltype(get<Is>(declval<UTuple>()))>);
+    }
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeAssignable(index_sequence<Is...>)
+    {
+        return (... && is_assignable_v<Ts &, decltype(get<Is>(declval<UTuple>()))>);
+    }
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeAssignableConst(index_sequence<Is...>)
+    {
+        return (... && is_assignable_v<const Ts &, decltype(get<Is>(declval<UTuple>()))>);
+    }
+
+    // Backing the tuple-like operator==/operator<=> below ([tuple.rel]).
+    // Local (not the __bits::TupleEq/TupleCmp free functions near the
+    // bottom of this file) because those are namespace-qualified names
+    // declared AFTER this class — ADL can see a later declaration through
+    // an unqualified call, but a qualified one cannot.
+    template <class UTuple, size_t... Is>
+    static constexpr bool TupleLikeEqual(const tuple &t, const UTuple &u,
+                                         index_sequence<Is...>)
+    {
+        return (... && (get<Is>(t) == get<Is>(u)));
+    }
+    template <class Cat, class UTuple>
+    static constexpr Cat TupleLikeCompare(const tuple &, const UTuple &, index_sequence<>)
+    {
+        return Cat::equivalent;
+    }
+    template <class Cat, class UTuple, size_t I0, size_t... Is>
+    static constexpr Cat TupleLikeCompare(const tuple &t, const UTuple &u,
+                                          index_sequence<I0, Is...>)
+    {
+        if (Cat c = __cmp::SynthThreeWay{}(get<I0>(t), get<I0>(u)); c != 0) return c;
+        return TupleLikeCompare<Cat>(t, u, index_sequence<Is...>{});
     }
 
     template <class...> friend class tuple;
@@ -189,6 +271,42 @@ public:
     {
     }
 
+    // from any tuple-like source via get<0..N-1> (P2165R4 [tuple.cnstr]/28-31).
+    // different-from<UTuple, tuple> keeps this from competing with the
+    // copy/move constructors for the exact-same-type case; the trailing
+    // disambiguating condition mirrors the single-element UTypes&&... ctor
+    // above, so a tuple<T> isn't ALSO reachable through this generic path
+    // when T is itself directly constructible from the whole source.
+    template <__bits::TupleLike UTuple>
+        requires(__bits::DifferentFrom<UTuple, tuple> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<UTuple>> &&
+                 sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>> &&
+                 TupleLikeConstructible<UTuple>(index_sequence_for<Ts...>{}) &&
+                 !TupleLikeDangles<UTuple>(index_sequence_for<Ts...>{}) &&
+                 (sizeof...(Ts) != 1 ||
+                  (!is_convertible_v<UTuple, __bits::NthType<0, Ts...>> &&
+                   !is_constructible_v<__bits::NthType<0, Ts...>, UTuple>)))
+    explicit(!TupleLikeConvertible<UTuple>(index_sequence_for<Ts...>{}))
+        constexpr tuple(UTuple &&u)
+        : tuple(forward<UTuple>(u), index_sequence_for<Ts...>{})
+    {
+    }
+
+    // Same shape, but binding an element here would dangle. Kept viable
+    // so overload resolution still selects it and rejects it as a use of
+    // a deleted function. LWG 4045 ("tuple can create dangling references
+    // from tuple-like") — see TupleLikeDangles's comment above.
+    template <__bits::TupleLike UTuple>
+        requires(__bits::DifferentFrom<UTuple, tuple> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<UTuple>> &&
+                 sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>> &&
+                 TupleLikeConstructible<UTuple>(index_sequence_for<Ts...>{}) &&
+                 TupleLikeDangles<UTuple>(index_sequence_for<Ts...>{}) &&
+                 (sizeof...(Ts) != 1 ||
+                  (!is_convertible_v<UTuple, __bits::NthType<0, Ts...>> &&
+                   !is_constructible_v<__bits::NthType<0, Ts...>, UTuple>)))
+    constexpr tuple(UTuple &&) = delete;
+
     tuple(const tuple &) = default;
     tuple(tuple &&)      = default;
     tuple &operator=(const tuple &) = default;
@@ -247,6 +365,63 @@ public:
     {
         AssignFromConst(move(other), index_sequence_for<Ts...>{});
         return *this;
+    }
+
+    // assign from any tuple-like source via get<0..N-1> (P2165R4
+    // [tuple.assign]/39-44); different-from/subrange-exclusion mirror the
+    // constructor above.
+    template <__bits::TupleLike UTuple>
+        requires(__bits::DifferentFrom<UTuple, tuple> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<UTuple>> &&
+                 sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>> &&
+                 TupleLikeAssignable<UTuple>(index_sequence_for<Ts...>{}))
+    constexpr tuple &operator=(UTuple &&u)
+    {
+        AssignFrom(forward<UTuple>(u), index_sequence_for<Ts...>{});
+        return *this;
+    }
+    template <__bits::TupleLike UTuple>
+        requires(__bits::DifferentFrom<UTuple, tuple> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<UTuple>> &&
+                 sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>> &&
+                 TupleLikeAssignableConst<UTuple>(index_sequence_for<Ts...>{}))
+    constexpr const tuple &operator=(UTuple &&u) const
+    {
+        AssignFromConst(forward<UTuple>(u), index_sequence_for<Ts...>{});
+        return *this;
+    }
+
+    // heterogeneous comparisons against any tuple-like ([tuple.rel]).
+    // Hidden friends found via ADL only, matching the standard's own
+    // "to be found via argument-dependent lookup only" remark. Guarded by
+    // !IsTupleType<UTuple> rather than DifferentFrom<UTuple, tuple>: the
+    // free tuple-vs-tuple operator== two functions down independently
+    // deduces packs on BOTH sides, and partial ordering does not reliably
+    // prefer it over this hidden friend for a same-type comparison like
+    // "tuple<int>{1} == tuple<int>{1}" (confirmed genuinely ambiguous by
+    // testing) — excluding every tuple, not just this exact one, is what
+    // current libstdc++ does too. Size mismatch is a Mandates in
+    // [tuple.rel]/2, not a Constraints, so operator== enforces it with a
+    // static_assert instead of SFINAE (matches current libstdc++); == and
+    // <=> differ here only because <=>'s return type is itself computed —
+    // TupleLikeCmpCategory's own requires-clause turns a mismatch into a
+    // substitution failure, so <=> drops out of overload resolution
+    // instead of hard error, again matching current libstdc++.
+    template <__bits::TupleLike UTuple>
+        requires(!__bits::IsTupleType<remove_cvref_t<UTuple>>)
+    friend constexpr bool operator==(const tuple &t, const UTuple &u)
+    {
+        static_assert(sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>>,
+                      "tuple objects can only be compared if they have equal sizes");
+        return TupleLikeEqual(t, u, index_sequence_for<Ts...>{});
+    }
+    template <__bits::TupleLike UTuple>
+        requires(!__bits::IsTupleType<remove_cvref_t<UTuple>>)
+    friend constexpr auto operator<=>(const tuple &t, const UTuple &u)
+        -> decltype(TupleLikeCmpCategory<UTuple>(index_sequence_for<Ts...>{}))
+    {
+        using Cat = decltype(TupleLikeCmpCategory<UTuple>(index_sequence_for<Ts...>{}));
+        return TupleLikeCompare<Cat>(t, u, index_sequence_for<Ts...>{});
     }
 
     constexpr void swap(tuple &other) noexcept(
@@ -325,6 +500,11 @@ struct tuple_element<I, tuple<Ts...>> {
     static_assert(I < sizeof...(Ts), "tuple index out of range");
     using type = __bits::NthType<I, Ts...>;
 };
+
+namespace __bits {
+template <class... Ts>
+inline constexpr bool IsTupleLikeType<tuple<Ts...>> = true;
+} // namespace __bits
 
 template <size_t I, class... Ts>
 [[nodiscard]] constexpr tuple_element_t<I, tuple<Ts...>> &

@@ -253,6 +253,40 @@ struct tuple_element<I, const T> {
 template <size_t I, class T>
 using tuple_element_t = typename tuple_element<I, T>::type;
 
+// ── tuple-like / pair-like ([tuple.like]) ────────────────────────────────
+// Both are exposition-only in the standard (hyphens make the real spelling
+// unwritable), so boxcxx names them under __bits. [tuple.like]/1: T is
+// tuple-like if remove_cvref_t<T> is a specialization of array, pair,
+// tuple, or ranges::subrange — a CLOSED set, not "anything with a
+// tuple_size/get pair" (a user type that merely opts into structured
+// bindings must NOT satisfy this).
+//
+// IsTupleLikeType's primary (false) lives here, the lowest header that
+// needs it; pair's own true-case is added right after pair below. <tuple>,
+// <array>, and <ranges> each add their own true-case once their type is
+// defined — the exact spread-specialization wiring tuple_size/tuple_element
+// already use across those same four headers, so a translation unit sees
+// "true" for exactly the tuple-like types whose header it actually
+// included.
+namespace __bits {
+
+template <class T> inline constexpr bool IsTupleLikeType = false;
+template <class T> inline constexpr bool IsSubrangeType  = false;
+
+template <class T>
+concept TupleLike = IsTupleLikeType<remove_cvref_t<T>>;
+
+template <class T>
+concept PairLike = TupleLike<T> && tuple_size_v<remove_cvref_t<T>> == 2;
+
+// [range.utility.helpers]'s different-from, needed to keep tuple's
+// tuple-like constructor/assignment from competing with its own copy/move
+// family for the exact-same-type case.
+template <class T, class U>
+concept DifferentFrom = !is_same_v<remove_cvref_t<T>, remove_cvref_t<U>>;
+
+} // namespace __bits
+
 // ── pair ────────────────────────────────────────────────────────────────
 
 template <class T1, class T2>
@@ -262,6 +296,22 @@ struct pair {
 
     T1 first;
     T2 second;
+
+    // Friended so get<I> is visible as a template from inside this class
+    // body (needed to parse "get<0>(...)" below) — mirrors tuple's own
+    // identical friend block in <tuple>.
+    template <size_t I, class U1, class U2>
+    friend constexpr tuple_element_t<I, pair<U1, U2>> &
+    get(pair<U1, U2> &) noexcept;
+    template <size_t I, class U1, class U2>
+    friend constexpr const tuple_element_t<I, pair<U1, U2>> &
+    get(const pair<U1, U2> &) noexcept;
+    template <size_t I, class U1, class U2>
+    friend constexpr tuple_element_t<I, pair<U1, U2>> &&
+    get(pair<U1, U2> &&) noexcept;
+    template <size_t I, class U1, class U2>
+    friend constexpr const tuple_element_t<I, pair<U1, U2>> &&
+    get(const pair<U1, U2> &&) noexcept;
 
     // default
     explicit(!__bits::ImplicitlyDefaultConstructible<T1> ||
@@ -326,6 +376,50 @@ struct pair {
         : first(forward<const U1>(p.first)), second(forward<const U2>(p.second))
     {
     }
+
+    // from any pair-like source via get<0>/get<1> (P2165R4 [pairs.pair]/14-17).
+    // ranges::subrange is excluded: it has its own dedicated conversion to
+    // any 2-element-constructible type, and letting both paths compete
+    // would make that conversion ambiguous. different-from<P, pair> isn't
+    // in [pairs.pair]/15's own Constraints (the exact-same-type case is
+    // already resolved by the non-template copy/move constructors winning
+    // any tie), but current libstdc++/libc++ both add it defensively for
+    // this exact constructor, so boxcxx mirrors that instead of relying
+    // solely on the tie-break rule.
+    template <class P>
+        requires(__bits::DifferentFrom<P, pair> &&
+                 __bits::PairLike<P> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<P>> &&
+                 is_constructible_v<T1, decltype(get<0>(declval<P>()))> &&
+                 is_constructible_v<T2, decltype(get<1>(declval<P>()))> &&
+                 !reference_constructs_from_temporary_v<
+                     T1, decltype(get<0>(declval<P>()))> &&
+                 !reference_constructs_from_temporary_v<
+                     T2, decltype(get<1>(declval<P>()))>)
+    explicit(!is_convertible_v<decltype(get<0>(declval<P>())), T1> ||
+             !is_convertible_v<decltype(get<1>(declval<P>())), T2>)
+        constexpr pair(P &&p)
+        : first(get<0>(forward<P>(p))), second(get<1>(forward<P>(p)))
+    {
+    }
+
+    // Same shape, but binding first/second here would dangle. Kept viable
+    // (not constrained away) so overload resolution still SELECTS it —
+    // and then rejects it as a use of a deleted function — instead of
+    // silently falling through to a worse-matching constructor. Matches
+    // [pairs.pair]/17: "defined as deleted if
+    // reference_constructs_from_temporary_v<...> is true".
+    template <class P>
+        requires(__bits::DifferentFrom<P, pair> &&
+                 __bits::PairLike<P> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<P>> &&
+                 is_constructible_v<T1, decltype(get<0>(declval<P>()))> &&
+                 is_constructible_v<T2, decltype(get<1>(declval<P>()))> &&
+                 (reference_constructs_from_temporary_v<
+                      T1, decltype(get<0>(declval<P>()))> ||
+                  reference_constructs_from_temporary_v<
+                      T2, decltype(get<1>(declval<P>()))>))
+    constexpr pair(P &&p) = delete;
 
     // piecewise — defined in <tuple>
     template <class... Args1, class... Args2>
@@ -408,6 +502,33 @@ struct pair {
     {
         first  = forward<U1>(p.first);
         second = forward<U2>(p.second);
+        return *this;
+    }
+
+    // assign from any pair-like source via get<0>/get<1> (P2165R4
+    // [pairs.pair]/42-47). different-from<P, pair> keeps this from
+    // competing with the copy/move/pair<U1,U2> assignments above; subrange
+    // is excluded for the same reason as the constructor.
+    template <class P>
+        requires(__bits::DifferentFrom<P, pair> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<P>> &&
+                 is_assignable_v<T1 &, decltype(get<0>(declval<P>()))> &&
+                 is_assignable_v<T2 &, decltype(get<1>(declval<P>()))>)
+    constexpr pair &operator=(P &&p)
+    {
+        first  = get<0>(forward<P>(p));
+        second = get<1>(forward<P>(p));
+        return *this;
+    }
+    template <class P>
+        requires(__bits::DifferentFrom<P, pair> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<P>> &&
+                 is_assignable_v<const T1 &, decltype(get<0>(declval<P>()))> &&
+                 is_assignable_v<const T2 &, decltype(get<1>(declval<P>()))>)
+    constexpr const pair &operator=(P &&p) const
+    {
+        first  = get<0>(forward<P>(p));
+        second = get<1>(forward<P>(p));
         return *this;
     }
 
@@ -513,6 +634,9 @@ template <class T1, class T2>
 struct tuple_element<1, pair<T1, T2>> { using type = T2; };
 
 namespace __bits {
+template <class T1, class T2>
+inline constexpr bool IsTupleLikeType<pair<T1, T2>> = true;
+
 template <size_t I> struct PairGet;
 template <> struct PairGet<0> {
     template <class T1, class T2>
