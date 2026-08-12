@@ -1313,6 +1313,19 @@ struct tuple_element<1, ranges::subrange<I, S, K>> {
     using type = S;
 };
 
+// subrange is tuple-like ([tuple.like]/1) but excluded from pair's/tuple's
+// generic tuple-like constructor and assignment (P2165R4 [pairs.pair]/15,
+// [tuple.cnstr]/29): it has its own dedicated conversion to any
+// 2-element-constructible type, and letting both paths compete would make
+// that conversion ambiguous. IsSubrangeType is what those constructors
+// check to exclude it.
+namespace __bits {
+template <typename I, typename S, ranges::subrange_kind K>
+inline constexpr bool IsTupleLikeType<ranges::subrange<I, S, K>> = true;
+template <typename I, typename S, ranges::subrange_kind K>
+inline constexpr bool IsSubrangeType<ranges::subrange<I, S, K>> = true;
+} // namespace __bits
+
 } // namespace std
 
 #endif // BOXCXX_BITS_RANGES_VIEWS
