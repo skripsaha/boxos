@@ -15,8 +15,9 @@
 // race. Per-phase `expected` (lowered by arrive_and_drop) is a separate
 // atomic.
 //
-// One thread per cabin → no waiter blocks today; the spin upgrades to a
-// kernel park once strands land, with no signature change.
+// A cabin holds many strands, so waiters really do block: the spin is a
+// prelude, and a waiter that outlasts it parks in the kernel until the
+// completing arrival's __boxcxx_atomic_notify wakes it.
 #ifndef BOXCXX_BARRIER
 #define BOXCXX_BARRIER
 
@@ -25,6 +26,10 @@
 #include <cstdint>
 #include <type_traits>
 #include <utility>
+
+namespace boxcxx {
+[[noreturn]] void Panic(const char *msg);
+}
 
 namespace std {
 
@@ -73,13 +78,28 @@ public:
     barrier(const barrier &)            = delete;
     barrier &operator=(const barrier &) = delete;
 
-    arrival_token arrive(ptrdiff_t n = 1)
+    [[nodiscard]] arrival_token arrive(ptrdiff_t n = 1)
     {
+        // Preconditions ([thread.barrier.class]): 0 < n <= the expected count
+        // for the current phase. A correct program cannot violate either — the
+        // per-phase updates sum to the expected count, and no waiter escapes
+        // into the window where the completing thread has zeroed the count but
+        // not yet advanced the phase, because wait() gates on the phase alone.
+        // These diagnose the incorrect program: folded into the state word,
+        // `count - un` wrapped to ~4 billion outstanding arrivals and hung
+        // every participant with no clue why. The guard catches an extra
+        // arrival that lands inside that window; one landing after the advance
+        // store sees a fresh count and instead under-provisions the next phase.
+        if (n <= 0)
+            boxcxx::Panic("barrier::arrive: update must be positive");
         uint32_t un = static_cast<uint32_t>(n);
         uint64_t s  = __state.load(memory_order_acquire);
         for (;;) {
             uint32_t phase = __barrier_impl::PhaseOf(s);
             uint32_t count = __barrier_impl::CountOf(s);
+            if (un > count)
+                boxcxx::Panic("barrier::arrive: update exceeds this phase's "
+                              "outstanding arrivals");
             if (count == un) {
                 // We are the completing arrival: claim it by zeroing the count
                 // at the current phase, then complete + advance in one store.
@@ -115,13 +135,16 @@ public:
     void arrive_and_drop()
     {
         // One fewer arrival is expected from the next phase onward; then we
-        // arrive for the current phase. Correct single-threaded and whenever
-        // this thread completes its own phase (its release fetch_sub is
-        // sequenced before the acquire load in CompletePhase). Residual,
-        // deferred to the strands epic: if a *foreign* thread completes the
-        // phase concurrently with this drop, it may reload the next count from
-        // the pre-drop __expected (a separate word, no synchronizes-with edge)
-        // and over-provision it. Unreachable today — one thread per cabin.
+        // arrive for the current phase. __expected is a separate word from
+        // __state, yet the completing thread cannot miss this decrement, and
+        // NOT because a cabin is single-threaded — it is the RMW chain that
+        // closes the window. [thread.barrier.class] makes arrive_and_drop
+        // arrive at the current phase, so this thread's arrival is one the
+        // drain needs; every successful arrive() CAS is acq_rel on __state, so
+        // whoever reads the count down to zero reads a value at or after ours
+        // in that word's modification order and synchronizes with us
+        // transitively. The fetch_sub is sequenced before our CAS, therefore
+        // it happens before the acquire load in CompletePhase.
         __expected.fetch_sub(1, memory_order_release);
         (void)arrive(1);
     }

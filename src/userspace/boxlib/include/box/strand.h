@@ -24,7 +24,8 @@ extern "C" {
  * trampoline calls strand_exit); fn may also call strand_exit() itself.
  *
  * malloc/free ARE strand-safe: the boxlib heap serialises every allocation
- * under a single process-wide lock (heap_lock, an atomic test-and-set umutex),
+ * under a single process-wide lock (heap_lock, a test-and-set uspin_t — the one
+ * lock that must spin rather than park, since the park path itself allocates),
  * so concurrent strands may allocate freely. That single lock does serialise
  * allocations, so a malloc-bound multi-strand workload contends on it; per-
  * strand heap arenas (to remove that contention) are a future scalability

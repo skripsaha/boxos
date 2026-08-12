@@ -13,6 +13,21 @@
 //     substitutes '?' for multi-byte UTF-8 (kernel font limitation), so there
 //     is no separate well-formed-UTF-8 transcoding step.
 //   * the format string is still consteval-checked (basic_format_string).
+//
+// Concurrency contract (many strands share a cabin, so this is not academic):
+//   * the screen channel handle is a function-local static, so the FIRST
+//     strand to print opens it and the rest reuse it. Racing first-touches are
+//     safe — __cxa_guard_acquire publishes BUSY plus an owner token atomically,
+//     so exactly one strand runs the initializer.
+//   * the handle is read-only afterwards, and a screen Current's write is a
+//     straight pass-through to print_bytes, which keeps its buffer and colour
+//     state PER STRAND. Concurrent print/println from any number of strands is
+//     therefore free of data races without a lock.
+//   * what is NOT promised is interleaving. The unit is one print_bytes call,
+//     not one line: println formats its '\n' into the same buffer so boxcxx
+//     never splits a line itself, but in IPC mode boxlib flushes a strand's
+//     io_buf at 256 bytes, so a longer line can still reach the display in
+//     pieces that another strand's output may sit between.
 #ifndef BOXCXX_PRINT
 #define BOXCXX_PRINT
 
@@ -73,7 +88,10 @@ void println(format_string<Args...> fmt, Args &&...args)
     __print::ToConsole(string_view(s.data(), s.size()));
 }
 
-inline void println() { print_bytes("\n", 1); }
+// Same road as every other overload: the console has one channel, and a bare
+// println() that called print_bytes directly would be the one byte that
+// bypassed it.
+inline void println() { __print::ToConsole(string_view("\n", 1)); }
 
 } // namespace std
 

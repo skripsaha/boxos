@@ -34480,6 +34480,490 @@ void Phase138()
            "unordered containers correctly still lack them\n");
 }
 
+// ── phase139: the concurrency headers stop assuming one thread per cabin ────
+// Ф31c-1. std::mutex sits on boxlib's umutex_t, which became a three-state
+// futex: a contender spins only long enough to cover a short critical section,
+// then parks in the kernel, and unlock enters the kernel ONLY when it observes
+// a parked waiter.
+//
+// Which check proves the wake, and why it is the timed one: an untimed lock()
+// parks under a 100 ms backstop, so ripping addr_wake out of unlock would only
+// slow a waiter down, and not even reliably — a woken-late waiter simply lets
+// the other side run ahead, so a hand-off chain finishes fast either way and
+// proves nothing about the wake. try_lock_for parks on the CALLER'S budget
+// instead, with no backstop underneath: with the wake dead it sleeps the whole
+// budget and misses the holder's release entirely. That is what section (E)
+// pins in both directions — an unlock must end the wait early, and an expired
+// budget must end it without waiting the holder out — and section (E3) pins it
+// with TWO waiters, because one unlock issues one wake and a single waiter
+// cannot show whether the other sleeper was left behind. Verified by mutation,
+// not by argument. Sections (D) and (G) claim progress only; see their labels.
+//
+// Timing bounds are one-sided with orders-of-magnitude headroom, never ratios
+// between two runs of the same work: box::stopwatch counts host descheduling
+// too, which is what made earlier ratio asserts flake.
+constexpr int      kP139Workers    = 4;      // sibling strands for the contention tests
+constexpr int      kP139Incs       = 2000;   // increments per strand under one mutex
+constexpr int      kP139Hops       = 40;     // contended hand-offs per side
+constexpr uint64_t kP139HoldUs     = 1000;   // hold per hop: >> the 16-PAUSE spin budget
+
+std::mutex          g_p139_mtx;
+std::timed_mutex    g_p139_tmtx;
+std::shared_mutex   g_p139_smtx;
+long                g_p139_counter  = 0;     // plain: a broken mutex loses updates
+std::atomic<int>    g_p139_inside{0};        // >1 at any moment = mutual exclusion broken
+std::atomic<int>    g_p139_overlap{0};
+std::atomic<int>    g_p139_hops{0};
+std::atomic<bool>   g_p139_go{false};
+std::atomic<int>    g_p139_phases{0};        // barrier completions observed
+std::barrier<void (*)() noexcept> *g_p139_bar = nullptr;
+volatile uint64_t   g_p139_remaining = 0;
+
+// Park-join the workers (phase35's shape): re-read the live counter before each
+// park so a missed decrement returns at once, bounded cycles so a genuine hang
+// fails loudly instead of wedging the harness.
+static bool p139_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p139_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 200u) return false;
+        addr_park(&g_p139_remaining, cur, 200);
+    }
+    return true;
+}
+
+static void p139_done_one()
+{
+    __atomic_fetch_sub(&g_p139_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p139_remaining, 0);
+}
+
+// Busy-hold: a sleep would park this strand and hand the core away, which is
+// exactly what must NOT happen here — the point is to keep the lock held while
+// the other side burns through its spin budget and has to park.
+static void p139_hold_us(uint64_t us)
+{
+    uint64_t deadline = cpu_rdtsc() + cpu_ms_to_tsc(1) * us / 1000;
+    while (cpu_rdtsc() < deadline) __asm__ volatile("pause");
+}
+
+static void p139_counter_worker(void *)
+{
+    g_p139_go.wait(false, std::memory_order_acquire);
+    for (int i = 0; i < kP139Incs; i++) {
+        std::lock_guard<std::mutex> g(g_p139_mtx);
+        if (g_p139_inside.fetch_add(1, std::memory_order_acq_rel) != 0)
+            g_p139_overlap.fetch_add(1, std::memory_order_relaxed);
+        g_p139_counter++;
+        g_p139_inside.fetch_sub(1, std::memory_order_acq_rel);
+    }
+    p139_done_one();
+    strand_exit();
+}
+
+static void p139_handoff_worker(void *)
+{
+    for (int i = 0; i < kP139Hops; i++) {
+        std::lock_guard<std::mutex> g(g_p139_mtx);
+        p139_hold_us(kP139HoldUs);
+        g_p139_hops.fetch_add(1, std::memory_order_relaxed);
+    }
+    p139_done_one();
+    strand_exit();
+}
+
+// Holds the timed_mutex for `g_p139_hold_ms`, then releases: main's
+// try_lock_for either wins early (proving the timed park is woken by the
+// unlock) or expires on its own budget (proving the budget bounds the park).
+volatile uint32_t g_p139_hold_ms = 0;
+static void p139_timed_holder(void *)
+{
+    g_p139_tmtx.lock();
+    g_p139_go.store(true, std::memory_order_release);
+    g_p139_go.notify_all();
+    std::this_thread::sleep_for(std::chrono::milliseconds(g_p139_hold_ms));
+    g_p139_tmtx.unlock();
+    p139_done_one();
+    strand_exit();
+}
+
+// Worker i clears rounds 0..i, dropping out at round i. Round r therefore
+// expects main plus the workers that have not dropped yet, which is exactly
+// what arrive_and_drop must have subtracted by then — over-provision by one
+// and the round after it never closes.
+//
+// The workers park on g_p139_go until main has counted how many actually
+// spawned and sized the barrier to match: a barrier built for participants
+// that never arrive would wedge main with no timeout to save it. Waiting also
+// keeps a worker from finishing before main has published the join count.
+volatile int g_p139_drop_round[kP139Workers] = {0, 0, 0, 0};
+std::atomic<int> g_p139_drop_next{0};
+static void p139_barrier_worker(void *)
+{
+    g_p139_go.wait(false, std::memory_order_acquire);
+    int me = g_p139_drop_next.fetch_add(1, std::memory_order_acq_rel);
+    for (int r = 0; r < me; r++) g_p139_bar->arrive_and_wait();
+    g_p139_bar->arrive_and_drop();
+    g_p139_drop_round[me] = 1;
+    p139_done_one();
+    strand_exit();
+}
+
+// A second timed waiter on the same mutex. One waiter alone cannot expose the
+// defect this pins: an unlock issues exactly one wake, and if the thread that
+// consumes it re-acquires without leaving a "someone is still waiting" trace
+// behind, the OTHER sleeper is stranded until its own budget runs out. So two
+// of them park, and both must come back with the lock.
+std::atomic<int> g_p139_timed_won{0};
+static void p139_timed_waiter(void *)
+{
+    if (g_p139_tmtx.try_lock_for(std::chrono::seconds(6))) {
+        g_p139_timed_won.fetch_add(1, std::memory_order_relaxed);
+        g_p139_tmtx.unlock();
+    }
+    p139_done_one();
+    strand_exit();
+}
+
+static void p139_shared_worker(void *)
+{
+    for (int i = 0; i < kP139Hops; i++) {
+        {
+            std::unique_lock<std::shared_mutex> w(g_p139_smtx);
+            p139_hold_us(kP139HoldUs / 4);
+        }
+        {
+            std::shared_lock<std::shared_mutex> r(g_p139_smtx);
+            p139_hold_us(kP139HoldUs / 4);
+        }
+    }
+    p139_done_one();
+    strand_exit();
+}
+
+static void p139_print_worker(void *)
+{
+    for (int i = 0; i < 4; i++) std::print("");   // empty: no output, same road
+    p139_done_one();
+    strand_exit();
+}
+
+void Phase139()
+{
+    using namespace std::chrono;
+
+    nanoseconds   p139_syscall{0};   // measured in (A), reused by (C)
+    system_info_t si139{};
+    unsigned p139_cores = (sysinfo(&si139) == 0) ? si139.cpu_app_cores : 0u;
+    const bool many_cores = p139_cores >= 2;
+
+    // ── (A) the uncontended pair never enters the kernel ────────────────────
+    // Self-calibrating, because a TCG host is orders of magnitude slower than
+    // real hardware and any absolute millisecond figure would be a guess: time
+    // one real syscall (an addr_wake nobody is parked on), then require 20 000
+    // uncontended lock/unlock pairs to cost less than 200 of them. If unlock
+    // syscalled unconditionally that alone would be 20 000.
+    {
+        // Calibrate against a window big enough to survive the clock's own
+        // granularity, not against a fixed iteration count: steady_clock falls
+        // back from the TSC to clock_uptime_us when the TSC is uncalibrated,
+        // which happens on the 16-core configs, and a fixed 20 syscalls then
+        // measured as exactly zero -- silently turning both bounds below into
+        // "< 0" and reddening a healthy tree. Keep issuing syscalls until 20 ms
+        // of wall time has accumulated, then divide by the count actually made.
+        volatile uint64_t nobody = 0;
+        unsigned          calls  = 0;
+        box::stopwatch    sw_sys;
+        while (sw_sys.elapsed() < milliseconds(20) && calls < 200000u) {
+            addr_wake(&nobody, 1);
+            ++calls;
+        }
+        nanoseconds per_syscall = calls ? sw_sys.elapsed() / calls : nanoseconds(0);
+        p139_syscall = per_syscall;
+
+        box::stopwatch sw_lock;
+        for (int i = 0; i < 20000; i++) { g_p139_mtx.lock(); g_p139_mtx.unlock(); }
+        nanoseconds uncontended = sw_lock.elapsed();
+
+        Check(calls > 0 && per_syscall > nanoseconds(0),
+              "phase139 (1) syscall calibration produced a positive cost");
+        // 2000 rather than a tight bound: the discriminator is 20000 syscalls
+        // against zero, so a tenth of the mutated cost separates them with an
+        // order of magnitude of headroom on both sides — a TCG host under load
+        // must not be able to tip it either way.
+        Check(uncontended < per_syscall * 2000,
+              "phase139 (2) 20000 uncontended lock/unlock pairs cost under 2000 syscalls "
+              "(unlock only enters the kernel for a parked waiter)");
+    }
+
+    // ── (B) try_lock / unlock still hold their plain contract ───────────────
+    {
+        Check(g_p139_mtx.try_lock(), "phase139 (3) try_lock on a free mutex succeeds");
+        g_p139_mtx.unlock();
+        std::lock_guard<std::mutex> g(g_p139_mtx);
+        Check(!g_p139_mtx.try_lock(), "phase139 (4) try_lock on a held mutex fails");
+    }
+    {
+        std::timed_mutex tm;
+        Check(tm.try_lock_for(milliseconds(5)),
+              "phase139 (5) try_lock_for on a free timed_mutex succeeds at once");
+        tm.unlock();
+        std::recursive_mutex rm;
+        rm.lock(); rm.lock();
+        Check(rm.try_lock(), "phase139 (6) recursive_mutex re-enters its own owner");
+        rm.unlock(); rm.unlock(); rm.unlock();
+        std::recursive_timed_mutex rtm;
+        rtm.lock();
+        Check(rtm.try_lock_for(milliseconds(5)),
+              "phase139 (7) recursive_timed_mutex re-enters through the timed path");
+        rtm.unlock(); rtm.unlock();
+    }
+    {
+        // A deadline already in the past still costs one attempt: the park is
+        // what the budget bounds, not the acquisition. Both timed classes.
+        std::timed_mutex tm;
+        Check(tm.try_lock_until(steady_clock::now() - seconds(1)),
+              "phase139 (8) try_lock_until with an expired deadline still takes a free mutex");
+        tm.unlock();
+        std::recursive_timed_mutex rtm2;
+        Check(rtm2.try_lock_until(steady_clock::now() - seconds(1)),
+              "phase139 (9) recursive try_lock_until with an expired deadline still takes it");
+        rtm2.unlock();
+    }
+
+    // Sibling strands need FSGSBASE (per-strand TLS); without it strand_spawn
+    // refuses. The single-strand half above already passed — skip the rest
+    // cleanly rather than count failures, exactly as phase35 does.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase139: strands need FSGSBASE — skipping the contended half\n");
+        printf("[CXX] PASS phase139: mutex fast path + timed/recursive contract "
+               "(contended half skipped, no FSGSBASE)\n");
+        return;
+    }
+
+    // ── (C) mutual exclusion under real contention ──────────────────────────
+    {
+        g_p139_counter = 0;
+        g_p139_overlap.store(0, std::memory_order_relaxed);
+        g_p139_go.store(false, std::memory_order_relaxed);
+        int spawned = 0;
+        for (int i = 0; i < kP139Workers; i++)
+            if (strand_spawn(p139_counter_worker, 0)) spawned++;
+        // A failed spawn is a defect signal on a healthy system, not a reason to
+        // quietly run fewer checks: a block that skips itself in silence reads
+        // exactly like a block that passed.
+        Check(spawned == kP139Workers, "phase139 (10) all counter workers spawned");
+        if (spawned == 0) {
+            printf("[CXX] PASS phase139: mutex fast path + timed/recursive contract "
+                   "(contended half unreachable, no strand)\n");
+            return;
+        }
+        g_p139_remaining = (uint64_t)spawned;
+        box::stopwatch sw_c;
+        g_p139_go.store(true, std::memory_order_release);
+        g_p139_go.notify_all();
+        bool        joined_c  = p139_join();      // the work is only over here --
+        nanoseconds contended = sw_c.elapsed();   // sampling before it is empty
+        Check(joined_c, "phase139 (11) counter workers joined");
+        // A critical section this short (one ++) must not turn every contended
+        // acquisition into a park. After announcing itself a contender re-tests
+        // the lock, and at this length the re-test almost always wins -- MEASURED,
+        // not assumed: deleting that re-test does not merely slow this block, it
+        // stops the phase from finishing inside the runner's whole budget (20+
+        // minutes on bios16 against seconds when healthy). So what this bound
+        // guards is a catastrophic regression, and it is deliberately loose --
+        // half the acquisitions' worth of calibrated syscalls -- because a tight
+        // one would only add flake risk to a defect that announces itself by
+        // hanging. The unit comes from check (2)'s calibration, so a slow TCG
+        // host scales both sides together.
+        Check(contended < p139_syscall * (spawned * kP139Incs / 2),
+              "phase139 (12) short critical sections mostly avoid the kernel");
+        Check(g_p139_counter == (long)spawned * kP139Incs,
+              "phase139 (13) every increment under the mutex landed (no lost update)");
+        Check(g_p139_overlap.load(std::memory_order_acquire) == 0,
+              "phase139 (14) no two strands were inside the critical section at once");
+    }
+
+    // ── (D) the hand-off wake is real, not the 100 ms backstop ──────────────
+    // Both sides hammer the same mutex holding it far longer than the spin
+    // budget, so essentially every acquisition parks. Dead wake floor =
+    // hops x 100 ms = 4 s per side; real cost is hops x hold = ~40 ms.
+    {
+        g_p139_hops.store(0, std::memory_order_relaxed);
+        g_p139_remaining = 1;
+        bool spawned_handoff = strand_spawn(p139_handoff_worker, 0) != 0;
+        Check(spawned_handoff, "phase139 (15) hand-off worker spawned");
+        if (spawned_handoff) {
+            box::stopwatch sw;
+            for (int i = 0; i < kP139Hops; i++) {
+                std::lock_guard<std::mutex> g(g_p139_mtx);
+                p139_hold_us(kP139HoldUs);
+                g_p139_hops.fetch_add(1, std::memory_order_relaxed);
+            }
+            bool joined = p139_join();
+            nanoseconds took = sw.elapsed();
+            Check(joined, "phase139 (16) hand-off worker joined");
+            Check(g_p139_hops.load(std::memory_order_acquire) == 2 * kP139Hops,
+                  "phase139 (17) both sides completed every contended hand-off");
+            // Progress, not wake-proof (see the header note): sustained
+            // two-sided contention must never lose a wakeup permanently, and
+            // must not degrade to one backstop per acquisition either.
+            auto bound = many_cores ? milliseconds(3000) : milliseconds(6000);
+            Check(took < bound,
+                  "phase139 (18) sustained mutex contention keeps making progress");
+        }
+    }
+
+    // ── (E) timed_mutex parks on the caller's budget, and an unlock ends it ──
+    {
+        g_p139_hold_ms  = 60;
+        g_p139_go.store(false, std::memory_order_relaxed);
+        g_p139_remaining = 1;
+        bool spawned_hold60 = strand_spawn(p139_timed_holder, 0) != 0;
+        Check(spawned_hold60, "phase139 (19) 60ms timed holder spawned");
+        if (spawned_hold60) {
+            g_p139_go.wait(false, std::memory_order_acquire);   // holder owns it now
+            box::stopwatch sw;
+            bool got = g_p139_tmtx.try_lock_for(seconds(6));
+            nanoseconds waited = sw.elapsed();
+            if (got) g_p139_tmtx.unlock();
+            Check(got, "phase139 (20) try_lock_for outlives a 60ms holder and acquires");
+            Check(waited < seconds(3),
+                  "phase139 (21) the acquire came from the holder's unlock, not the budget");
+            Check(p139_join(), "phase139 (22) timed holder joined");
+        }
+    }
+    {
+        g_p139_hold_ms  = 2000;
+        g_p139_go.store(false, std::memory_order_relaxed);
+        g_p139_remaining = 1;
+        bool spawned_hold2s = strand_spawn(p139_timed_holder, 0) != 0;
+        Check(spawned_hold2s, "phase139 (23) 2s timed holder spawned");
+        if (spawned_hold2s) {
+            g_p139_go.wait(false, std::memory_order_acquire);
+            box::stopwatch sw;
+            bool got = g_p139_tmtx.try_lock_for(milliseconds(80));
+            nanoseconds waited = sw.elapsed();
+            if (got) g_p139_tmtx.unlock();
+            Check(!got, "phase139 (24) try_lock_for(80ms) against a 2s holder reports failure");
+            Check(waited < milliseconds(1500),
+                  "phase139 (25) it gave up on its own budget instead of waiting out the holder");
+            Check(p139_join(), "phase139 (26) long timed holder joined");
+        }
+    }
+
+    // ── (E3) TWO timed waiters, one holder: neither may be stranded ─────────
+    // The regression this guards against is invisible with a single waiter.
+    {
+        g_p139_hold_ms  = 60;
+        g_p139_go.store(false, std::memory_order_relaxed);
+        g_p139_timed_won.store(0, std::memory_order_relaxed);
+        g_p139_remaining = 1;
+        bool spawned_pair = strand_spawn(p139_timed_holder, 0) != 0;
+        Check(spawned_pair, "phase139 (27) two-waiter holder spawned");
+        if (spawned_pair) {
+            g_p139_go.wait(false, std::memory_order_acquire);   // holder owns it
+            int waiters = 0;
+            g_p139_remaining = 2;            // holder + one racing waiter
+            if (strand_spawn(p139_timed_waiter, 0)) waiters++;
+            else g_p139_remaining = 1;
+            Check(waiters == 1, "phase139 (28) second timed waiter spawned");
+            box::stopwatch sw;
+            bool mine = g_p139_tmtx.try_lock_for(seconds(6));
+            nanoseconds waited = sw.elapsed();
+            if (mine) g_p139_tmtx.unlock();
+            Check(p139_join(), "phase139 (29) two-waiter holder and sibling joined");
+            Check(mine, "phase139 (30) this strand acquired despite a second timed waiter");
+            Check(g_p139_timed_won.load(std::memory_order_acquire) == waiters,
+                  "phase139 (31) the sibling timed waiter was not stranded either");
+            Check(waited < seconds(4),
+                  "phase139 (32) neither waiter waited out its whole budget");
+        }
+    }
+
+    // ── (F) barrier: arrive_and_drop across strands ─────────────────────────
+    // Rounds 0..W-1 are cleared by main plus the workers still in; round W is
+    // main alone, which only closes if every drop lowered the expected count by
+    // exactly one. The completion function counts the phases from inside.
+    {
+        g_p139_phases.store(0, std::memory_order_relaxed);
+        g_p139_drop_next.store(0, std::memory_order_relaxed);
+        g_p139_go.store(false, std::memory_order_relaxed);
+        for (int i = 0; i < kP139Workers; i++) g_p139_drop_round[i] = 0;
+
+        int spawned = 0;
+        for (int i = 0; i < kP139Workers; i++)
+            if (strand_spawn(p139_barrier_worker, 0)) spawned++;
+        Check(spawned == kP139Workers, "phase139 (33) all barrier drop workers spawned");
+        if (spawned > 0) {
+            // Sized to the strands that really exist, and every worker still
+            // parked on the gate, so no arrival is counted before this point.
+            // Static, not automatic: if the join below ever times out, a
+            // straggler is still inside arrive_and_wait, and a stack barrier
+            // would be destroyed under it. Phase139 runs once, so first-pass
+            // initialization with the measured `spawned` is exactly right.
+            static std::barrier<void (*)() noexcept> bar(
+                1 + spawned,
+                +[]() noexcept { g_p139_phases.fetch_add(1, std::memory_order_relaxed); });
+            g_p139_bar       = &bar;
+            g_p139_remaining = (uint64_t)spawned;
+            g_p139_go.store(true, std::memory_order_release);
+            g_p139_go.notify_all();
+
+            for (int r = 0; r < spawned; r++) bar.arrive_and_wait();
+            bar.arrive_and_wait();                    // last round: main is alone
+            Check(p139_join(), "phase139 (34) barrier drop workers joined");
+            Check(g_p139_phases.load(std::memory_order_acquire) == spawned + 1,
+                  "phase139 (35) every phase completed exactly once across the drops");
+            int dropped = 0;
+            for (int i = 0; i < spawned; i++) dropped += g_p139_drop_round[i];
+            Check(dropped == spawned,
+                  "phase139 (36) every worker reached its own arrive_and_drop round");
+            g_p139_bar = nullptr;
+        }
+    }
+
+    // ── (G) shared_mutex under contention, both directions ──────────────────
+    {
+        g_p139_remaining = 1;
+        bool spawned_shared = strand_spawn(p139_shared_worker, 0) != 0;
+        Check(spawned_shared, "phase139 (37) shared_mutex worker spawned");
+        if (spawned_shared) {
+            box::stopwatch sw;
+            for (int i = 0; i < kP139Hops; i++) {
+                { std::shared_lock<std::shared_mutex> r(g_p139_smtx); p139_hold_us(kP139HoldUs / 4); }
+                { std::unique_lock<std::shared_mutex> w(g_p139_smtx); p139_hold_us(kP139HoldUs / 4); }
+            }
+            bool joined = p139_join();
+            nanoseconds took = sw.elapsed();
+            Check(joined, "phase139 (38) shared_mutex worker joined");
+            auto bound = many_cores ? milliseconds(3000) : milliseconds(6000);
+            Check(took < bound,
+                  "phase139 (39) shared_mutex keeps making progress under reader/writer contention");
+        }
+    }
+
+    // ── (H) std::print from several strands at once ─────────────────────────
+    // The screen channel handle is one function-local static shared by every
+    // strand; racing first-touch is the guard's problem and concurrent writes
+    // are print_bytes's. Empty formats keep the log byte-exact for STRICT runs.
+    {
+        g_p139_remaining = 1;
+        bool spawned_print = strand_spawn(p139_print_worker, 0) != 0;
+        Check(spawned_print, "phase139 (40) concurrent print worker spawned");
+        if (spawned_print) {
+            for (int i = 0; i < 4; i++) std::print("");
+            std::println();                            // through ToConsole now
+            Check(p139_join(), "phase139 (41) concurrent std::print worker joined");
+        }
+    }
+
+    printf("[CXX] PASS phase139: std::mutex/timed_mutex/shared_mutex park and wake through the "
+           "kernel under real strand contention, barrier::arrive_and_drop holds across strands, "
+           "and the uncontended lock pair never enters the kernel\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -34640,6 +35124,7 @@ int main()
     Phase136();
     Phase137();
     Phase138();
+    Phase139();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
