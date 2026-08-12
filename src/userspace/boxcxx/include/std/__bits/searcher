@@ -47,11 +47,21 @@ public:
     {
     }
 
+    // The array is ours the moment the mem-initializer returns, but this
+    // constructor's own destructor will not run if the assignment loop
+    // throws — so a throwing T::operator= would strand the whole block and
+    // every element in it. delete[] is right at any point in the loop: the
+    // new-expression either built all n elements or cleaned up after itself.
     HeapArray(const HeapArray &other)
         : __data(other.__size ? new T[other.__size] : nullptr),
           __size(other.__size)
     {
-        for (size_t i = 0; i < __size; ++i) __data[i] = other.__data[i];
+        try {
+            for (size_t i = 0; i < __size; ++i) __data[i] = other.__data[i];
+        } catch (...) {
+            delete[] __data;
+            throw;
+        }
     }
 
     HeapArray(HeapArray &&other) noexcept

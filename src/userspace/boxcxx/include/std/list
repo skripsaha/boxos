@@ -152,46 +152,86 @@ public:
 
     list() noexcept { Reset(); }
     explicit list(const Alloc &a) noexcept : __alloc(a) { Reset(); }
+    // A constructor that throws part-way never runs ~list, so every node it
+    // already linked would leak. clear() releases exactly those, and is
+    // valid from the first statement on: Reset() is noexcept and heads each
+    // body, so the anchor is always a well-formed empty ring by the time
+    // anything can throw (NodeBase carries no default member initializer).
     explicit list(size_type count, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Reset();
-        for (; count > 0; --count) emplace_back();
+        try {
+            Reset();
+            for (; count > 0; --count) emplace_back();
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     list(size_type count, const T &value, const Alloc &a = Alloc())
         : __alloc(a)
     {
-        Reset();
-        for (; count > 0; --count) push_back(value);
+        try {
+            Reset();
+            for (; count > 0; --count) push_back(value);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     template <typename It>
         requires(!is_integral_v<It>)
     list(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Reset();
-        for (; first != last; ++first) push_back(*first);
+        try {
+            Reset();
+            for (; first != last; ++first) push_back(*first);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     template <ContainerCompatibleRange<T> R>
     list(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Reset();
-        for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+        try {
+            Reset();
+            for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     list(initializer_list<T> il, const Alloc &a = Alloc()) : __alloc(a)
     {
-        Reset();
-        for (const T &v : il) push_back(v);
+        try {
+            Reset();
+            for (const T &v : il) push_back(v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     list(const list &other)
         : __alloc(NodeTraits::select_on_container_copy_construction(
               other.__alloc))
     {
-        Reset();
-        for (const T &v : other) push_back(v);
+        try {
+            Reset();
+            for (const T &v : other) push_back(v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     list(const list &other, const Alloc &a) : __alloc(a)
     {
-        Reset();
-        for (const T &v : other) push_back(v);
+        try {
+            Reset();
+            for (const T &v : other) push_back(v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     list(list &&other) noexcept : __alloc(std::move(other.__alloc))
     {
@@ -204,7 +244,12 @@ public:
         if (NodeTraits::is_always_equal::value || __alloc == other.__alloc) {
             StealFrom(other);
         } else {
-            for (T &v : other) push_back(std::move(v));
+            try {
+                for (T &v : other) push_back(std::move(v));
+            } catch (...) {
+                clear();
+                throw;
+            }
         }
     }
     ~list() { clear(); }
