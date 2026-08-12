@@ -355,8 +355,25 @@
 #ifndef __cpp_lib_flat_set
 #  error "__cpp_lib_flat_set is not visible from <flat_set> alone"
 #endif
+#include <flat_map>
+#ifndef __cpp_lib_flat_map
+#  error "__cpp_lib_flat_map is not visible from <flat_map> alone"
+#endif
 #ifdef BOXCXX_VERSION
 #  error "one of the owning headers above drags in <version>"
+#endif
+
+// Ф31b-2 fix-round H-1: __cpp_lib_flat_map must ALSO be visible from
+// <version> alone, per [version.syn]/2 -- not just from <flat_map>, checked
+// above. That check already defined the macro, so a plain #include <version>
+// here would be blind to a <version> that never pulls in its flat_map leaf;
+// undef the macro AND the leaf's own include guard first to force <version>
+// to prove it defines the macro itself, on this, its first-ever inclusion.
+#undef __cpp_lib_flat_map
+#undef BOXCXX_BITS_VERSION_FLAT_MAP
+#include <version>
+#ifndef __cpp_lib_flat_map
+#  error "__cpp_lib_flat_map is not visible from <version> alone"
 #endif
 
 #include <algorithm>
@@ -374,6 +391,7 @@
 #include <generator>
 #include <deque>
 #include <expected>
+#include <flat_map>
 #include <flat_set>
 #include <format>
 #include <forward_list>
@@ -510,6 +528,17 @@ template class std::flat_multiset<int>;
 template class std::flat_set<int, std::greater<int>, std::deque<int>>;
 template class std::flat_multiset<int, std::greater<int>, std::deque<int>>;
 template class std::flat_set<std::string, std::less<>>;
+template class std::flat_map<int, char>;
+template class std::flat_multimap<int, char>;
+template class std::flat_map<int, char, std::greater<int>, std::deque<int>, std::deque<char>>;
+template class std::flat_multimap<int, char, std::greater<int>, std::deque<int>, std::deque<char>>;
+template class std::flat_map<std::string, int, std::less<>>;
+// Ф31b-2 fix-round: [temp.explicit]/9 only instantiates flat_map/flat_multimap's
+// OWN members from the two lines above -- every behaviour lives in the private
+// base __flat::MapImpl, so those two alone never reach it. Instantiating the
+// engine directly is what actually exercises L-6's Multi-gating on operator[]/at.
+template class std::__flat::MapImpl<int, char, std::less<int>, std::vector<int>, std::vector<char>, false>;
+template class std::__flat::MapImpl<int, char, std::less<int>, std::vector<int>, std::vector<char>, true>;
 
 namespace {
 
@@ -29327,19 +29356,18 @@ void Phase131()
 #ifdef __cpp_lib_erase_if
 #  error "phase131: __cpp_lib_erase_if must stay undefined"
 #endif
-    // The eight below name a header boxcxx does not ship at all, so the
+    // The seven below name a header boxcxx does not ship at all, so the
     // macro could only ever appear by accident -- these guards are what
     // turns "we never wrote it" into "we checked". (It was nine until
     // Ф31b-1 shipped <flat_set>; __cpp_lib_flat_set moved out of this list
-    // and into phase133's value pin.)
+    // and into phase133's value pin. It was eight until Ф31b-2 shipped
+    // <flat_map>; __cpp_lib_flat_map moved out of this list and into
+    // phase135's value pin.)
 #ifdef __cpp_lib_execution
 #  error "phase131: __cpp_lib_execution must stay undefined"
 #endif
 #ifdef __cpp_lib_filesystem
 #  error "phase131: __cpp_lib_filesystem must stay undefined"
-#endif
-#ifdef __cpp_lib_flat_map
-#  error "phase131: __cpp_lib_flat_map must stay undefined"
 #endif
 #ifdef __cpp_lib_format
 #  error "phase131: __cpp_lib_format must stay undefined"
@@ -30605,6 +30633,10 @@ void Phase133()
                   "phase133 deque-backed keeps random access");
     static_assert(ranges::sized_range<FS>, "phase133 sized_range");
     static_assert(!ranges::view<FS>, "phase133 not a view");
+
+    // Ф31b-2 fix-round L-5: [[no_unique_address]] on the comparator member
+    // must actually collapse it into the container's own padding.
+    static_assert(sizeof(FS) == 24, "phase133 flat_set carries no padding overhead from an empty comparator");
 
     // ── (A) ordering tags ───────────────────────────────────────────────
     static_assert(is_empty_v<sorted_unique_t>, "phase133 sorted_unique_t empty");
@@ -32279,6 +32311,1259 @@ void Phase134()
            g_p134LeakObjs, g_p134LeakBlocks);
 }
 
+// ── phase135 fixtures: <flat_map> ───────────────────────────────────────
+// Reuses several phase133 fixtures directly where the job is identical
+// (P133OnlyLess, P133Tagged/P133TagLess, P133CountLess's counter shape,
+// P133Bomb, P133ModLess, P133StateAlloc) -- only genuinely map-shaped
+// fixtures (a value type to count, a pair-shaped holds-checker, the
+// two-container throw stands) get their own P135 names.
+
+template <class T>
+concept P135HasContainers = requires { typename T::containers; };
+template <class T>
+concept P135HasNodeType = requires { typename T::node_type; };
+template <class T>
+concept P135HasAt = requires(T &t) { t.at(std::declval<typename T::key_type>()); };
+template <class T>
+concept P135HasBracket = requires(T &t) { t[std::declval<typename T::key_type>()]; };
+template <class T>
+concept P135HasTryEmplace = requires(T &t) { t.try_emplace(std::declval<typename T::key_type>()); };
+template <class T>
+concept P135HasInsertOrAssign = requires(T &t) {
+    t.insert_or_assign(std::declval<typename T::key_type>(), std::declval<typename T::mapped_type>());
+};
+template <class S, class K>
+concept P135CanFind = requires(S &s, const K &k) { s.find(k); };
+template <class S, class K>
+concept P135CanEraseK = requires(S &s, K &&k) { s.erase((K &&)k); };
+template <class T>
+concept P135CanEqual = requires(const T &a, const T &b) { a == b; };
+
+// Golden-trace shape throughout: int keys, char values.
+template <class M>
+bool P135Holds(const M &m, std::initializer_list<std::pair<int, char>> want)
+{
+    if (m.size() != want.size()) return false;
+    auto it = m.begin();
+    for (auto &kv : want) {
+        if (it->first != kv.first || it->second != kv.second) return false;
+        ++it;
+    }
+    return true;
+}
+
+template <class M>
+bool P135StrictlySorted(const M &m)
+{
+    for (auto i = m.size(); i > 1; --i)
+        if (!(m.begin()[static_cast<ptrdiff_t>(i - 2)].first <
+              m.begin()[static_cast<ptrdiff_t>(i - 1)].first))
+            return false;
+    return true;
+}
+
+// Counts every copy/move of the MAPPED value, and a move leaves a visible
+// mark -- the same job behave_flat_map.cpp's Val does.
+struct P135Val {
+    static inline long copies = 0, moves = 0;
+    static void        Reset() { copies = moves = 0; }
+    char                c;
+    P135Val(char x) : c(x) {}
+    P135Val(const P135Val &o) : c(o.c) { ++copies; }
+    P135Val(P135Val &&o) noexcept : c(o.c) { ++moves; }
+    P135Val &operator=(const P135Val &o)
+    {
+        c = o.c;
+        ++copies;
+        return *this;
+    }
+    P135Val &operator=(P135Val &&o) noexcept
+    {
+        c = o.c;
+        ++moves;
+        return *this;
+    }
+    bool operator==(const P135Val &o) const { return c == o.c; }
+};
+
+// Throws on its budget-th copy/assignment -- the exact stand that proved
+// libc++'s invariant-5.1 defect (Ф31b-2 inv.cpp), transcribed here.
+// Copy-only, like inv.cpp's own Bomb: a vector shift must copy, never move.
+struct P135Bomb {
+    static inline int budget = -1;
+    int                v;
+    P135Bomb(int x) : v(x) {}
+    P135Bomb(const P135Bomb &o) : v(o.v) { Trip(); }
+    P135Bomb &operator=(const P135Bomb &o)
+    {
+        Trip();
+        v = o.v;
+        return *this;
+    }
+    static void Trip()
+    {
+        if (budget == 0) throw std::runtime_error("boom");
+        if (budget > 0) --budget;
+    }
+};
+
+// The same bomb, but in the KEY -- and for erasure that distinction is the
+// whole test. c.keys.erase() runs FIRST and vector::erase does __size -= n
+// only after its shift loop, so a key whose assignment throws mid-shift
+// leaves the size UNCHANGED with a moved-from husk inside a range that is no
+// longer sorted. A bomb in the MAPPED half cannot reach that state at all:
+// by the time the mapped shift runs, c.keys.erase() has already returned and
+// moved the size, so even a size-watching guard fires. Measured, not
+// assumed -- with the bomb in the value, all eight throw points pass even
+// against a deliberately reverted guard, i.e. the test proves nothing.
+struct P135BombKey {
+    static inline int budget = -1;
+    int                v;
+    P135BombKey(int x) : v(x) {}
+    P135BombKey(const P135BombKey &o) : v(o.v) { Trip(); }
+    P135BombKey &operator=(const P135BombKey &o)
+    {
+        Trip();
+        v = o.v;
+        return *this;
+    }
+    static void Trip()
+    {
+        if (budget == 0) throw std::runtime_error("boom");
+        if (budget > 0) --budget;
+    }
+};
+struct P135BombKeyLess {
+    bool operator()(const P135BombKey &a, const P135BombKey &b) const { return a.v < b.v; }
+};
+
+// A mapped value whose copy/move constructor can be armed to throw -- the
+// "throw while BUILDING the element" half of the invariant story, distinct
+// from P135Bomb's "throw during the container's OWN shift" half.
+struct P135Fragile {
+    static inline int armed = -1;
+    int                v     = 0;
+    P135Fragile(int x) : v(x) {}
+    P135Fragile(const P135Fragile &o) : v(o.v) { Trip(); }
+    P135Fragile(P135Fragile &&o) noexcept(false) : v(o.v) { Trip(); }
+    P135Fragile &operator=(const P135Fragile &) = default;
+    P135Fragile &operator=(P135Fragile &&)      = default;
+    static void  Trip()
+    {
+        if (armed > 0 && --armed == 0) throw std::runtime_error("boom");
+    }
+};
+
+template <class Mp, class Tag>
+Mp P135FragileFive(Tag tag)
+{
+    std::vector<int> k;
+    k.reserve(16);
+    for (int i = 1; i <= 5; ++i) k.push_back(i * 10);
+    std::vector<P135Fragile> v;
+    v.reserve(16);
+    for (int i = 1; i <= 5; ++i) v.push_back(P135Fragile{i * 10});
+    return Mp(tag, std::move(k), std::move(v));
+}
+
+template <class Mp>
+bool P135FiveIntact(const Mp &m)
+{
+    if (m.size() != 5) return false;
+    int want = 10;
+    for (auto &&e : m) {
+        if (e.first != want || e.second.v != want) return false;
+        want += 10;
+    }
+    return true;
+}
+
+// Runs one of the eight single-element insertion paths with the mapped
+// value's constructor armed. expect_intact tells the two container halves
+// apart: paths that build the WHOLE pair before touching either container
+// leave it 5-intact when the build throws (strong guarantee); paths that
+// build the key-only pair and let it succeed into c.keys before the value
+// half is placed into c.values EMPTY the map when that placement throws --
+// [flat.map.overview]/5.1 restored by clearing, exactly what cell H is
+// about, and a split flat_set never has to make (one container, not two).
+template <class Mp, class Tag>
+bool P135SurvivesFragile(Tag tag, int path, bool expect_intact)
+{
+    Mp                          m = P135FragileFive<Mp>(tag);
+    std::pair<int, P135Fragile> arg{35, P135Fragile{35}};
+    bool                        threw = false;
+    P135Fragile::armed              = 1;
+    try {
+        const auto &c = arg;
+        switch (path) {
+        case 0: (void)m.insert(c); break;
+        case 1: (void)m.insert(std::move(arg)); break;
+        case 2: (void)m.insert(m.begin(), c); break;
+        case 3: (void)m.insert(m.begin(), std::move(arg)); break;
+        case 4: (void)m.emplace(std::move(arg)); break;
+        case 5: (void)m.emplace(35, 35); break;
+        case 6: (void)m.emplace_hint(m.begin(), std::move(arg)); break;
+        case 7: (void)m.emplace_hint(m.begin(), 35, 35); break;
+        }
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    P135Fragile::armed = -1;
+    if (!threw) return false;
+    if (expect_intact) {
+        if (!P135FiveIntact(m)) return false;
+    } else {
+        if (!m.empty()) return false;
+    }
+    m.insert(std::pair<int, P135Fragile>{60, P135Fragile{60}});
+    return m.size() == (expect_intact ? 6u : 1u);
+}
+
+// 8 throw points per mutating path, exactly inv.cpp's stand: proves ALL
+// THREE invariants of [flat.map.overview]/5 hold after EVERY throw, measured
+// on boxcxx's own vector rather than argued from the text.
+//
+// Every value carries its own key, so 5.3 ("the value at offset off is the
+// value associated with the key at offset off") is checkable and not merely
+// asserted. That third check is not decoration: an erase whose shift throws
+// half-way leaves keys.size() UNCHANGED -- vector::erase does __size -= n
+// only after its shift loop -- so 5.1 and 5.2 alone can pass over a range
+// with a moved-from husk spliced into it. 5.3 is the one that sees it.
+template <class M, class Op>
+bool P135InvariantHoldsOn(Op op)
+{
+    bool all_ok = true;
+    for (int point = 0; point < 8; ++point) {
+        M m;
+        for (int i = 0; i < 5; ++i) m.emplace(i * 10, i * 10);
+        P135Bomb::budget = point;
+        try {
+            op(m);
+        } catch (const std::runtime_error &) {
+        }
+        P135Bomb::budget = -1;
+        if (m.keys().size() != m.values().size()) all_ok = false;   // 5.1
+        if (!P135StrictlySorted(m)) all_ok = false;                  // 5.2
+        for (auto &&e : m)                                           // 5.3
+            if (e.second.v != e.first) all_ok = false;
+    }
+    return all_ok;
+}
+
+template <class Op>
+bool P135InvariantHolds(Op op)
+{
+    return P135InvariantHoldsOn<std::flat_map<int, P135Bomb>>(op);
+}
+
+// The erasure stand: same three invariants, but the bomb is in the key, so
+// the throw lands inside c.keys.erase()'s shift -- the one place where the
+// size stays put while the range stops being sorted.
+template <class M, class Op>
+bool P135KeyBombInvariantHolds(Op op)
+{
+    bool all_ok = true;
+    for (int point = 0; point < 10; ++point) {
+        M m;
+        for (int i = 0; i < 5; ++i) m.emplace(P135BombKey{i * 10}, i * 10);
+        P135BombKey::budget = point;
+        try {
+            op(m);
+        } catch (const std::runtime_error &) {
+        }
+        P135BombKey::budget = -1;
+        if (m.keys().size() != m.values().size()) all_ok = false;              // 5.1
+        for (size_t i = 1; i < m.keys().size(); ++i)                           // 5.2
+            if (!(m.keys()[i - 1].v < m.keys()[i].v)) all_ok = false;
+        for (auto &&e : m)                                                     // 5.3
+            if (e.second != e.first.v) all_ok = false;
+    }
+    return all_ok;
+}
+
+long g_p135_comparisons = 0;
+struct P135CountLess {
+    bool operator()(int a, int b) const
+    {
+        ++g_p135_comparisons;
+        return a < b;
+    }
+};
+
+// Counts every move/copy of the MAPPED value during a merge -- comparison
+// counting cannot tell a buffered merge from a rotate merge (rotate uses
+// FEWER comparisons), so the N + M log M guarantee has to be checked here,
+// in element moves, which is where a RotateMerge fallback actually shows.
+long g_p135_moves = 0;
+struct P135Counted {
+    int v = 0;
+    P135Counted() = default;
+    P135Counted(int x) : v(x) {}
+    P135Counted(const P135Counted &o) : v(o.v) { ++g_p135_moves; }
+    P135Counted(P135Counted &&o) noexcept : v(o.v) { ++g_p135_moves; }
+    P135Counted &operator=(const P135Counted &o)
+    {
+        v = o.v;
+        ++g_p135_moves;
+        return *this;
+    }
+    P135Counted &operator=(P135Counted &&o) noexcept
+    {
+        v = o.v;
+        ++g_p135_moves;
+        return *this;
+    }
+};
+
+// An allocator with an absurdly small max_size(), so that MapImpl::max_size
+// -- min(keys.max_size(), values.max_size()) -- has something observable to
+// pick between.
+template <class T>
+struct P135TinyAlloc {
+    using value_type = T;
+    P135TinyAlloc()  = default;
+    template <class U>
+    P135TinyAlloc(const P135TinyAlloc<U> &)
+    {
+    }
+    T   *allocate(size_t n) { return static_cast<T *>(::operator new(n * sizeof(T))); }
+    void deallocate(T *p, size_t) { ::operator delete(p); }
+    size_t max_size() const { return 7; }
+    bool   operator==(const P135TinyAlloc &) const { return true; }
+};
+
+void Phase135()
+{
+    using namespace std;
+
+    using M   = flat_map<int, char>;
+    using MM  = flat_multimap<int, char>;
+    using MD  = flat_map<int, char, less<int>, deque<int>, deque<char>>;
+    using MST = flat_map<string, int, less<>>;
+
+    // ── (A) nested types ────────────────────────────────────────────────
+    static_assert(is_same_v<M::key_type, int>, "phase135 key_type");
+    static_assert(is_same_v<M::mapped_type, char>, "phase135 mapped_type");
+    static_assert(is_same_v<M::value_type, pair<int, char>>, "phase135 value_type");
+    static_assert(is_same_v<M::key_compare, less<int>>, "phase135 key_compare");
+    static_assert(is_same_v<M::reference, pair<const int &, char &>>, "phase135 reference");
+    static_assert(is_same_v<M::const_reference, pair<const int &, const char &>>,
+                  "phase135 const_reference");
+    static_assert(is_same_v<M::key_container_type, vector<int>>, "phase135 key_container_type");
+    static_assert(is_same_v<M::mapped_container_type, vector<char>>, "phase135 mapped_container_type");
+    static_assert(is_same_v<M::reverse_iterator, std::reverse_iterator<M::iterator>>,
+                  "phase135 reverse_iterator");
+    static_assert(is_same_v<M::const_reverse_iterator, std::reverse_iterator<M::const_iterator>>,
+                  "phase135 const_reverse_iterator");
+    // Fixed size_t/ptrdiff_t, NOT taken from either container -- unlike
+    // flat_set, where size_type IS the container's own.
+    static_assert(is_same_v<M::size_type, size_t>, "phase135 size_type is fixed size_t");
+    static_assert(is_same_v<M::difference_type, ptrdiff_t>, "phase135 difference_type is fixed ptrdiff_t");
+
+    static_assert(P135HasContainers<M>, "phase135 has nested containers (unlike flat_set)");
+    static_assert(!P135HasNodeType<M>, "phase135 no node_type");
+    static_assert(!P135HasNodeType<MM>, "phase135 multimap no node_type");
+    static_assert(sizeof(M::containers) == 48, "phase135 containers is two vectors, no extra members");
+    // Ф31b-2 fix-round L-5: [[no_unique_address]] on the comparator must
+    // collapse it into the containers' own padding, same as flat_set.
+    static_assert(sizeof(M) == 48, "phase135 flat_map carries no padding overhead from an empty comparator");
+
+    // flat_map has at/operator[]/try_emplace/insert_or_assign;
+    // flat_multimap has NONE of the four -- [flat.multimap.defn] simply
+    // does not declare them, and MapImpl gates every one on (!Multi) so a
+    // shared engine cannot hand them to the multimap facade by accident.
+    static_assert(P135HasAt<M> && P135HasBracket<M> && P135HasTryEmplace<M> && P135HasInsertOrAssign<M>,
+                  "phase135 flat_map has at/[]/try_emplace/insert_or_assign");
+    static_assert(!P135HasAt<MM> && !P135HasBracket<MM> && !P135HasTryEmplace<MM> &&
+                      !P135HasInsertOrAssign<MM>,
+                  "phase135 flat_multimap has none of at/[]/try_emplace/insert_or_assign");
+
+    // ── (A) iterators ───────────────────────────────────────────────────
+    // Unlike flat_set (where iterator IS const_iterator), the two genuinely
+    // differ: the mapped half of iterator is T&, of const_iterator is const T&.
+    static_assert(!is_same_v<M::iterator, M::const_iterator>, "phase135 iterator != const_iterator");
+    static_assert(is_convertible_v<M::iterator, M::const_iterator>,
+                  "phase135 iterator -> const_iterator converts");
+    static_assert(!is_convertible_v<M::const_iterator, M::iterator>,
+                  "phase135 const_iterator -> iterator does NOT convert");
+    static_assert(random_access_iterator<M::iterator>, "phase135 iterator models random_access_iterator");
+    static_assert(random_access_iterator<M::const_iterator>,
+                  "phase135 const_iterator models random_access_iterator");
+    static_assert(random_access_iterator<std::reverse_iterator<M::iterator>>,
+                  "phase135 reverse_iterator<iterator> still models random_access_iterator");
+    static_assert(is_same_v<iter_reference_t<M::iterator>, pair<const int &, char &>>,
+                  "phase135 iterator reference is pair<const int&, char&>");
+    static_assert(is_same_v<iter_reference_t<M::const_iterator>, pair<const int &, const char &>>,
+                  "phase135 const_iterator reference is pair<const int&, const char&>");
+    static_assert(is_same_v<iter_value_t<M::iterator>, pair<int, char>>, "phase135 iter_value_t");
+
+    // Ф31b-2 fix-round M-4: Yoke's own shape (KeyIt, MappedIt, KeyRef,
+    // MappedRef) depends on neither Compare nor Multi, so without a phantom
+    // Derived tag flat_map<int,char>::iterator and flat_multimap<int,char>::
+    // iterator -- or two flat_maps differing only by comparator -- would be
+    // the SAME type, letting an iterator from one specialization pass where
+    // another's is expected.
+    static_assert(!is_same_v<M::iterator, MM::iterator>,
+                  "phase135 map and multimap iterators are distinct types");
+    static_assert(!is_same_v<M::const_iterator, MM::const_iterator>,
+                  "phase135 map and multimap const_iterators are distinct types");
+    static_assert(!is_same_v<M::iterator, flat_map<int, char, greater<int>>::iterator>,
+                  "phase135 two comparators on the same Key/T give distinct iterators");
+    static_assert(!is_convertible_v<MM::iterator, M::iterator>,
+                  "phase135 a multimap iterator does not convert to a map iterator");
+    static_assert(!is_convertible_v<M::iterator, flat_map<int, char, greater<int>>::iterator>,
+                  "phase135 an iterator does not convert across comparators");
+
+    // Cells A and B: the exact live re-test of Ф31a-2's [iterator.traits]/3
+    // ladder that b-2's design measured against both oracles. reference is
+    // a PRVALUE pair, not a real reference, so the ladder stops at input,
+    // never reaching forward -- libstdc++'s answer; libc++ overstates it.
+    static_assert(is_same_v<iterator_traits<M::iterator>::iterator_category, input_iterator_tag>,
+                  "phase135 cell A: iterator_category synthesizes to input_iterator_tag");
+    static_assert(is_same_v<iterator_traits<M::iterator>::value_type, pair<int, char>>,
+                  "phase135 cell B: iterator_traits value_type is pair<Key,T>, not pair<const Key,T>");
+    static_assert(!sortable<M::iterator, less<>>, "phase135 the public iterator is not sortable");
+    static_assert(!ranges::contiguous_range<M>, "phase135 flat_map is not a contiguous_range");
+    static_assert(ranges::random_access_range<M>, "phase135 flat_map is a random_access_range");
+    static_assert(ranges::sized_range<M>, "phase135 sized_range");
+    static_assert(!ranges::view<M>, "phase135 not a view");
+
+    // ── (A) value_compare ───────────────────────────────────────────────
+    static_assert(!is_default_constructible_v<M::value_compare>, "phase135 value_compare not default-ctor");
+    static_assert(!is_constructible_v<M::value_compare, less<int>>,
+                  "phase135 value_compare ctor is private");
+    static_assert(is_invocable_v<M::value_compare, M::const_reference, M::const_reference>,
+                  "phase135 value_compare callable on const_reference pairs");
+
+    // ── (A) constructors ────────────────────────────────────────────────
+    static_assert(is_default_constructible_v<M> && is_copy_constructible_v<M> &&
+                      is_move_constructible_v<M> && is_copy_assignable_v<M> && is_move_assignable_v<M>,
+                  "phase135 special members");
+    // [flat.map.defn]: the two-container constructor is NOT explicit --
+    // unlike flat_set's single-container ctor, it takes two REQUIRED
+    // arguments, so explicit-ness has no single-argument conversion to
+    // guard against in the first place.
+    static_assert(is_constructible_v<M, vector<int>, vector<char>>, "phase135 container ctor");
+    static_assert(is_constructible_v<M, less<int>>, "phase135 comparator ctor");
+    static_assert(!is_convertible_v<less<int>, M>, "phase135 comparator ctor is explicit");
+
+    static_assert(is_constructible_v<M, sorted_unique_t, vector<int>, vector<char>>,
+                  "phase135 sorted_unique accepted");
+    static_assert(!is_constructible_v<M, sorted_equivalent_t, vector<int>, vector<char>>,
+                  "phase135 flat_map rejects sorted_equivalent");
+    static_assert(is_constructible_v<MM, sorted_equivalent_t, vector<int>, vector<char>>,
+                  "phase135 sorted_equivalent accepted");
+    static_assert(!is_constructible_v<MM, sorted_unique_t, vector<int>, vector<char>>,
+                  "phase135 flat_multimap rejects sorted_unique");
+
+    static_assert(is_constructible_v<M, initializer_list<pair<int, char>>>, "phase135 init-list ctor");
+    static_assert(is_constructible_v<M, const int *, const int *>,
+                  "phase135 iterator-pair ctor -- not a real pair range, just an arity probe would fail; "
+                  "use a real pair iterator below instead");
+
+    static_assert(is_constructible_v<M, allocator<int>>, "phase135 allocator ctor");
+    static_assert(is_constructible_v<M, const vector<int> &, const vector<char> &, allocator<int>>,
+                  "phase135 container + allocator");
+    static_assert(is_constructible_v<M, less<int>, allocator<int>>, "phase135 comparator + allocator");
+    static_assert(is_constructible_v<M, sorted_unique_t, const vector<int> &, const vector<char> &,
+                                     allocator<int>>,
+                  "phase135 tagged container + allocator");
+    static_assert(is_constructible_v<M, initializer_list<pair<int, char>>, allocator<int>>,
+                  "phase135 init-list + allocator");
+
+    static_assert(uses_allocator_v<M, allocator<int>>, "phase135 uses_allocator");
+    static_assert(uses_allocator_v<MM, allocator<int>>, "phase135 multimap uses_allocator");
+
+    // ── (A) deduction guides ────────────────────────────────────────────
+    static_assert(is_same_v<decltype(flat_map(declval<vector<int>>(), declval<vector<char>>())),
+                            flat_map<int, char, less<int>, vector<int>, vector<char>>>,
+                  "phase135 guide: KeyContainer + MappedContainer");
+    static_assert(
+        is_same_v<decltype(flat_map(declval<vector<int>>(), declval<vector<char>>(), greater<int>{})),
+                  flat_map<int, char, greater<int>, vector<int>, vector<char>>>,
+        "phase135 guide: KeyContainer + MappedContainer + Compare");
+    static_assert(
+        is_same_v<decltype(flat_map(declval<vector<int>>(), declval<vector<char>>(), allocator<int>{})),
+                  flat_map<int, char, less<int>, vector<int>, vector<char>>>,
+        "phase135 guide: KeyContainer + MappedContainer + Allocator");
+    static_assert(is_same_v<decltype(flat_map(sorted_unique, declval<vector<int>>(), declval<vector<char>>())),
+                            flat_map<int, char, less<int>, vector<int>, vector<char>>>,
+                  "phase135 guide: tag + KeyContainer + MappedContainer");
+    static_assert(is_same_v<decltype(flat_map{pair{1, 'a'}, pair{2, 'b'}}), flat_map<int, char, less<int>>>,
+                  "phase135 guide: initializer_list<pair<Key,T>>");
+    static_assert(is_same_v<decltype(flat_map(sorted_unique, {pair{1, 'a'}, pair{2, 'b'}})),
+                            flat_map<int, char, less<int>>>,
+                  "phase135 guide: tag + initializer_list<pair<Key,T>>");
+    static_assert(is_same_v<decltype(flat_map(declval<deque<int>>(), declval<deque<char>>(), greater<int>{})),
+                            flat_map<int, char, greater<int>, deque<int>, deque<char>>>,
+                  "phase135 guide: a non-vector KeyContainer/MappedContainer");
+    static_assert(is_same_v<decltype(flat_multimap(declval<vector<int>>(), declval<vector<char>>())),
+                            flat_multimap<int, char, less<int>, vector<int>, vector<char>>>,
+                  "phase135 guide: multimap KeyContainer + MappedContainer");
+    static_assert(
+        is_same_v<decltype(flat_multimap(sorted_equivalent, declval<vector<int>>(), declval<vector<char>>())),
+                  flat_multimap<int, char, less<int>, vector<int>, vector<char>>>,
+        "phase135 guide: multimap tag + KeyContainer + MappedContainer");
+
+    // The iterator-pair and from_range guides both name iter-key-type /
+    // iter-mapped-type / range-key-type / range-mapped-type, an asymmetry
+    // [flat.map.syn] writes on purpose (trap 14): the range form's default
+    // allocator is allocator<byte>, not allocator<range-key-type<R>> the
+    // way b-1's flat_set guide is.
+    static_assert(
+        is_same_v<decltype(flat_map(declval<vector<pair<int, char>>::iterator>(),
+                                    declval<vector<pair<int, char>>::iterator>())),
+                  flat_map<int, char, less<int>>>,
+        "phase135 guide: iterator pair over vector<pair<int,char>>");
+    static_assert(is_same_v<decltype(flat_map(declval<vector<pair<int, char>>::iterator>(),
+                                              declval<vector<pair<int, char>>::iterator>(), greater<int>{})),
+                            flat_map<int, char, greater<int>>>,
+                  "phase135 guide: iterator pair + Compare");
+    static_assert(is_same_v<decltype(flat_multimap(declval<vector<pair<int, char>>::iterator>(),
+                                                    declval<vector<pair<int, char>>::iterator>())),
+                            flat_multimap<int, char, less<int>>>,
+                  "phase135 guide: multimap iterator pair");
+    {
+        vector<pair<int, char>> rg{{1, 'a'}};
+        static_assert(
+            is_same_v<decltype(flat_map(from_range, rg)), flat_map<int, char, less<int>, vector<int>, vector<char>>>,
+            "phase135 guide: from_range default allocator is allocator<byte>, rebound to int and char");
+        static_assert(is_same_v<decltype(flat_multimap(from_range, rg)),
+                                flat_multimap<int, char, less<int>, vector<int>, vector<char>>>,
+                      "phase135 guide: multimap from_range");
+    }
+
+    // ── (A) signatures and return types ─────────────────────────────────
+    static_assert(is_same_v<decltype(declval<M &>().emplace(1, 'a')), pair<M::iterator, bool>>,
+                  "phase135 emplace -> pair");
+    static_assert(is_same_v<decltype(declval<MM &>().emplace(1, 'a')), MM::iterator>,
+                  "phase135 multimap emplace -> iterator");
+    static_assert(is_same_v<decltype(declval<M &>().insert(declval<const pair<int, char> &>())),
+                            pair<M::iterator, bool>>,
+                  "phase135 insert(const&) -> pair");
+    static_assert(is_same_v<decltype(declval<MM &>().insert(declval<pair<int, char> &&>())), MM::iterator>,
+                  "phase135 multimap insert(&&) -> iterator");
+    // Two declarations, not one: unlike flat_set (where they collapse),
+    // iterator and const_iterator genuinely differ here.
+    static_assert(is_same_v<decltype(declval<M &>().erase(declval<M::iterator>())), M::iterator>,
+                  "phase135 erase(iterator) -> iterator");
+    static_assert(is_same_v<decltype(declval<M &>().erase(declval<M::const_iterator>())), M::iterator>,
+                  "phase135 erase(const_iterator) -> iterator");
+    static_assert(is_same_v<decltype(declval<M &>().erase(declval<const int &>())), M::size_type>,
+                  "phase135 erase(key) -> size_type");
+    static_assert(is_same_v<decltype(declval<M &&>().extract()), M::containers>,
+                  "phase135 extract -> containers");
+    static_assert(is_same_v<decltype(declval<M &>().equal_range(1)), pair<M::iterator, M::iterator>>,
+                  "phase135 equal_range -> pair of iterators");
+    static_assert(is_same_v<decltype(declval<const M &>().at(1)), const char &>, "phase135 const at");
+    static_assert(is_same_v<decltype(declval<M &>().at(1)), char &>, "phase135 mutable at");
+    static_assert(is_same_v<decltype(declval<M &>()[1]), char &>, "phase135 operator[] -> mapped_type&");
+
+    static_assert(noexcept(declval<M &>().swap(declval<M &>())), "phase135 swap noexcept");
+    static_assert(noexcept(declval<M &>().clear()), "phase135 clear noexcept");
+    static_assert(noexcept(declval<const M &>().empty()), "phase135 empty noexcept");
+    static_assert(noexcept(declval<const M &>().size()), "phase135 size noexcept");
+    static_assert(noexcept(declval<const M &>().max_size()), "phase135 max_size noexcept");
+    static_assert(noexcept(declval<const M &>().crbegin()), "phase135 crbegin noexcept");
+    static_assert(noexcept(declval<const M &>().crend()), "phase135 crend noexcept");
+
+    // ── (A) heterogeneous lookup gated on is_transparent ────────────────
+    static_assert(P135CanFind<MST, string_view>, "phase135 transparent find");
+    static_assert(!P135CanFind<flat_map<string, int>, string_view>, "phase135 opaque comparator, no het find");
+    static_assert(P135CanEraseK<MST, string_view>, "phase135 transparent erase");
+    static_assert(!P135CanEraseK<flat_map<string, int>, string_view>, "phase135 opaque comparator, no het erase");
+    static_assert(P135HasTryEmplace<MST>, "phase135 transparent try_emplace exists");
+    static_assert(P135HasInsertOrAssign<MST>, "phase135 transparent insert_or_assign exists");
+
+    // ── (A) comparisons ──────────────────────────────────────────────────
+    static_assert(equality_comparable<M>, "phase135 equality_comparable");
+    static_assert(is_same_v<decltype(declval<const M &>() <=> declval<const M &>()), strong_ordering>,
+                  "phase135 <=> is strong_ordering for int/char");
+    static_assert(is_same_v<decltype(declval<const flat_map<P133OnlyLess, char> &>() <=>
+                                     declval<const flat_map<P133OnlyLess, char> &>()),
+                            weak_ordering>,
+                  "phase135 synth-three-way gives weak_ordering for a <-only key");
+    static_assert(!three_way_comparable<flat_multimap<P133Tagged, char, P133TagLess>>,
+                  "phase135 <=> drops out for a key with no ordering of its own");
+    static_assert(P135CanEqual<flat_multimap<P133Tagged, char, P133TagLess>>,
+                  "phase135 == stays declared for such a key");
+
+    static_assert(is_same_v<decltype(erase_if(declval<M &>(), [](auto) { return true; })), M::size_type>,
+                  "phase135 erase_if -> size_type");
+    static_assert(is_same_v<decltype(erase_if(declval<MM &>(), [](auto) { return true; })), MM::size_type>,
+                  "phase135 multimap erase_if -> size_type");
+
+    // ── (A) feature-test macro ──────────────────────────────────────────
+    static_assert(__cpp_lib_flat_map == 202207L, "phase135 __cpp_lib_flat_map is the C++23 value");
+
+    // ── (B) construction, against the two-oracle golden run ─────────────
+    Check(P135Holds(M(vector<int>{3, 1, 2, 1}, vector<char>{'c', 'a', 'b', 'X'}), {{1, 'a'}, {2, 'b'}, {3, 'c'}}),
+          "phase135 (1) container ctor sorts and dedups, FIRST of a duplicate group wins");
+    Check(P135Holds(MM(vector<int>{3, 1, 2, 1}, vector<char>{'c', 'a', 'b', 'X'}),
+                    {{1, 'a'}, {1, 'X'}, {2, 'b'}, {3, 'c'}}),
+          "phase135 (2) multimap container ctor sorts and KEEPS every duplicate");
+    {
+        M m{{1, 'a'}, {2, 'b'}};
+        m[3] = 'c';
+        m[1] = 'A';
+        Check(m.at(2) == 'b' && m[9] == char(),
+              "phase135 (3) at() reads, operator[] on an absent key value-initializes");
+        Check(P135Holds(m, {{1, 'A'}, {2, 'b'}, {3, 'c'}, {9, char()}}), "phase135 (4) map after the access above");
+        bool threw = false;
+        try {
+            (void)as_const(m).at(77);
+        } catch (const out_of_range &) {
+            threw = true;
+        }
+        Check(threw, "phase135 (5) at() of an absent key throws out_of_range");
+    }
+    {
+        M m;
+        auto [i1, b1] = m.try_emplace(1, 'o');
+        auto [i2, b2] = m.try_emplace(1, 'X');
+        Check(b1 && !b2 && m.at(1) == 'o', "phase135 (6) try_emplace: new inserts, duplicate leaves it alone");
+        auto i7 = m.try_emplace(m.begin(), 5, 'h');
+        Check(i7->first == 5, "phase135 (7) hinted try_emplace inserts at the key's own position");
+        auto [i5, b5] = m.insert_or_assign(1, 'A');
+        Check(!b5 && m.at(1) == 'A', "phase135 (8) insert_or_assign on a present key assigns, reports false");
+        auto [i6, b6] = m.insert_or_assign(9, 'f');
+        Check(b6, "phase135 (9) insert_or_assign on an absent key inserts, reports true");
+    }
+    {
+        // How many element operations does a duplicate insert cost?
+        // Matches behave_flat_map.cpp block 5 -- including the fact that
+        // building the LOCAL fixture pair<int,P135Val>{1,P135Val('z')}
+        // itself performs one move (a prvalue Val('z') materializes into
+        // pair's forwarding parameter, then moves into .second): that move
+        // is counted below exactly where the golden trace counts it.
+        flat_map<int, P135Val> m;
+        m.try_emplace(1, 'a');
+        P135Val::Reset();
+        pair<int, P135Val> p{1, P135Val('z')};
+        auto [it, ok] = m.insert(p);
+        Check(!ok && P135Val::copies == 1 && P135Val::moves == 1,
+              "phase135 (10) dup insert(const&): fixture ctor 1 move, insert's t 1 copy, container untouched");
+        P135Val::Reset();
+        pair<int, P135Val> q{1, P135Val('z')};
+        auto [it2, ok2] = m.insert(std::move(q));
+        Check(!ok2 && P135Val::copies == 0 && P135Val::moves == 2,
+              "phase135 (11) dup insert(&&): fixture ctor 1 move, insert's t 1 move, container untouched");
+        P135Val::Reset();
+        auto [it3, ok3] = m.emplace(1, 'z');
+        Check(!ok3 && P135Val::copies == 0 && P135Val::moves == 0,
+              "phase135 (12) dup emplace(1,'z') touches Val's copy/move ctor not at all");
+        P135Val::Reset();
+        auto [it4, ok4] = m.try_emplace(1, 'z');
+        Check(!ok4 && P135Val::copies == 0 && P135Val::moves == 0,
+              "phase135 (13) dup try_emplace touches nothing -- it never builds a value at all");
+    }
+    {
+        M m{{1, 'a'}, {3, 'c'}};
+        vector<pair<int, char>> add{{2, 'b'}, {1, 'X'}, {2, 'Y'}, {4, 'd'}};
+        m.insert(add.begin(), add.end());
+        Check(P135Holds(m, {{1, 'a'}, {2, 'b'}, {3, 'c'}, {4, 'd'}}),
+              "phase135 (14) range insert: the PRE-EXISTING and the FIRST of the tail's duplicates win");
+        MM mm{{1, 'a'}, {3, 'c'}};
+        mm.insert(add.begin(), add.end());
+        Check(P135Holds(mm, {{1, 'a'}, {1, 'X'}, {2, 'b'}, {2, 'Y'}, {3, 'c'}, {4, 'd'}}),
+              "phase135 (15) multimap range insert keeps every one of them");
+        M r{{1, 'a'}};
+        r.insert_range(add);
+        Check(P135Holds(r, {{1, 'a'}, {2, 'b'}, {4, 'd'}}), "phase135 (16) insert_range");
+        M s{{0, 'z'}};
+        vector<pair<int, char>> sorted{{5, 'e'}, {6, 'f'}};
+        s.insert(sorted_unique, sorted.begin(), sorted.end());
+        Check(P135Holds(s, {{0, 'z'}, {5, 'e'}, {6, 'f'}}), "phase135 (17) sorted_unique range insert");
+    }
+    {
+        MM mm{{2, 'a'}, {4, 'b'}};
+        mm.emplace(4, 'X');
+        mm.emplace(4, 'Y');
+        Check(P135Holds(mm, {{2, 'a'}, {4, 'b'}, {4, 'X'}, {4, 'Y'}}),
+              "phase135 (18) multimap emplace lands at upper_bound, after its equals");
+        auto r = mm.equal_range(4);
+        Check(r.second - r.first == 3 && mm.count(4) == 3, "phase135 (19) equal_range(4) width == count == 3");
+        Check(mm.erase(4) == 3, "phase135 (20) erase(4) removes all three");
+        Check(P135Holds(mm, {{2, 'a'}}), "phase135 (21) map after erase(4)");
+    }
+    {
+        M   m{{1, 'a'}, {2, 'b'}, {3, 'c'}, {4, 'd'}, {5, 'e'}};
+        int applications = 0, mutable_seen = 0;
+        auto n = erase_if(m, [&](auto e) {
+            ++applications;
+            if constexpr (!is_const_v<remove_reference_t<decltype(e.second)>>) ++mutable_seen;
+            return e.first % 2 == 0;
+        });
+        Check(n == 2 && applications == 5 && mutable_seen == 0,
+              "phase135 (22) erase_if: EXACTLY size() applications, predicate sees a CONST pair");
+        Check(P135Holds(m, {{1, 'a'}, {3, 'c'}, {5, 'e'}}), "phase135 (23) erase_if is stable");
+    }
+    {
+        M m{{1, 'a'}, {2, 'b'}};
+        auto c = std::move(m).extract();
+        Check(m.size() == 0 && c.keys.size() == 2 && c.values.size() == 2,
+              "phase135 (24) extract empties the map and hands both containers over");
+        M n;
+        n.replace(std::move(c.keys), std::move(c.values));
+        Check(P135Holds(n, {{1, 'a'}, {2, 'b'}}), "phase135 (25) replace adopts the sorted containers");
+    }
+    {
+        M a{{1, 'a'}, {2, 'b'}}, b{{1, 'a'}, {2, 'c'}};
+        Check(a == a && !(a == b) && a < b, "phase135 (26) equality and ordering over pairs");
+        static_assert(is_same_v<decltype(a <=> b), strong_ordering>, "phase135 (27) <=> is strong_ordering");
+    }
+    {
+        MST m{{"aa", 1}, {"bb", 2}};
+        Check(m.find(string_view("bb")) != m.end() && m.count(string_view("aa")) == 1 &&
+                  !m.contains(string_view("zz")) && m.at(string_view("aa")) == 1,
+              "phase135 (28) heterogeneous find/count/contains/at");
+        // Cell F: MEASURED, libstdc++ 15.2 and 16.1 fail to COMPILE the next
+        // three lines. [flat.map.modifiers]/21 spells the key insertion as
+        // c.keys.emplace(key_it, forward<K>(k)); libstdc++ writes
+        // c.keys.insert(key_it, move(k)) instead, so vector<string>::insert
+        // is handed a string_view with no conversion. boxcxx follows /21.
+        m.try_emplace(string_view("cc"), 3);
+        m.insert_or_assign(string_view("aa"), 9);
+        Check(m.at(string_view("cc")) == 3 && m.at(string_view("aa")) == 9,
+              "phase135 (29) heterogeneous try_emplace/insert_or_assign work");
+        Check(m[string_view("dd")] == 0, "phase135 (30) heterogeneous operator[] value-initializes");
+    }
+    {
+        vector<int>  k{1, 2};
+        vector<char> v{'a', 'b'};
+        flat_map     g1(k, v);
+        flat_map     g2(sorted_unique, k, v);
+        flat_map     g3{pair{1, 'a'}, pair{2, 'b'}};
+        Check(g1.size() == 2 && g2.size() == 2 && g3.size() == 2, "phase135 (31) deduction guides all deduce size 2");
+        static_assert(is_same_v<decltype(g1), flat_map<int, char, less<int>, vector<int>, vector<char>>>,
+                      "phase135 (32) g1's deduced type");
+    }
+    {
+        MD m;
+        m.try_emplace(2, 'b');
+        m.try_emplace(1, 'a');
+        Check(P135Holds(m, {{1, 'a'}, {2, 'b'}}), "phase135 (33) deque-backed flat_map works");
+    }
+    {
+        M m{{2, 'b'}, {1, 'a'}};
+        Check(m.keys()[0] == 1 && m.values()[0] == 'a', "phase135 (34) keys()/values() observers");
+        static_assert(is_same_v<decltype(m.keys()), const vector<int> &>, "phase135 (35) keys() is a const ref");
+    }
+    {
+        M   m{{1, 'a'}, {2, 'b'}, {3, 'c'}};
+        int walked[3] = {0, 0, 0};
+        int at        = 0;
+        for (auto it = m.crbegin(); it != m.crend(); ++it) walked[at++] = it->first;
+        Check(at == 3 && walked[0] == 3 && walked[1] == 2 && walked[2] == 1,
+              "phase135 (36) crbegin/crend walk the map backwards");
+    }
+
+    // ── (N) max_size is the min of BOTH containers ───────────────────────
+    {
+        using MappedLimited = flat_map<int, char, less<int>, vector<int>, vector<char, P135TinyAlloc<char>>>;
+        using KeyLimited     = flat_map<int, char, less<int>, vector<int, P135TinyAlloc<int>>, vector<char>>;
+        MappedLimited a;
+        KeyLimited    b;
+        Check(a.max_size() == 7, "phase135 (N1) max_size is the min of both containers -- mapped side limits");
+        Check(b.max_size() == 7, "phase135 (N2) max_size is the min of both containers -- key side limits");
+        Check(M().max_size() > 1000000, "phase135 (N3) an unconstrained flat_map has a huge max_size");
+    }
+
+    // ── (E) emplace_hint: multimap clamps, map ignores it entirely ───────
+    {
+        static const int kExpectPos[5] = {1, 1, 2, 3, 3};
+        bool             clamped       = true;
+        for (int h = 0; h <= 4; ++h) {
+            MM   mm{{1, 'a'}, {2, 'b'}, {2, 'c'}, {3, 'd'}};
+            auto it = mm.emplace_hint(mm.cbegin() + h, 2, 'Z');
+            if (it - mm.begin() != kExpectPos[h]) clamped = false;
+        }
+        Check(clamped, "phase135 (E1) multimap emplace_hint clamps the hint into the key's equal-range");
+    }
+    {
+        bool ignored_for_new = true, ignored_for_dup = true;
+        for (int h = 0; h <= 3; ++h) {
+            M    m{{1, 'a'}, {2, 'b'}, {5, 'e'}};
+            auto it = m.emplace_hint(m.cbegin() + h, 3, 'Z');
+            if (it - m.begin() != 2 || m.size() != 4) ignored_for_new = false;
+        }
+        for (int h = 0; h <= 3; ++h) {
+            M    m{{1, 'a'}, {2, 'b'}, {5, 'e'}};
+            auto it = m.emplace_hint(m.cbegin() + h, 2, 'Z');
+            if (it - m.begin() != 1 || it->second != 'b' || m.size() != 3) ignored_for_dup = false;
+        }
+        Check(ignored_for_new, "phase135 (E2) map emplace_hint ignores the hint entirely for a new key");
+        Check(ignored_for_dup, "phase135 (E3) map emplace_hint on a duplicate returns the EXISTING element");
+    }
+
+    // ── (F) erase family return values ────────────────────────────────────
+    {
+        M    m{{1, 'a'}, {2, 'b'}, {3, 'c'}, {4, 'd'}};
+        auto it1 = m.erase(m.begin() + 1);
+        Check(it1->first == 3, "phase135 (F1) erase(iterator) returns the element after the one removed");
+        // Erased from the MIDDLE on purpose. erase(const_iterator) is its own
+        // declaration here (iterator and const_iterator genuinely differ, so
+        // the two cannot collapse the way flat_set's do), and erasing at
+        // position 0 would let a body that simply returned begin() pass.
+        auto it2 = m.erase(m.cbegin() + 1);
+        Check(it2->first == 4 && it2 != m.begin(),
+              "phase135 (F2) erase(const_iterator) returns the element after the one removed");
+        auto it3 = m.erase(m.cbegin(), m.cend());
+        Check(it3 == m.end() && m.empty(),
+              "phase135 (F3) erase(first,last) over everything returns end() and empties the map");
+    }
+    {
+        M    m{{1, 'a'}, {2, 'b'}, {3, 'c'}, {4, 'd'}, {5, 'e'}};
+        auto it = m.erase(m.cbegin() + 1, m.cbegin() + 3);
+        Check(it->first == 4 && m.size() == 3 && m.keys().size() == m.values().size(),
+              "phase135 (F4) erase(first,last) partial range returns the element now at that position");
+        Check(P135Holds(m, {{1, 'a'}, {4, 'd'}, {5, 'e'}}), "phase135 (F5) map after the partial erase");
+        Check(m.erase(99) == 0, "phase135 (F6) erase(absent key) returns 0");
+    }
+    {
+        MM mm{{1, 'a'}, {1, 'b'}, {2, 'c'}};
+        Check(mm.erase(1) == 2, "phase135 (F7) multimap erase(key) returns the count removed");
+        Check(mm.erase(9) == 0, "phase135 (F8) multimap erase(absent key) returns 0");
+    }
+    {
+        M    m{{1, 'a'}, {2, 'b'}};
+        auto it = m.erase(m.begin() + 1);
+        Check(it == m.end(), "phase135 (F9) erase(iterator) at the last position returns end()");
+    }
+
+    // ── (G) operator=(il), insert(il) sorts, lookup misses, clear ────────
+    {
+        M m{{9, 'z'}};
+        m = {{3, 'c'}, {1, 'a'}, {2, 'b'}, {1, 'X'}};
+        Check(P135Holds(m, {{1, 'a'}, {2, 'b'}, {3, 'c'}}),
+              "phase135 (G1) operator=(il) replaces the map, sorts, and keeps the FIRST of a duplicate");
+        MM mm{{9, 'z'}};
+        mm = {{3, 'c'}, {1, 'a'}, {2, 'b'}, {1, 'X'}};
+        Check(P135Holds(mm, {{1, 'a'}, {1, 'X'}, {2, 'b'}, {3, 'c'}}),
+              "phase135 (G2) multimap operator=(il) replaces the map and keeps every duplicate");
+        m = {};
+        Check(m.empty(), "phase135 (G3) operator=(empty il) empties the map");
+    }
+    {
+        M m;
+        m.insert({{3, 'c'}, {1, 'a'}, {2, 'b'}, {1, 'X'}});
+        Check(P135Holds(m, {{1, 'a'}, {2, 'b'}, {3, 'c'}}),
+              "phase135 (G4) insert(initializer_list) sorts an unsorted list and dedups");
+        MM mm;
+        mm.insert({{3, 'c'}, {1, 'a'}, {2, 'b'}, {1, 'X'}});
+        Check(P135Holds(mm, {{1, 'a'}, {1, 'X'}, {2, 'b'}, {3, 'c'}}),
+              "phase135 (G5) multimap insert(initializer_list) sorts and keeps every duplicate");
+    }
+    {
+        M m{{1, 'a'}, {3, 'c'}};
+        Check(m.find(2) == m.end() && m.find(3) != m.end(), "phase135 (G6) find: absent misses, present hits");
+        Check(!m.contains(2) && m.contains(3), "phase135 (G7) contains: absent misses, present hits");
+        Check(m.count(2) == 0 && m.count(3) == 1, "phase135 (G8) count: absent is 0, present is 1");
+        const auto &cm = m;
+        Check(cm.find(2) == cm.end() && cm.contains(3) && !cm.contains(2),
+              "phase135 (G9) const find/contains agree with the mutable overloads");
+        bool mutable_at_throws = false, const_at_throws = false;
+        try {
+            (void)m.at(2);
+        } catch (const out_of_range &) {
+            mutable_at_throws = true;
+        }
+        try {
+            (void)cm.at(2);
+        } catch (const out_of_range &) {
+            const_at_throws = true;
+        }
+        Check(mutable_at_throws && const_at_throws, "phase135 (G10) at() on a missing key throws on both overloads");
+        m.clear();
+        Check(m.empty() && m.size() == 0 && m.keys().empty() && m.values().empty(),
+              "phase135 (G11) clear() empties both containers");
+    }
+
+    // ── (J) emplace/insert/emplace_hint return THEIR OWN new element ─────
+    // Read immediately, before the next call can reallocate or shift the
+    // underlying vectors -- reading a stale iterator after a later insert
+    // is UB, so every position below is checked call-by-call.
+    {
+        MM   mm{{2, 'a'}, {4, 'b'}, {6, 'c'}};
+        bool ok = true;
+        auto i1 = mm.emplace(4, 'X');
+        ok      = ok && i1 - mm.begin() == 2 && i1->second == 'X';
+        auto i2 = mm.insert(pair<int, char>{1, 'Z'});
+        ok      = ok && i2 - mm.begin() == 0 && i2->second == 'Z';
+        auto i3 = mm.insert(mm.cbegin(), pair<int, char>{9, 'W'});
+        ok      = ok && i3 - mm.begin() == 5 && i3->second == 'W';
+        auto i4 = mm.emplace_hint(mm.cend(), 4, 'Q');
+        ok      = ok && i4 - mm.begin() == 4 && i4->second == 'Q';
+        Check(ok, "phase135 (J1) multimap emplace/insert/emplace_hint each return THEIR OWN new element");
+    }
+    {
+        M    m{{2, 'a'}, {6, 'c'}};
+        auto r1 = m.emplace(4, 'X');
+        bool ok = r1.first - m.begin() == 1 && r1.first->second == 'X' && r1.second;
+        auto r2 = m.emplace(4, 'Y');
+        ok      = ok && r2.first - m.begin() == 1 && r2.first->second == 'X' && !r2.second;
+        auto h1 = m.emplace_hint(m.cbegin(), 5, 'S');
+        ok      = ok && h1 - m.begin() == 2 && h1->second == 'S';
+        auto h2 = m.emplace_hint(m.cend(), 4, 'T');
+        ok      = ok && h2 - m.begin() == 1 && h2->second == 'X' && m.size() == 4;
+        Check(ok, "phase135 (J2) map emplace on a duplicate returns the EXISTING element, unchanged");
+    }
+
+    // ── (C) complexity, in comparisons and moves ────────────────────────
+    // Fixtures at N=1000, M=16, mirroring phase133's own measured setup --
+    // the merge/dedup machinery underneath is the SAME flat_engine code,
+    // just driven through Yoke instead of a bare KeyContainer::iterator.
+    const int   kN = 1000;
+    vector<int> ordered(static_cast<size_t>(kN));
+    for (int i = 0; i < kN; ++i) ordered[static_cast<size_t>(i)] = i;
+    vector<char> ordered_v(static_cast<size_t>(kN), 'x');
+
+    long ctor_sorted = 0, ctor_reversed = 0, ins_above = 0, ins_single = 0, merge_moves = 0;
+    {
+        g_p135_comparisons = 0;
+        flat_map<int, char, P135CountLess> m(ordered, ordered_v);
+        ctor_sorted = g_p135_comparisons;
+        Check(m.size() == static_cast<size_t>(kN), "phase135 (C1) sorted ctor keeps every element");
+    }
+    // Measured on this build: 1998 = (N-1) is_sorted probes + (N-1) dedup
+    // probes, a closed form in N with no allocation dependence -- so the
+    // bound sits just above it rather than at a comfortable multiple. A
+    // multiple of N would still pass if Dedup lost its short-circuit and
+    // spent two comparisons per adjacent pair (2997); this does not.
+    Check(ctor_sorted < 2100,
+          "phase135 (C2) ctor from an already-sorted pair of containers is LINEAR, not N log N");
+    {
+        vector<int> reversed(ordered.rbegin(), ordered.rend());
+        g_p135_comparisons = 0;
+        flat_map<int, char, P135CountLess> m(reversed, ordered_v);
+        ctor_reversed = g_p135_comparisons;
+        Check(P135StrictlySorted(m) && m.size() == static_cast<size_t>(kN),
+              "phase135 (C3) reversed input really is sorted afterwards");
+    }
+    Check(ctor_reversed > 2L * kN, "phase135 (C4) an unsorted pair of containers really costs a sort");
+    // ... but only a sort. Measured 8127, against N log2 N = 9966; a
+    // quadratic regression in the Yoke-driven sort would land near 500000.
+    Check(ctor_reversed < 12L * kN,
+          "phase135 (C4a) sorting an unsorted pair of containers stays N log N, not quadratic");
+    {
+        flat_map<int, char, P135CountLess> m(sorted_unique, ordered, ordered_v);
+        vector<pair<int, char>>            tail;
+        for (int i = 0; i < 16; ++i) tail.push_back({5000 + i, 'y'});
+        g_p135_comparisons = 0;
+        m.insert(tail.begin(), tail.end());
+        ins_above = g_p135_comparisons;
+        Check(m.size() == static_cast<size_t>(kN) + 16, "phase135 (C5) disjoint-above tail all landed");
+    }
+    // Measured 1031 -- the same closed form phase133 tuned for flat_set (15
+    // is_sorted probes over the tail + 1 merge shortcut + 1015 dedup), so
+    // the bound is the same 1040 it settled on there.
+    Check(ins_above < 1040,
+          "phase135 (C6) range insert of a disjoint-above tail stays within N + M log M, nowhere near N log(N+M)");
+    {
+        flat_map<int, char, P135CountLess> m(sorted_unique, ordered, ordered_v);
+        g_p135_comparisons = 0;
+        m.try_emplace(4242, 'q');
+        ins_single = g_p135_comparisons;
+    }
+    // Measured 9; a binary search over 1000 keys cannot exceed ~11, and a
+    // linear scan would be 1000. 40 left room for a dedup pass to hide in.
+    Check(ins_single < 20, "phase135 (C7) a single try_emplace is one binary search, not a dedup pass");
+    {
+        const int            kBase = 1000, kTail = 16;
+        vector<int>          base_k(static_cast<size_t>(kBase));
+        vector<P135Counted>  base_v;
+        base_v.reserve(static_cast<size_t>(kBase + kTail));
+        for (int i = 0; i < kBase; ++i) {
+            base_k[static_cast<size_t>(i)] = i * 2;
+            base_v.emplace_back(i * 2);
+        }
+        base_k.reserve(static_cast<size_t>(kBase + kTail));
+        flat_map<int, P135Counted> m(sorted_unique, std::move(base_k), std::move(base_v));
+
+        vector<pair<int, P135Counted>> tail;
+        tail.reserve(static_cast<size_t>(kTail));
+        for (int i = 0; i < kTail; ++i) tail.push_back({i * 124 + 1, P135Counted(i * 124 + 1)});
+
+        g_p135_moves = 0;
+        m.insert(tail.begin(), tail.end());
+        merge_moves = g_p135_moves;
+        Check(m.size() == static_cast<size_t>(kBase + kTail),
+              "phase135 (C8) the interleaved tail merged into the mapped values without loss");
+        Check(P135StrictlySorted(m), "phase135 (C9) the merge really produced a sorted range");
+    }
+    // Measured 1063; a RotateMerge fallback would be ~(n+m) log2(n+m) =
+    // 10160. Same bound phase133 settled on for the identical measurement.
+    Check(merge_moves < 3L * (1000 + 16),
+          "phase135 (C10) the merge is LINEAR in element moves, not (n+m) log (n+m)");
+
+    // Ф31b-2 fix-round L-8: an empty range insert must not pay for a dedup
+    // scan over a range it never touched -- nothing was appended, so no
+    // duplicate could have appeared.
+    {
+        flat_map<int, char, P135CountLess> m(sorted_unique, ordered, ordered_v);
+        vector<pair<int, char>>            empty_range;
+        g_p135_comparisons = 0;
+        m.insert(empty_range.begin(), empty_range.end());
+        Check(g_p135_comparisons == 0,
+              "phase135 (C11) an empty range insert costs zero comparisons, no wasted dedup scan");
+    }
+
+    // Ф31b-2 fix-round item 10: the sorted_unique-tagged ctor is CONSTANT
+    // ([flat.map.cons]/7) -- it takes the caller's word for it and only
+    // moves, so it must not call the comparator at all.
+    long ctor_tagged = 0;
+    {
+        g_p135_comparisons = 0;
+        flat_map<int, char, P135CountLess> m(sorted_unique, ordered, ordered_v);
+        ctor_tagged = g_p135_comparisons;
+    }
+    Check(ctor_tagged == 0, "phase135 (C12) the sorted_unique-tagged ctor is CONSTANT -- zero comparisons");
+    // A tagged range insert skips the tail's is_sorted probe entirely
+    // (sort_tail=false), so it must be strictly cheaper than the untagged
+    // C5/C6 insert of the identical tail above.
+    long ins_above_tagged = 0;
+    {
+        flat_map<int, char, P135CountLess> m(sorted_unique, ordered, ordered_v);
+        vector<pair<int, char>>            tail;
+        for (int i = 0; i < 16; ++i) tail.push_back({5000 + i, 'y'});
+        g_p135_comparisons = 0;
+        m.insert(sorted_unique, tail.begin(), tail.end());
+        ins_above_tagged = g_p135_comparisons;
+    }
+    Check(ins_above_tagged < ins_above,
+          "phase135 (C13) a sorted_unique-tagged range insert is strictly cheaper than the untagged form");
+
+    // ── (D)/(H) the invariant is restored on every exception path ───────
+    {
+        P133Bomb::budget = 3;
+        bool threw       = false;
+        try {
+            flat_map<int, char, P133Bomb> m(vector<int>{5, 4, 3, 2, 1}, vector<char>{'a', 'b', 'c', 'd', 'e'});
+            (void)m;
+        } catch (const runtime_error &) {
+            threw = true;
+        }
+        P133Bomb::budget = -1;
+        Check(threw, "phase135 (H1) a throwing comparator propagates out of the container ctor");
+    }
+    {
+        flat_map<int, char, P133Bomb> m;
+        m.insert({{10, 'a'}, {20, 'b'}, {30, 'c'}});
+        size_t before    = m.size();
+        P133Bomb::budget = 2;
+        bool threw       = false;
+        try {
+            vector<pair<int, char>> add{{5, 'x'}, {25, 'y'}, {15, 'z'}};
+            m.insert(add.begin(), add.end());
+        } catch (const runtime_error &) {
+            threw = true;
+        }
+        P133Bomb::budget = -1;
+        Check(before == 3 && threw, "phase135 (H2) a throwing comparator propagates out of a range insert");
+        Check(m.size() == 0, "phase135 (H3) the invariant is restored by emptying both containers");
+        Check(m.keys().size() == m.values().size(), "phase135 (H4) keys/values stay equal-sized even when empty");
+        m.try_emplace(7, 'g');
+        Check(P135Holds(m, {{7, 'g'}}), "phase135 (H5) the map is still usable after the throw");
+    }
+    Check(P135InvariantHolds([](auto &m) { m.try_emplace(5, 5); }),
+          "phase135 (H6) try_emplace: all three invariants hold across 8 throw points");
+    Check(P135InvariantHolds([](auto &m) { m.insert(pair<int, P135Bomb>(5, P135Bomb(5))); }),
+          "phase135 (H7) insert(pair&&): all three invariants hold across 8 throw points");
+    Check(P135InvariantHolds([](auto &m) { m.emplace(5, 5); }),
+          "phase135 (H8) emplace: all three invariants hold across 8 throw points");
+    // Erasure, the other half of [flat.map.overview]/6 and the half a
+    // size-watching guard cannot cover: vector::erase shifts BEFORE it
+    // shrinks __size, so a throwing move-assignment mid-shift is invisible
+    // to a size probe and leaves a moved-from husk inside a range that is no
+    // longer sorted -- a map that answers find()/contains() with confident
+    // wrong values and never reports a failure. Only the FIRST/MIDDLE
+    // positions can trip it; a tail erase shifts nothing.
+    using BK  = flat_map<P135BombKey, int, P135BombKeyLess>;
+    using BKM = flat_multimap<P135BombKey, int, P135BombKeyLess>;
+    Check(P135KeyBombInvariantHolds<BK>([](auto &m) { m.erase(m.begin()); }),
+          "phase135 (H8a) erase(iterator) at the front: all three invariants hold across 10 throw points");
+    Check(P135KeyBombInvariantHolds<BK>([](auto &m) { m.erase(P135BombKey{20}); }),
+          "phase135 (H8b) erase(key) in the middle: all three invariants hold across 10 throw points");
+    Check(P135KeyBombInvariantHolds<BK>([](auto &m) { m.erase(m.cbegin(), m.cbegin() + 2); }),
+          "phase135 (H8c) erase(first,last) at the front: all three invariants hold across 10 throw points");
+    Check(P135KeyBombInvariantHolds<BKM>([](auto &m) { m.erase(P135BombKey{20}); }),
+          "phase135 (H8d) multimap erase(key) via equal_range: all three invariants hold across 10 throw points");
+    // The other axis: the throw lands in c.values.erase(), after the key
+    // container has already shrunk. Cheaper to restore, but it is a distinct
+    // code path and the guard must cover it too.
+    Check(P135InvariantHolds([](auto &m) { m.erase(m.begin()); }),
+          "phase135 (H8e) erase(iterator) with a throwing VALUE: all three invariants hold");
+    Check(P135InvariantHoldsOn<flat_multimap<int, P135Bomb>>([](auto &m) { m.erase(m.begin()); }),
+          "phase135 (H8f) multimap erase(iterator) with a throwing VALUE: all three invariants hold");
+    {
+        // The eight single-element paths, split by WHERE the throw lands:
+        // build-first paths (0,1,2,3,4,6) never touch the container; the
+        // two paths that build the pair from bare ints (5,7) let the key
+        // land in c.keys before the mapped value's own placement throws,
+        // so [flat.map.overview]/6 restores by emptying -- the split a
+        // one-container flat_set never has to make.
+        static const char *const kPathNames[8] = {
+            "phase135 (H9) throwing value: insert(const value_type&) leaves the map whole",
+            "phase135 (H10) throwing value: insert(value_type&&) leaves the map whole",
+            "phase135 (H11) throwing value: insert(hint, const value_type&) leaves the map whole",
+            "phase135 (H12) throwing value: insert(hint, value_type&&) leaves the map whole",
+            "phase135 (H13) throwing value: emplace(value_type&&) leaves the map whole",
+            "phase135 (H14) throwing value: emplace(k, v) built AFTER the key lands empties the map",
+            "phase135 (H15) throwing value: emplace_hint(value_type&&) leaves the map whole",
+            "phase135 (H16) throwing value: emplace_hint(k, v) built AFTER the key lands empties the map"};
+        static const bool kExpectIntact[8] = {true, true, true, true, true, false, true, false};
+        for (int path = 0; path < 8; ++path)
+            Check(P135SurvivesFragile<flat_map<int, P135Fragile>>(sorted_unique, path, kExpectIntact[path]),
+                  kPathNames[path]);
+        static const char *const kMultiNames[8] = {
+            "phase135 (H17) multimap throwing value: insert(const value_type&) leaves the map whole",
+            "phase135 (H18) multimap throwing value: insert(value_type&&) leaves the map whole",
+            "phase135 (H19) multimap throwing value: insert(hint, const value_type&) leaves the map whole",
+            "phase135 (H20) multimap throwing value: insert(hint, value_type&&) leaves the map whole",
+            "phase135 (H21) multimap throwing value: emplace(value_type&&) leaves the map whole",
+            "phase135 (H22) multimap throwing value: emplace(k, v) empties the map",
+            "phase135 (H23) multimap throwing value: emplace_hint(value_type&&) leaves the map whole",
+            "phase135 (H24) multimap throwing value: emplace_hint(k, v) empties the map"};
+        for (int path = 0; path < 8; ++path)
+            Check(P135SurvivesFragile<flat_multimap<int, P135Fragile>>(sorted_equivalent, path,
+                                                                       kExpectIntact[path]),
+                  kMultiNames[path]);
+    }
+    {
+        // erase_if's predicate throws: extract() has already emptied the
+        // map and replace() never runs, so it is left valid and empty.
+        M    m{{1, 'a'}, {2, 'b'}, {3, 'c'}, {4, 'd'}, {5, 'e'}};
+        bool threw = false;
+        try {
+            (void)erase_if(m, [](auto e) {
+                if (e.first == 3) throw runtime_error("boom");
+                return e.first % 2 == 0;
+            });
+        } catch (const runtime_error &) {
+            threw = true;
+        }
+        Check(threw && m.empty(), "phase135 (H25) a throwing erase_if predicate leaves the map valid and empty");
+        m.try_emplace(9, 'i');
+        Check(P135Holds(m, {{9, 'i'}}), "phase135 (H26) the map is still usable after erase_if threw");
+    }
+    {
+        // The most direct proof of RestoreBothIfTouched's own reasoning:
+        // arm the bomb so it fires on the FIRST container touch (the key's
+        // placement-new inside c.keys.emplace, before c.keys has grown and
+        // before c.values is touched at all). The size probe correctly
+        // reads "nothing happened" and leaves every prior entry exactly as
+        // it was -- [flat.map.overview] Note 2 allows emptying on a throw,
+        // it does not require it.
+        BK m;
+        for (int i = 1; i <= 4; ++i) m.try_emplace(P135BombKey{i * 10}, i * 10);
+        P135BombKey::budget = 0;
+        bool threw = false;
+        try {
+            m.try_emplace(P135BombKey{35}, 99);
+        } catch (const runtime_error &) {
+            threw = true;
+        }
+        P135BombKey::budget = -1;
+        bool intact = m.size() == 4 && m.keys().size() == m.values().size();
+        for (auto &&e : m)
+            if (e.second != e.first.v) intact = false;
+        Check(threw && intact,
+              "phase135 (H27) a bomb on the very first container touch leaves ALL prior data intact");
+    }
+
+    // ── owner-locked deviation: iter_move on the PUBLIC iterator ────────
+    // Both reference libraries leave the default prvalue-returning path in
+    // place for the mapped-value half, which makes ranges::move(m, out)
+    // silently COPY every value instead of moving it. boxcxx gives Yoke's
+    // iter_move to iterator and const_iterator too, not just the private
+    // sorting cursor -- recorded in CONFORMANCE.md (Ф31d), pinned here.
+    {
+        flat_map<int, P135Val> m;
+        m.try_emplace(1, 'a');
+        P135Val::Reset();
+        auto                it = m.begin();
+        pair<int, P135Val>  dest(ranges::iter_move(it));
+        Check(P135Val::moves == 1 && P135Val::copies == 0 && dest.second.c == 'a',
+              "phase135 (I1) iter_move on the public iterator really moves the mapped value");
+    }
+
+    // ── (K) a present key costs nothing and consumes nothing ────────────
+    {
+        flat_map<int, P135Val> s;
+        s.try_emplace(1, 'a');
+        {
+            P135Val x{'z'};
+            P135Val::Reset();
+            auto [it, ok] = s.insert(pair<int, P135Val>(1, std::move(x)));
+            (void)it;
+            Check(!ok, "phase135 (K1) insert of a PRESENT key reports false");
+        }
+        {
+            P135Val x{'z'};
+            const auto &cx = x;
+            P135Val::Reset();
+            auto [it, ok] = s.try_emplace(1, cx);
+            (void)it;
+            Check(!ok && P135Val::copies == 0 && P135Val::moves == 0 && x.c == 'z',
+                  "phase135 (K2) try_emplace of a PRESENT key builds nothing and leaves the argument alone");
+        }
+    }
+
+    // ── (L) stateful comparator: key_comp/value_comp/swap ────────────────
+    {
+        flat_map<int, char, P133ModLess> a(vector<int>{}, vector<char>{}, P133ModLess{10});
+        flat_map<int, char, P133ModLess> b(vector<int>{}, vector<char>{}, P133ModLess{3});
+        a.swap(b);
+        Check(a.key_comp().m == 3 && b.key_comp().m == 10,
+              "phase135 (L1) swap exchanges the COMPARATORS, not just the elements");
+        flat_map<int, char, P133ModLess> c(vector<int>{}, vector<char>{}, P133ModLess{7});
+        Check(c.key_comp().m == 7 && c.value_comp()({1, 'a'}, {8, 'b'}) == false,
+              "phase135 (L2) key_comp/value_comp return the object the map was built from");
+        // (L2) uses keys 1 and 8, both residue 1 mod 7 -- value_comp() is
+        // false BOTH ways for that pair, so it cannot tell a working
+        // delegation from a broken one. 1 and 3 have different residues.
+        Check(c.value_comp()({1, 'a'}, {3, 'c'}) == true && c.value_comp()({3, 'c'}, {1, 'a'}) == false,
+              "phase135 (L3) value_comp truly delegates to the stateful comparator, both directions");
+    }
+
+    // ── (M) allocator propagation reaches BOTH containers ────────────────
+    {
+        using AK  = vector<int, P133StateAlloc<int>>;
+        using AV  = vector<char, P133StateAlloc<char>>;
+        using FMA = flat_map<int, char, less<int>, AK, AV>;
+        P133StateAlloc<int>  ak_alloc{42};
+        P133StateAlloc<char> av_alloc{42};
+        AK                   ak(ak_alloc);
+        ak.push_back(3);
+        ak.push_back(1);
+        AV av(av_alloc);
+        av.push_back('c');
+        av.push_back('a');
+        bool propagated =
+            FMA(ak, av, ak_alloc).extract().keys.get_allocator().id == 42 &&
+            FMA(ak, av, ak_alloc).extract().values.get_allocator().id == 42 &&
+            FMA(ak, av, less<int>{}, ak_alloc).extract().keys.get_allocator().id == 42 &&
+            FMA(sorted_unique, ak, av, ak_alloc).extract().values.get_allocator().id == 42 &&
+            FMA(less<int>{}, ak_alloc).extract().keys.get_allocator().id == 42 &&
+            FMA(ak_alloc).extract().values.get_allocator().id == 42;
+        Check(propagated, "phase135 (M1) allocator ctors reach BOTH the key and the mapped container");
+
+        // uses_allocator_v is the CONJUNCTION of both sides. Two vectors
+        // sharing ONE stateful allocator (above) can never distinguish &&
+        // from || -- both operands are always true there. A pair where
+        // exactly one side matches is the only thing that can.
+        static_assert(!uses_allocator_v<flat_map<int, char, less<int>, AK, vector<char>>, P133StateAlloc<int>>,
+                      "phase135 (M2) key uses the allocator, mapped does not -- uses_allocator_v is false");
+        static_assert(!uses_allocator_v<flat_map<int, char, less<int>, vector<int>, AV>, P133StateAlloc<char>>,
+                      "phase135 (M3) mapped uses the allocator, key does not -- uses_allocator_v is false");
+    }
+
+    printf("[CXX] PASS phase135: <flat_map> -- [flat.map] + [flat.multimap] over Yoke, "
+           "the lockstep key/value cursor (cmp at N=1000: ctor sorted %ld / reversed %ld, "
+           "insert-above %ld, single %ld; merge moves %ld)\n",
+           ctor_sorted, ctor_reversed, ins_above, ins_single, merge_moves);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -32435,6 +33720,7 @@ int main()
     Phase132();
     Phase133();
     Phase134();
+    Phase135();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

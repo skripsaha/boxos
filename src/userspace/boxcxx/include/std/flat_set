@@ -106,7 +106,7 @@ private:
     using MutIt = typename KeyContainer::iterator;
 
     KeyContainer keys;
-    Compare      compare;
+    [[no_unique_address]] Compare compare;
 
     // Both operands are frozen first: a container whose const_iterator is a
     // distinct class (deque) has no mixed-constness operator-.
