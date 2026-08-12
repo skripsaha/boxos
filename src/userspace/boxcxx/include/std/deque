@@ -178,49 +178,89 @@ public:
 
     deque() { InitMap(0); }
     explicit deque(const Alloc &a) : __alloc(a), __malloc(a) { InitMap(0); }
+    // A constructor that throws part-way never runs ~deque, and the map
+    // array, every block hanging off it and every element built into them
+    // are held by plain scalars nobody owns. Teardown releases exactly that
+    // and is correct at every point, including before InitMap ran (__map is
+    // null-initialized, and Teardown returns immediately on a null map).
     explicit deque(size_type count, const Alloc &a = Alloc())
         : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (; count > 0; --count) emplace_back();
+        try {
+            InitMap(0);
+            for (; count > 0; --count) emplace_back();
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     deque(size_type count, const T &value, const Alloc &a = Alloc())
         : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (; count > 0; --count) push_back(value);
+        try {
+            InitMap(0);
+            for (; count > 0; --count) push_back(value);
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     template <typename It>
         requires(!is_integral_v<It>)
     deque(It first, It last, const Alloc &a = Alloc()) : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (; first != last; ++first) push_back(*first);
+        try {
+            InitMap(0);
+            for (; first != last; ++first) push_back(*first);
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     template <ContainerCompatibleRange<T> R>
     deque(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+        try {
+            InitMap(0);
+            for (auto &&v : rg) push_back(std::forward<decltype(v)>(v));
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     deque(initializer_list<T> il, const Alloc &a = Alloc())
         : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (const T &v : il) push_back(v);
+        try {
+            InitMap(0);
+            for (const T &v : il) push_back(v);
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     deque(const deque &other)
         : __alloc(ATraits::select_on_container_copy_construction(
               other.__alloc)),
           __malloc(other.__malloc)
     {
-        InitMap(0);
-        for (const T &v : other) push_back(v);
+        try {
+            InitMap(0);
+            for (const T &v : other) push_back(v);
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     deque(const deque &other, const Alloc &a) : __alloc(a), __malloc(a)
     {
-        InitMap(0);
-        for (const T &v : other) push_back(v);
+        try {
+            InitMap(0);
+            for (const T &v : other) push_back(v);
+        } catch (...) {
+            Teardown();
+            throw;
+        }
     }
     deque(deque &&other) noexcept
         : __alloc(std::move(other.__alloc)), __malloc(std::move(other.__malloc))
@@ -232,8 +272,13 @@ public:
         if (ATraits::is_always_equal::value || a == other.__alloc) {
             StealFrom(other);
         } else {
-            InitMap(0);
-            for (T &v : other) push_back(std::move(v));
+            try {
+                InitMap(0);
+                for (T &v : other) push_back(std::move(v));
+            } catch (...) {
+                Teardown();
+                throw;
+            }
         }
     }
     ~deque() { Teardown(); }
@@ -539,11 +584,20 @@ private:
         __map_size       = blocks + 2 < 8 ? 8 : blocks + 2;
         __map            = MapTraits::allocate(__malloc, __map_size);
         for (size_type i = 0; i < __map_size; ++i) __map[i] = nullptr;
-        // Centre the initial block.
+        // Centre the initial block. The map array is already ours here, so a
+        // failing block allocation has to hand it back — otherwise it leaks
+        // out of EVERY constructor, the default one included.
         size_type mid = __map_size / 2;
-        __map[mid]    = AllocBlock();
-        __start       = iterator(__map[mid], __map + mid);
-        __finish      = __start;
+        try {
+            __map[mid] = AllocBlock();
+        } catch (...) {
+            MapTraits::deallocate(__malloc, __map, __map_size);
+            __map      = nullptr;
+            __map_size = 0;
+            throw;
+        }
+        __start  = iterator(__map[mid], __map + mid);
+        __finish = __start;
     }
 
     void Teardown() noexcept

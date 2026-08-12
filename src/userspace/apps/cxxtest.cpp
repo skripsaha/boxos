@@ -31770,11 +31770,12 @@ void Phase133()
 
 struct P134Throw {};
 
-int g_p134Live       = 0;
-int g_p134Blocks     = 0;
-int g_p134Budget     = -1; // -1 = never throw; else N successes, then throw
-int g_p134LeakObjs   = 0;
-int g_p134LeakBlocks = 0;
+int g_p134Live        = 0;
+int g_p134Blocks      = 0;
+int g_p134Budget      = -1; // -1 = never throw; else N successes, then throw
+int g_p134AllocBudget = -1; // same, but counted in allocations
+int g_p134LeakObjs    = 0;
+int g_p134LeakBlocks  = 0;
 
 void P134Trip()
 {
@@ -31812,6 +31813,10 @@ struct P134Alloc {
     }
     T *allocate(std::size_t n)
     {
+        if (g_p134AllocBudget >= 0) {
+            if (g_p134AllocBudget == 0) throw P134Throw{};
+            --g_p134AllocBudget;
+        }
         ++g_p134Blocks;
         return static_cast<T *>(::operator new(n * sizeof(T)));
     }
@@ -31832,8 +31837,12 @@ struct P134Alloc {
     }
 };
 
-using P134Vec  = std::vector<P134Elem, P134Alloc<P134Elem>>;
-using P134BVec = std::vector<bool, P134Alloc<bool>>;
+using P134Vec   = std::vector<P134Elem, P134Alloc<P134Elem>>;
+using P134BVec  = std::vector<bool, P134Alloc<bool>>;
+using P134Deq   = std::deque<P134Elem, P134Alloc<P134Elem>>;
+using P134List  = std::list<P134Elem, P134Alloc<P134Elem>>;
+using P134FList = std::forward_list<P134Elem, P134Alloc<P134Elem>>;
+using P134Str   = std::basic_string<char, std::char_traits<char>, P134Alloc<char>>;
 
 // Non-pointer iterator: drives vector(It,It)'s no-size-known branch, where
 // storage arrives through emplace_back's growth instead of one Grow.
@@ -31862,13 +31871,47 @@ struct P134Iter {
     bool operator==(const P134Iter &o) const { return p == o.p; }
 };
 
-// Trips on dereference — the throw source for the vector<bool> mirrors,
-// whose elements have no constructor of their own to trip in.
+// Trips on dereference — the throw source for the vector<bool> mirrors and
+// for basic_string, whose elements have no constructor of their own to trip.
 struct P134TripBool {
     bool operator()(int i) const
     {
         P134Trip();
         return (i & 1) != 0;
+    }
+};
+
+struct P134TripChar {
+    char operator()(int i) const
+    {
+        P134Trip();
+        return static_cast<char>('a' + i % 26);
+    }
+};
+
+// For the searcher's HeapArray: a pattern key whose ASSIGNMENT trips. That
+// array is raw new[]/delete[] rather than allocator traffic, so the leak
+// shows up purely in the live-object tally — the default-constructed keys
+// inside an abandoned block never get destroyed.
+struct P134Key {
+    int v;
+    P134Key() : v(0) { ++g_p134Live; }
+    explicit P134Key(int x) : v(x) { ++g_p134Live; }
+    P134Key(const P134Key &o) : v(o.v) { ++g_p134Live; }
+    P134Key &operator=(const P134Key &o)
+    {
+        P134Trip();
+        v = o.v;
+        return *this;
+    }
+    ~P134Key() { --g_p134Live; }
+    bool operator==(const P134Key &o) const { return v == o.v; }
+};
+
+struct P134KeyHash {
+    std::size_t operator()(const P134Key &k) const noexcept
+    {
+        return static_cast<std::size_t>(k.v);
     }
 };
 
@@ -31885,9 +31928,10 @@ void P134Expect(Fn fn, const char *what)
     } catch (const P134Throw &) {
         threw = true;
     }
-    g_p134Budget  = -1;
-    int lost_objs = g_p134Live - live0;
-    int lost_blks = g_p134Blocks - blocks0;
+    g_p134Budget      = -1;
+    g_p134AllocBudget = -1;
+    int lost_objs     = g_p134Live - live0;
+    int lost_blks     = g_p134Blocks - blocks0;
     g_p134LeakObjs += lost_objs;
     g_p134LeakBlocks += lost_blks;
     if (!threw || lost_objs != 0 || lost_blks != 0)
@@ -32028,6 +32072,160 @@ void Phase134()
                    "phase134 (C2) vector<bool>(from_range) leaks no word block");
     }
 
+    // ── (E) deque: same class, and the map array raises the stakes ─────────
+    // Every deque constructor calls InitMap first, which takes the map array
+    // AND one block before a single element exists.
+    P134Expect([&] { g_p134Budget = 3; P134Deq d(6); },
+               "phase134 (E1) deque(count) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134Deq d(6, model); },
+               "phase134 (E2) deque(count,value) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134Deq d(src, src + 6); },
+               "phase134 (E3) deque(It,It) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 3;
+            P134Deq d(std::from_range, std::span<const P134Elem>(src, 6));
+        },
+        "phase134 (E4) deque(from_range) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 9; // six for the initializer_list, then three copies
+            P134Deq d{P134Elem(0), P134Elem(1), P134Elem(2),
+                      P134Elem(3), P134Elem(4), P134Elem(5)};
+        },
+        "phase134 (E5) deque(initializer_list) leaks nothing when it throws");
+    {
+        P134Deq base(src, src + 6);
+        P134Expect([&] { g_p134Budget = 3; P134Deq w(base); },
+                   "phase134 (E6) deque(const deque&) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                g_p134Budget = 3;
+                P134Deq w(base, P134Alloc<P134Elem>(0));
+            },
+            "phase134 (E7) deque(const deque&,alloc) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                P134Deq donor(src, src + 6);
+                g_p134Budget = 3;
+                P134Deq w(std::move(donor), P134Alloc<P134Elem>(7));
+            },
+            "phase134 (E8) deque(deque&&,alloc) with unequal allocators leaks nothing");
+    }
+    // The secondary leak inside InitMap itself: the map array is already
+    // taken when the first block allocation fails. This one reaches even the
+    // default constructor, which has no element loop at all.
+    P134Expect([&] { g_p134AllocBudget = 1; P134Deq d; },
+               "phase134 (E9) deque(): a failed first block releases the map array");
+    P134Expect([&] { g_p134AllocBudget = 1; P134Deq d{P134Alloc<P134Elem>(3)}; },
+               "phase134 (E10) deque(alloc): likewise");
+
+    // ── (F) list: one node per element, all of them ownerless on a throw ───
+    P134Expect([&] { g_p134Budget = 3; P134List l(6); },
+               "phase134 (F1) list(count) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134List l(6, model); },
+               "phase134 (F2) list(count,value) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134List l(src, src + 6); },
+               "phase134 (F3) list(It,It) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 3;
+            P134List l(std::from_range, std::span<const P134Elem>(src, 6));
+        },
+        "phase134 (F4) list(from_range) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 9;
+            P134List l{P134Elem(0), P134Elem(1), P134Elem(2),
+                       P134Elem(3), P134Elem(4), P134Elem(5)};
+        },
+        "phase134 (F5) list(initializer_list) leaks nothing when it throws");
+    {
+        P134List base(src, src + 6);
+        P134Expect([&] { g_p134Budget = 3; P134List w(base); },
+                   "phase134 (F6) list(const list&) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                g_p134Budget = 3;
+                P134List w(base, P134Alloc<P134Elem>(0));
+            },
+            "phase134 (F7) list(const list&,alloc) leaks nothing when it throws");
+        P134Expect(
+            [&] {
+                P134List donor(src, src + 6);
+                g_p134Budget = 3;
+                P134List w(std::move(donor), P134Alloc<P134Elem>(7));
+            },
+            "phase134 (F8) list(list&&,alloc) with unequal allocators leaks nothing");
+    }
+
+    // ── (G) forward_list: same shape, singly linked ────────────────────────
+    P134Expect([&] { g_p134Budget = 3; P134FList l(6); },
+               "phase134 (G1) forward_list(count) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134FList l(6, model); },
+               "phase134 (G2) forward_list(count,value) leaks nothing when it throws");
+    P134Expect([&] { g_p134Budget = 3; P134FList l(src, src + 6); },
+               "phase134 (G3) forward_list(It,It) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 3;
+            P134FList l(std::from_range, std::span<const P134Elem>(src, 6));
+        },
+        "phase134 (G4) forward_list(from_range) leaks nothing when it throws");
+    P134Expect(
+        [&] {
+            g_p134Budget = 9;
+            P134FList l{P134Elem(0), P134Elem(1), P134Elem(2),
+                        P134Elem(3), P134Elem(4), P134Elem(5)};
+        },
+        "phase134 (G5) forward_list(initializer_list) leaks nothing when it throws");
+    {
+        P134FList base(src, src + 6);
+        P134Expect([&] { g_p134Budget = 3; P134FList w(base); },
+                   "phase134 (G6) forward_list(const forward_list&) leaks nothing");
+        P134Expect(
+            [&] {
+                g_p134Budget = 3;
+                P134FList w(base, P134Alloc<P134Elem>(0));
+            },
+            "phase134 (G7) forward_list(const forward_list&,alloc) leaks nothing");
+        P134Expect(
+            [&] {
+                P134FList donor(src, src + 6);
+                g_p134Budget = 3;
+                P134FList w(std::move(donor), P134Alloc<P134Elem>(7));
+            },
+            "phase134 (G8) forward_list(forward_list&&,alloc) unequal allocators");
+    }
+
+    // ── (H) basic_string: the two constructors that walk instead of size ──
+    // Both start with SetShort(0), grow past the inline buffer, and then
+    // have a heap buffer to lose. The pointer-pair and count/char forms
+    // allocate last and cannot leak, so they are not throw sites at all.
+    {
+        auto ct = std::views::iota(0, 200) | std::views::transform(P134TripChar{});
+        P134Expect([&] { g_p134Budget = 100; P134Str s(ct.begin(), ct.end()); },
+                   "phase134 (H1) basic_string(It,It) walking branch leaks no buffer");
+        P134Expect([&] { g_p134Budget = 100; P134Str s(std::from_range, ct); },
+                   "phase134 (H2) basic_string(from_range) leaks no buffer");
+    }
+
+    // ── (I) the same class outside the containers: <functional>'s searcher ─
+    // boyer_moore_searcher over a non-byte key builds a BadCharMap, whose
+    // HeapArray<Key> copy constructor takes a new[] block and then runs
+    // Key::operator= across it. A throwing assignment there stranded the
+    // block and every key default-constructed into it.
+    {
+        P134Key pat[4] = {P134Key(1), P134Key(2), P134Key(3), P134Key(4)};
+        std::boyer_moore_searcher<const P134Key *, P134KeyHash> bm(pat, pat + 4);
+        P134Expect([&] { g_p134Budget = 3; auto copy = bm; },
+                   "phase134 (I1) boyer_moore_searcher copy leaks no key array");
+        std::boyer_moore_horspool_searcher<const P134Key *, P134KeyHash> bmh(pat,
+                                                                             pat + 4);
+        P134Expect([&] { g_p134Budget = 3; auto copy = bmh; },
+                   "phase134 (I2) boyer_moore_horspool_searcher copy leaks no key array");
+    }
+
     // ── (D) the tallies themselves balance when nothing throws ─────────────
     {
         int live0 = g_p134Live, blocks0 = g_p134Blocks;
@@ -32049,14 +32247,35 @@ void Phase134()
             Check(p.size() == 10 && q.size() == 10 && q[0] && r.size() == 3 &&
                       s.size() == 10,
                   "phase134 (D2) the vector<bool> constructors likewise");
+
+            P134Deq  d1(6), d2(6, model), d3(src, src + 6), d4(d3),
+                d5(std::move(d4), P134Alloc<P134Elem>(7));
+            P134List l1(6), l2(6, model), l3(src, src + 6), l4(l3),
+                l5(std::move(l4), P134Alloc<P134Elem>(7));
+            P134FList f1(6), f2(6, model), f3(src, src + 6), f4(f3),
+                f5(std::move(f4), P134Alloc<P134Elem>(7));
+            auto     ct = std::views::iota(0, 200) |
+                      std::views::transform(P134TripChar{});
+            P134Str s1(ct.begin(), ct.end());
+            P134Str s2(std::from_range, ct);
+            Check(d1.size() == 6 && d2.size() == 6 && d3.size() == 6 &&
+                      d5.size() == 6 && l1.size() == 6 && l2.size() == 6 &&
+                      l3.size() == 6 && l5.size() == 6,
+                  "phase134 (D3) the deque and list constructors likewise");
+            Check(f1.front().v == 0 && f2.front().v == 9 && f3.front().v == 0 &&
+                      f5.front().v == 0 && s1.size() == 200 && s2.size() == 200 &&
+                      s1[0] == 'a' && s2[25] == 'z',
+                  "phase134 (D4) the forward_list and basic_string constructors likewise");
         }
         Check(g_p134Live == live0 && g_p134Blocks == blocks0,
-              "phase134 (D3) the no-throw path balances objects and blocks");
+              "phase134 (D5) the no-throw path balances objects and blocks");
     }
 
-    printf("[CXX] PASS phase134: <vector> exception safety -- the growth relocation and "
-           "all 8 allocating ctors + 6 vector<bool> mirrors own what they took "
-           "(across 13 throw sites: leaked objects=%d, leaked blocks=%d)\n",
+    printf("[CXX] PASS phase134: container ctor/growth exception safety -- vector "
+           "(relocation + 8 ctors + 6 vector<bool> mirrors), deque (8 ctors + the "
+           "InitMap map array), list (8), forward_list (8), basic_string (2) and the "
+           "searcher key array (2) all own what they took "
+           "(across 42 throw sites: leaked objects=%d, leaked blocks=%d)\n",
            g_p134LeakObjs, g_p134LeakBlocks);
 }
 

@@ -131,41 +131,76 @@ public:
 
     forward_list() noexcept = default;
     explicit forward_list(const Alloc &a) noexcept : __alloc(a) {}
+    // A constructor that throws part-way never runs ~forward_list, so every
+    // node it already linked would leak. clear() releases exactly those and
+    // needs no priming: __beforeBegin.next carries a default member
+    // initializer, so the list is a well-formed empty one on entry.
     explicit forward_list(size_type count, const Alloc &a = Alloc()) : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (; count > 0; --count) prev = emplace_after(prev);
+        try {
+            iterator prev = before_begin();
+            for (; count > 0; --count) prev = emplace_after(prev);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     forward_list(size_type count, const T &value, const Alloc &a = Alloc())
         : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (; count > 0; --count) prev = insert_after(prev, value);
+        try {
+            iterator prev = before_begin();
+            for (; count > 0; --count) prev = insert_after(prev, value);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     template <typename It>
         requires(!is_integral_v<It>)
     forward_list(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (; first != last; ++first) prev = insert_after(prev, *first);
+        try {
+            iterator prev = before_begin();
+            for (; first != last; ++first) prev = insert_after(prev, *first);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     template <ContainerCompatibleRange<T> R>
     forward_list(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (auto &&v : rg) prev = insert_after(prev, std::forward<decltype(v)>(v));
+        try {
+            iterator prev = before_begin();
+            for (auto &&v : rg)
+                prev = insert_after(prev, std::forward<decltype(v)>(v));
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     forward_list(initializer_list<T> il, const Alloc &a = Alloc()) : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (const T &v : il) prev = insert_after(prev, v);
+        try {
+            iterator prev = before_begin();
+            for (const T &v : il) prev = insert_after(prev, v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     forward_list(const forward_list &other)
         : __alloc(NodeTraits::select_on_container_copy_construction(
               other.__alloc))
     {
-        iterator prev = before_begin();
-        for (const T &v : other) prev = insert_after(prev, v);
+        try {
+            iterator prev = before_begin();
+            for (const T &v : other) prev = insert_after(prev, v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     // Allocator-extended ctors: bare `const Alloc &`, not type_identity_t<Alloc>.
     // Both are non-template constructors (Alloc is fixed by the class), so
@@ -173,8 +208,13 @@ public:
     // this codebase's own vector.h/deque.h convention.
     forward_list(const forward_list &other, const Alloc &a) : __alloc(a)
     {
-        iterator prev = before_begin();
-        for (const T &v : other) prev = insert_after(prev, v);
+        try {
+            iterator prev = before_begin();
+            for (const T &v : other) prev = insert_after(prev, v);
+        } catch (...) {
+            clear();
+            throw;
+        }
     }
     forward_list(forward_list &&other) noexcept : __alloc(std::move(other.__alloc))
     {
@@ -185,8 +225,13 @@ public:
         if (NodeTraits::is_always_equal::value || __alloc == other.__alloc) {
             StealFrom(other);
         } else {
-            iterator prev = before_begin();
-            for (T &v : other) prev = insert_after(prev, std::move(v));
+            try {
+                iterator prev = before_begin();
+                for (T &v : other) prev = insert_after(prev, std::move(v));
+            } catch (...) {
+                clear();
+                throw;
+            }
         }
     }
     ~forward_list() { clear(); }

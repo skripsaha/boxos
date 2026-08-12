@@ -102,13 +102,24 @@ public:
 
     template <typename It>
         requires(!is_integral_v<It>)
+    // Only the walking branch is wrapped, and deliberately so. DropStorage
+    // decides via IsLong(), i.e. by reading __data, which has no default
+    // member initializer: it is meaningful only once SetShort(0) has run.
+    // The pointer branch cannot leak anyway — InitCopy allocates last, and
+    // both of its throw points (the length check, the allocation) happen
+    // before anything is owned.
     basic_string(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
     {
         if constexpr (is_pointer_v<It>) {
             InitCopy(first, static_cast<size_type>(last - first));
         } else {
             SetShort(0);
-            for (; first != last; ++first) push_back(*first);
+            try {
+                for (; first != last; ++first) push_back(*first);
+            } catch (...) {
+                DropStorage();
+                throw;
+            }
         }
     }
 
@@ -121,7 +132,12 @@ public:
     basic_string(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
     {
         SetShort(0);
-        for (auto &&ch : rg) push_back(ch);
+        try {
+            for (auto &&ch : rg) push_back(ch);
+        } catch (...) {
+            DropStorage();
+            throw;
+        }
     }
 
     template <typename SV>
