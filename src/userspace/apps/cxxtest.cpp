@@ -33564,6 +33564,490 @@ void Phase135()
            ctor_sorted, ctor_reversed, ins_above, ins_single, merge_moves);
 }
 
+// Ф31b-2 fix-round proxy-move sweep: algorithm_classic's InsertionSort hole-
+// EXTRACT was fixed for move-only elements behind a proxy iterator back in
+// Ф29f-1, but that sweep was partial -- it missed the hole-SHIFT one line
+// below it, and missed the pivot-value snapshot in IntroSort/nth_element
+// entirely, plus several sites the same audit never reached (classic move/
+// move_backward, classic unique, shift_right, BufferedMerge's right-run
+// read, stable_partition). This phase is the full-sweep proof: a move-only
+// mapped type (unique_ptr<int>) driven through flat_map's Yoke cursor, and
+// every algorithm this sweep touched run directly against Yoke besides.
+struct P136Tag {};
+using P136Yoke = std::__flat::Yoke<std::vector<int>::iterator,
+                                   std::vector<std::unique_ptr<int>>::iterator,
+                                   int &, std::unique_ptr<int> &, P136Tag>;
+
+bool P136KeyLess(const std::pair<int &, std::unique_ptr<int> &> &a,
+                  const std::pair<int &, std::unique_ptr<int> &> &b)
+{
+    return a.first < b.first;
+}
+
+// Every value must still hold exactly the int its paired key names -- the
+// invariant a lost, aliased, or hollowed slot (the exact bug class this
+// phase exists to catch) would break silently rather than fail to compile.
+bool P136Matched(const std::vector<int> &keys, const std::vector<std::unique_ptr<int>> &vals)
+{
+    if (keys.size() != vals.size()) return false;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (!vals[i]) return false;
+        if (*vals[i] != keys[i]) return false;
+    }
+    return true;
+}
+
+bool P136MatchedRange(const std::vector<int> &keys, const std::vector<std::unique_ptr<int>> &vals,
+                      size_t begin, size_t end)
+{
+    for (size_t i = begin; i < end; ++i) {
+        if (!vals[i]) return false;
+        if (*vals[i] != keys[i]) return false;
+    }
+    return true;
+}
+
+bool P136Sorted(const std::vector<int> &keys)
+{
+    for (size_t i = 1; i < keys.size(); ++i)
+        if (!(keys[i - 1] < keys[i])) return false;
+    return true;
+}
+
+// kInsertionThreshold is 16: every dataset below is sized well past it so
+// sort/stable_sort/nth_element actually recurse through IntroSort's pivot
+// selection, not just InsertionSort.
+void P136MakeReversed(int n, std::vector<int> &keys, std::vector<std::unique_ptr<int>> &vals)
+{
+    keys.clear();
+    vals.clear();
+    keys.resize(static_cast<size_t>(n));
+    vals.resize(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        keys[static_cast<size_t>(i)] = n - i;
+        vals[static_cast<size_t>(i)] = std::unique_ptr<int>(new int(n - i));
+    }
+}
+
+void Phase136()
+{
+    using namespace std;
+
+    // ── (A) flat_map<int, unique_ptr<int>> through the three fixed paths ──
+    {
+        vector<pair<int, unique_ptr<int>>> src;
+        for (int i = 25; i >= 1; --i) src.push_back({i, unique_ptr<int>(new int(i))});
+        flat_map<int, unique_ptr<int>> m(make_move_iterator(src.begin()), make_move_iterator(src.end()));
+        bool ok   = m.size() == 25;
+        int  want = 1;
+        for (auto &&e : m) {
+            ok = ok && e.first == want && e.second && *e.second == want;
+            ++want;
+        }
+        Check(ok, "phase136 (1) ctor(move_iterator, move_iterator) sorts (>16, exercises IntroSort) and "
+                  "preserves unique_ptr values");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        for (int i = 25; i >= 1; --i) {
+            keys.push_back(i);
+            vals.push_back(unique_ptr<int>(new int(i)));
+        }
+        flat_map<int, unique_ptr<int>> m(std::move(keys), std::move(vals));
+        bool ok   = m.size() == 25;
+        int  want = 1;
+        for (auto &&e : m) {
+            ok = ok && e.first == want && e.second && *e.second == want;
+            ++want;
+        }
+        Check(ok, "phase136 (2) ctor(KeyContainer&&, MappedContainer&&) sorts (>16) and preserves "
+                  "unique_ptr values");
+    }
+    {
+        flat_map<int, unique_ptr<int>>     m;
+        vector<pair<int, unique_ptr<int>>> src;
+        for (int i = 20; i >= 1; --i) src.push_back({i, unique_ptr<int>(new int(i))});
+        m.insert(make_move_iterator(src.begin()), make_move_iterator(src.end()));
+        bool ok   = m.size() == 20;
+        int  want = 1;
+        for (auto &&e : m) {
+            ok = ok && e.first == want && e.second && *e.second == want;
+            ++want;
+        }
+        Check(ok, "phase136 (3) insert(move_iterator, move_iterator) sorts (>16) and preserves "
+                  "unique_ptr values");
+    }
+    {
+        flat_map<int, unique_ptr<int>>     m;
+        vector<pair<int, unique_ptr<int>>> src;
+        for (int i = 1; i <= 5; ++i) src.push_back({i, unique_ptr<int>(new int(i))});
+        m.insert(sorted_unique, make_move_iterator(src.begin()), make_move_iterator(src.end()));
+        bool ok   = m.size() == 5;
+        int  want = 1;
+        for (auto &&e : m) {
+            ok = ok && e.first == want && e.second && *e.second == want;
+            ++want;
+        }
+        Check(ok, "phase136 (4) insert(sorted_unique, move_iterator, move_iterator) preserves "
+                  "unique_ptr values");
+    }
+    // insert_range over a move-only pair range is a SEPARATE, pre-existing
+    // bug in flat_map::insert_range itself ("for (const auto &e : rg)"
+    // forces a copy read regardless of what range is passed), unrelated to
+    // the algorithm_classic/ranges_algo_* sweep this phase covers. It is a
+    // hard compile error, so it cannot be exercised here without breaking
+    // the build; left for a follow-up.
+
+    // ── (B) direct algorithm runs over the Yoke proxy itself ─────────────
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        std::sort(first, last, P136KeyLess);
+        Check(P136Sorted(keys) && P136Matched(keys, vals),
+              "phase136 (5) std::sort over Yoke<unique_ptr<int>>: sorted, values still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        std::stable_sort(first, last, P136KeyLess);
+        Check(P136Sorted(keys) && P136Matched(keys, vals),
+              "phase136 (6) std::stable_sort over Yoke<unique_ptr<int>>: sorted, values still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke middle(keys.begin() + 10, vals.begin() + 10);
+        P136Yoke last(keys.end(), vals.end());
+        std::partial_sort(first, middle, last, P136KeyLess);
+        bool ok = P136Matched(keys, vals);
+        for (int i = 0; i < 10 && ok; ++i) ok = keys[static_cast<size_t>(i)] == i + 1;
+        Check(ok, "phase136 (7) std::partial_sort over Yoke<unique_ptr<int>>: first 10 are ranks 1..10, "
+                  "values still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke nth(keys.begin() + 24, vals.begin() + 24);
+        P136Yoke last(keys.end(), vals.end());
+        std::nth_element(first, nth, last, P136KeyLess);
+        bool ok = P136Matched(keys, vals) && keys[24] == 25;
+        for (int i = 0; i < 24 && ok; ++i) ok = keys[static_cast<size_t>(i)] <= 25;
+        for (int i = 25; i < 50 && ok; ++i) ok = keys[static_cast<size_t>(i)] >= 25;
+        Check(ok, "phase136 (8) std::nth_element over Yoke<unique_ptr<int>>: correct rank and partition, "
+                  "values still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke split = std::partition(first, last, [](auto &&p) { return p.first % 2 == 0; });
+        auto     splitIdx = static_cast<size_t>(split.key - keys.begin());
+        bool     ok       = P136Matched(keys, vals);
+        for (size_t i = 0; i < splitIdx && ok; ++i) ok = keys[i] % 2 == 0;
+        for (size_t i = splitIdx; i < keys.size() && ok; ++i) ok = keys[i] % 2 != 0;
+        Check(ok, "phase136 (9) std::partition over Yoke<unique_ptr<int>>: evens before odds, values "
+                  "still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(50, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        std::make_heap(first, last, P136KeyLess);
+        std::sort_heap(first, last, P136KeyLess);
+        Check(P136Sorted(keys) && P136Matched(keys, vals),
+              "phase136 (10) std::make_heap+sort_heap over Yoke<unique_ptr<int>>: sorted, values "
+              "still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(20, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke middle(keys.begin() + 8, vals.begin() + 8);
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke ret    = std::rotate(first, middle, last);
+        auto     retPos = static_cast<size_t>(ret.key - keys.begin());
+        bool     ok     = P136Matched(keys, vals) && keys[0] == 12 && retPos == 12;
+        Check(ok, "phase136 (11) std::rotate over Yoke<unique_ptr<int>>: rotated correctly, values "
+                  "still paired");
+    }
+    {
+        vector<int> keys{1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 5, 5};
+        vector<unique_ptr<int>> vals;
+        for (int k : keys) vals.push_back(unique_ptr<int>(new int(k)));
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke tail    = std::unique(first, last, [](auto &&a, auto &&b) { return a.first == b.first; });
+        auto     newSize = static_cast<size_t>(tail.key - keys.begin());
+        keys.resize(newSize);
+        vals.resize(newSize);
+        bool ok      = newSize == 5 && P136Matched(keys, vals);
+        int  want[5] = {1, 2, 3, 4, 5};
+        for (size_t i = 0; i < newSize && ok; ++i) ok = keys[i] == want[i];
+        Check(ok, "phase136 (12) std::unique over Yoke<unique_ptr<int>>: dedups runs, keeps first-of-run");
+    }
+    {
+        // Ascending input, not reversed: remove_if preserves the RELATIVE
+        // order of survivors, it does not sort them -- feeding it descending
+        // data and then asserting P136Sorted (ascending) would check the
+        // wrong thing.
+        vector<int>             keys(20);
+        vector<unique_ptr<int>> vals(20);
+        for (int i = 0; i < 20; ++i) {
+            keys[static_cast<size_t>(i)] = i + 1;
+            vals[static_cast<size_t>(i)] = unique_ptr<int>(new int(i + 1));
+        }
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke tail    = std::remove_if(first, last, [](auto &&p) { return p.first % 2 == 0; });
+        auto     newSize = static_cast<size_t>(tail.key - keys.begin());
+        keys.resize(newSize);
+        vals.resize(newSize);
+        bool ok = newSize == 10 && P136Matched(keys, vals) && P136Sorted(keys);
+        for (size_t i = 0; i < newSize && ok; ++i) ok = keys[i] % 2 != 0;
+        Check(ok, "phase136 (13) std::remove_if over Yoke<unique_ptr<int>>: keeps odds in order, "
+                  "values paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(20, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        std::reverse(first, last);
+        bool ok = P136Matched(keys, vals);
+        for (int i = 0; i < 20 && ok; ++i) ok = keys[static_cast<size_t>(i)] == i + 1;
+        Check(ok, "phase136 (14) std::reverse over Yoke<unique_ptr<int>>: exact reversal, values "
+                  "still paired");
+    }
+    {
+        vector<int>             keys(20);
+        vector<unique_ptr<int>> vals(20);
+        for (int i = 0; i < 10; ++i) {
+            keys[static_cast<size_t>(i)]      = i * 2;
+            vals[static_cast<size_t>(i)]      = unique_ptr<int>(new int(i * 2));
+            keys[static_cast<size_t>(i + 10)] = i * 2 + 1;
+            vals[static_cast<size_t>(i + 10)] = unique_ptr<int>(new int(i * 2 + 1));
+        }
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke middle(keys.begin() + 10, vals.begin() + 10);
+        P136Yoke last(keys.end(), vals.end());
+        std::inplace_merge(first, middle, last, P136KeyLess);
+        Check(P136Sorted(keys) && P136Matched(keys, vals),
+              "phase136 (15) std::inplace_merge over Yoke<unique_ptr<int>>: merges into one sorted "
+              "sequence, values still paired");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(20, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke split    = std::stable_partition(first, last, [](auto &&p) { return p.first % 2 == 0; });
+        auto     splitIdx = static_cast<size_t>(split.key - keys.begin());
+        bool     ok       = P136Matched(keys, vals);
+        for (size_t i = 0; i < splitIdx && ok; ++i) ok = keys[i] % 2 == 0;
+        for (size_t i = splitIdx; i < keys.size() && ok; ++i) ok = keys[i] % 2 != 0;
+        for (size_t i = 1; i < splitIdx && ok; ++i) ok = keys[i - 1] > keys[i];
+        for (size_t i = splitIdx + 1; i < keys.size() && ok; ++i) ok = keys[i - 1] > keys[i];
+        Check(ok, "phase136 (16) std::stable_partition over Yoke<unique_ptr<int>>: evens before odds, "
+                  "each group keeps its relative order, values still paired");
+    }
+    {
+        vector<int>             srcKeys, dstKeys;
+        vector<unique_ptr<int>> srcVals, dstVals;
+        P136MakeReversed(10, srcKeys, srcVals);
+        dstKeys.assign(10, 0);
+        dstVals.resize(10);
+        for (auto &v : dstVals) v = unique_ptr<int>(new int(-1));
+        P136Yoke srcFirst(srcKeys.begin(), srcVals.begin());
+        P136Yoke srcLast(srcKeys.end(), srcVals.end());
+        P136Yoke dstFirst(dstKeys.begin(), dstVals.begin());
+        std::move(srcFirst, srcLast, dstFirst);
+        bool ok = P136Matched(dstKeys, dstVals);
+        for (size_t i = 0; i < 10 && ok; ++i)
+            ok = dstKeys[i] == 10 - static_cast<int>(i) && !srcVals[i];
+        Check(ok, "phase136 (17) std::move over Yoke<unique_ptr<int>>: dest gets the values, source is "
+                  "left moved-from (proves a real move, not a copy or aliasing no-op)");
+    }
+    {
+        vector<int>             srcKeys, dstKeys;
+        vector<unique_ptr<int>> srcVals, dstVals;
+        P136MakeReversed(10, srcKeys, srcVals);
+        dstKeys.assign(10, 0);
+        dstVals.resize(10);
+        for (auto &v : dstVals) v = unique_ptr<int>(new int(-1));
+        P136Yoke srcFirst(srcKeys.begin(), srcVals.begin());
+        P136Yoke srcLast(srcKeys.end(), srcVals.end());
+        P136Yoke dstLast(dstKeys.end(), dstVals.end());
+        std::move_backward(srcFirst, srcLast, dstLast);
+        bool ok = P136Matched(dstKeys, dstVals);
+        for (size_t i = 0; i < 10 && ok; ++i)
+            ok = dstKeys[i] == 10 - static_cast<int>(i) && !srcVals[i];
+        Check(ok, "phase136 (18) std::move_backward over Yoke<unique_ptr<int>>: dest gets the values in "
+                  "the same relative order, source left moved-from");
+    }
+    {
+        vector<int>             keys;
+        vector<unique_ptr<int>> vals;
+        P136MakeReversed(10, keys, vals);
+        P136Yoke first(keys.begin(), vals.begin());
+        P136Yoke last(keys.end(), vals.end());
+        P136Yoke newFirst = std::shift_right(first, last, 3);
+        auto     newPos   = static_cast<size_t>(newFirst.key - keys.begin());
+        bool     ok       = newPos == 3 && P136MatchedRange(keys, vals, 3, 10);
+        for (size_t i = 0; i < 3 && ok; ++i) ok = !vals[i];
+        Check(ok, "phase136 (19) std::shift_right over Yoke<unique_ptr<int>>: shifted range stays "
+                  "paired, vacated prefix is genuinely moved-from");
+    }
+
+    // ── (C) regression: the SAME algorithms over ordinary iterators ──────
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        std::sort(v.begin(), v.end());
+        Check(P136Sorted(v), "phase136 (20) std::sort over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        std::stable_sort(v.begin(), v.end());
+        Check(P136Sorted(v), "phase136 (21) std::stable_sort over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        std::partial_sort(v.begin(), v.begin() + 10, v.end());
+        bool ok = true;
+        for (int i = 0; i < 10 && ok; ++i) ok = v[static_cast<size_t>(i)] == i + 1;
+        Check(ok, "phase136 (22) std::partial_sort over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        std::nth_element(v.begin(), v.begin() + 9, v.end());
+        bool ok = v[9] == 10;
+        for (int i = 0; i < 9 && ok; ++i) ok = v[static_cast<size_t>(i)] <= 10;
+        for (int i = 10; i < 20 && ok; ++i) ok = v[static_cast<size_t>(i)] >= 10;
+        Check(ok, "phase136 (23) std::nth_element over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        auto mid = std::partition(v.begin(), v.end(), [](int x) { return x % 2 == 0; });
+        bool ok  = true;
+        for (auto it = v.begin(); it != mid && ok; ++it) ok = *it % 2 == 0;
+        for (auto it = mid; it != v.end() && ok; ++it) ok = *it % 2 != 0;
+        Check(ok, "phase136 (24) std::partition over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        std::make_heap(v.begin(), v.end());
+        std::sort_heap(v.begin(), v.end());
+        Check(P136Sorted(v), "phase136 (25) std::make_heap+sort_heap over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+        auto        ret = std::rotate(v.begin(), v.begin() + 3, v.end());
+        bool        ok  = v[0] == 7 && (ret - v.begin()) == 7;
+        Check(ok, "phase136 (26) std::rotate over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{1, 1, 1, 2, 2, 3, 3, 3, 3, 4, 5, 5};
+        auto        tail = std::unique(v.begin(), v.end());
+        v.erase(tail, v.end());
+        Check(v == vector<int>{1, 2, 3, 4, 5}, "phase136 (27) std::unique over plain vector<int>: unchanged");
+    }
+    {
+        // Ascending input for the same reason as the Yoke case above:
+        // remove_if preserves relative order, it does not sort.
+        vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+        auto        tail = std::remove_if(v.begin(), v.end(), [](int x) { return x % 2 == 0; });
+        v.erase(tail, v.end());
+        bool ok = P136Sorted(v);
+        for (int x : v) ok = ok && x % 2 != 0;
+        Check(ok, "phase136 (28) std::remove_if over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        std::reverse(v.begin(), v.end());
+        bool ok = true;
+        for (int i = 0; i < 10 && ok; ++i) ok = v[static_cast<size_t>(i)] == 10 - i;
+        Check(ok, "phase136 (29) std::reverse over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v(20);
+        for (int i = 0; i < 10; ++i) {
+            v[static_cast<size_t>(i)]      = i * 2;
+            v[static_cast<size_t>(i + 10)] = i * 2 + 1;
+        }
+        std::inplace_merge(v.begin(), v.begin() + 10, v.end());
+        Check(P136Sorted(v), "phase136 (30) std::inplace_merge over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{20, 19, 18, 17, 16, 15, 14, 13, 12, 11,
+                      10, 9,  8,  7,  6,  5,  4,  3,  2,  1};
+        auto tail      = std::stable_partition(v.begin(), v.end(), [](int x) { return x % 2 == 0; });
+        auto splitIdx  = static_cast<size_t>(tail - v.begin());
+        bool ok        = true;
+        for (size_t i = 0; i < splitIdx && ok; ++i) ok = v[i] % 2 == 0;
+        for (size_t i = splitIdx; i < v.size() && ok; ++i) ok = v[i] % 2 != 0;
+        for (size_t i = 1; i < splitIdx && ok; ++i) ok = v[i - 1] > v[i];
+        for (size_t i = splitIdx + 1; i < v.size() && ok; ++i) ok = v[i - 1] > v[i];
+        Check(ok, "phase136 (31) std::stable_partition over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> src{10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+        vector<int> dst(10, 0);
+        std::move(src.begin(), src.end(), dst.begin());
+        Check(dst == vector<int>({10, 9, 8, 7, 6, 5, 4, 3, 2, 1}),
+              "phase136 (32) std::move over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> src{10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+        vector<int> dst(10, 0);
+        std::move_backward(src.begin(), src.end(), dst.end());
+        Check(dst == vector<int>({10, 9, 8, 7, 6, 5, 4, 3, 2, 1}),
+              "phase136 (33) std::move_backward over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{10, 9, 8, 7, 6, 5, 4, 3, 2, 1};
+        auto        nf       = std::shift_right(v.begin(), v.end(), 3);
+        vector<int> expected = {10, 9, 8, 7, 6, 5, 4};
+        bool        ok       = (nf - v.begin()) == 3;
+        for (size_t i = 3; i < 10 && ok; ++i) ok = v[i] == expected[i - 3];
+        Check(ok, "phase136 (34) std::shift_right over plain vector<int>: unchanged");
+    }
+    {
+        vector<int> v{1, 2};
+        std::iter_swap(v.begin(), v.begin() + 1);
+        Check(v[0] == 2 && v[1] == 1,
+              "phase136 (35) std::iter_swap over plain vector<int>: unchanged, and delegating to "
+              "ranges::iter_swap did not recurse");
+    }
+
+    printf("[CXX] PASS phase136: proxy-move sweep -- flat_map<Key,unique_ptr<T>> ctor/insert paths, "
+           "sort/stable_sort/partial_sort/nth_element/partition/heap/rotate/unique/remove_if/reverse/"
+           "inplace_merge/stable_partition/move/move_backward/shift_right over Yoke<unique_ptr<int>> "
+           "and plain vector<int>\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -33721,6 +34205,7 @@ int main()
     Phase133();
     Phase134();
     Phase135();
+    Phase136();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

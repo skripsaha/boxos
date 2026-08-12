@@ -453,20 +453,26 @@ constexpr Out copy_backward(In first, In last, Out out)
 template <typename In, typename Out>
 constexpr Out move(In first, In last, Out out)
 {
-    for (; first != last; ++first, ++out) *out = std::move(*first);
+    for (; first != last; ++first, ++out) *out = ranges::iter_move(first);
     return out;
 }
 template <typename In, typename Out>
 constexpr Out move_backward(In first, In last, Out out)
 {
-    while (first != last) *--out = std::move(*--last);
+    while (first != last) *--out = ranges::iter_move(--last);
     return out;
 }
 
+// Delegates to the ranges::iter_swap CPO rather than a bare unqualified
+// swap(*a,*b): a proxy iterator's operator* returns a prvalue (e.g. Yoke's
+// pair<Key&,T&>), which cannot bind to swap(T&,T&)'s by-reference
+// parameters at all. ranges::iter_swap tries an ADL iter_swap(a,b) on the
+// ITERATORS first (what a proxy customizes), so this stays a plain
+// swap(*a,*b) for every ordinary iterator already using this function.
 template <typename It1, typename It2>
 constexpr void iter_swap(It1 a, It2 b)
 {
-    swap(*a, *b);
+    ranges::iter_swap(a, b);
 }
 template <typename It1, typename It2>
 constexpr It2 swap_ranges(It1 first1, It1 last1, It2 first2)
@@ -549,7 +555,7 @@ constexpr It remove_if(It first, It last, Pred pred)
     if (first == last) return first;
     It write = first;
     for (++first; first != last; ++first)
-        if (!pred(*first)) *write++ = std::move(*first);
+        if (!pred(*first)) *write++ = ranges::iter_move(first);
     return write;
 }
 template <typename It, typename T>
@@ -582,7 +588,7 @@ constexpr It unique(It first, It last, Pred pred)
     It write = first;
     for (++first; first != last; ++first)
         if (!pred(*write, *first) && ++write != first)
-            *write = std::move(*first);
+            *write = ranges::iter_move(first);
     return ++write;
 }
 template <typename It>
@@ -690,7 +696,7 @@ constexpr It shift_right(It first, It last,
     It src = last;
     for (; n > 0 && src != first; --n) --src;
     if (src == first) return last;
-    while (src != first) *--dst = std::move(*--src);
+    while (src != first) *--dst = ranges::iter_move(--src);
     return dst;
 }
 
@@ -958,7 +964,10 @@ constexpr void InsertionSort(It first, It last, Comp comp)
         iter_value_t<It> value = ranges::iter_move(i);
         It hole                = i;
         while (hole != first && comp(value, *(hole - 1))) {
-            *hole = std::move(*(hole - 1));
+            // Same reasoning as the extraction above: hole-1 is about to
+            // become the new hole, so its old value must MOVE forward, not
+            // alias in place. ranges::iter_move for the same reason.
+            *hole = ranges::iter_move(hole - 1);
             --hole;
         }
         *hole = std::move(value);
@@ -994,18 +1003,26 @@ constexpr void IntroSort(It first, It last, int depth, Comp comp)
             return;
         }
         It pivot = MedianPivot(first, last, comp);
-        // Hoare-style partition around the median value. pv is read-only
-        // (compared, never written back) but the loop's own iter_swap(lo,hi)
-        // CAN touch pivot's slot — auto pv = *pivot would (for a proxy
-        // iterator) alias that slot rather than snapshot it, corrupting the
-        // comparison mid-partition. iter_value_t<It> is a genuine copy.
-        iter_value_t<It> pv = *pivot;
+        // Hoare-style partition around the median value. The classic form
+        // snapshots *pivot into a local copy for the comparisons below, but
+        // a snapshot needs CopyConstructible -- a move-only element behind a
+        // proxy iterator (flat_map's Yoke over unique_ptr<T>, say) has none
+        // to take, and moving it out would hollow a slot this function never
+        // refills. So `pivot` is tracked instead of snapshotted: comparisons
+        // read through it directly, and whenever the partition's own
+        // iter_swap(lo,hi) touches the slot pivot currently names, pivot
+        // follows the value to its new position. Same value compared the
+        // same number of times either way, zero copies either way.
         It lo = first;
         It hi = last - 1;
         for (;;) {
-            while (comp(*lo, pv)) ++lo;
-            while (comp(pv, *hi)) --hi;
+            while (comp(*lo, *pivot)) ++lo;
+            while (comp(*pivot, *hi)) --hi;
             if (lo >= hi) break;
+            if (pivot == lo)
+                pivot = hi;
+            else if (pivot == hi)
+                pivot = lo;
             iter_swap(lo, hi);
             ++lo;
             --hi;
@@ -1083,16 +1100,19 @@ constexpr void nth_element(It first, It nth, It last, Comp comp)
             return;
         }
         It pivot = __algo_impl::MedianPivot(first, last, comp);
-        // Same proxy-aliasing risk as IntroSort's identical pivot pattern
-        // (this loop's own iter_swap(lo,hi) can touch pivot's slot) —
-        // iter_value_t<It> is a genuine copy, not an aliased reference.
-        iter_value_t<It> pv = *pivot;
+        // Same move-only-proxy hazard as IntroSort's identical pivot
+        // pattern, fixed the same way: track pivot's position instead of
+        // snapshotting its value (see IntroSort above for the reasoning).
         It lo    = first;
         It hi    = last - 1;
         for (;;) {
-            while (comp(*lo, pv)) ++lo;
-            while (comp(pv, *hi)) --hi;
+            while (comp(*lo, *pivot)) ++lo;
+            while (comp(*pivot, *hi)) --hi;
             if (lo >= hi) break;
+            if (pivot == lo)
+                pivot = hi;
+            else if (pivot == hi)
+                pivot = lo;
             iter_swap(lo, hi);
             ++lo;
             --hi;
@@ -1186,7 +1206,10 @@ void BufferedMerge(It first, It middle, It last, T *buf, Comp comp)
     It out   = first;
     while (left != buf_end && right != last) {
         if (comp(*right, *left)) {
-            *out = std::move(*right);
+            // right walks the ORIGINAL (possibly proxy) range; left is a
+            // real T* into buf. Same iter_move-vs-std::move split as the
+            // buffer fill above, for the same reason.
+            *out = ranges::iter_move(right);
             ++right;
         } else {
             *out = std::move(*left);
@@ -1437,10 +1460,14 @@ constexpr It stable_partition(It first, It last, Pred pred)
         size_t nb  = 0;
         for (It it = first; it != last; ++it) {
             if (pred(*it)) {
-                if (out != it) *out = static_cast<T &&>(*it);
+                // it walks the source range (possibly a proxy iterator);
+                // ranges::iter_move routes through its own customization
+                // instead of constructing T straight from a reference-
+                // holding prvalue, which a move-only element can't do.
+                if (out != it) *out = ranges::iter_move(it);
                 ++out;
             } else {
-                ::new (static_cast<void *>(buf + nb)) T(static_cast<T &&>(*it));
+                ::new (static_cast<void *>(buf + nb)) T(ranges::iter_move(it));
                 ++nb;
             }
         }
