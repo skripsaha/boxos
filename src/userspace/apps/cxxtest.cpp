@@ -34251,6 +34251,235 @@ void Phase137()
            "SFINAE safety; tuple==tuple/<=>tuple stay unambiguous)\n");
 }
 
+// ── crbegin/crend closing-the-class helper concepts (defined close to use,
+// matching HasConstBegin's own convention above) ──────────────────────────
+template <class T>
+concept HasCrbeginMember = requires(const T &t) { t.crbegin(); };
+template <class T>
+concept HasCrendMember = requires(const T &t) { t.crend(); };
+
+// Full surface a reversible container's own synopsis requires of crbegin/
+// crend: present, returns const_reverse_iterator, noexcept. Short-circuits
+// on HasCrbeginMember/HasCrendMember first, so a type that lacks the member
+// entirely (forward_list, unordered_*) yields false instead of a hard error.
+template <class T>
+concept HasConformingCrbegin =
+    HasCrbeginMember<T> && HasCrendMember<T> &&
+    std::is_same_v<decltype(std::declval<const T &>().crbegin()),
+                   typename T::const_reverse_iterator> &&
+    std::is_same_v<decltype(std::declval<const T &>().crend()),
+                   typename T::const_reverse_iterator> &&
+    noexcept(std::declval<const T &>().crbegin()) &&
+    noexcept(std::declval<const T &>().crend());
+
+template <typename Container>
+bool CrbeginEqualsRbegin(const Container &c)
+{
+    return c.crbegin() == c.rbegin() && c.crend() == c.rend();
+}
+
+void Phase138()
+{
+    using namespace std;
+
+    // ── (A) presence + return type + noexcept, every container whose own
+    // synopsis requires crbegin/crend -- [vector.overview], [vector.bool],
+    // [deque.overview], [list.overview], [basic.string], [array.overview],
+    // [map.overview], [multimap.overview], [set.overview],
+    // [multiset.overview], [views.span]. Verified against the raw N4950
+    // clause HTML (timsong-cpp.github.io/cppwp/n4950/, not eel.is -- that's
+    // C++26). span was a genuine surprise: its synopsis writes crbegin/crend
+    // WITH inline bodies ("{ return rbegin(); }") unlike every other
+    // container here -- confirmed byte-for-byte, not a paraphrase. ───────
+    static_assert(HasConformingCrbegin<vector<int>>,
+                  "phase138 (1) vector: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<vector<bool>>,
+                  "phase138 (2) vector<bool>: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<deque<int>>,
+                  "phase138 (3) deque: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<list<int>>,
+                  "phase138 (4) list: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<string>,
+                  "phase138 (5) string: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<array<int, 5>>,
+                  "phase138 (6) array: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<map<int, int>>,
+                  "phase138 (7) map: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<multimap<int, int>>,
+                  "phase138 (8) multimap: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<set<int>>,
+                  "phase138 (9) set: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<multiset<int>>,
+                  "phase138 (10) multiset: crbegin/crend present, const_reverse_iterator, noexcept");
+    static_assert(HasConformingCrbegin<span<int>>,
+                  "phase138 (11) span: crbegin/crend present, const_reverse_iterator, noexcept "
+                  "-- present in N4950 despite libc++ 22 not implementing it yet");
+
+    // ── (B) crbegin()==rbegin(), crend()==rend() BY VALUE for a const
+    // object -- the whole point of crbegin/crend is that they equal what
+    // rbegin/rend already give on a const object, not just share a type. ──
+    Check(CrbeginEqualsRbegin(vector<int>{1, 2, 3}), "phase138 (12) vector crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(vector<bool>{true, false, true}),
+          "phase138 (13) vector<bool> crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(deque<int>{1, 2, 3}), "phase138 (14) deque crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(list<int>{1, 2, 3}), "phase138 (15) list crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(string{"hello"}), "phase138 (16) string crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(array<int, 5>{1, 2, 3, 4, 5}),
+          "phase138 (17) array crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(map<int, int>{{1, 2}, {3, 4}}), "phase138 (18) map crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(multimap<int, int>{{1, 2}, {1, 4}}),
+          "phase138 (19) multimap crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(set<int>{1, 2, 3}), "phase138 (20) set crbegin==rbegin, crend==rend");
+    Check(CrbeginEqualsRbegin(multiset<int>{1, 1, 2}), "phase138 (21) multiset crbegin==rbegin, crend==rend");
+    {
+        int arr[3]{1, 2, 3};
+        Check(CrbeginEqualsRbegin(span<int>{arr}), "phase138 (22) span crbegin==rbegin, crend==rend");
+    }
+    {
+        const vector<int> empty_v;
+        Check(empty_v.crbegin() == empty_v.rbegin() && empty_v.crbegin() == empty_v.crend(),
+              "phase138 (23) crbegin()==rbegin()==crend() on a genuinely empty const container");
+    }
+
+    // ── (C) map/multimap/deque/list/vector<bool> shared a prerequisite gap:
+    // iterator != const_iterator in every one of them, yet only a non-const
+    // rbegin()/rend() existed -- rbegin()/rend() did not compile AT ALL on a
+    // const object. (B) above is unwritable without fixing this first, so it
+    // closed alongside crbegin/crend: const_reverse_iterator rbegin() const
+    // / rend() const now exist, both checked for each of the five. vector/
+    // string/array/set/multiset/span/flat_set/flat_map already had both
+    // overloads (unaffected). ─────────────────────────────────────────────
+    static_assert(is_same_v<decltype(declval<const map<int, int> &>().rbegin()),
+                            map<int, int>::const_reverse_iterator>,
+                  "phase138 (24) map::rbegin() const now exists, returns const_reverse_iterator");
+    static_assert(is_same_v<decltype(declval<const map<int, int> &>().rend()),
+                            map<int, int>::const_reverse_iterator>,
+                  "phase138 (25) map::rend() const now exists");
+    static_assert(is_same_v<decltype(declval<const multimap<int, int> &>().rbegin()),
+                            multimap<int, int>::const_reverse_iterator>,
+                  "phase138 (26) multimap::rbegin() const now exists");
+    static_assert(is_same_v<decltype(declval<const multimap<int, int> &>().rend()),
+                            multimap<int, int>::const_reverse_iterator>,
+                  "phase138 (27) multimap::rend() const now exists");
+    static_assert(is_same_v<decltype(declval<const deque<int> &>().rbegin()),
+                            deque<int>::const_reverse_iterator>,
+                  "phase138 (28) deque::rbegin() const now exists");
+    static_assert(is_same_v<decltype(declval<const deque<int> &>().rend()),
+                            deque<int>::const_reverse_iterator>,
+                  "phase138 (29) deque::rend() const now exists");
+    static_assert(is_same_v<decltype(declval<const list<int> &>().rbegin()),
+                            list<int>::const_reverse_iterator>,
+                  "phase138 (30) list::rbegin() const now exists");
+    static_assert(is_same_v<decltype(declval<const list<int> &>().rend()),
+                            list<int>::const_reverse_iterator>,
+                  "phase138 (31) list::rend() const now exists");
+    static_assert(is_same_v<decltype(declval<const vector<bool> &>().rbegin()),
+                            vector<bool>::const_reverse_iterator>,
+                  "phase138 (32) vector<bool>::rbegin() const now exists");
+    static_assert(is_same_v<decltype(declval<const vector<bool> &>().rend()),
+                            vector<bool>::const_reverse_iterator>,
+                  "phase138 (33) vector<bool>::rend() const now exists");
+
+    // ── (D) non-reversible containers still lack crbegin/crend --
+    // forward_list has no rbegin at all ([forward_list.overview]); the
+    // unordered containers are not a Reversible Container ([unord.req]).
+    // Regression guard: this must stay false, or the class isn't closed. ──
+    static_assert(!HasCrbeginMember<forward_list<int>>, "phase138 (34) forward_list still has no crbegin");
+    static_assert(!HasCrendMember<forward_list<int>>, "phase138 (35) forward_list still has no crend");
+    static_assert(!HasCrbeginMember<unordered_map<int, int>>,
+                  "phase138 (36) unordered_map still has no crbegin");
+    static_assert(!HasCrendMember<unordered_map<int, int>>, "phase138 (37) unordered_map still has no crend");
+    static_assert(!HasCrbeginMember<unordered_multimap<int, int>>,
+                  "phase138 (38) unordered_multimap still has no crbegin");
+    static_assert(!HasCrbeginMember<unordered_set<int>>, "phase138 (39) unordered_set still has no crbegin");
+    static_assert(!HasCrendMember<unordered_set<int>>, "phase138 (40) unordered_set still has no crend");
+    static_assert(!HasCrbeginMember<unordered_multiset<int>>,
+                  "phase138 (41) unordered_multiset still has no crbegin");
+
+    // ── (E) [iterator.range] free functions: rbegin/rend/crbegin/crend were
+    // entirely absent (begin/end/cbegin/cend already existed). Container
+    // form (mutable + const), array form, initializer_list form (rbegin/
+    // rend only -- crbegin/crend forward through the generic const-C& form
+    // per the raw synopsis text: deducing C against a const array argument
+    // yields a const element type, so std::rbegin(c) inside crbegin's body
+    // already resolves to the right array overload with no dedicated
+    // crbegin/crend array or initializer_list overload needed). ──────────
+    static_assert(is_same_v<decltype(std::rbegin(declval<vector<int> &>())), vector<int>::reverse_iterator>,
+                  "phase138 (42) std::rbegin(C&)");
+    static_assert(is_same_v<decltype(std::rbegin(declval<const vector<int> &>())),
+                            vector<int>::const_reverse_iterator>,
+                  "phase138 (43) std::rbegin(const C&)");
+    static_assert(is_same_v<decltype(std::rend(declval<vector<int> &>())), vector<int>::reverse_iterator>,
+                  "phase138 (44) std::rend(C&)");
+    static_assert(is_same_v<decltype(std::rend(declval<const vector<int> &>())),
+                            vector<int>::const_reverse_iterator>,
+                  "phase138 (45) std::rend(const C&)");
+    static_assert(is_same_v<decltype(std::crbegin(declval<vector<int> &>())),
+                            vector<int>::const_reverse_iterator>,
+                  "phase138 (46) std::crbegin(C&) -- const_reverse_iterator even from a mutable C&");
+    static_assert(is_same_v<decltype(std::crbegin(declval<const vector<int> &>())),
+                            vector<int>::const_reverse_iterator>,
+                  "phase138 (47) std::crbegin(const C&)");
+    static_assert(is_same_v<decltype(std::crend(declval<vector<int> &>())),
+                            vector<int>::const_reverse_iterator>,
+                  "phase138 (48) std::crend(C&)");
+    {
+        int arr[3]{1, 2, 3};
+        Check(*std::rbegin(arr) == 3 && *(std::rend(arr) - 1) == 1,
+              "phase138 (49) std::rbegin/rend(T(&)[N]) walk the array backwards");
+        Check(*std::crbegin(arr) == 3, "phase138 (50) std::crbegin(T(&)[N]) via the generic const-C& deduction");
+        static_assert(is_same_v<decltype(std::rbegin(arr)), reverse_iterator<int *>>,
+                      "phase138 (51) array rbegin type -- mutable element");
+        static_assert(is_same_v<decltype(std::crbegin(arr)), reverse_iterator<const int *>>,
+                      "phase138 (52) array crbegin type -- const element");
+    }
+    {
+        initializer_list<int> il{1, 2, 3};
+        Check(*std::rbegin(il) == 3 && *(std::rend(il) - 1) == 1,
+              "phase138 (53) std::rbegin/rend(initializer_list<E>)");
+        static_assert(is_same_v<decltype(std::rbegin(declval<initializer_list<int>>())),
+                                reverse_iterator<const int *>>,
+                      "phase138 (54) initializer_list rbegin type");
+    }
+
+    // ── (F) noexcept profile of the free functions ([iterator.range],
+    // verified against the raw N4950 clause HTML): cbegin/cend carry a
+    // CONDITIONAL noexcept propagating begin/end's own; begin/end/rbegin/
+    // rend/crbegin/crend (container form) carry NO noexcept-specifier
+    // whatsoever. Confirmed against real installed libc++ 22 headers
+    // (matches exactly) and real installed libstdc++ 15/16 headers (both
+    // add noexcept(noexcept(...)) as a permitted-but-not-mandated
+    // extension boxcxx does not replicate, staying literal to the
+    // synopsis). Array-form begin/end ARE mandated noexcept; rbegin/rend/
+    // crbegin/crend (array and initializer_list form) are NOT. ───────────
+    {
+        vector<int>       v{1, 2, 3};
+        const vector<int> cv{1, 2, 3};
+        int               arr[3]{1, 2, 3};
+        static_assert(noexcept(std::cbegin(cv)) == noexcept(std::begin(cv)),
+                      "phase138 (55) cbegin propagates begin's noexcept, per [iterator.range]");
+        static_assert(noexcept(std::cend(cv)) == noexcept(std::end(cv)),
+                      "phase138 (56) cend propagates end's noexcept, per [iterator.range]");
+        Check(noexcept(std::begin(arr)) == true, "phase138 (57) array begin() is noexcept");
+        Check(noexcept(std::end(arr)) == true, "phase138 (58) array end() is noexcept");
+        Check(noexcept(std::begin(v)) == false, "phase138 (59) std::begin(C&) is not noexcept");
+        Check(noexcept(std::end(v)) == false, "phase138 (60) std::end(C&) is not noexcept");
+        Check(noexcept(std::rbegin(v)) == false, "phase138 (61) std::rbegin(C&) is not noexcept");
+        Check(noexcept(std::rend(v)) == false, "phase138 (62) std::rend(C&) is not noexcept");
+        Check(noexcept(std::crbegin(cv)) == false, "phase138 (63) std::crbegin(const C&) is not noexcept");
+        Check(noexcept(std::crend(cv)) == false, "phase138 (64) std::crend(const C&) is not noexcept");
+        Check(noexcept(std::rbegin(arr)) == false, "phase138 (65) std::rbegin(T(&)[N]) is not noexcept");
+        Check(noexcept(std::rend(arr)) == false, "phase138 (66) std::rend(T(&)[N]) is not noexcept");
+        Check(noexcept(std::crbegin(arr)) == false, "phase138 (67) std::crbegin(T(&)[N]) is not noexcept");
+        Check(noexcept(std::crend(arr)) == false, "phase138 (68) std::crend(T(&)[N]) is not noexcept");
+    }
+
+    printf("[CXX] PASS phase138: crbegin/crend closed across vector/vector<bool>/deque/list/"
+           "string/array/map/multimap/set/multiset/span + [iterator.range] rbegin/rend/crbegin/"
+           "crend free functions (container/array/initializer_list forms); forward_list and the "
+           "unordered containers correctly still lack them\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -34410,6 +34639,7 @@ int main()
     Phase135();
     Phase136();
     Phase137();
+    Phase138();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
