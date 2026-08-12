@@ -45,6 +45,7 @@
 #include <__bits/version_cstddef>         // <cstddef>
 #include <__bits/version_exception>       // <exception>
 #include <__bits/version_expected>        // <expected>
+#include <__bits/version_flat_map>        // <flat_map>
 #include <__bits/version_flat_set>        // <flat_set>
 #include <__bits/version_format>          // <format>
 #include <__bits/version_functional>      // <functional>
@@ -173,11 +174,6 @@
 //                          std::erase_if(basic_string&, Pred).
 // execution                no <execution> header.
 // filesystem               no <filesystem> header.
-// flat_map                 no <flat_map> header. <flat_set> ships in this
-//                          phase and carries the two [flat.set.syn]
-//                          ordering tags both synopses declare;
-//                          flat_map/flat_multimap and their proxy iterator
-//                          are the next commit (Ф31b-2).
 // format                   <format> is char-only: no wchar_t, no
 //                          wformat_context, no wformat/wformat_to.
 // formatters               formatter<thread::id, wchar_t> is absent, and
