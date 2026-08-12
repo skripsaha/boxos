@@ -2,23 +2,23 @@
 //
 // std::counting_semaphore / binary_semaphore — a permit counter. acquire()
 // takes a permit, blocking until one exists; release() hands permits back.
-// The blocking acquire spins on __boxcxx_atomic_wait_cycle (WAITPKG
-// UMONITOR/UMWAIT on the counter word, else PAUSE budget then yield) — the
-// same substrate as atomic::wait; the release store is the implicit wake.
+// The blocking acquire goes through __boxcxx_atomic_wait_cycle — the same
+// substrate as atomic::wait: a bounded spin (WAITPKG UMONITOR/UMWAIT on the
+// counter word, else a PAUSE budget) and then a real kernel park. A cabin
+// holds many strands, so acquirers genuinely block and genuinely park.
 //
-// Timed acquires use the <mutex> cooperative deadline-spin
-// (__mutex_impl::TimedBackoff: PAUSE budget then yield, re-checking a <chrono>
-// clock between steps) rather than the WAITPKG-capped wait, whose 50 ms cap
-// would overshoot the caller's deadline.
+// release() therefore notifies explicitly. The store alone only reaches a
+// waiter still in its spin; one already parked is asleep in the kernel and is
+// woken by nothing but __boxcxx_atomic_notify.
 //
-// One thread per cabin means no acquirer ever actually blocks today; the
-// contract is the multi-thread one and the spins upgrade to a kernel park
-// (acquire) / kernel timed-park (try_acquire_for/until) once strands land,
-// with no signature change.
+// Timed acquires (try_acquire_for/until) park with the caller's REMAINING
+// budget via __boxcxx_atomic_wait_until, so a release wakes them early and an
+// expiry costs no spinning — the budget is what bounds the park, not the
+// WAITPKG 50 ms cap, which would overshoot the caller's deadline.
 #ifndef BOXCXX_SEMAPHORE
 #define BOXCXX_SEMAPHORE
 
-#include <mutex> // atomic, <chrono> bits, __mutex_impl::TimedBackoff;
+#include <mutex> // atomic, <chrono> bits, __mutex_impl::RemainingMs;
                  // transitively __boxcxx_atomic_wait_cycle
 #include <cstddef>
 #include <cstdint>

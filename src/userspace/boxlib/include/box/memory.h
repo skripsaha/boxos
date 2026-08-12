@@ -38,7 +38,8 @@ void* malloc_tagged(size_t size, const char *tag);
 #define malloc(...)  _MALLOC_CAT(_malloc_, _MALLOC_NARG(__VA_ARGS__))(__VA_ARGS__)
 
 // ---------------------------------------------------------------------------
-// Standard allocator interface (thread-safe via umutex)
+// Standard allocator interface (thread-safe via the heap uspin_t — the
+// allocator's lock spins by design; see box/sync.h for why it cannot park)
 // ---------------------------------------------------------------------------
 
 void  free(void* ptr);

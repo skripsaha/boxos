@@ -28,8 +28,15 @@ error_t addr_park(const volatile void *addr, uint64_t expected,
 
     /* Use timeout_ms as the MfCall1 wall-clock budget; add a small margin
      * so the kernel timeout fires before the syscall itself times out.
-     * For forever waits (timeout_ms==0) use a generous default. */
-    uint32_t call_timeout = timeout_ms > 0 ? timeout_ms + 100 : 30000;
+     * For forever waits (timeout_ms==0) use a generous default. The margin
+     * saturates instead of wrapping: a caller passing a near-UINT32_MAX budget
+     * (std::mutex's RemainingMs clamps there for a far-future deadline) would
+     * otherwise wrap to 99 ms and re-enter the kernel ten times a second for
+     * the whole wait instead of parking once. */
+    uint32_t call_timeout;
+    if (timeout_ms == 0)                     call_timeout = 30000;
+    else if (timeout_ms > 0xFFFFFFFFu - 100) call_timeout = 0xFFFFFFFFu;
+    else                                     call_timeout = timeout_ms + 100;
 
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_ADDR_PARK,
                      params, sizeof(params),

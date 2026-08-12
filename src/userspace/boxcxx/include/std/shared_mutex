@@ -2,9 +2,11 @@
 //
 // std::shared_mutex / shared_timed_mutex / shared_lock — a reader/writer
 // lock over a single atomic state word. No pthread_rwlock and no
-// condition_variable underneath (boxcxx has neither); the blocking paths
-// spin on __boxcxx_atomic_wait_cycle (WAITPKG UMONITOR/UMWAIT on the state
-// word, else PAUSE budget then yield) — the same substrate as atomic::wait.
+// condition_variable underneath (boxcxx has neither); the blocking paths go
+// through __boxcxx_atomic_wait_cycle — the same substrate as atomic::wait: a
+// bounded spin (WAITPKG UMONITOR/UMWAIT on the state word, else a PAUSE
+// budget) and then a real kernel park. Every unlock that can free a blocked
+// party notifies explicitly, since a parked one sees no store.
 //
 // State word: the high bit (kWriteEntered) marks that a writer has entered —
 // it holds the lock exclusively, or it set the bit and is draining the
@@ -12,19 +14,14 @@
 // the bit blocks new readers and then waits for existing readers to leave,
 // so a steady stream of readers cannot starve a writer.
 //
-// One thread per cabin means no contention materialises until the strands
-// epic; every path is its fast path today. The contract is already the
-// multi-thread one, and the indefinite spins upgrade to a kernel park —
-// the timed spins to a kernel timed-park — with no signature change.
-//
-// shared_timed_mutex's timed acquires use the cooperative deadline-spin from
-// <mutex> (__mutex_impl::TimedBackoff: PAUSE budget then yield, re-checking
-// a <chrono> clock between steps) rather than the WAITPKG-capped wait, whose
-// 50 ms cap would overshoot the caller's deadline.
+// shared_timed_mutex's timed acquires park with the caller's REMAINING budget
+// via __boxcxx_atomic_wait_until, so an unlock wakes them early and an expiry
+// costs no spinning — the budget bounds the park, not the WAITPKG 50 ms cap,
+// which would overshoot the caller's deadline.
 #ifndef BOXCXX_SHARED_MUTEX
 #define BOXCXX_SHARED_MUTEX
 
-#include <mutex> // atomic, <chrono> bits, __mutex_impl::TimedBackoff, lock
+#include <mutex> // atomic, <chrono> bits, __mutex_impl::RemainingMs, lock
 #include <__bits/version_sync>
                  // tags, system_error; transitively __boxcxx_atomic_wait_cycle
 

@@ -63,7 +63,7 @@ static uint8_t heap_tag_count = 0;
 
 // ---- internal state (all access under heap_lock) --------------------------
 
-static umutex_t  heap_lock    = UMUTEX_INIT;
+static uspin_t   heap_lock    = USPIN_INIT;
 static block_t*  free_list    = NULL;
 static uintptr_t heap_base    = 0;
 static uintptr_t heap_current = 0;
@@ -478,7 +478,7 @@ static StrandPool *pool_claim(StrandInfo *si) {
     StrandPool *claimed = NULL;
     uint32_t    claimed_gen = 0;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     for (int pass = 0; pass < 2 && !claimed; pass++) {
         for (unsigned i = 0; i < STRAND_POOL_SLAB_MAX; i++) {
             StrandPool *p = &g_pool_slab[i];
@@ -508,7 +508,7 @@ static StrandPool *pool_claim(StrandInfo *si) {
             __atomic_store_n(&g_strandpool_orphan_pending, 0, __ATOMIC_RELEASE);
         }
     }
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 
     if (claimed) {
         /* Cache the pointer for the lock-free fast path, THEN bind to the kernel
@@ -577,7 +577,7 @@ void strand_pool_flush_self(void) {
     if (si && si->strand_pool_ptr == 0) return;
     if (!si && __atomic_load_n(&g_main_pool.GenState, __ATOMIC_ACQUIRE) == 0) return;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++)
         pool_flush_class_locked(pool, c, (unsigned)-1);
     coalesce_locked();
@@ -586,7 +586,7 @@ void strand_pool_flush_self(void) {
     __atomic_store_n(&pool->GenState,
                      STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
                      __ATOMIC_RELEASE);
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 
     if (si) si->strand_pool_ptr = 0;
 }
@@ -601,7 +601,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
     const unsigned c = 3;  /* the 64-byte class */
     if (n_blocks == 0 || n_blocks > StrandPoolCapForClass[c]) return 0;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     /* Find a FREE spare slot near the top of the slab (away from live claims). */
     StrandPool *slot = NULL;
@@ -611,7 +611,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
             break;
         }
     }
-    if (!slot) { umutex_unlock(&heap_lock); return 0; }
+    if (!slot) { uspin_unlock(&heap_lock); return 0; }
 
     uint32_t gen = STRANDPOOL_GEN(slot->GenState);
 
@@ -650,7 +650,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
              (slot->Heads[c] == NULL) && (slot->Counts[c] == 0) &&
              (staged > 0) && (live_after + staged == live_before);
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return ok;
 }
 
@@ -673,17 +673,17 @@ void* _malloc_impl(size_t size) {
     if (c == STRAND_POOL_NO_CLASS || !pool) {
         /* Oversized request, or no slab slot available — serve from the locked
          * global heap. alloc_locked records the cause in this strand's cell. */
-        umutex_lock(&heap_lock);
+        uspin_lock(&heap_lock);
         void* ptr = alloc_locked(size, HEAP_TAG_NONE, errcell);
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         return ptr;
     }
 
     if (!pool->Heads[c]) {
-        umutex_lock(&heap_lock);
+        uspin_lock(&heap_lock);
         reclaim_orphans_scan_locked();
         pool_refill_locked(pool, c);
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         if (!pool->Heads[c]) {
             *errcell = ERR_HEAP_EXHAUSTED;
             return NULL;
@@ -703,10 +703,10 @@ void* malloc_tagged(size_t size, const char *tag) {
     /* pool_self() (which may claim a slot) is called BEFORE the heap lock —
      * pool_claim takes the lock itself, so resolving it here avoids re-entry. */
     error_t *errcell = heap_err_cell_for(pool_self());
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     uint8_t tag_id = get_or_create_tag_locked(tag);
     void* ptr = alloc_locked(size, tag_id, errcell);
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return ptr;
 }
 
@@ -714,7 +714,7 @@ void* malloc_tagged(size_t size, const char *tag) {
  * free()'s global cases (corrupt/double-free/tagged/oversized/overflow). */
 static void free_global(void* ptr) {
     error_t *errcell = heap_err_cell_for(pool_self());
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     stat_free_calls++;
 
@@ -722,13 +722,13 @@ static void free_global(void* ptr) {
 
     if (block->magic != HEAP_MAGIC) {
         *errcell = ERR_CORRUPTED;
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         return;
     }
 
     if (block->free) {
         *errcell = ERR_INVALID_ADDRESS;
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         return;
     }
 
@@ -737,7 +737,7 @@ static void free_global(void* ptr) {
     coalesce_locked();
 
     *errcell = OK;
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 }
 
 void free(void* ptr) {
@@ -775,11 +775,11 @@ void free(void* ptr) {
     }
 
     if (pool->Counts[c] >= StrandPoolCapForClass[c]) {
-        umutex_lock(&heap_lock);
+        uspin_lock(&heap_lock);
         reclaim_orphans_scan_locked();
         pool_flush_class_locked(pool, c, STRAND_POOL_REFILL_BATCH);
         coalesce_locked();
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
     }
 
     *(void **)ptr  = pool->Heads[c];
@@ -812,12 +812,12 @@ void* realloc(void* ptr, size_t size) {
     }
 
     error_t *errcell = heap_err_cell_for(pool_self());
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
     if (block->magic != HEAP_MAGIC) {
         *errcell = ERR_CORRUPTED;
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         return NULL;
     }
 
@@ -836,7 +836,7 @@ void* realloc(void* ptr, size_t size) {
             block->next  = split;
         }
         *errcell = OK;
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
         return ptr;
     }
 
@@ -857,7 +857,7 @@ void* realloc(void* ptr, size_t size) {
                 block->next  = split;
             }
             *errcell = OK;
-            umutex_unlock(&heap_lock);
+            uspin_unlock(&heap_lock);
             return ptr;
         }
     }
@@ -865,7 +865,7 @@ void* realloc(void* ptr, size_t size) {
     // Must relocate — save old tag and size, then drop lock
     size_t old_size = block->size;
     uint8_t old_tag = block->tag;
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 
     void* new_ptr = _malloc_impl(size);
     if (!new_ptr) return NULL;
@@ -875,12 +875,12 @@ void* realloc(void* ptr, size_t size) {
 
     // Restore tag on the new block
     if (old_tag != HEAP_TAG_NONE) {
-        umutex_lock(&heap_lock);
+        uspin_lock(&heap_lock);
         block_t* new_block = (block_t*)((uint8_t*)new_ptr - BLOCK_HDR_SIZE);
         if (new_block->magic == HEAP_MAGIC) {
             new_block->tag = old_tag;
         }
-        umutex_unlock(&heap_lock);
+        uspin_unlock(&heap_lock);
     }
 
     return new_ptr;
@@ -891,16 +891,16 @@ void* realloc(void* ptr, size_t size) {
 // ---------------------------------------------------------------------------
 
 uint8_t heap_register_tag(const char *name) {
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     uint8_t id = get_or_create_tag_locked(name);
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return id;
 }
 
 uint8_t heap_lookup_tag(const char *name) {
     if (!name) return HEAP_TAG_NONE;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     uint8_t result = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
         if (strncmp(heap_tag_names[i], name, HEAP_TAG_NAME_MAX - 1) == 0) {
@@ -908,23 +908,23 @@ uint8_t heap_lookup_tag(const char *name) {
             break;
         }
     }
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return result;
 }
 
 const char *heap_tag_name(uint8_t id) {
     if (id == HEAP_TAG_NONE || id >= HEAP_TAG_CAP) return NULL;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
     const char *name = (id < heap_tag_count) ? heap_tag_names[id] : NULL;
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return name;
 }
 
 size_t heap_count_tag(const char *tag) {
     if (!tag) return 0;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     uint8_t tag_id = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
@@ -944,14 +944,14 @@ size_t heap_count_tag(const char *tag) {
         }
     }
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
     return count;
 }
 
 void heap_iterate_tag(const char *tag, HeapTagCallback cb, void *userdata) {
     if (!tag || !cb) return;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     uint8_t tag_id = HEAP_TAG_NONE;
     for (uint8_t i = 0; i < heap_tag_count; i++) {
@@ -973,13 +973,13 @@ void heap_iterate_tag(const char *tag, HeapTagCallback cb, void *userdata) {
         }
     }
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 }
 
 void heap_iterate_all_tagged(HeapTagCallback cb, void *userdata) {
     if (!cb) return;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     block_t* curr = free_list;
     while (curr) {
@@ -994,11 +994,11 @@ void heap_iterate_all_tagged(HeapTagCallback cb, void *userdata) {
         curr = curr->next;
     }
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 }
 
 void heap_dump_tags(void) {
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     printf("[heap] tagged live blocks:\n");
 
@@ -1027,7 +1027,7 @@ void heap_dump_tags(void) {
         printf("[heap]   (none)\n");
     }
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 }
 
 // ---------------------------------------------------------------------------
@@ -1037,7 +1037,7 @@ void heap_dump_tags(void) {
 void heap_get_stats(heap_stats_t *out) {
     if (!out) return;
 
-    umutex_lock(&heap_lock);
+    uspin_lock(&heap_lock);
 
     out->total_allocated = 0;
     out->total_free      = 0;
@@ -1060,5 +1060,5 @@ void heap_get_stats(heap_stats_t *out) {
         curr = curr->next;
     }
 
-    umutex_unlock(&heap_lock);
+    uspin_unlock(&heap_lock);
 }

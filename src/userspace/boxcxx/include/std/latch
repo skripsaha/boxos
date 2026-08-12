@@ -1,15 +1,16 @@
 // boxcxx — <latch>
 //
 // std::latch — a single-use down-counter. Participants count_down() and
-// wait() until it reaches zero; it never resets. wait() spins on
-// __boxcxx_atomic_wait_cycle (WAITPKG UMONITOR/UMWAIT on the counter word,
-// else PAUSE budget then yield) — the same substrate as atomic::wait. The
-// wake is implicit: the count_down store lands on the counter's cacheline
-// and every waiter re-checks its predicate.
+// wait() until it reaches zero; it never resets. wait() goes through
+// __boxcxx_atomic_wait_cycle — the same substrate as atomic::wait: a bounded
+// spin (WAITPKG UMONITOR/UMWAIT on the counter word, else a PAUSE budget)
+// and then a real kernel park.
 //
-// One thread per cabin means no waiter ever actually blocks today; the
-// contract is the multi-thread one and the spin upgrades to a kernel park
-// once strands land, with no signature change.
+// Two wakes, and only one of them is implicit. During the spin the count_down
+// store suffices: it lands on the monitored cacheline and the waiter re-checks
+// its predicate. A parked waiter is sleeping in the kernel and cannot see any
+// store, so the arrival that drives the count to zero must notify explicitly —
+// that is the __boxcxx_atomic_notify in count_down, not decoration.
 #ifndef BOXCXX_LATCH
 #define BOXCXX_LATCH
 
@@ -33,7 +34,9 @@ public:
     latch &operator=(const latch &) = delete;
 
     // Preconditions ([thread.latch]): n >= 0 and n <= the current count.
-    // The store wakes any waiter monitoring the counter's cacheline.
+    // Only the arrival that reaches zero notifies: that is the single edge
+    // any waiter's predicate cares about, so intermediate decrements owe the
+    // kernel nothing.
     void count_down(ptrdiff_t n = 1)
     {
         if (__counter.fetch_sub(n, memory_order_release) - n == 0)

@@ -1,13 +1,17 @@
 // boxcxx — <mutex>
 //
-// std::mutex family over boxlib's umutex_t (box/sync.h) — the single
-// userspace lock primitive (TAS + PAUSE backoff + yield). One thread
-// per cabin today, so contention only materialises after the strands
-// epic; the API contract is already the multi-thread one.
+// std::mutex family over boxlib's umutex_t (box/sync.h) — a futex, not a
+// spin lock. A cabin holds many strands, so contention is real: a
+// contender spins only long enough to cover a short critical section,
+// then parks in the kernel until an unlock wakes it. An uncontended
+// lock/unlock pair enters the kernel zero times; a CONTENDED unlock does
+// make a syscall, and unlock is destructor-reachable, so ~lock_guard on a
+// contended mutex can block for that wake (it cannot fail the unlock —
+// the lock word is free before the wake is attempted).
 //
 // recursive_mutex ownership identity = __boxcxx_thread_id(): the
-// address of a thread_local anchor (src/runtime/mutex.cpp). Unique per
-// thread within a cabin, and automatically correct once strands land.
+// address of a thread_local anchor (src/runtime/mutex.cpp) — unique per
+// strand, since each strand's thread_local block is its own.
 // Mutexes are cabin-private — sharing one across cabins through a Bay
 // is outside the std contract (same stance as every libstdc++ build
 // without process-shared pthreads).
@@ -16,12 +20,12 @@
 // std-mandated errc codes. recursive_mutex::unlock by a non-owner is UB
 // per the standard — boxcxx panics there as a diagnostic.
 //
-// timed_mutex / recursive_timed_mutex add try_lock_for/try_lock_until as a
-// cooperative deadline-spin: umutex_trylock retried with a PAUSE budget
-// then yield, re-checking a <chrono> clock between steps. Precise to a
-// yield interval (no WAITPKG 50 ms cap, which would overshoot the caller's
-// deadline). One thread per cabin means no contention yet; the spin
-// upgrades to a kernel timed-park once strands land, with no API change.
+// timed_mutex / recursive_timed_mutex add try_lock_for/try_lock_until over
+// umutex_lock_timeout: the park is bounded by what is left of the caller's
+// <chrono> deadline, so an unlock wakes the waiter early and an expiry costs
+// no spinning. The caller owns the deadline and hands down a fresh budget
+// each round; a sub-millisecond remainder rounds up to 1 ms, because 0 means
+// "forever" to the park.
 // Only the lightweight <chrono> duration/clock bits are pulled in — not the
 // calendar/format machinery — so <mutex> stays a cheap include.
 #ifndef BOXCXX_MUTEX
@@ -45,26 +49,14 @@ namespace boxcxx {
 
 namespace std {
 
-// One backoff step for a timed-acquire loop: a short PAUSE budget, then a
-// cooperative yield. The caller re-checks its <chrono> deadline between
-// steps, so the wait is precise to a yield interval.
 namespace __mutex_impl {
 
-inline void TimedBackoff(unsigned &spin) noexcept
-{
-    constexpr unsigned kSpinBudget = 64;
-    if (spin++ < kSpinBudget)
-        __asm__ volatile("pause");
-    else {
-        spin = 0;
-        yield();
-    }
-}
-
 // Remaining time until `abs` as a millisecond budget for a timed kernel park
-// (__boxcxx_atomic_wait_until), clamped to [0, UINT32_MAX]. 0 ⇒ the deadline
-// has already passed; sub-millisecond remainders round up to 1 so the caller
-// still parks-with-budget rather than busy-looping the final fraction.
+// (umutex_lock_timeout / __boxcxx_atomic_wait_until), clamped to
+// [0, UINT32_MAX]. 0 ⇒ the deadline has already passed; sub-millisecond
+// remainders round up to 1 so the caller parks-with-budget rather than
+// busy-looping the final fraction — and so it never hands 0 to a park, where
+// that value means "wait forever".
 template <typename Clock, typename Duration>
 inline unsigned RemainingMs(const chrono::time_point<Clock, Duration> &abs) noexcept
 {
@@ -82,7 +74,7 @@ inline unsigned RemainingMs(const chrono::time_point<Clock, Duration> &abs) noex
 
 class mutex {
 public:
-    constexpr mutex() noexcept : __m{0} {}
+    constexpr mutex() noexcept : __m{0, 0} {}
     ~mutex() = default;
     mutex(const mutex &) = delete;
     mutex &operator=(const mutex &) = delete;
@@ -100,7 +92,7 @@ private:
 
 class recursive_mutex {
 public:
-    recursive_mutex() noexcept : __m{0} {}
+    recursive_mutex() noexcept : __m{0, 0} {}
     ~recursive_mutex() = default;
     recursive_mutex(const recursive_mutex &) = delete;
     recursive_mutex &operator=(const recursive_mutex &) = delete;
@@ -153,7 +145,7 @@ private:
 
 class timed_mutex {
 public:
-    timed_mutex() noexcept : __m{0} {}
+    timed_mutex() noexcept : __m{0, 0} {}
     ~timed_mutex() = default;
     timed_mutex(const timed_mutex &) = delete;
     timed_mutex &operator=(const timed_mutex &) = delete;
@@ -171,11 +163,21 @@ public:
     template <typename Clock, typename Duration>
     bool try_lock_until(const chrono::time_point<Clock, Duration> &abs)
     {
-        unsigned spin = 0;
+        // One attempt always happens, even for a deadline already in the past:
+        // a free mutex must still be acquired, exactly as before.
+        if (umutex_trylock(&__m)) return true;
         for (;;) {
-            if (umutex_trylock(&__m)) return true;
-            if (Clock::now() >= abs) return false;
-            __mutex_impl::TimedBackoff(spin);
+            // Then the park is bounded by what is left of the deadline, so an
+            // unlock wakes us early and an expiry costs no spinning.
+            unsigned ms = __mutex_impl::RemainingMs(abs);
+            if (ms == 0) {
+                // We may have been handed the single wake an unlock issued and
+                // then run out of budget. Pass it on rather than leave a
+                // sibling asleep on a free mutex.
+                umutex_wake_waiter(&__m);
+                return false;
+            }
+            if (umutex_lock_timeout(&__m, ms)) return true;
         }
     }
 
@@ -188,7 +190,7 @@ private:
 
 class recursive_timed_mutex {
 public:
-    recursive_timed_mutex() noexcept : __m{0} {}
+    recursive_timed_mutex() noexcept : __m{0, 0} {}
     ~recursive_timed_mutex() = default;
     recursive_timed_mutex(const recursive_timed_mutex &) = delete;
     recursive_timed_mutex &operator=(const recursive_timed_mutex &) = delete;
@@ -232,15 +234,24 @@ public:
             ++__depth;
             return true;
         }
-        unsigned spin = 0;
+        // One attempt always happens, even for an expired deadline (see
+        // timed_mutex::try_lock_until).
+        if (umutex_trylock(&__m)) {
+            __owner.store(self, memory_order_relaxed);
+            __depth = 1;
+            return true;
+        }
         for (;;) {
-            if (umutex_trylock(&__m)) {
+            unsigned ms = __mutex_impl::RemainingMs(abs);
+            if (ms == 0) {
+                umutex_wake_waiter(&__m);   // see timed_mutex::try_lock_until
+                return false;
+            }
+            if (umutex_lock_timeout(&__m, ms)) {
                 __owner.store(self, memory_order_relaxed);
                 __depth = 1;
                 return true;
             }
-            if (Clock::now() >= abs) return false;
-            __mutex_impl::TimedBackoff(spin);
         }
     }
 
