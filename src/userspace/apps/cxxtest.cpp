@@ -36091,6 +36091,202 @@ void Phase142()
            "without touching the heap\n");
 }
 
+// ── phase143: box::math stops lying about compass points and decimals ───────
+// Three measured defects, all in include/box/cxx/math.h:
+//
+//   * round(x, digits) scaled by 10^digits and back. round(1e308, 5) came out
+//     inf and round(1.5, 400) came out NaN — a finite input leaving the finite
+//     numbers. The tie rule was also unpredictable rather than wrong: 2.675
+//     rounded up to 2.68 while 1.005 rounded down to 1.00, because the stored
+//     doubles sit on opposite sides of their midpoints.
+//   * log(x, base) was always log(x)/log(base), which loses exactness on
+//     powers of the base — while root(x, n), three lines away in the same file,
+//     has had exact entries for its square and cube cases all along. The size
+//     of the loss is a property of this cmath and is measured below, not
+//     quoted from elsewhere.
+//   * degrees and turns were converted straight to radians, so sin(180, deg)
+//     came out near 1.2e-16 (the double nearest pi is not pi) and the error
+//     grew in proportion to the angle, since the whole angle was multiplied by
+//     a rounded constant before <cmath> ever saw it.
+//
+// The compass checks below are the deliverable. The sweep at the end is the
+// honest counterweight: reducing onto the quadrant changes which <cmath> entry
+// computes a given angle, so it has to be shown that ordinary angles did not
+// get worse. That question can only be answered here — a host libm has its own
+// sin/cos balance and predicts nothing about this one — and it is answered
+// against a genuine 80-bit long double reference (Ф27).
+void Phase143()
+{
+    // ── the compass points ──────────────────────────────────────────────────
+    Check(box::sin(0.0, box::deg) == 0.0 && box::sin(90.0, box::deg) == 1.0 &&
+              box::sin(180.0, box::deg) == 0.0 && box::sin(270.0, box::deg) == -1.0 &&
+              box::sin(360.0, box::deg) == 0.0,
+          "phase143 (1) sin is exactly 0 and +-1 on the compass points");
+    Check(box::cos(0.0, box::deg) == 1.0 && box::cos(90.0, box::deg) == 0.0 &&
+              box::cos(180.0, box::deg) == -1.0 && box::cos(270.0, box::deg) == 0.0 &&
+              box::cos(360.0, box::deg) == 1.0,
+          "phase143 (2) cos is exactly 0 and +-1 on the compass points");
+    Check(box::sin(450.0, box::deg) == 1.0 && box::cos(450.0, box::deg) == 0.0 &&
+              box::sin(-90.0, box::deg) == -1.0 && box::cos(-90.0, box::deg) == 0.0 &&
+              box::cos(-180.0, box::deg) == -1.0,
+          "phase143 (3) past one turn and below zero the compass still holds");
+    Check(box::tan(0.0, box::deg) == 0.0 && box::tan(45.0, box::deg) == 1.0 &&
+              box::tan(135.0, box::deg) == -1.0 && box::tan(180.0, box::deg) == 0.0 &&
+              box::tan(225.0, box::deg) == 1.0 && box::tan(315.0, box::deg) == -1.0 &&
+              box::tan(-45.0, box::deg) == -1.0,
+          "phase143 (4) tan is exactly 0 and +-1 on every multiple of 45 degrees");
+    // Every angle in (4) is a multiple of 45, and those come straight out of a
+    // table — so (4) alone never reaches the branch that actually computes.
+    // tan has period 180, which makes an odd quadrant the CO-tangent:
+    // tan(90+f) is -cot(f), not -tan(f). Getting that wrong returns 0.577
+    // where 1.732 belongs, and nothing above would notice.
+    Check(std::fabs(box::tan(120.0, box::deg) -
+                    std::tan(120.0 * (std::kPi / 180.0))) < 1e-12 &&
+              std::fabs(box::tan(200.0, box::deg) -
+                        std::tan(200.0 * (std::kPi / 180.0))) < 1e-12 &&
+              std::fabs(box::tan(300.0, box::deg) -
+                        std::tan(300.0 * (std::kPi / 180.0))) < 1e-12,
+          "phase143 (5) tan is right inside every quadrant, not only on the 45s");
+    Check(box::tan(90.0, box::deg) == std::kInf && box::tan(270.0, box::deg) == -std::kInf,
+          "phase143 (6) tan reports its poles as infinities, following sin/cos");
+    Check(box::sin(0.5, box::turn) == 0.0 && box::cos(0.25, box::turn) == 0.0 &&
+              box::sin(0.25, box::turn) == 1.0 && box::cos(0.5, box::turn) == -1.0,
+          "phase143 (7) turns land on the compass too");
+    Check(std::signbit(box::sin(-0.0, box::deg)) && box::sin(-0.0, box::deg) == 0.0 &&
+              !std::signbit(box::cos(-0.0, box::deg)),
+          "phase143 (8) sin keeps the sign of a negative zero, cos does not");
+    // The zeros AND their signs. Without the sign half, nothing here can see the
+    // compass tables at all: with f == 0 the reduction already lands on an exact
+    // sin(0)/cos(0), so dropping the tables still compares equal to 0.0. What it
+    // does change is 180 degrees to -0.0 and 90 degrees to -0.0, where the exact
+    // value is +0 — a zero result from non-zero operands is positive.
+    Check(!std::signbit(box::sin(180.0, box::deg)) &&
+              !std::signbit(box::sin(360.0, box::deg)) &&
+              !std::signbit(box::cos(90.0, box::deg)) &&
+              !std::signbit(box::cos(270.0, box::deg)) &&
+              std::signbit(box::sin(-180.0, box::deg)),
+          "phase143 (9) the compass zeros are positive zeros, and sin(-180) is negative");
+
+    // (8) the error no longer grows with the angle: this one was 5.07e-10.
+    Check(box::cos(1e6 * 360.0 + 90.0, box::deg) == 0.0 &&
+              box::sin(1e6 * 360.0 + 90.0, box::deg) == 1.0,
+          "phase143 (10) a million turns past the compass point is still exact");
+
+    // (9) the quadrant split reads a quadrant index out of the angle; a
+    //     non-finite input must never reach that conversion.
+    Check(std::isnan(box::sin(std::kInf, box::deg)) &&
+              std::isnan(box::cos(std::kQNaN, box::deg)) &&
+              std::isnan(box::tan(std::kInf, box::turn)),
+          "phase143 (11) infinities and NaNs come back as NaN, not as a quadrant");
+
+    // ── log: the entries root() has always had ──────────────────────────────
+    // The claim is about which entry gets called, so it is stated against THIS
+    // cmath rather than against an idealised answer: log(x, 2) must BE log2(x)
+    // and log(x, 10) must BE log10(x). How exact those two are is a property of
+    // <cmath>, not of this change — the earlier draft asserted "every power of
+    // ten comes out exact", which is true of a host libm and false here.
+    {
+        int same2 = 0, same10 = 0, exact_new = 0, exact_ratio = 0;
+        for (int i = 0; i < 64; i++) {
+            const double x = std::pow(2.0, (double)i);
+            if (box::log(x, 2.0) == std::log2(x)) same2++;
+            if (box::log(x, 2.0) == (double)i) exact_new++;
+            if (std::log(x) / std::log(2.0) == (double)i) exact_ratio++;
+        }
+        for (int i = 0; i < 23; i++) {
+            const double x = std::pow(10.0, (double)i);
+            if (box::log(x, 10.0) == std::log10(x)) same10++;
+            if (box::log(x, 10.0) == (double)i) exact_new++;
+            if (std::log(x) / std::log(10.0) == (double)i) exact_ratio++;
+        }
+        Check(same2 == 64, "phase143 (12) log(x, 2) is log2(x) on every power of two");
+        Check(same10 == 23, "phase143 (13) log(x, 10) is log10(x) on every power of ten");
+        // The two above would also pass on code that never took the fast path,
+        // if the ratio happened to agree. This is the observable gain, measured
+        // here rather than assumed: on this cmath it is 86 of 87 against 70.
+        Check(exact_new > exact_ratio && exact_new >= 86,
+              "phase143 (14) more of the 87 exact powers land exactly than the ratio managed");
+        printf("[CXX] note phase143: %d of 87 exact powers come back exact through "
+               "log(x,2)/log(x,10), against %d through the old log(x)/log(base)\n",
+               exact_new, exact_ratio);
+        // an ordinary base still goes the general way, and ln is untouched
+        Check(std::fabs(box::log(243.0, 3.0) - 5.0) < 1e-14 && box::log(1.0) == 0.0,
+              "phase143 (15) other bases and plain ln are unchanged");
+    }
+
+    // ── round: finite in, finite out ────────────────────────────────────────
+    Check(box::round(1e308, 5) == 1e308 && box::round(1.5, 400) == 1.5 &&
+              box::round(1.0, 309) == 1.0 && box::round(1e308, -400) == 0.0,
+          "phase143 (16) a finite input never rounds to an infinity or a NaN");
+    Check(box::round(2.675, 2) == 2.67 && box::round(1.005, 2) == 1.00 &&
+              box::round(0.145, 2) == 0.14 && box::round(8.835, 2) == 8.84,
+          "phase143 (17) rounding follows the value the double actually holds");
+    Check(box::round(12345.0, -2) == 12300.0 && box::round(3.14159, 3) == 3.142 &&
+              box::round(1e-320, 325) == 1e-320,
+          "phase143 (18) negative digits, ordinary digits and subnormals all hold");
+    Check(std::signbit(box::round(-0.0, 2)) && box::round(-0.0, 2) == 0.0 &&
+              std::signbit(box::round(-1e-9, 2)),
+          "phase143 (19) a negative value keeps its sign through zero");
+
+    // (18) the tie rule did NOT change: box::round has always broken ties away
+    //      from zero because std::round does, and the decimal conversion breaks
+    //      them to even. Every exact half-step is a tie, so this sweep is the
+    //      discriminator; without the correction it fails on every other one.
+    {
+        int mism = 0;
+        for (int i = -20000; i <= 20000; i++) {
+            double x = (double)i * 0.5;
+            if (box::round(x, 0) != std::round(x)) mism++;
+        }
+        Check(mism == 0,
+              "phase143 (20) 40001 half-steps agree with std::round, ties away from zero");
+        Check(box::round(2.5, 0) == 3.0 && box::round(-2.5, 0) == -3.0 &&
+                  box::round(1.25, 1) == 1.3 && box::round(0.125, 2) == 0.13,
+              "phase143 (21) the named ties round away from zero, not to even");
+    }
+
+    // ── ordinary angles did not get worse ───────────────────────────────────
+    // Reference in genuine 80-bit long double; `plain` is what the header used
+    // to do — convert the whole angle and hand it to <cmath>.
+    {
+        constexpr long double kPiL = std::numbers::pi_v<long double>;
+        double        worst_new = 0.0;
+        long double   sum_new = 0.0L, sum_old = 0.0L;
+        for (int i = 1; i <= 3600; i++) {
+            const double      d     = (double)i * 0.1;
+            const long double ref_s = std::sin((long double)d * kPiL / 180.0L);
+            const double      plain = std::sin(d * (std::kPi / 180.0));
+            const double      got   = box::sin(d, box::deg);
+            const long double e_new = std::fabs((long double)got - ref_s);
+            const long double e_old = std::fabs((long double)plain - ref_s);
+            sum_new += e_new;
+            sum_old += e_old;
+            if ((double)e_new > worst_new) worst_new = (double)e_new;
+        }
+        Check(worst_new <= 1e-15,
+              "phase143 (22) no sampled angle is off by more than about four ulp");
+        // Measured on BoxOS, which is the only oracle that counts here: the
+        // reduced path totals 1.19e-13 against 3.14e-13 for the plain
+        // conversion. A host libm gave the opposite ranking, which is exactly
+        // why this is asserted here and not there. Pure arithmetic, so the
+        // numbers do not move between configurations.
+        Check(sum_new < sum_old,
+              "phase143 (23) reducing onto the quadrant makes ordinary angles closer too");
+        // boxlib's printf carries no floating-point conversion at all (s/d/u/x/
+        // c/p only), so the numbers go through std::format.
+        printf("[CXX] note phase143: %s\n",
+               std::format("swept 3600 angles — total |error| new {:.3e} vs "
+                           "plain-conversion {:.3e}, worst new {:.3e}",
+                           (double)sum_new, (double)sum_old, worst_new)
+                   .c_str());
+    }
+
+    printf("[CXX] PASS phase143: box::math — the compass points are exact, the error stops "
+           "growing with the angle, log(x,2)/log(x,10) reach their own <cmath> entries, and "
+           "round() reports the value the double really holds without leaving the finite "
+           "numbers\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36255,6 +36451,7 @@ int main()
     Phase140();
     Phase141();
     Phase142();
+    Phase143();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
