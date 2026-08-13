@@ -35787,6 +35787,204 @@ void Phase140()
            "block, and whose invariant survives a throw on every relocation path\n");
 }
 
+// ── phase141: one mold, two casts — the TLS image cannot drift (Ф31c-3) ─────
+// tls_init.cpp casts the main strand's C++ TLS block on the heap; tls_strand.cpp
+// casts a spawned strand's into the kernel's neg-TLS page. Both must place a
+// thread_local on the ONE negative offset the linker fixed for it. Ф31c-3 moved
+// that arithmetic into src/tls/tls_mold.h so it exists once instead of twice.
+//
+// What this phase can and cannot see is worth stating, because the obvious test
+// is vacuous: (&var - fsbase) is NOT evidence of anything. The compiler forms
+// &var as fs_base + var_offset with a link-time constant, so that difference is
+// the same number on every strand no matter what either cast did with the image.
+//
+// The image placement is observable only through the VALUES read back. If a cast
+// puts the block at the wrong distance below the thread pointer, the compiler
+// still reads at fs_base + var_offset — now landing beside the variable's real
+// bytes. So the net here is a .tdata fixture that is distinctive at 64-byte
+// granularity (kAlign): a mold off by one alignment step reads a neighbouring
+// cell, and no word of the fixture survives.
+//
+//   (1) main strand reads its whole .tdata image, word for word.
+//   (2) main strand's .tbss half is zero.
+//   (3) every worker strand really started (a silent spawn failure reads
+//       exactly like a passing block).
+//   (4) every spawned strand reads the whole .tdata image, word for word.
+//   (5) no worker saw main's sentinel: main overwrites its OWN copy before
+//       spawning, so a cast sourcing the image from the wrong place shows up.
+//   (6) every spawned strand's .tbss half is zero.
+//   (7) the strands hold different storage — without this, (4) could pass by
+//       reading main's block rather than a per-strand cast.
+//   (8) the image still fits the single page the kernel maps and tls_strand.cpp
+//       Panics above: a build-shape guard for future thread_local growth.
+//   (9) main's poisoned copy is restored for the phases that follow.
+//
+// Measured non-emptiness (Ф31c-3, bios1), rather than assumed:
+//   * image shifted one kAlign step  -> (4) red. phase36/37 red too.
+//   * .tdata copy 4 bytes short      -> (4) red, and phase36/37 stay GREEN —
+//     so this phase is not a restatement of the older TLS coverage.
+//   * main strand's memset dropped   -> SURVIVES. The bootstrap runs as the
+//     first .init_array ctor, so its heap block is still pristine and reads
+//     zero anyway. (2) therefore pins the contract, not the memset; the memset
+//     stays because malloc'd storage is not zero by rule, only by luck here.
+
+static constexpr uint32_t kP141Workers = 4;
+
+// 64 bytes of .tdata, every word distinct: an image shifted by one kAlign step
+// lands on a neighbouring cell and no word survives.
+alignas(64) thread_local uint32_t g_p141_cell[16] = {
+    0xC0FFEE00u, 0xC0FFEE11u, 0xC0FFEE22u, 0xC0FFEE33u,
+    0xC0FFEE44u, 0xC0FFEE55u, 0xC0FFEE66u, 0xC0FFEE77u,
+    0xC0FFEE88u, 0xC0FFEE99u, 0xC0FFEEAAu, 0xC0FFEEBBu,
+    0xC0FFEECCu, 0xC0FFEEDDu, 0xC0FFEEEEu, 0xC0FFEEFFu,
+};
+
+// .tbss side of the image (no initializer ⇒ zero-fill, not a copy).
+alignas(64) thread_local uint64_t g_p141_blank[8];
+
+static uint32_t P141Expected(unsigned i) { return 0xC0FFEE00u | (uint32_t)(i * 0x11u); }
+
+static volatile uint64_t g_p141_remaining;
+static volatile uint32_t g_p141_words_ok[kP141Workers];  // matching words, 0..16
+static volatile uint32_t g_p141_saw_main[kP141Workers];  // 1 iff main's sentinel leaked
+static volatile uint32_t g_p141_blank_ok[kP141Workers];  // 1 iff .tbss read all-zero
+static volatile uint64_t g_p141_cell_addr[kP141Workers]; // this strand's storage
+static volatile uint64_t g_p141_depth[kP141Workers];     // fsbase - &cell, bytes
+
+static inline uint64_t P141FsBase()
+{
+    uint64_t v;
+    __asm__ volatile("rdfsbase %0" : "=r"(v));
+    return v;
+}
+
+static void p141_worker(void *arg)
+{
+    uint32_t id = (uint32_t)(uintptr_t)arg;
+
+    __boxcxx_tls_strand_init();
+    __boxcxx_thread_storage_enter();
+
+    uint32_t ok = 0, leaked = 0;
+    for (unsigned i = 0; i < 16; i++) {
+        if (g_p141_cell[i] == P141Expected(i)) ok++;
+        if (g_p141_cell[i] == 0xDEADBEEFu) leaked = 1;
+    }
+    uint32_t blank_ok = 1;
+    for (unsigned i = 0; i < 8; i++)
+        if (g_p141_blank[i] != 0) blank_ok = 0;
+
+    g_p141_words_ok[id]  = ok;
+    g_p141_saw_main[id]  = leaked;
+    g_p141_blank_ok[id]  = blank_ok;
+    g_p141_cell_addr[id] = (uint64_t)(uintptr_t)&g_p141_cell[0];
+    g_p141_depth[id]     = P141FsBase() - (uint64_t)(uintptr_t)&g_p141_cell[0];
+
+    __boxcxx_thread_storage_exit();
+
+    __atomic_sub_fetch(&g_p141_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p141_remaining, 0);
+    strand_exit();
+}
+
+void Phase141()
+{
+    // (1)-(2) the main strand's own cast, before anything is disturbed.
+    unsigned main_ok = 0;
+    for (unsigned i = 0; i < 16; i++)
+        if (g_p141_cell[i] == P141Expected(i)) main_ok++;
+    Check(main_ok == 16,
+          "phase141 (1) main strand reads its whole .tdata image, word for word");
+    Check(g_p141_blank[0] == 0 && g_p141_blank[7] == 0,
+          "phase141 (2) main strand's .tbss half of the image is zero");
+
+    const uint64_t main_addr = (uint64_t)(uintptr_t)&g_p141_cell[0];
+
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase141: spawned strands need FSGSBASE — skipping the second cast\n");
+        printf("[CXX] PASS phase141: one mold, two casts (main cast only, no FSGSBASE)\n");
+        return;
+    }
+
+    // Poison the main strand's OWN copy. A worker must still read the pristine
+    // linker image: seeing 0xDEADBEEF would mean the cast copied from the wrong
+    // place, and (7) below rules out the workers simply sharing this block.
+    for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = 0xDEADBEEFu;
+
+    for (uint32_t i = 0; i < kP141Workers; i++) {
+        g_p141_words_ok[i]  = 0;
+        g_p141_saw_main[i]  = 0;
+        g_p141_blank_ok[i]  = 0;
+        g_p141_cell_addr[i] = 0;
+        g_p141_depth[i]     = 0;
+    }
+    g_p141_remaining = kP141Workers;
+
+    uint32_t spawned = 0;
+    for (uint32_t i = 0; i < kP141Workers; i++)
+        if (strand_spawn(p141_worker, (void *)(uintptr_t)i) != 0) spawned++;
+        else break;
+    // A spawn that quietly does not happen reads exactly like a block that
+    // passed — say so out loud (the Ф31c-1 lesson).
+    Check(spawned == kP141Workers, "phase141 (3) all worker strands spawned");
+    // The counter is armed BEFORE the first spawn and only ever decremented
+    // afterwards: a worker can finish while the loop is still running, so
+    // re-storing it here would erase decrements that already happened (the
+    // phase139 bug — that block re-stores safely only because its workers are
+    // held behind a go-gate). Subtract the ones that never started instead.
+    if (spawned < kP141Workers)
+        __atomic_sub_fetch(&g_p141_remaining, kP141Workers - spawned, __ATOMIC_RELEASE);
+    if (spawned == 0) {
+        for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = P141Expected(i);
+        printf("[CXX] PASS phase141: one mold, two casts (second cast unreachable, no strand)\n");
+        return;
+    }
+
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p141_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 80u) {
+            printf("[CXX] FAIL phase141: %u worker(s) stuck after %u cycles\n",
+                   (unsigned)cur, cycles);
+            g_failures++;
+            for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = P141Expected(i);
+            return;
+        }
+        addr_park(&g_p141_remaining, cur, 200);
+    }
+
+    uint32_t all_words = 0, any_leak = 0, all_blank = 0, distinct = 0, deep = 0;
+    for (uint32_t i = 0; i < spawned; i++) {
+        if (g_p141_words_ok[i] == 16) all_words++;
+        if (g_p141_saw_main[i]) any_leak++;
+        if (g_p141_blank_ok[i]) all_blank++;
+        if (g_p141_cell_addr[i] != 0 && g_p141_cell_addr[i] != main_addr) distinct++;
+        if (g_p141_depth[i] > 0 && g_p141_depth[i] <= 4096) deep++;
+    }
+    Check(all_words == spawned,
+          "phase141 (4) every spawned strand reads the whole .tdata image, word for word");
+    Check(any_leak == 0,
+          "phase141 (5) no spawned strand saw the main strand's overwritten copy");
+    Check(all_blank == spawned,
+          "phase141 (6) every spawned strand's .tbss half of the image is zero");
+    Check(distinct == spawned,
+          "phase141 (7) each spawned strand holds storage of its own, not main's");
+    Check(deep == spawned,
+          "phase141 (8) the whole image still fits the one page the kernel maps");
+
+    // Main's copy was poisoned on purpose; put it back so nothing downstream
+    // inherits a booby-trapped thread_local.
+    for (unsigned i = 0; i < 16; i++) g_p141_cell[i] = P141Expected(i);
+    unsigned restored = 0;
+    for (unsigned i = 0; i < 16; i++)
+        if (g_p141_cell[i] == P141Expected(i)) restored++;
+    Check(restored == 16, "phase141 (9) main strand's copy restored for later phases");
+
+    printf("[CXX] PASS phase141: one mold, two casts — the main strand's heap block and a "
+           "spawned strand's neg-TLS page carry the same image, cast from the one formula in "
+           "src/tls/tls_mold.h\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -35949,6 +36147,7 @@ int main()
     Phase138();
     Phase139();
     Phase140();
+    Phase141();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
