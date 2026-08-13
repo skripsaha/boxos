@@ -72,18 +72,26 @@ for cfg in $CONFIGS; do
     # out immediately on marker-hit OR PANIC/EXCEPTION/FAILURES, so fast configs
     # and genuine faults both finish/fail fast; only a slow-but-healthy config
     # uses the full ceiling.
+    # '[boxcxx] FATAL' is in the pattern because it was NOT, and that cost a
+    # whole diagnosis: an uncaught exception ends the app through
+    # std::terminate, which prints "[boxcxx] FATAL: std::terminate() called" and
+    # nothing else — no PANIC, no [EXCEPTION], no TOTAL FAILURES. The runner
+    # therefore reported marker_hit=0 bad_lines=0, which is EXACTLY the
+    # signature of hitting the budget below, and a real crash read as a slow
+    # config. Any death the guest can print has to be in this alternation, or
+    # "budget" becomes a place for failures to hide.
     for i in $(seq 1 7200); do
         [ "$(grep -cE "$MARKER" build/serial.log 2>/dev/null)" -ge 1 ] && { hit=1; break; }
-        grep -qE 'PANIC|\[EXCEPTION\]|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
+        grep -qE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
         sleep 0.5
     done
-    bad=$(grep -cE 'PANIC|\[EXCEPTION\]|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null)
+    bad=$(grep -cE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null)
 
     if [ "$hit" = 1 ] && [ "$bad" = 0 ]; then
-        echo "[$cfg] PASS (marker matched; no PANIC/EXCEPTION/FAILURES)"
+        echo "[$cfg] PASS (marker matched; no PANIC/EXCEPTION/FATAL/FAILURES)"
     else
         echo "[$cfg] FAIL (marker_hit=$hit  bad_lines=$bad)"
-        grep -nE 'PANIC|\[EXCEPTION\]|\[CXX\] (TOTAL FAILURES|FAIL)|phase9a4' build/serial.log 2>/dev/null | tail -20
+        grep -nE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] (TOTAL FAILURES|FAIL)|phase9a4' build/serial.log 2>/dev/null | tail -20
         FAILED=1
     fi
     make run-stop >/dev/null 2>&1 || true
