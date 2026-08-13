@@ -1,21 +1,15 @@
 /*
- * tls_init.cpp — local-exec TLS bootstrap for BoxOS C++ binaries.
+ * tls_init.cpp — local-exec TLS bootstrap for the MAIN strand of a BoxOS C++
+ * binary.
  *
- * The kernel loader ignores PT_TLS; this runs as the very first
- * .init_array entry (constructor priority 101 — ahead of every default-
- * priority global constructor, which may itself touch thread_local).
+ * The kernel loader ignores PT_TLS; this runs as the very first .init_array
+ * entry (constructor priority 101 — ahead of every default-priority global
+ * constructor, which may itself touch thread_local). It casts the block from
+ * the shared mold (tls_mold.h, which carries the layout contract), puts a TCB
+ * of its own at the thread pointer and installs fs-base.
  *
- * Layout contract with the linker (x86-64 TLS variant 2):
- *
- *      block:  [ .tdata copy | pad | .tbss zeros | pad | TCB ]
- *                ^0            ^AlignUp(tdata,64)         ^tp
- *      tp = block + AlignUp(memsz, 64);  fs:0 = tp (self pointer)
- *      var offset = PT_TLS offset − AlignUp(memsz, 64)   (negative)
- *
- * The 64-byte figure is pinned by kAnchor below: it forces PT_TLS
- * p_align == 64 so the linker and this code compute identical layouts.
- * Apps must not exceed alignas(64) on thread_local objects — the
- * cxxtest.elf link rule carries a readelf check for that.
+ * Apps must not exceed alignas(64) on thread_local objects — the cxxtest.elf
+ * link rule carries a readelf check for that.
  *
  * One C++ TLS block per cabin: this bootstraps the MAIN strand only. Its FS
  * base points at the C++ TCB here (on the heap). Strands spawned via
@@ -30,17 +24,12 @@
 #include <cstddef>
 
 #include "box/cpu.h"
-#include "box/string.h"
 #include "box/system.h"
+
+#include "tls_mold.h"
 
 extern "C" {
 void *_malloc_impl(size_t size);
-
-/* user.ld — .tdata load image and section sizes (symbol-value trick:
- * the "address" of the size symbols IS the size). */
-extern const char __tdata_start[];
-extern const char __tdata_size[];
-extern const char __tbss_size[];
 }
 
 namespace boxcxx {
@@ -49,14 +38,15 @@ namespace boxcxx {
 
 namespace {
 
-// Pins PT_TLS p_align to 64 for every C++ binary (see header comment).
-// Lives in .tbss; one byte + alignment padding per process.
-[[gnu::used]] alignas(64) thread_local char kAnchor;
+// Pins PT_TLS p_align to 64 for every C++ binary, which is what lets tls_mold.h
+// place .tbss at AlignUp(tdata_size, 64). Lives in .tbss; one byte plus
+// alignment padding per process.
+[[gnu::used]] alignas(boxcxx::__tls::kAlign) thread_local char kAnchor;
 
-constexpr uint64_t AlignUp(uint64_t v, uint64_t a)
-{
-    return (v + a - 1) & ~(a - 1);
-}
+// The anchor is load-bearing for the mold's arithmetic, not just for the ELF
+// program header — losing the alignas would silently reshape every TLS block.
+static_assert(__alignof__(kAnchor) == boxcxx::__tls::kAlign,
+              "kAnchor must stay alignas(kAlign): it is what pins PT_TLS p_align");
 
 struct TlsControlBlock {
     void *self;       // fs:0 — address-of-thread-local sequences load this
@@ -67,24 +57,19 @@ struct TlsControlBlock {
 
 extern "C" void __boxcxx_tls_bootstrap()
 {
-    const uint64_t tdata_size = (uint64_t)(uintptr_t)__tdata_size;
-    const uint64_t tbss_size  = (uint64_t)(uintptr_t)__tbss_size;
-    constexpr uint64_t kAlign = 64;
+    namespace tls = boxcxx::__tls;
 
-    const uint64_t tbss_off  = AlignUp(tdata_size, kAlign);
-    const uint64_t memsz     = tbss_off + tbss_size;
-    const uint64_t tp_off    = AlignUp(memsz, kAlign);
-    const uint64_t total     = tp_off + sizeof(TlsControlBlock);
+    const tls::Mold mold = tls::Take();
+    const uint64_t total = mold.below_tcb + sizeof(TlsControlBlock);
 
-    void *raw = _malloc_impl(total + kAlign);
+    void *raw = _malloc_impl(total + tls::kAlign);
     if (!raw) boxcxx::Panic("TLS bootstrap: heap exhausted");
 
-    uintptr_t block = AlignUp((uintptr_t)raw, kAlign);
+    uintptr_t block = tls::AlignUp((uintptr_t)raw, tls::kAlign);
 
-    memcpy((void *)block, __tdata_start, tdata_size);
-    memset((void *)(block + tdata_size), 0, tp_off - tdata_size);
+    tls::Pour((void *)block, mold);
 
-    TlsControlBlock *tcb = (TlsControlBlock *)(block + tp_off);
+    TlsControlBlock *tcb = (TlsControlBlock *)(block + mold.below_tcb);
     tcb->self     = tcb;
     tcb->reserved = nullptr;
 
