@@ -37,6 +37,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>          // std::formatter<box::heap::stats>
+#include <limits>          // widest-unsigned width for that formatter's buffer
 #include <memory>
 #include <memory_resource>
 #include <new>
@@ -357,19 +358,33 @@ public:
 }  // namespace heap
 }  // namespace box
 
-// ── std::formatter<box::heap::stats> — one greppable line, no spec ───────────
+// ── std::formatter<box::heap::stats> — one greppable line, full std spec ─────
 // Reads only the already-snapshotted POD copy — no for_each, no malloc/free, no
 // heap lock re-entry (the file banner's lock contract is respected).
+//
+// The line is rendered into a stack buffer and handed to formatter<string_view>,
+// which is where width, fill, align and precision come from. box::error reaches
+// for std::string to do the same thing; this one must not, because a formatter
+// that allocates to print the heap's own numbers would perturb what it reports.
 template <>
-struct std::formatter<box::heap::stats, char> {
-    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+struct std::formatter<box::heap::stats, char> : std::formatter<std::string_view, char> {
     auto format(const box::heap::stats &s, std::format_context &ctx) const
     {
-        return std::format_to(
-            ctx.out(),
-            "heap used={} in_use={} free={} live={} freeblk={} mallocs={} frees={}",
+        static constexpr char kFmt[] =
+            "heap used={} in_use={} free={} live={} freeblk={} mallocs={} frees={}";
+        // Derived, not guessed: the format string itself plus one widest
+        // unsigned per field. Every placeholder is at least two characters, so
+        // this over-counts; the count of fields is the one thing to keep in
+        // step, and phase142 pins it by formatting an all-maximum record.
+        static constexpr std::size_t kCap =
+            sizeof kFmt + 7 * (std::numeric_limits<unsigned long long>::digits10 + 1);
+        char buf[kCap];
+        auto r = std::format_to_n(
+            buf, (std::ptrdiff_t)sizeof buf, kFmt,
             s.heap_bytes(), s.in_use_bytes(), s.free_bytes(), s.live_blocks(),
             s.free_blocks(), s.malloc_calls(), s.free_calls());
+        return std::formatter<std::string_view, char>::format(
+            std::string_view(buf, (std::size_t)(r.out - buf)), ctx);
     }
 };
 
