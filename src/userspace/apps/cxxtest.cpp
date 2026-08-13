@@ -8758,8 +8758,18 @@ static bool p48_join()
     return true;
 }
 
+static std::atomic<bool> g_p48_go{false};
+
 static void p48_producer(void *)
 {
+    // Wait for main to be about to enter run(), THEN sleep, so the whole 20 ms
+    // falls inside the window main measures. Sleeping from spawn instead made
+    // the measured window 20 ms minus however long main took to get from
+    // strand_spawn to run(); on a loaded 16-vCPU TCG host that setup gap can eat
+    // most of it, the touches are already delivered when run() starts, and the
+    // ">= 15 ms" check below fails while everything it is meant to prove still
+    // holds. Seen exactly once in a batch matrix, green in isolation.
+    g_p48_go.wait(false, std::memory_order_acquire);
     // Sleep so the main strand reaches the rotation (both coroutines suspended)
     // BEFORE either Touch is delivered — then deliver both to main's claimed ring.
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -8806,6 +8816,7 @@ void Phase48()
             while (touch_pop(&drain)) { }  // clear stray touches: touch_event is unfiltered
             g_p48_tp        = tp;
             g_p48_remaining = 1;
+            g_p48_go.store(false, std::memory_order_relaxed);
             if (strand_spawn(p48_producer, 0) != 0) {
                 box::executor ex;
                 auto          t1 = P48AwaitTouch();
@@ -8813,6 +8824,8 @@ void Phase48()
                 ex.schedule(t1.handle());  // both run, find the TouchRing empty,
                 ex.schedule(t2.handle());  // suspend -> two Touch-domain waiters
                 box::stopwatch sw;
+                g_p48_go.store(true, std::memory_order_release);  // start its 20 ms here
+                g_p48_go.notify_all();
                 ex.run();                  // bounded rotation; sibling delivers 2
                 auto ms = duration_cast<milliseconds>(sw.elapsed());
 
