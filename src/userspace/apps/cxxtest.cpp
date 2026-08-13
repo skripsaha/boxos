@@ -6511,6 +6511,15 @@ void Phase38()
         return;
     }
 
+    // Every jthread below spawns a strand, and a jthread CONSTRUCTOR throws
+    // std::system_error when that spawn does not complete inside the IPC
+    // hand-off budget — which a 16-vCPU TCG guest on a loaded host can miss.
+    // Until this guard existed the exception was uncaught: it ended the entire
+    // suite through std::terminate, whose only trace is one "[boxcxx] FATAL"
+    // line with no phase name, so the run looked to the matrix runner exactly
+    // like hitting its own time budget. Naming the failure is the whole point —
+    // the same treatment phase139's spawns got in Ф31c-1.
+    try {
     // A cooperative-cancel body polls its token and BACKS OFF with a 1 ms sleep
     // (a timed kernel park) between checks — NOT a tight yield-spin. On a single
     // App-Core boot the strands schedule cooperatively, so a strand that never
@@ -6595,6 +6604,11 @@ void Phase38()
 
         Check(g_p38_cb_count.load(std::memory_order_acquire) == 1,
               "phase38 concurrent stop_callback ran exactly once (no double/lost)");
+    }
+    } catch (const std::system_error &) {
+        Check(false,
+              "phase38 (Tier B) a jthread could not spawn its strand (std::system_error) — "
+              "the strand-spawn budget was missed, which is NOT a stop_token defect");
     }
 
     printf("[CXX] PASS phase38: stop_token + jthread "
