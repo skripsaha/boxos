@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <expected>
 #include <format>     // std::formatter<box::hw::tme_state>
+#include <limits>     // widest-unsigned width for that formatter's buffer
 #include <optional>
 
 #include "box/cpu.h"  // cpu_has_lam / cpu_has_tme
@@ -174,20 +175,27 @@ public:
 
 }  // namespace box
 
-// ── std::formatter<box::hw::tme_state> — one greppable line, no spec ─────────
+// ── std::formatter<box::hw::tme_state> — one line, full std spec ─────────────
+// Rendered into a stack buffer, then handed to formatter<string_view> for the
+// spec, so width/fill/align work without allocating (see heap.h).
 template <>
-struct std::formatter<box::hw::tme_state, char> {
-    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+struct std::formatter<box::hw::tme_state, char> : std::formatter<std::string_view, char> {
     auto format(const box::hw::tme_state &s, std::format_context &ctx) const
     {
-        return std::format_to(
-            ctx.out(),
-            "tme active={} mk={} keyid_bits={} alg={} max_keyid={} in_use={} rmpa={} held={}",
+        static constexpr char kFmt[] =
+            "tme active={} mk={} keyid_bits={} alg={} max_keyid={} in_use={} rmpa={} held={}";
+        static constexpr std::size_t kCap =
+            sizeof kFmt + 8 * (std::numeric_limits<unsigned long long>::digits10 + 1);
+        char buf[kCap];
+        auto r = std::format_to_n(
+            buf, (std::ptrdiff_t)sizeof buf, kFmt,
             static_cast<unsigned>(s.active()), static_cast<unsigned>(s.mk_active()),
             static_cast<unsigned>(s.keyid_bits()), static_cast<unsigned>(s.algorithm()),
             static_cast<unsigned>(s.max_keyid()), static_cast<unsigned>(s.in_use()),
             static_cast<unsigned>(s.reduced_maxphyaddr()),
             static_cast<unsigned>(s.this_proc_held()));
+        return std::formatter<std::string_view, char>::format(
+            std::string_view(buf, (std::size_t)(r.out - buf)), ctx);
     }
 };
 

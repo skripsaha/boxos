@@ -199,16 +199,24 @@ inline dimensions size() noexcept
 
 // ── std::formatter<box::color> — the color VALUE as "#RRGGBB" (not a control
 //    sequence; sentinels render as "default" / "inherit") ────────────────────
-template <> struct std::formatter<box::color> {
-    constexpr auto parse(std::format_parse_context &pc) { return pc.begin(); }
+// Inherits formatter<string_view> for the spec, so a palette can be printed in
+// columns; the three renderings are all seven characters wide either way.
+template <> struct std::formatter<box::color> : std::formatter<std::string_view, char> {
     auto format(const box::color &c, std::format_context &ctx) const
     {
-        if (c.is_default()) return std::format_to(ctx.out(), "default");
-        if (c.is_inherit()) return std::format_to(ctx.out(), "inherit");
-        return std::format_to(ctx.out(), "#{:02X}{:02X}{:02X}",
-                              static_cast<unsigned>(c.r()),
-                              static_cast<unsigned>(c.g()),
-                              static_cast<unsigned>(c.b()));
+        static constexpr char kFmt[] = "#{:02X}{:02X}{:02X}";
+        char             buf[sizeof kFmt + 3 * 2];   // three two-digit fields
+        std::string_view sv;
+        if (c.is_default())      sv = "default";
+        else if (c.is_inherit()) sv = "inherit";
+        else {
+            auto r = std::format_to_n(buf, (std::ptrdiff_t)sizeof buf, kFmt,
+                                      static_cast<unsigned>(c.r()),
+                                      static_cast<unsigned>(c.g()),
+                                      static_cast<unsigned>(c.b()));
+            sv = std::string_view(buf, (std::size_t)(r.out - buf));
+        }
+        return std::formatter<std::string_view, char>::format(sv, ctx);
     }
 };
 

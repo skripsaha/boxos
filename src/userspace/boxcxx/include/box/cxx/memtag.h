@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>          // std::formatter<region> / <stats>
+#include <limits>          // widest-unsigned width for those formatters' buffers
 #include <initializer_list>
 #include <string>
 #include <string_view>
@@ -311,33 +312,45 @@ inline result<scoped_grant> grant_scope(std::uint32_t pid, const char *tag)
 }  // namespace memtag
 }  // namespace box
 
-// ── std::formatter<box::memtag::region> / <stats> — one greppable line, no spec
+// ── std::formatter<box::memtag::region> / <stats> — one line, full std spec ──
 // Pure POD reads — region prints tag_count() (the POD field), NEVER the tags()
-// syscall, so formatting never re-enters the kernel or takes a lock.
+// syscall, so formatting never re-enters the kernel or takes a lock. Both render
+// into a stack buffer and delegate to formatter<string_view> for the spec, so
+// width/fill/align cost no allocation (see heap.h for the same reasoning).
 template <>
-struct std::formatter<box::memtag::region, char> {
-    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+struct std::formatter<box::memtag::region, char> : std::formatter<std::string_view, char> {
     auto format(const box::memtag::region &r, std::format_context &ctx) const
     {
-        return std::format_to(
-            ctx.out(),
-            "region id={} phys={:#x} virt={:#x} pages={} tags={} flags={:#x} gen={}",
+        static constexpr char kFmt[] =
+            "region id={} phys={:#x} virt={:#x} pages={} tags={} flags={:#x} gen={}";
+        static constexpr std::size_t kCap =
+            sizeof kFmt + 7 * (std::numeric_limits<unsigned long long>::digits10 + 1);
+        char buf[kCap];
+        auto res = std::format_to_n(
+            buf, (std::ptrdiff_t)sizeof buf, kFmt,
             r.id(), r.base_phys(), r.base_virt(), r.pages(),
             static_cast<unsigned>(r.tag_count()), static_cast<unsigned>(r.flags()),
             r.generation());
+        return std::formatter<std::string_view, char>::format(
+            std::string_view(buf, (std::size_t)(res.out - buf)), ctx);
     }
 };
 
 template <>
-struct std::formatter<box::memtag::stats, char> {
-    constexpr auto parse(std::format_parse_context &ctx) { return ctx.begin(); }
+struct std::formatter<box::memtag::stats, char> : std::formatter<std::string_view, char> {
     auto format(const box::memtag::stats &s, std::format_context &ctx) const
     {
-        return std::format_to(
-            ctx.out(),
-            "memtag tags={} active={} slots={} cap={} reg_gen={} hits={} misses={}",
+        static constexpr char kFmt[] =
+            "memtag tags={} active={} slots={} cap={} reg_gen={} hits={} misses={}";
+        static constexpr std::size_t kCap =
+            sizeof kFmt + 7 * (std::numeric_limits<unsigned long long>::digits10 + 1);
+        char buf[kCap];
+        auto res = std::format_to_n(
+            buf, (std::ptrdiff_t)sizeof buf, kFmt,
             s.tag_count(), s.region_active(), s.region_slot_count(), s.region_slot_cap(),
             s.registry_generation(), s.cache_hits(), s.cache_misses());
+        return std::formatter<std::string_view, char>::format(
+            std::string_view(buf, (std::size_t)(res.out - buf)), ctx);
     }
 };
 

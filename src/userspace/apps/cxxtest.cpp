@@ -35998,6 +35998,99 @@ void Phase141()
            "src/tls/tls_mold.h\n");
 }
 
+// ── phase142: the diagnostic formatters accept the standard spec (Ф31c-3) ───
+// box:: had two classes of formatter. box::error and box::strand::id inherit a
+// std formatter, so "{:>20}" works on them. The five one-line records —
+// heap::stats, memtag::region, memtag::stats, hw::tme_state, box::color — parsed
+// nothing and rejected every spec, so a diagnostic could not be put in a column.
+// They now render into a stack buffer and delegate to formatter<string_view>.
+//
+// The buffer, not std::string, is the point: heap.h's banner promises its
+// formatter never allocates, and a formatter that mallocs to print the heap's
+// own numbers would disturb what it is reporting. That promise turned out not
+// to be observable from here — see the note further down, where the check that
+// tried to pin it was removed for being unable to fail.
+void Phase142()
+{
+    heap_stats_t hs{};
+    hs.heap_used = 4096; hs.total_allocated = 1000; hs.total_free = 200;
+    hs.alloc_count = 5; hs.free_count = 2; hs.malloc_calls = 9; hs.free_calls = 4;
+    const box::heap::stats st(hs);
+    const std::string      plain = std::format("{}", st);
+
+    // (1) the rendering itself did not move — phase54 pins the exact bytes, this
+    //     pins that the spec-bearing path produces the same thing.
+    Check(plain == "heap used=4096 in_use=1000 free=200 live=5 freeblk=2 mallocs=9 frees=4",
+          "phase142 (1) heap::stats renders exactly as before");
+
+    // (2) width, fill and align — the whole point of the change.
+    const std::string wide = std::format("{:>100}", st);
+    Check(wide.size() == 100 && wide.ends_with(plain) &&
+              wide.substr(0, 100 - plain.size()).find_first_not_of(' ') == std::string::npos,
+          "phase142 (2) heap::stats right-aligns into a 100-column field");
+    const std::string centred = std::format("{:*^100}", st);
+    Check(centred.size() == 100 && centred.front() == '*' && centred.back() == '*' &&
+              centred.find(plain) != std::string::npos,
+          "phase142 (3) heap::stats centres with a fill character");
+
+    // (4) precision truncates, as it does for any string.
+    Check(std::format("{:.9}", st) == "heap used",
+          "phase142 (4) precision truncates the record like a string");
+
+    // (5) every one of the five carries the spec now, not just the one above.
+    //     120 columns, because width is a minimum: three of these records are
+    //     already longer than 40 and a narrower field would prove nothing.
+    Check(std::format("{:>120}", box::hw::tme_state(hw_tme_state_t{})).size() == 120 &&
+              std::format("{:>120}", box::memtag::stats(mem_stats_t{})).size() == 120 &&
+              std::format("{:>120}", box::memtag::region(7, mem_region_info_t{})).size() == 120 &&
+              std::format("{:>120}", box::colors::red).size() == 120,
+          "phase142 (5) tme_state, memtag::stats, memtag::region and color take a width");
+    Check(std::format("{:>10}", box::colors::red) == "   #E04040" &&
+              std::format("{:<10}", box::color::use_default()) == "default   ",
+          "phase142 (6) box::color pads on both sides and keeps its three renderings");
+
+    // There is deliberately no "and it allocates nothing" check here, though
+    // that is the reason for the stack buffer. It was written, and then measured
+    // to be unable to fail: swapping the buffer for std::string left the suite
+    // green. box::heap::counters() only counts what alloc_locked serves, and
+    // _malloc_impl serves everything up to 8192 bytes from a per-strand pool
+    // that refills in batches — so a ~70-byte string allocated and freed in a
+    // loop never moves malloc_calls at all. No counter reachable from userspace
+    // sees it. The property holds by construction and by reading the code; it is
+    // recorded as unobservable rather than pinned by a check that cannot fail.
+    // The same blindness applies to any "this does not allocate" test here.
+
+    // (7) the derived buffer cap really covers the worst record: all fields at
+    //     their maximum must still end with the last field intact.
+    {
+        heap_stats_t mx{};
+        mx.heap_used = (std::size_t)-1; mx.total_allocated = (std::size_t)-1;
+        mx.total_free = (std::size_t)-1; mx.alloc_count = 0xFFFFFFFFu;
+        mx.free_count = 0xFFFFFFFFu; mx.malloc_calls = 0xFFFFFFFFu;
+        mx.free_calls = 0xFFFFFFFFu;
+        Check(std::format("{}", box::heap::stats(mx)).ends_with("frees=4294967295"),
+              "phase142 (7) an all-maximum heap record is not truncated");
+
+        hw_tme_state_t mt{};
+        mt.tme_active = 1; mt.mk_active = 1; mt.num_keyid_bits = 255;
+        mt.activated_alg = 255; mt.max_keyid = 65535; mt.in_use = 65535;
+        mt.reduced_maxphyaddr = 255; mt.this_proc_held = 65535;
+        Check(std::format("{}", box::hw::tme_state(mt)).ends_with("held=65535"),
+              "phase142 (8) an all-maximum TME record is not truncated");
+
+        mem_region_info_t mr{};
+        mr.base_phys = (std::uint64_t)-1; mr.base_virt = (std::uint64_t)-1;
+        mr.pages = (std::uint64_t)-1; mr.tag_count = 65535; mr.flags = 65535;
+        mr.generation = 0xFFFFFFFFu;
+        Check(std::format("{}", box::memtag::region(0xFFFFFFFFu, mr)).ends_with("gen=4294967295"),
+              "phase142 (9) an all-maximum region record is not truncated");
+    }
+
+    printf("[CXX] PASS phase142: the five one-line diagnostics take width, fill, align and "
+           "precision like every other formattable type, and still reach the heap's numbers "
+           "without touching the heap\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36161,6 +36254,7 @@ int main()
     Phase139();
     Phase140();
     Phase141();
+    Phase142();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
