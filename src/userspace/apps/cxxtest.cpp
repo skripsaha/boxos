@@ -450,6 +450,8 @@
 #include "box/cxx/brook.h"
 #include "box/cxx/child.h"
 #include "box/cxx/ferry.h"
+#include "box/cxx/flat_hash_map.h"
+#include "box/cxx/flat_hash_set.h"
 #include "box/cxx/console.h"
 #include "box/cxx/cpu.h"
 #include "box/cxx/current.h"
@@ -539,6 +541,20 @@ template class std::flat_map<std::string, int, std::less<>>;
 // engine directly is what actually exercises L-6's Multi-gating on operator[]/at.
 template class std::__flat::MapImpl<int, char, std::less<int>, std::vector<int>, std::vector<char>, false>;
 template class std::__flat::MapImpl<int, char, std::less<int>, std::vector<int>, std::vector<char>, true>;
+
+// phase140 (Ф31c-2): same reasoning, one layer up. Instantiating the facades
+// alone reaches only their own members ([temp.explicit]/9) — every line of
+// behaviour lives in the engine, so the net has to be hung on the engine
+// itself, in both its map and its set form.
+template class box::flat_hash_map<int, int>;
+template class box::flat_hash_set<int>;
+template class box::__flat_hash::Table<int, int, std::hash<int>, std::equal_to<int>,
+                                       std::allocator<std::pair<int, int>>>;
+template class box::__flat_hash::Table<int, void, std::hash<int>, std::equal_to<int>,
+                                       std::allocator<int>>;
+template class box::__flat_hash::Table<std::string, std::string, std::hash<std::string>,
+                                       std::equal_to<std::string>,
+                                       std::allocator<std::pair<std::string, std::string>>>;
 
 namespace {
 
@@ -34978,6 +34994,799 @@ void Phase139()
            "and the uncontended lock pair never enters the kernel\n");
 }
 
+// ── phase140 (Ф31c-2) — box::flat_hash_map / box::flat_hash_set ────────────
+// The robin-hood engine is proven three ways: against std::unordered_map as a
+// differential oracle, against probe-cost budgets (the early exit and the
+// fingerprint are PERFORMANCE properties — no correctness assertion can see
+// them, which is what probe_distance() is for), and against the boxlib heap,
+// the only place where "one allocation, not one per element" is measurable
+// rather than asserted.
+
+// ideal slot = k & mask, so a fixture can build a run exactly where it wants
+// one — including one that crosses the end of the array.
+struct P140SlotHash {
+    size_t operator()(int k) const { return (size_t)k; }
+};
+// Every key collides: the case a distance-byte robin-hood cannot survive.
+struct P140AllSame {
+    size_t operator()(int) const { return 0x1234; }
+};
+long g_p140_eq = 0;
+struct P140CountEq {
+    bool operator()(int a, int b) const { ++g_p140_eq; return a == b; }
+};
+long g_p140_hash = 0;
+struct P140CountHash {
+    size_t operator()(int v) const { ++g_p140_hash; return std::hash<int>{}(v); }
+};
+struct P140StrHash {
+    using is_transparent = void;
+    size_t operator()(std::string_view s) const { return std::hash<std::string_view>{}(s); }
+    size_t operator()(const std::string &s) const { return std::hash<std::string_view>{}(s); }
+    size_t operator()(const char *s) const { return std::hash<std::string_view>{}(s); }
+};
+
+// One countdown per OPERATION KIND: the rotate's moves, the growth's copies and
+// the engine's construction from the caller's argument are three different
+// sites, and one counter cannot aim at a single one of them.
+long g_p140_copy_bomb = -1, g_p140_move_bomb = -1, g_p140_build_bomb = -1;
+bool P140Fire(long &c)
+{
+    if (c < 0) return false;
+    if (c == 0) { c = -1; return true; }
+    --c;
+    return false;
+}
+
+// Relocation CAN throw -> the engine compiles its restore guard in.
+long g_p140_boom_live = 0;
+struct P140Boom {
+    int v;
+    explicit P140Boom(int x = 0) : v(x) { ++g_p140_boom_live; }
+    P140Boom(const P140Boom &o) : v(o.v)
+    {
+        if (P140Fire(g_p140_copy_bomb)) throw 42;
+        ++g_p140_boom_live;
+    }
+    P140Boom(P140Boom &&o) : v(o.v)
+    {
+        if (P140Fire(g_p140_move_bomb)) throw 42;
+        ++g_p140_boom_live;
+    }
+    P140Boom &operator=(const P140Boom &o)
+    {
+        if (P140Fire(g_p140_copy_bomb)) throw 42;
+        v = o.v;
+        return *this;
+    }
+    P140Boom &operator=(P140Boom &&o)
+    {
+        if (P140Fire(g_p140_move_bomb)) throw 42;
+        v = o.v;
+        return *this;
+    }
+    ~P140Boom() { --g_p140_boom_live; }
+};
+
+// Relocation is noexcept, only construction from the caller's argument throws
+// -> the guard is NOT compiled, so the strong guarantee has to come from the
+// ordering alone (build the newcomer before the first relocation).
+long g_p140_frag_live = 0;
+struct P140Fragile {
+    int v;
+    explicit P140Fragile(int x = 0) : v(x) { ++g_p140_frag_live; }
+    P140Fragile(const P140Fragile &o) : v(o.v)
+    {
+        if (P140Fire(g_p140_build_bomb)) throw 42;
+        ++g_p140_frag_live;
+    }
+    P140Fragile(P140Fragile &&o) noexcept : v(o.v) { ++g_p140_frag_live; }
+    P140Fragile &operator=(const P140Fragile &o)
+    {
+        if (P140Fire(g_p140_build_bomb)) throw 42;
+        v = o.v;
+        return *this;
+    }
+    P140Fragile &operator=(P140Fragile &&o) noexcept
+    {
+        v = o.v;
+        return *this;
+    }
+    ~P140Fragile() { --g_p140_frag_live; }
+};
+static_assert(std::is_nothrow_move_constructible_v<P140Fragile> &&
+                  std::is_nothrow_move_assignable_v<P140Fragile>,
+              "P140Fragile must relocate without throwing, or (18) aims at the wrong guard");
+
+struct P140MoveOnly {
+    int v;
+    explicit P140MoveOnly(int x) : v(x) {}
+    P140MoveOnly(P140MoveOnly &&) noexcept            = default;
+    P140MoveOnly &operator=(P140MoveOnly &&) noexcept = default;
+    P140MoveOnly(const P140MoveOnly &)                = delete;
+    P140MoveOnly &operator=(const P140MoveOnly &)     = delete;
+};
+
+// Stateful allocators for the propagation checks.
+template <class T>
+struct P140TagAlloc {
+    using value_type                             = T;
+    using propagate_on_container_copy_assignment = std::true_type;
+    using propagate_on_container_move_assignment = std::true_type;
+    using propagate_on_container_swap            = std::true_type;
+    int id;
+    explicit P140TagAlloc(int i = 0) : id(i) {}
+    template <class U>
+    P140TagAlloc(const P140TagAlloc<U> &o) : id(o.id)
+    {
+    }
+    T   *allocate(size_t n) { return (T *)::operator new(n * sizeof(T)); }
+    void deallocate(T *p, size_t) { ::operator delete(p); }
+    template <class U>
+    bool operator==(const P140TagAlloc<U> &o) const
+    {
+        return id == o.id;
+    }
+};
+template <class T>
+struct P140StuckAlloc {
+    using value_type                             = T;
+    using propagate_on_container_copy_assignment = std::false_type;
+    using propagate_on_container_move_assignment = std::false_type;
+    using propagate_on_container_swap            = std::false_type;
+    int id;
+    explicit P140StuckAlloc(int i = 0) : id(i) {}
+    template <class U>
+    P140StuckAlloc(const P140StuckAlloc<U> &o) : id(o.id)
+    {
+    }
+    T   *allocate(size_t n) { return (T *)::operator new(n * sizeof(T)); }
+    void deallocate(T *p, size_t) { ::operator delete(p); }
+    template <class U>
+    bool operator==(const P140StuckAlloc<U> &o) const
+    {
+        return id == o.id;
+    }
+};
+
+// Absence probes. A requires-expression over a CONCRETE type is not a
+// substitution context — the invalid member access is a hard error — so each
+// one has to be asked through a template parameter.
+template <class M>
+concept P140HasBuckets = requires(M m) { m.bucket_count(); };
+template <class M>
+concept P140HasExtract = requires(M m) { m.extract(1); };
+template <class M>
+concept P140HasSettableLoad = requires(M m) { m.max_load_factor(0.5f); };
+template <class M, class K>
+concept P140HasHeterogeneousFind = requires(M m, K k) { m.find(k); };
+
+unsigned long long P140Rng(unsigned long long &s)
+{
+    s += 0x9e3779b97f4a7c15ull;
+    unsigned long long z = s;
+    z                    = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+    z                    = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+    return z ^ (z >> 31);
+}
+
+void Phase140()
+{
+    using Map = box::flat_hash_map<int, int>;
+    using Set = box::flat_hash_set<int>;
+
+    // ── shape ───────────────────────────────────────────────────────────────
+    // value_type is pair<Key,T>, NOT pair<const Key,T>: a table that relocates
+    // its keys cannot store them const, and pair<const Key,T> is not movable.
+    // std::flat_map reaches the same conclusion for the same reason.
+    static_assert(std::is_same_v<Map::value_type, std::pair<int, int>>);
+    static_assert(std::is_same_v<Set::value_type, int>);
+    static_assert(std::is_same_v<Map::key_type, int> && std::is_same_v<Map::mapped_type, int>);
+    // The map's reference is a proxy (the two halves live in two arrays); the
+    // set's is a genuine reference (there is no second half).
+    static_assert(std::is_same_v<std::iter_reference_t<Map::iterator>,
+                                 std::pair<const int &, int &>>);
+    static_assert(std::is_same_v<std::iter_reference_t<Set::iterator>, const int &>);
+    // Ф31a-2's [iterator.traits]/3 synthesis derives the category from that,
+    // and gets both right without either cursor declaring one by hand.
+    static_assert(std::is_same_v<std::iterator_traits<Map::iterator>::iterator_category,
+                                 std::input_iterator_tag>);
+    static_assert(std::is_same_v<std::iterator_traits<Set::iterator>::iterator_category,
+                                 std::forward_iterator_tag>);
+    static_assert(std::forward_iterator<Map::iterator> && std::forward_iterator<Set::iterator>);
+    static_assert(std::ranges::forward_range<Map> && std::ranges::forward_range<Set>);
+    // A key is immutable while it is in the table, so the set needs one erase
+    // declaration, exactly as std::flat_set does.
+    static_assert(std::is_same_v<Set::iterator, Set::const_iterator>);
+    static_assert(!std::is_same_v<Map::iterator, Map::const_iterator>);
+    // The iterator carries its table as a phantom tag, so two tables differing
+    // only in hasher cannot exchange iterators.
+    static_assert(!std::is_same_v<Map::iterator,
+                                  box::flat_hash_map<int, int, P140SlotHash>::iterator>);
+    // No bucket family and no node handles — a plain table has neither.
+    static_assert(!P140HasBuckets<Map> && !P140HasBuckets<Set>);
+    static_assert(!P140HasExtract<Map>);
+    static_assert(!P140HasSettableLoad<Map>);
+    // The restore guard is an EMPTY, trivially destructible object when no
+    // relocation can throw: "it costs nothing for a nothrow-movable element" is
+    // a fact the compiler enforces, not a claim in a comment.
+    static_assert(std::is_empty_v<box::__flat_hash::RestoreGuard<false, int>>);
+    static_assert(std::is_trivially_destructible_v<box::__flat_hash::RestoreGuard<false, int>>);
+    static_assert(!std::is_trivially_destructible_v<box::__flat_hash::RestoreGuard<true, int>>);
+
+    // ── (A) the plain surface ───────────────────────────────────────────────
+    {
+        Map m;
+        for (int i = 0; i < 200; ++i) m.try_emplace(i, i * 2);
+        Check(m.size() == 200 && !m.empty(), "phase140 (1) 200 inserted");
+        bool all = true;
+        for (int i = 0; i < 200; ++i)
+            if (!m.contains(i) || m.at(i) != i * 2 || m.find(i)->second != i * 2) all = false;
+        Check(all, "phase140 (2) every key found with its value");
+        Check(!m.contains(200) && m.count(200) == 0 && m.find(200) == m.end(),
+              "phase140 (3) an absent key is absent");
+        long sum = 0, seen = 0;
+        for (auto e : m) { sum += e.second; ++seen; }
+        Check(seen == 200 && sum == 199 * 200, "phase140 (4) iteration visits all exactly once");
+        m[300] = 7;
+        Check(m[300] == 7 && m.size() == 201, "phase140 (5) operator[] inserted");
+        m[300] = 9;
+        Check(m[300] == 9 && m.size() == 201, "phase140 (6) operator[] on a present key assigns");
+        auto r = m.equal_range(5);
+        Check(r.first != r.second && r.first->second == 10 && ++r.first == r.second,
+              "phase140 (7) equal_range spans exactly one element");
+        bool threw = false;
+        try { (void)m.at(9999); } catch (const std::out_of_range &) { threw = true; }
+        Check(threw, "phase140 (8) at() throws out_of_range on an absent key");
+
+        // equal_range on an ABSENT key. Its failure mode is silent: not-found
+        // hands back end(), and incrementing THAT walks off the control array
+        // into the key array of the SAME block — live memory, so no sanitizer
+        // fires and the caller simply receives a non-empty range for a key
+        // that is not there. Comparing against end() is the only guard.
+        auto absent = m.equal_range(9999);
+        Check(absent.first == absent.second && absent.first == m.end(),
+              "phase140 (9) equal_range on an absent key is {end, end}");
+        const Map &cm  = m;
+        auto       cab = cm.equal_range(9999);
+        Check(cab.first == cab.second && cab.first == cm.end(),
+              "phase140 (10) the const overload agrees");
+        Map  fresh;
+        auto fab = fresh.equal_range(1);
+        Check(fab.first == fab.second, "phase140 (11) and so does a table with no storage yet");
+        Set  st{1, 2, 3};
+        auto sab = st.equal_range(42);
+        Check(sab.first == sab.second, "phase140 (12) the set half too");
+    }
+
+    // ── (B) heterogeneous lookup ────────────────────────────────────────────
+    {
+        box::flat_hash_map<std::string, int, P140StrHash, std::equal_to<>> m;
+        m.try_emplace("alpha", 1);
+        m.try_emplace("beta", 2);
+        Check(m.find(std::string_view("alpha")) != m.end() &&
+                  m.contains(std::string_view("beta")) &&
+                  m.count(std::string_view("gamma")) == 0,
+              "phase140 (13) heterogeneous find/contains/count through a transparent hasher");
+        Check(m.erase(std::string_view("alpha")) == 1 && m.size() == 1,
+              "phase140 (14) heterogeneous erase");
+        static_assert(!P140HasHeterogeneousFind<Map, std::string_view>,
+                      "a non-transparent hasher must not enable the heterogeneous overloads");
+    }
+
+    // ── (C) erase, and the iterator it hands back ───────────────────────────
+    {
+        box::flat_hash_map<int, int, P140SlotHash> m;
+        m.reserve(9);                                    // 16 slots
+        for (int i = 0; i < 5; ++i) m.try_emplace(2 + 16 * i, i);   // one run, slots 2..6
+        Check(m.slot_count() == 16 && m.probe_distance(2 + 16 * 4) == 5,
+              "phase140 (15) the fixture really is one 5-long run");
+        std::vector<int> order;
+        for (auto e : m) order.push_back(e.first);
+        auto nx = m.erase(m.find(2));
+        Check(nx != m.end() && nx->first == order[1],
+              "phase140 (16) erase(iterator) names the element that followed");
+        Map::const_iterator dummy_check{};
+        (void)dummy_check;
+        auto cnx = m.erase(m.cbegin());
+        Check(cnx != m.end() && m.size() == 3,
+              "phase140 (17) erase(const_iterator) is its own overload and returns a live one");
+        int walked = 2;
+        for (auto it = m.begin(); it != m.end();) { ++walked; it = m.erase(it); }
+        Check(walked == 5 && m.empty(),
+              "phase140 (18) the erase-while-iterating loop walked every element once");
+    }
+
+    // ── (D) erase_if is exactly-once, even across the seam ──────────────────
+    {
+        Map  m;
+        for (int i = 0; i < 100; ++i) m.try_emplace(i, i);
+        long applied = 0;
+        auto removed = box::erase_if(m, [&](auto e) { ++applied; return (e.first & 1) == 0; });
+        Check(applied == 100 && removed == 50 && m.size() == 50,
+              "phase140 (19) erase_if applied the predicate exactly once per element");
+
+        // A run that CROSSES the end of the array: five keys that all want the
+        // last slots. Erasing inside it drags an element across the seam, which
+        // moves it LATER in slot order — a scan starting at 0 would meet it
+        // twice. The engine's scan starts at an empty slot instead.
+        box::flat_hash_map<int, int, P140SlotHash> w;
+        w.reserve(9);
+        for (int i = 0; i < 5; ++i) w.try_emplace(14 + 16 * i, i);
+        Check(w.probe_distance(14 + 16 * 4) == 5,
+              "phase140 (20) the wrapping run is 5 long and crosses the seam");
+        std::vector<int> hit;
+        auto             wr = box::erase_if(w, [&](auto e) { hit.push_back(e.first); return e.first == 14; });
+        bool             distinct = true;
+        for (size_t a = 0; a < hit.size(); ++a)
+            for (size_t b = a + 1; b < hit.size(); ++b)
+                if (hit[a] == hit[b]) distinct = false;
+        Check(wr == 1 && hit.size() == 5 && distinct,
+              "phase140 (21) erase_if across the seam still applied the predicate exactly once");
+        Check(w.size() == 4 && w.contains(30) && w.contains(46) && w.contains(62) && w.contains(78),
+              "phase140 (22) and every survivor is still reachable");
+
+        Set s;
+        for (int i = 0; i < 90; ++i) s.insert(i);
+        long sapplied = 0;
+        box::erase_if(s, [&](const int &k) { ++sapplied; return k % 3 == 0; });
+        Check(sapplied == 90 && s.size() == 60, "phase140 (23) erase_if over the set half");
+    }
+
+    // ── (E) probe cost: the early exit and the fingerprint ──────────────────
+    {
+        box::flat_hash_map<int, int, std::hash<int>, P140CountEq> m;
+        const int N = 6300;                              // load 0.769 on 8192 slots
+        m.reserve(N);
+        for (int i = 0; i < N; ++i) m.try_emplace(i, i);
+        Check(m.slot_count() == 8192, "phase140 (24) the probe fixture is a crowded table");
+
+        g_p140_eq = 0;
+        for (int i = 0; i < N; ++i) (void)m.find(i);
+        Check(g_p140_eq == N,
+              "phase140 (25) a hit costs EXACTLY one key comparison — the fingerprint rejects "
+              "every foreign slot the probe walks over");
+        g_p140_eq = 0;
+        for (int i = N; i < 2 * N; ++i) (void)m.find(i);
+        Check(g_p140_eq == 0, "phase140 (26) a miss costs ZERO key comparisons");
+
+        size_t hit_slots = 0, miss_slots = 0;
+        for (int i = 0; i < N; ++i) hit_slots += m.probe_distance(i);
+        for (int i = N; i < 2 * N; ++i) miss_slots += m.probe_distance(i);
+        // Budgets taken from the measurement, not guessed: this table measures
+        // hit 2.592 / miss 3.031 slots. Deleting the robin-hood early exit
+        // measures miss 9.755 (a hit is unchanged — it stops at its own key
+        // either way), so 4.5 separates them with margin on both sides.
+        Check(hit_slots * 10 < (size_t)N * 30,
+              "phase140 (27) a hit visits under 3.0 slots on average (measured 2.592)");
+        Check(miss_slots * 10 < (size_t)N * 45,
+              "phase140 (28) a miss visits under 4.5 slots on average — the early exit is live "
+              "(without it the same table measures 9.755)");
+        Check(m.max_distance() < 32, "phase140 (29) worst probe distance stays small");
+    }
+
+    // ── (F) growth never calls the hasher again ─────────────────────────────
+    {
+        box::flat_hash_map<int, int, P140CountHash> m;
+        g_p140_hash = 0;
+        for (int i = 0; i < 1000; ++i) m.try_emplace(i, i);
+        long after_fill = g_p140_hash;
+        Check(after_fill == 1000, "phase140 (30) exactly one hash per insertion");
+        m.rehash(m.slot_count() * 4);
+        Check(g_p140_hash == after_fill,
+              "phase140 (31) a rehash asks the hasher NOTHING — the ideal slot comes out of the "
+              "control word");
+        bool all = true;
+        for (int i = 0; i < 1000; ++i)
+            if (!m.contains(i)) all = false;
+        Check(all && m.size() == 1000, "phase140 (32) and every key survived the rehash");
+    }
+
+    // ── (G) a degenerate hasher: the cliff a distance byte cannot clear ─────
+    {
+        box::flat_hash_map<int, int, P140AllSame> m;
+        for (int i = 0; i < 400; ++i) m.try_emplace(i, i * 7);
+        Check(m.size() == 400, "phase140 (33) 400 keys with ONE hash value all went in");
+        Check(m.max_distance() >= 255,
+              "phase140 (34) the probe distance really passed 255 — where a stored distance byte "
+              "would have overflowed");
+        bool all = true;
+        for (int i = 0; i < 400; ++i)
+            if (m.at(i) != i * 7) all = false;
+        Check(all, "phase140 (35) and every one of them is still correct");
+        for (int i = 0; i < 400; i += 2) m.erase(i);
+        all = true;
+        for (int i = 1; i < 400; i += 2)
+            if (!m.contains(i)) all = false;
+        Check(all && m.size() == 200, "phase140 (36) erasing half left the other half reachable");
+    }
+
+    // ── (H) no tombstone drift ──────────────────────────────────────────────
+    {
+        Map m;
+        for (int i = 0; i < 150; ++i) m.try_emplace(i, i);
+        size_t slots0 = m.slot_count();
+        for (int round = 0; round < 60; ++round) {
+            for (int i = 0; i < 150; ++i) m.erase(i);
+            for (int i = 0; i < 150; ++i) m.try_emplace(i, i * 3);
+        }
+        Check(m.slot_count() == slots0 && m.size() == 150,
+              "phase140 (37) 60 full erase/refill cycles did not grow the table");
+        Check(m.max_distance() < 32,
+              "phase140 (38) and left no tombstone drift in the probe distance");
+    }
+
+    // ── (I) differential against std::unordered_map ─────────────────────────
+    {
+        Map                          m;
+        std::unordered_map<int, int> oracle;
+        unsigned long long           st = 12345;
+        bool                         ok = true;
+        for (int i = 0; i < 4000 && ok; ++i) {
+            int k = (int)(P140Rng(st) % 96);
+            int v = (int)(P140Rng(st) % 1000);
+            switch (P140Rng(st) % 8) {
+            case 0:
+            case 1: m.try_emplace(k, v); oracle.try_emplace(k, v); break;
+            case 2: m.insert({k, v}); oracle.insert({k, v}); break;
+            case 3: m.insert_or_assign(k, v); oracle.insert_or_assign(k, v); break;
+            case 4: m[k] = v; oracle[k] = v; break;
+            case 5:
+            case 6: m.erase(k); oracle.erase(k); break;
+            case 7: {
+                auto it = m.find(k);
+                if (it != m.end()) { m.erase(it); oracle.erase(k); }
+                break;
+            }
+            }
+            if ((i & 0xff) == 0) {
+                if (m.size() != oracle.size()) ok = false;
+                for (const auto &kv : oracle) {
+                    auto it = m.find(kv.first);
+                    if (it == m.end() || it->second != kv.second) { ok = false; break; }
+                }
+            }
+        }
+        if (ok) {
+            if (m.size() != oracle.size()) ok = false;
+            for (const auto &kv : oracle) {
+                auto it = m.find(kv.first);
+                if (it == m.end() || it->second != kv.second) { ok = false; break; }
+            }
+            size_t seen = 0;
+            for (auto e : m) { if (!oracle.count(e.first)) ok = false; ++seen; }
+            if (seen != oracle.size()) ok = false;
+        }
+        Check(ok, "phase140 (39) 4000 mixed operations agree with std::unordered_map element for "
+                  "element");
+    }
+
+    // ── (J) exceptions ──────────────────────────────────────────────────────
+    // A throwing element constructor leaves the table exactly as it was, even
+    // on the CROWDED path: the newcomer is built at the run's free end before
+    // anything is relocated.
+    {
+        Check(g_p140_frag_live == 0, "phase140 (40) fragile fixture starts clean");
+        box::flat_hash_map<int, P140Fragile, P140SlotHash> m;
+        m.reserve(9);
+        m.try_emplace(4, P140Fragile(40));
+        m.try_emplace(5, P140Fragile(50));
+        m.try_emplace(6, P140Fragile(60));
+        Check(m.probe_distance(5) == 1, "phase140 (41) key 5 sits at its own slot to begin with");
+        size_t      slots_before = m.slot_count(), size_before = m.size();
+        P140Fragile arg(200);
+        g_p140_build_bomb = 0;              // the engine's own copy of arg throws
+        bool threw        = false;
+        try { m.try_emplace(20, arg); } catch (int) { threw = true; }
+        g_p140_build_bomb = -1;
+        Check(threw, "phase140 (42) the element constructor really threw");
+        Check(m.size() == size_before && m.slot_count() == slots_before && !m.contains(20),
+              "phase140 (43) STRONG: size, capacity and content unchanged");
+        Check(m.at(4).v == 40 && m.at(5).v == 50 && m.at(6).v == 60 && m.probe_distance(5) == 1,
+              "phase140 (44) and NOTHING moved — key 5 is still at its own slot");
+        m.try_emplace(20, arg);
+        Check(m.size() == size_before + 1 && m.probe_distance(5) == 2,
+              "phase140 (45) the retry inserted AND rotated the run — the fixture was not vacuous");
+        m.clear();
+        Check(g_p140_frag_live == 1, "phase140 (46) only the local argument is still alive");
+    }
+    // A throwing relocation cannot be undone (undoing it is another move, and a
+    // second throw while unwinding is terminate), so the invariant is restored
+    // by emptying — the doctrine <flat_set>/<flat_map> already ship.
+    {
+        Check(g_p140_boom_live == 0, "phase140 (47) boom fixture starts clean");
+        box::flat_hash_map<int, P140Boom, P140SlotHash> m;
+        m.reserve(9);
+        for (int i = 0; i < 5; ++i) m.try_emplace(14 + 16 * i, P140Boom(i));
+        g_p140_move_bomb = 1;
+        bool threw       = false;
+        try { m.erase(14); } catch (int) { threw = true; }
+        g_p140_move_bomb = -1;
+        Check(threw && m.empty() && m.begin() == m.end(),
+              "phase140 (48) a throwing move inside the erase shift restored the invariant by "
+              "emptying");
+        Check(g_p140_boom_live == 0,
+              "phase140 (49) and destroyed every element exactly once — nothing leaked");
+    }
+    // The same, in the insert rotation: the newcomer is already built at the
+    // run's end, and it must be destroyed with the rest rather than stranded.
+    {
+        box::flat_hash_map<int, P140Boom, P140SlotHash> m;
+        m.reserve(9);
+        P140Boom v4(40), v5(50), v6(60), v20(200);
+        m.try_emplace(4, v4);
+        m.try_emplace(5, v5);
+        m.try_emplace(6, v6);
+        long live_before  = g_p140_boom_live;
+        g_p140_move_bomb  = 1;              // fires inside the rotate
+        bool threw        = false;
+        try { m.try_emplace(20, v20); } catch (int) { threw = true; }
+        g_p140_move_bomb  = -1;
+        Check(threw && m.empty(), "phase140 (50) a throwing rotate emptied the table");
+        Check(g_p140_boom_live == live_before - 3,
+              "phase140 (51) the half-placed newcomer was destroyed too — nothing stranded");
+    }
+    // Growth relocates with move_if_noexcept, so a throwing-move-but-copyable
+    // element keeps the STRONG guarantee: the old table is untouched.
+    {
+        box::flat_hash_map<int, P140Boom> m;
+        m.reserve(6);                        // 8 slots, ceiling 7
+        for (int i = 0; i < 7; ++i) m.try_emplace(i, P140Boom(i));
+        size_t slots = m.slot_count(), n = m.size();
+        long   live  = g_p140_boom_live;
+        Check(n == 7 && slots == 8, "phase140 (52) sitting exactly on the growth ceiling");
+        g_p140_copy_bomb = 0;                // the first relocation copy throws
+        bool threw       = false;
+        try { m.try_emplace(7, P140Boom(7)); } catch (int) { threw = true; }
+        g_p140_copy_bomb = -1;
+        bool intact = threw && m.slot_count() == slots && m.size() == n;
+        for (int i = 0; i < (int)n; ++i)
+            if (!m.contains(i) || m.at(i).v != i) intact = false;
+        Check(intact, "phase140 (53) a failed growth left the old table exactly as it was");
+        Check(g_p140_boom_live == live,
+              "phase140 (54) with nothing duplicated and nothing lost");
+        m.try_emplace(7, P140Boom(7));
+        Check(m.slot_count() == 16 && m.size() == 8, "phase140 (55) and it still grows after");
+    }
+    Check(g_p140_boom_live == 0, "phase140 (56) every bomb fixture is destroyed");
+
+    // ── (K) an argument that names an element of the table being modified ───
+    {
+        Map m;
+        m.reserve(6);                        // 8 slots, ceiling 7
+        for (int i = 0; i < 7; ++i) m.try_emplace(i, i * 10);
+        const int &alias = m.at(3);
+        m.try_emplace(100, alias);           // THIS insert relocates everything
+        Check(m.slot_count() == 16 && m.at(100) == 30,
+              "phase140 (57) a value argument naming a live element survived the growth");
+
+        Map m2;
+        m2.reserve(6);
+        for (int i = 0; i < 7; ++i) m2.try_emplace(i, 500 + i);
+        const int &kalias = m2.at(2);        // 502 — a live value, not a key
+        m2.try_emplace(kalias, 7);
+        Check(m2.slot_count() == 16 && m2.contains(502) && m2.at(502) == 7,
+              "phase140 (58) a KEY argument naming a live element survived the growth");
+
+        // operator[] hands back a reference into the table, and the insertion
+        // that produced it may have just freed the block that reference would
+        // have pointed into.
+        Map m3;
+        m3.reserve(6);
+        for (int i = 0; i < 7; ++i) m3.try_emplace(i, i * 10);
+        int lk    = 100;
+        m3[lk]    = 42;
+        Map m4;
+        m4.reserve(6);
+        for (int i = 0; i < 7; ++i) m4.try_emplace(i, i * 10);
+        m4[200] = 43;
+        Check(m3.slot_count() == 16 && m3.at(100) == 42 && m4.slot_count() == 16 &&
+                  m4.at(200) == 43,
+              "phase140 (59) both operator[] overloads wrote into the NEW block after growing");
+
+        box::flat_hash_map<std::string, std::string> ms;
+        ms.reserve(6);
+        for (int i = 0; i < 7; ++i)
+            ms.try_emplace("k" + std::to_string(i),
+                           "long-enough-to-heap-allocate-" + std::to_string(i));
+        const std::string &va = ms.at("k3");
+        ms.try_emplace("brand-new", va);
+        const std::string &ka = ms.at("k4");
+        ms.try_emplace(ka, "x");
+        Check(ms.at("brand-new") == "long-enough-to-heap-allocate-3" &&
+                  ms.contains("long-enough-to-heap-allocate-4"),
+              "phase140 (60) the same holds for heap-owning keys and values");
+    }
+
+    // ── (L) allocator propagation ───────────────────────────────────────────
+    {
+        using M = box::flat_hash_map<int, int, std::hash<int>, std::equal_to<int>,
+                                     P140TagAlloc<std::pair<int, int>>>;
+        M a(0, P140TagAlloc<std::pair<int, int>>(1));
+        M b(0, P140TagAlloc<std::pair<int, int>>(2));
+        for (int i = 0; i < 50; ++i) a.try_emplace(i, i);
+        b = a;
+        Check(b.get_allocator().id == 1 && b.size() == 50,
+              "phase140 (61) POCCA propagated the allocator on copy-assignment");
+        M c(0, P140TagAlloc<std::pair<int, int>>(3));
+        c = std::move(a);
+        Check(c.get_allocator().id == 1 && c.size() == 50,
+              "phase140 (62) POCMA propagated it on move-assignment");
+        M d(0, P140TagAlloc<std::pair<int, int>>(4));
+        d.try_emplace(999, 999);
+        c.swap(d);
+        Check(c.get_allocator().id == 4 && d.get_allocator().id == 1 && c.size() == 1 &&
+                  d.size() == 50,
+              "phase140 (63) POCS swapped allocators along with the storage");
+
+        using S2 = box::flat_hash_map<int, int, std::hash<int>, std::equal_to<int>,
+                                      P140StuckAlloc<std::pair<int, int>>>;
+        S2 x(0, P140StuckAlloc<std::pair<int, int>>(1));
+        S2 y(0, P140StuckAlloc<std::pair<int, int>>(2));
+        for (int i = 0; i < 30; ++i) x.try_emplace(i, i * 2);
+        y      = std::move(x);
+        bool v = y.get_allocator().id == 2 && y.size() == 30 && x.empty();
+        for (int i = 0; i < 30; ++i)
+            if (y.at(i) != i * 2) v = false;
+        Check(v, "phase140 (64) unequal non-propagating allocators moved element by element "
+                 "instead of stealing a block this allocator could never free");
+    }
+
+    // ── (M) the BoxOS half: one tagged allocation for the whole map ─────────
+    // This is the claim that cannot be measured anywhere but here — the boxlib
+    // tagged heap counts the blocks, so "one allocation, not one per element"
+    // is a number rather than a design note.
+    {
+        box::tagged_resource flat_res("boxcxx:p140:flat");
+        box::tagged_resource node_res("boxcxx:p140:node");
+        box::heap::tag       flat_tag("boxcxx:p140:flat");
+        box::heap::tag       node_tag("boxcxx:p140:node");
+        const int            N = 2000;
+        size_t               flat_blocks = 0, node_blocks = 0, flat_bytes = 0, node_bytes = 0;
+        {
+            box::pmr::flat_hash_map<int, int> flat(&flat_res);
+            std::pmr::unordered_map<int, int> node(&node_res);
+            for (int i = 0; i < N; ++i) {
+                flat.try_emplace(i, i);
+                node.emplace(i, i);
+            }
+            flat_blocks = flat_tag.count();
+            node_blocks = node_tag.count();
+            flat_bytes  = flat_tag.bytes();
+            node_bytes  = node_tag.bytes();
+            Check(flat.size() == (size_t)N && node.size() == (size_t)N,
+                  "phase140 (65) both maps hold the same 2000 elements");
+        }
+        printf("[CXX] phase140 footprint: box::flat_hash_map %zu block(s) %zu bytes (%zu B/elem) "
+               "vs std::unordered_map %zu blocks %zu bytes (%zu B/elem)\n",
+               flat_blocks, flat_bytes, flat_bytes / N, node_blocks, node_bytes, node_bytes / N);
+        Check(flat_blocks == 1,
+              "phase140 (66) the ENTIRE flat map is ONE tagged heap block");
+        Check(node_blocks > (size_t)N,
+              "phase140 (67) std::unordered_map took more than one block per element");
+        // The block is EXACTLY four bytes of control plus the key plus the
+        // value, per slot, with nothing else in it: no per-element header, no
+        // padding beyond the section alignment. 2000 elements land on 4096
+        // slots (the doubling above 3584, this table's ceiling for 4096).
+        Check(flat_bytes == 4096 * (sizeof(uint32_t) + sizeof(int) + sizeof(int)),
+              "phase140 (68) the single block is exactly ctl+key+value per slot, nothing else");
+        // Measured here: 49152 against 80832, i.e. 61% — the bound is 75%, set
+        // from that measurement rather than from an expectation. The headline
+        // is (63) though: the bytes are merely better, the BLOCK COUNT is
+        // 1 against 2001.
+        Check(flat_bytes * 4 < node_bytes * 3,
+              "phase140 (69) and under three quarters of the bytes, measured by the boxlib heap "
+              "itself");
+        Check(flat_tag.count() == 0 && node_tag.count() == 0,
+              "phase140 (70) both tags are back to zero live blocks");
+    }
+
+    // ── (N) the fallible facet ──────────────────────────────────────────────
+    {
+        Map  m;
+        auto r = m.fallible().reserve(64);
+        Check(r.has_value(), "phase140 (71) fallible().reserve succeeded");
+        auto ri = m.fallible().insert({1, 2});
+        Check(ri.has_value() && ri->second && ri->first->second == 2,
+              "phase140 (72) fallible().insert handed back the iterator and the flag");
+        auto rt = m.fallible().try_emplace(1, 99);
+        Check(rt.has_value() && !rt->second && m.at(1) == 2,
+              "phase140 (73) a duplicate is a VALUE, not an error, and did not overwrite");
+        auto ra = m.fallible().insert_or_assign(1, 99);
+        Check(ra.has_value() && !ra->second && m.at(1) == 99,
+              "phase140 (74) fallible().insert_or_assign");
+        auto rb = m.fallible().reserve(m.max_size() + 1);
+        Check(!rb.has_value() && rb.error().code() == box::errc::invalid_argument,
+              "phase140 (75) an impossible reserve names its cause instead of throwing");
+        Set  s;
+        auto rs = s.fallible().insert(7);
+        Check(rs.has_value() && rs->second && s.contains(7),
+              "phase140 (76) the set half has the same facet");
+    }
+
+    // ── (O) the set, and the rest of the surface ────────────────────────────
+    {
+        box::flat_hash_set<std::string> s;
+        auto                            r1 = s.insert("hello");
+        std::string                     dup = "hello";
+        auto                            r2  = s.insert(std::move(dup));
+        Check(r1.second && !r2.second && s.size() == 1 && *r2.first == "hello",
+              "phase140 (77) a duplicate insert reports the incumbent");
+        Check(dup == "hello",
+              "phase140 (78) and left the caller's argument INTACT — no silent move");
+
+        box::flat_hash_map<int, P140MoveOnly> mo;
+        for (int i = 0; i < 300; ++i) mo.try_emplace(i, P140MoveOnly(i));
+        bool all = mo.size() == 300;
+        for (int i = 0; i < 300; ++i)
+            if (mo.at(i).v != i) all = false;
+        for (int i = 0; i < 150; ++i) mo.erase(i);
+        for (int i = 150; i < 300; ++i)
+            if (mo.at(i).v != i) all = false;
+        Check(all && mo.size() == 150,
+              "phase140 (79) a move-only mapped type survives growth and the erase shift");
+
+        Map a{{1, 10}, {2, 20}, {3, 30}};
+        Map b(a);
+        Check(a == b && b.size() == 3, "phase140 (80) initializer_list, copy ctor and operator==");
+        Map c(std::move(b));
+        Check(c.size() == 3 && c.at(2) == 20, "phase140 (81) move construction");
+        Map d;
+        d = c;
+        d[4] = 40;
+        Check(!(d == c) && d.size() == 4, "phase140 (82) copy assignment then divergence");
+        swap(c, d);
+        Check(c.size() == 4 && d.size() == 3, "phase140 (83) the free swap");
+        d = {{9, 90}};
+        Check(d.size() == 1 && d.at(9) == 90, "phase140 (84) assignment from initializer_list");
+
+        std::vector<std::pair<int, int>> src{{7, 70}, {8, 80}};
+        Map                              fr(std::from_range, src);
+        Check(fr.size() == 2 && fr.at(8) == 80, "phase140 (85) the from_range constructor");
+        fr.insert_range(std::vector<std::pair<int, int>>{{9, 90}});
+        Check(fr.size() == 3 && fr.at(9) == 90, "phase140 (86) insert_range");
+
+        // insert_range COPIES by contract; views::as_rvalue is how a caller
+        // asks for the elements to be moved, and that is where it matters: a
+        // duplicate must leave its source element alone, exactly as
+        // insert(Key&&) does. Building a Key from every element up front would
+        // move the ones it then throws away — the same divergence between two
+        // halves of one class this epic keeps finding.
+        const std::string               kDup   = "duplicate-long-enough-to-heap-allocate";
+        const std::string               kFresh = "fresh-long-enough-to-heap-allocate";
+        box::flat_hash_set<std::string> rs;
+        rs.insert(kDup);
+        std::vector<std::string> rsrc{kDup, kFresh};
+        rs.insert_range(rsrc | std::views::as_rvalue);
+        Check(rs.size() == 2 && rs.contains(kFresh) && rsrc[0] == kDup,
+              "phase140 (87) insert_range did NOT move the source element of a duplicate");
+        Check(rsrc[1].empty(), "phase140 (88) and did move the one it actually took");
+        box::flat_hash_set<std::string> rs2;
+        std::vector<std::string>        rsrc2{kDup, kFresh};
+        rs2.insert_range(rsrc2);
+        Check(rs2.size() == 2 && rsrc2[0] == kDup && rsrc2[1] == kFresh,
+              "phase140 (89) the copying form left every source element intact");
+        box::flat_hash_set<std::string> rs3;
+        std::vector<const char *>       raw{"x", "y", "x"};
+        rs3.insert_range(raw);
+        Check(rs3.size() == 2 && rs3.contains("x") && rs3.contains("y"),
+              "phase140 (90) and a range the hasher does not speak still inserts");
+
+        // CTAD, through the iterator-pair and initializer_list guides.
+        box::flat_hash_map ctad(src.begin(), src.end());
+        static_assert(std::is_same_v<decltype(ctad), box::flat_hash_map<int, int>>);
+        std::vector<int>   ks{1, 2, 3};
+        box::flat_hash_set ctad2(ks.begin(), ks.end());
+        static_assert(std::is_same_v<decltype(ctad2), box::flat_hash_set<int>>);
+        Check(ctad.size() == 2 && ctad2.size() == 3,
+              "phase140 (91) deduction guides deduced both containers");
+    }
+
+    printf("[CXX] PASS phase140: box::flat_hash_map/flat_hash_set — a robin-hood table whose "
+           "probe distance is derived and cannot overflow, whose whole storage is ONE tagged heap "
+           "block, and whose invariant survives a throw on every relocation path\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -35139,6 +35948,7 @@ int main()
     Phase137();
     Phase138();
     Phase139();
+    Phase140();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
