@@ -179,10 +179,6 @@
 // formatters               formatter<thread::id, wchar_t> is absent, and
 //                          there is no <stacktrace> / formatter<
 //                          stacktrace_entry> at all.
-// hypot                    the three-argument hypot(x, y, z) is absent.
-// interpolate              midpoint is complete in <numeric>, but lerp is
-//                          absent from <cmath>; jointly owned, so defined
-//                          only once both provide their piece.
 // is_implicit_lifetime     std::is_implicit_lifetime absent.
 // is_layout_compatible     is_layout_compatible is present, but P0466R5's
 //                          is_corresponding_member is absent.
@@ -190,12 +186,6 @@
 //                          is_pointer_interconvertible_base_of is present,
 //                          but is_pointer_interconvertible_with_class is
 //                          absent.
-// is_swappable             the traits exist, but is_swappable_v<int[3]> is
-//                          false: <type_traits> declares only the scalar
-//                          std::swap, and the array overload defined later
-//                          in <utility> is invisible to the trait's own
-//                          definition context, which built-in array types
-//                          cannot reach through ADL.
 // map_try_emplace          map::try_emplace and map::insert_or_assign each
 //                          have 2 of their 4 overloads; both const_iterator
 //                          hint forms are absent.
@@ -214,13 +204,13 @@
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
 //                          algorithms] — and 23 of the entities it promises
-//                          are absent: views::take_while/take_while_view;
+//                          are absent. Ф31e-b closed eight of them — all
+//                          thirteen [range.access] names now exist as CPOs
+//                          (the seven c- and r-prefixed ones were added, and
+//                          ssize stopped being a plain function template).
+//                          What remains: views::take_while/take_while_view;
 //                          views::drop_while/drop_while_view;
 //                          views::istream/basic_istream_view/istream_view;
-//                          seven of the thirteen [range.access] names
-//                          (cbegin, cend, rbegin, rend, crbegin, crend,
-//                          cdata — only begin/end/size/empty/data exist as
-//                          CPOs, plus ssize as a plain function template);
 //                          range_rvalue_reference_t;
 //                          range_common_reference_t; subrange's two range
 //                          deduction guides subrange(R&&) and
@@ -233,22 +223,8 @@
 //                          destroy, destroy_n, destroy_at and construct_at
 //                          (14 names; the std:: forms of all of them do
 //                          exist in <memory>).
-// ranges_as_const          P2278R4's own headline entities are the two that
-//                          are missing: ranges::cbegin and ranges::cend do
-//                          not exist, and neither do view_interface::cbegin
-//                          / view_interface::cend. Everything else the paper
-//                          adds IS complete and exercised —
-//                          basic_const_iterator, make_const_iterator (and
-//                          make_const_sentinel), views::as_const,
-//                          const_iterator_t, const_sentinel_t — so this is
-//                          four names away from claimable.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// robust_nonmodifying_seq_ops
-//                          equal and is_permutation have their four-iterator
-//                          overloads, but std::mismatch has only the
-//                          three-iterator forms -- exactly the unsafe shape
-//                          N3346 exists to replace.
 // sample                   only ranges::sample exists; the classic
 //                          std::sample is absent.
 // scoped_lock              the single-mutex scoped_lock<Mutex> partial
@@ -275,14 +251,11 @@
 //                          basic_string::resize_and_overwrite absent.
 // string_view              basic_string_view has no crbegin/crend.
 // syncbuf                  no <syncbuf> header.
-// three_way_comparison     two separate gaps. (1) In <compare> itself the
-//                          CLASS compare_three_way_result<int> is ill-formed
-//                          — the primary template is declared without the
-//                          `class U = T` default — while the ALIAS
-//                          compare_three_way_result_t<int> works, because
-//                          the alias carries the default itself. (2) The
-//                          bigger one, and the reason (1) alone is not the
-//                          blocker: this macro's 201907L value is P1614R2,
+// three_way_comparison     gap (1) — the CLASS compare_three_way_result<int>
+//                          being ill-formed for want of the `class U = T`
+//                          default on its primary — was closed in Ф31e-b.
+//                          What still blocks: this macro's 201907L value is
+//                          P1614R2,
 //                          which is the library-wide operator<=>, and the
 //                          four ordered associative containers — map,
 //                          multimap, set, multiset — have no operator<=> at
@@ -299,10 +272,6 @@
 //                          the C++14 alias set is missing aligned_storage_t
 //                          and aligned_union_t (deprecated in C++23, but
 //                          still required).
-// transparent_operators    all nineteen void specializations of the
-//                          operator functors are present, but P0074R0's
-//                          owner_less<void> — the paper that defines the
-//                          201510L value — has no is_transparent typedef.
 // tuple_like               P2165R4's tuple-like is EXPOSITION-ONLY in C++23,
 //                          so there is no std::tuple_like to be missing —
 //                          the reason is entirely the converting machinery

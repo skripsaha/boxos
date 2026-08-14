@@ -301,7 +301,12 @@ concept three_way_comparable_with =
         { u <=> t } -> __cmp::ComparesAs<Cat>;
     };
 
-template <class T, class U>
+// [cmp.result]: `template<class T, class U = T>`. The default lives on the
+// primary, never on the partial specialization below (a default template
+// argument may be given once per class template) — and the _t alias carries
+// its own, which is why `compare_three_way_result_t<T>` already worked while
+// `compare_three_way_result<T>` did not.
+template <class T, class U = T>
 struct compare_three_way_result {};
 template <class T, class U>
     requires requires(const remove_reference_t<T> &t,

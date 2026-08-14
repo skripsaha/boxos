@@ -125,6 +125,19 @@ struct array<T, 0> {
     {
         boxcxx::ThrowOutOfRange("array<T,0>::at");
     }
+    // [array.zero]/2: these must be DECLARED for the zero-size case too —
+    // calling them is undefined, declaring them is not optional. Generic code
+    // that instantiates a template over both sizes, or merely names
+    // array<T,0>::back in a discarded branch, needs them present; the null
+    // dereference is the undefined behaviour the standard already licenses
+    // for calling them, and it is what both reference libraries do here.
+    constexpr reference operator[](size_type) { return *data(); }
+    constexpr const_reference operator[](size_type) const { return *data(); }
+    constexpr reference front() { return *data(); }
+    constexpr const_reference front() const { return *data(); }
+    constexpr reference back() { return *data(); }
+    constexpr const_reference back() const { return *data(); }
+
     constexpr pointer data() noexcept { return nullptr; }
     constexpr const_pointer data() const noexcept { return nullptr; }
     constexpr iterator begin() noexcept { return nullptr; }
@@ -133,6 +146,30 @@ struct array<T, 0> {
     constexpr iterator end() noexcept { return nullptr; }
     constexpr const_iterator end() const noexcept { return nullptr; }
     constexpr const_iterator cend() const noexcept { return nullptr; }
+    constexpr reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+    constexpr const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    constexpr reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+    constexpr const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+    constexpr const_reverse_iterator crbegin() const noexcept
+    {
+        return const_reverse_iterator(cend());
+    }
+    constexpr const_reverse_iterator crend() const noexcept
+    {
+        return const_reverse_iterator(cbegin());
+    }
 
     [[nodiscard]] constexpr bool empty() const noexcept { return true; }
     constexpr size_type size() const noexcept { return 0; }

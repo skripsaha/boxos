@@ -10,5 +10,14 @@
 #ifndef __cpp_lib_math_special_functions
 #  define __cpp_lib_math_special_functions 201603L
 #endif
+#ifndef __cpp_lib_hypot
+// P0030R1: the three-argument hypot(x, y, z), added in Ф31e-b.
+#  define __cpp_lib_hypot 201603L
+#endif
+#ifndef __cpp_lib_interpolate
+// P0811R3, co-owned with <numeric>: lerp is this header's half, midpoint is
+// the other. Claimable since Ф31e-b added lerp.
+#  define __cpp_lib_interpolate 201902L
+#endif
 
 #endif // BOXCXX_BITS_VERSION_CMATH

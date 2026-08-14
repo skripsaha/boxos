@@ -10,6 +10,11 @@
 #ifndef __cpp_lib_gcd_lcm
 #  define __cpp_lib_gcd_lcm 201606L
 #endif
+#ifndef __cpp_lib_interpolate
+// P0811R3, co-owned with <cmath> -- see the note there. midpoint is this
+// header's half of the paper.
+#  define __cpp_lib_interpolate 201902L
+#endif
 #ifndef __cpp_lib_constexpr_numeric
 #  define __cpp_lib_constexpr_numeric 201911L
 #endif

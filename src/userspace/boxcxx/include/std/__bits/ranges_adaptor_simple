@@ -26,11 +26,10 @@
 namespace std {
 namespace ranges {
 
-// ── constant_range ([range.refinements], C++23) ─────────────────────────
-
-template <typename T>
-concept constant_range =
-    input_range<T> && __iter_impl::ConstantIterator<iterator_t<T>>;
+// constant_range ([range.refinements]) now lives in <iterator>, next to the
+// ConstantIterator concept it is written in terms of: the c-prefixed
+// range-access CPOs need it and sit earlier in the include graph than this
+// file. It arrives through the <iterator> include above.
 
 // ── reverse_view ([range.reverse]) ──────────────────────────────────────
 

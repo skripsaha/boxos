@@ -1828,6 +1828,184 @@ constexpr const_sentinel<S> make_const_sentinel(S s)
     return s;
 }
 
+// ── the reverse and constant range-access CPOs ([range.access]) ───────────
+// These live here, not in <__bits/ranges_core>, because every ingredient they
+// need is finished on THIS line and none of it is available there:
+// make_reverse_iterator, make_const_iterator/make_const_sentinel and
+// ConstantIterator are all defined above, while ranges_core deliberately does
+// not include <iterator> at all (that direction is the genuine cycle -- see
+// its header comment). ranges_core's own begin/end/size/empty/data reach us
+// through the include it already performs further up this file, so the two
+// halves of [range.access] end up in one namespace, split only by what each
+// half can see.
+namespace ranges {
+
+// [range.refinements]. Defined here rather than in <__bits/ranges_adaptor_
+// simple>, where it used to sit: the c-prefixed CPOs below need it, and they
+// are earlier in the include graph than that file.
+template <typename T>
+concept constant_range =
+    input_range<T> && __iter_impl::ConstantIterator<iterator_t<T>>;
+
+namespace __cpo {
+
+// [range.access.general]'s possibly-const-range. The const overlay is applied
+// only when it BUYS constness -- if T is already a constant range, or if the
+// const version is not a range at all (filter_view, and every other view that
+// caches), handing back const T& would either change nothing or break the
+// call. Returning a reference, never a copy, is what keeps the CPOs usable on
+// a range whose iterators point into it.
+template <typename T>
+constexpr auto &PossiblyConstRange(T &t) noexcept
+{
+    if constexpr (constant_range<const T> && !constant_range<T>)
+        return const_cast<const T &>(t);
+    else
+        return t;
+}
+
+struct RBegin {
+    template <typename R>
+        requires requires(R &r) {
+            { r.rbegin() } -> input_or_output_iterator;
+        }
+    constexpr auto operator()(R &r) const noexcept(noexcept(r.rbegin()))
+    {
+        return r.rbegin();
+    }
+    template <typename R>
+        requires(!requires(R &r) {
+            { r.rbegin() } -> input_or_output_iterator;
+        }) && requires(R &r) {
+            { rbegin(r) } -> input_or_output_iterator;
+        }
+    constexpr auto operator()(R &r) const noexcept(noexcept(rbegin(r)))
+    {
+        return rbegin(r);
+    }
+    // The synthesized form. [range.access.rbegin] allows it only when begin
+    // and end have the SAME type -- a reverse_iterator is built from the end,
+    // and it must be able to walk back to the begin, which a distinct sentinel
+    // type cannot express.
+    template <typename R>
+        requires(!requires(R &r) { r.rbegin(); }) &&
+                (!requires(R &r) { rbegin(r); }) && requires(R &r) {
+                    requires same_as<decltype(ranges::begin(r)),
+                                     decltype(ranges::end(r))>;
+                    requires bidirectional_iterator<decltype(ranges::begin(r))>;
+                }
+    constexpr auto operator()(R &r) const
+    {
+        return std::make_reverse_iterator(ranges::end(r));
+    }
+};
+
+struct REnd {
+    template <typename R>
+        requires requires(R &r) {
+            { r.rend() } -> input_or_output_iterator;
+        }
+    constexpr auto operator()(R &r) const noexcept(noexcept(r.rend()))
+    {
+        return r.rend();
+    }
+    template <typename R>
+        requires(!requires(R &r) {
+            { r.rend() } -> input_or_output_iterator;
+        }) && requires(R &r) {
+            { rend(r) } -> input_or_output_iterator;
+        }
+    constexpr auto operator()(R &r) const noexcept(noexcept(rend(r)))
+    {
+        return rend(r);
+    }
+    template <typename R>
+        requires(!requires(R &r) { r.rend(); }) &&
+                (!requires(R &r) { rend(r); }) && requires(R &r) {
+                    requires same_as<decltype(ranges::begin(r)),
+                                     decltype(ranges::end(r))>;
+                    requires bidirectional_iterator<decltype(ranges::begin(r))>;
+                }
+    constexpr auto operator()(R &r) const
+    {
+        return std::make_reverse_iterator(ranges::begin(r));
+    }
+};
+
+// The four c-prefixed CPOs. P2278R4 made these WRAP rather than merely
+// re-dispatch: the result is a constant iterator, so cbegin on a range whose
+// own const overlay is not constant still hands back something that cannot be
+// written through. make_const_iterator collapses to the identity when the
+// iterator is already constant, so no wrapper is paid for where none is
+// needed -- vector<int>::const_iterator comes back as itself.
+struct CBegin {
+    template <typename R>
+        requires requires(R &r) {
+            ranges::begin(__cpo::PossiblyConstRange(r));
+        }
+    constexpr auto operator()(R &r) const
+    {
+        auto &c = __cpo::PossiblyConstRange(r);
+        return std::make_const_iterator(ranges::begin(c));
+    }
+};
+
+struct CEnd {
+    template <typename R>
+        requires requires(R &r) { ranges::end(__cpo::PossiblyConstRange(r)); }
+    constexpr auto operator()(R &r) const
+    {
+        auto &c = __cpo::PossiblyConstRange(r);
+        return std::make_const_sentinel(ranges::end(c));
+    }
+};
+
+struct CRBegin {
+    template <typename R>
+        requires requires(R &r) { RBegin{}(__cpo::PossiblyConstRange(r)); }
+    constexpr auto operator()(R &r) const
+    {
+        auto &c = __cpo::PossiblyConstRange(r);
+        return std::make_const_iterator(RBegin{}(c));
+    }
+};
+
+struct CREnd {
+    template <typename R>
+        requires requires(R &r) { REnd{}(__cpo::PossiblyConstRange(r)); }
+    constexpr auto operator()(R &r) const
+    {
+        auto &c = __cpo::PossiblyConstRange(r);
+        return std::make_const_sentinel(REnd{}(c));
+    }
+};
+
+// [range.prim.cdata] returns a pointer to const, by applying the same const
+// overlay and then asking for data(). No wrapping: a pointer is already the
+// constant form once its pointee is const.
+struct CData {
+    template <typename R>
+        requires requires(R &r) { Data{}(__cpo::PossiblyConstRange(r)); }
+    constexpr auto operator()(R &r) const
+    {
+        return Data{}(__cpo::PossiblyConstRange(r));
+    }
+};
+
+} // namespace __cpo
+
+inline namespace __cpo_objects {
+inline constexpr __cpo::RBegin  rbegin{};
+inline constexpr __cpo::REnd    rend{};
+inline constexpr __cpo::CBegin  cbegin{};
+inline constexpr __cpo::CEnd    cend{};
+inline constexpr __cpo::CRBegin crbegin{};
+inline constexpr __cpo::CREnd   crend{};
+inline constexpr __cpo::CData   cdata{};
+} // namespace __cpo_objects
+
+} // namespace ranges
+
 // ── [stream.iterators] ────────────────────────────────────────────────────
 
 // istream_iterator: a LOOK-AHEAD input iterator -- construction (and every

@@ -18276,9 +18276,9 @@ void Phase101()
         static_assert(__cpp_lib_gcd_lcm >= 201606L, "phase101 __cpp_lib_gcd_lcm pin");
         static_assert(__cpp_lib_constexpr_numeric >= 201911L, "phase101 __cpp_lib_constexpr_numeric pin");
         static_assert(__cpp_lib_ranges_iota >= 202202L, "phase101 __cpp_lib_ranges_iota pin");
-#ifdef __cpp_lib_interpolate
-#  error "phase101: __cpp_lib_interpolate must stay undefined until lerp lands in <cmath>"
-#endif
+        // Ф31e-b-1 landed lerp in <cmath>, which is exactly the condition this
+        // pin named; <numeric> co-owns the macro and must publish it too.
+        static_assert(__cpp_lib_interpolate >= 201902L, "phase101 __cpp_lib_interpolate pin");
     }
 
     // ── constexpr sanity: proves __cpp_lib_constexpr_numeric is real ─────
@@ -29418,12 +29418,8 @@ void Phase131()
 #ifdef __cpp_lib_formatters
 #  error "phase131: __cpp_lib_formatters must stay undefined"
 #endif
-#ifdef __cpp_lib_hypot
-#  error "phase131: __cpp_lib_hypot must stay undefined"
-#endif
-#ifdef __cpp_lib_interpolate
-#  error "phase131: __cpp_lib_interpolate must stay undefined"
-#endif
+static_assert(__cpp_lib_hypot == 201603L, "phase131: __cpp_lib_hypot — closed by Ф31e");
+static_assert(__cpp_lib_interpolate == 201902L, "phase131: __cpp_lib_interpolate — closed by Ф31e");
 #ifdef __cpp_lib_is_implicit_lifetime
 #  error "phase131: __cpp_lib_is_implicit_lifetime must stay undefined"
 #endif
@@ -29433,9 +29429,7 @@ void Phase131()
 #ifdef __cpp_lib_is_pointer_interconvertible
 #  error "phase131: __cpp_lib_is_pointer_interconvertible must stay undefined"
 #endif
-#ifdef __cpp_lib_is_swappable
-#  error "phase131: __cpp_lib_is_swappable must stay undefined"
-#endif
+static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappable — closed by Ф31e");
 #ifdef __cpp_lib_map_try_emplace
 #  error "phase131: __cpp_lib_map_try_emplace must stay undefined"
 #endif
@@ -29464,15 +29458,11 @@ void Phase131()
 #ifdef __cpp_lib_ranges
 #  error "phase131: __cpp_lib_ranges must stay undefined"
 #endif
-#ifdef __cpp_lib_ranges_as_const
-#  error "phase131: __cpp_lib_ranges_as_const must stay undefined"
-#endif
+static_assert(__cpp_lib_ranges_as_const == 202207L, "phase131: __cpp_lib_ranges_as_const — closed by Ф31e");
 #ifdef __cpp_lib_result_of_sfinae
 #  error "phase131: __cpp_lib_result_of_sfinae must stay undefined"
 #endif
-#ifdef __cpp_lib_robust_nonmodifying_seq_ops
-#  error "phase131: __cpp_lib_robust_nonmodifying_seq_ops must stay undefined"
-#endif
+static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp_lib_robust_nonmodifying_seq_ops — closed by Ф31e");
 #ifdef __cpp_lib_sample
 #  error "phase131: __cpp_lib_sample must stay undefined"
 #endif
@@ -29515,9 +29505,7 @@ void Phase131()
 #ifdef __cpp_lib_transformation_trait_aliases
 #  error "phase131: __cpp_lib_transformation_trait_aliases must stay undefined"
 #endif
-#ifdef __cpp_lib_transparent_operators
-#  error "phase131: __cpp_lib_transparent_operators must stay undefined"
-#endif
+static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_transparent_operators — closed by Ф31e");
 #ifdef __cpp_lib_tuple_like
 #  error "phase131: __cpp_lib_tuple_like must stay undefined"
 #endif
@@ -36483,6 +36471,208 @@ void Phase144()
            "vector<bool> both models an output range and swaps its allocator\n");
 }
 
+// ── Ф31e-b-1 fixtures ────────────────────────────────────────────────────
+// Distinguishes "the class spelling works" from "the alias spelling works":
+// the alias always carried its own `class U = T`, so only the class form was
+// ever ill-formed. Dependent, so a failure is a substitution failure.
+template <class T>
+constexpr bool HasCmpResultClass =
+    requires { typename std::compare_three_way_result<T>::type; };
+struct NoSpaceship {};
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-b-1 — surface that was simply absent, so valid code did not compile.
+// Nothing here was ever a wrong answer; each one was a name that should have
+// existed and did not, which is why the checks are mostly about a call
+// resolving at all and about the TYPE it resolves to.
+// ─────────────────────────────────────────────────────────────────────────
+void Phase145()
+{
+    // ── <compare>: the class spelling of compare_three_way_result ────────
+    static_assert(HasCmpResultClass<int>);
+    static_assert(!HasCmpResultClass<NoSpaceship>);
+    static_assert(std::is_same_v<std::compare_three_way_result<int>::type,
+                                 std::strong_ordering>);
+    static_assert(std::is_same_v<std::compare_three_way_result_t<double>,
+                                 std::partial_ordering>);
+
+    // ── <algorithm>: mismatch's four-iterator forms ──────────────────────
+    // The point of N3346: the second range's END is consulted, so a shorter
+    // second range stops the walk instead of being run off.
+    {
+        int a[4] = {1, 2, 3, 4};
+        int b[2] = {1, 2};
+        auto r   = std::mismatch(a, a + 4, b, b + 2);
+        Check(r.first == a + 2 && r.second == b + 2,
+              "phase145 (1) four-iterator mismatch stops at the shorter range's end");
+        auto rp = std::mismatch(a, a + 4, b, b + 2,
+                                [](int x, int y) { return x == y; });
+        Check(rp.first == a + 2 && rp.second == b + 2,
+              "phase145 (2) and so does the predicate form");
+        // Which overload four same-type iterators select is settled by partial
+        // ordering, not by a constraint: the four-iterator one is the more
+        // specialized, because deducing it from the (It,It,It,Pred) shape makes
+        // It2 answer two different types at once.
+        static_assert(std::is_same_v<decltype(std::mismatch((int *)0, (int *)0,
+                                                            (int *)0, (int *)0)),
+                                     std::pair<int *, int *>>);
+        int c[3] = {1, 9, 3};
+        Check(std::mismatch(a, a + 3, c).first == a + 1 &&
+                  std::mismatch(a, a + 3, c, [](int x, int y) { return x == y; })
+                          .first == a + 1,
+              "phase145 (3) the three-iterator forms still resolve, predicate and all");
+    }
+
+    // ── <array>: array<T,0>'s element and reverse surface ────────────────
+    // Declared, never called: [array.zero] makes calling them undefined and
+    // declaring them mandatory, and generic code over both sizes needs them.
+    {
+        using Z = std::array<int, 0>;
+        static_assert(requires(Z z, const Z cz) {
+            z[0]; cz[0]; z.front(); cz.front(); z.back(); cz.back();
+            z.rbegin(); cz.rbegin(); z.rend(); cz.rend(); cz.crbegin(); cz.crend();
+        });
+        static_assert(std::is_same_v<decltype(std::declval<Z &>()[0]), int &>);
+        static_assert(std::is_same_v<decltype(std::declval<const Z &>().back()),
+                                     const int &>);
+        Z z;
+        Check(z.rbegin() == z.rend() && z.crbegin() == z.crend() && z.empty(),
+              "phase145 (4) array<T,0>'s reverse range is empty rather than absent");
+        std::array<int, 3> a{1, 2, 3};
+        Check(a[0] == 1 && a.front() == 1 && a.back() == 3 && *a.rbegin() == 3 &&
+                  *a.crbegin() == 3,
+              "phase145 (5) the non-zero specialization is untouched");
+    }
+
+    // ── <cmath>: lerp and the three-argument hypot ───────────────────────
+    static_assert(std::lerp(0.0, 10.0, 0.0) == 0.0);
+    static_assert(std::lerp(0.0, 10.0, 1.0) == 10.0);   // exact, by construction
+    static_assert(std::lerp(2.0, 4.0, 0.5) == 3.0);
+    static_assert(std::lerp(2.0, 4.0, 2.0) == 6.0);     // extrapolates
+    static_assert(std::lerp(1.0, 1.0, 5.0) == 1.0);     // a == b, any finite t
+    static_assert(std::is_same_v<decltype(std::lerp(0.0f, 0.0f, 0.0f)), float>);
+    {
+        // P0811R3's four guarantees, the two that arithmetic alone would break:
+        // exactness at t == 1 (a + t*(b-a) overshoots) and boundedness inside
+        // [0,1] (which is what the clamp against b restores).
+        Check(std::lerp(0.1, 0.2, 1.0) == 0.2 && std::lerp(1e308, 1.5e308, 1.0) == 1.5e308,
+              "phase145 (6) lerp is exact at t == 1, where the naive form overshoots");
+        bool bounded = true;
+        for (int i = 0; i <= 1000; ++i) {
+            const double t = i / 1000.0;
+            const double r = std::lerp(1.0, 2.0, t);
+            if (!(r >= 1.0 && r <= 2.0)) bounded = false;
+        }
+        Check(bounded, "phase145 (7) lerp stays inside the endpoints for t in [0,1]");
+        Check(std::lerp(0.0f, 10.0f, 1.0f) == 10.0f &&
+                  std::lerp(0.0L, 10.0L, 1.0L) == 10.0L,
+              "phase145 (8) all three floating-point widths");
+        // hypot(x,y,z): the 3-4-5-style triple, and the reason the scaling
+        // exists — squaring 1e200 directly overflows to infinity.
+        Check(std::hypot(2.0, 3.0, 6.0) == 7.0 && std::hypot(-2.0, -3.0, -6.0) == 7.0 &&
+                  std::hypot(0.0, 0.0, 0.0) == 0.0,
+              "phase145 (9) three-argument hypot");
+        Check(std::hypot(2e200, 3e200, 6e200) == 7e200 &&
+                  std::hypot(2e-200, 3e-200, 6e-200) == 7e-200,
+              "phase145 (10) and it survives where squaring first would overflow or flush");
+        Check(std::hypot(std::kInf, std::kQNaN, 1.0) == std::kInf &&
+                  std::isnan(std::hypot(std::kQNaN, 1.0, 1.0)),
+              "phase145 (11) an infinity wins over a NaN, as in the two-argument form");
+        Check(std::hypot(2.0f, 3.0f, 6.0f) == 7.0f && std::hypot(2.0L, 3.0L, 6.0L) == 7.0L,
+              "phase145 (12) hypot3 at float and long double width too");
+    }
+
+    // ── <ranges>: the seven missing access CPOs, and ssize as an object ──
+    {
+        using V = std::vector<int>;
+        static_assert(std::is_object_v<decltype(std::ranges::cbegin)> &&
+                      std::is_object_v<decltype(std::ranges::cend)> &&
+                      std::is_object_v<decltype(std::ranges::rbegin)> &&
+                      std::is_object_v<decltype(std::ranges::rend)> &&
+                      std::is_object_v<decltype(std::ranges::crbegin)> &&
+                      std::is_object_v<decltype(std::ranges::crend)> &&
+                      std::is_object_v<decltype(std::ranges::cdata)> &&
+                      std::is_object_v<decltype(std::ranges::ssize)>);
+        static_assert(std::is_same_v<decltype(std::ranges::cbegin(std::declval<V &>())),
+                                     V::const_iterator>);
+        static_assert(std::is_same_v<decltype(std::ranges::crbegin(std::declval<V &>())),
+                                     V::const_reverse_iterator>);
+        static_assert(std::is_same_v<decltype(std::ranges::cdata(std::declval<V &>())),
+                                     const int *>);
+        static_assert(std::is_same_v<decltype(std::ranges::ssize(std::declval<V &>())),
+                                     std::ptrdiff_t>);
+        // P2278R4's actual content: cbegin on a NON-const range still yields a
+        // constant iterator. A plain begin() would not.
+        static_assert(std::is_same_v<
+                      std::iter_reference_t<decltype(std::ranges::cbegin(std::declval<V &>()))>,
+                      const int &>);
+        // ssize is an object now, so it can be bound — which is the whole
+        // difference from the function template it used to be.
+        constexpr auto ssize_obj = std::ranges::ssize;
+        int a[4] = {1, 2, 3, 4};
+        Check(ssize_obj(a) == 4 && std::ranges::ssize(a) == 4,
+              "phase145 (13) ranges::ssize is a customization point object, and binds like one");
+        // The synthesized rbegin: a C array has neither a member nor an ADL one.
+        static_assert(std::is_same_v<decltype(std::ranges::rbegin(a)),
+                                     std::reverse_iterator<int *>>);
+        int sum = 0;
+        for (auto it = std::ranges::rbegin(a); it != std::ranges::rend(a); ++it)
+            sum = sum * 10 + *it;
+        Check(sum == 4321, "phase145 (14) the synthesized rbegin/rend walk a C array backwards");
+        V v{1, 2, 3};
+        Check(*std::ranges::cbegin(v) == 1 && *std::ranges::crbegin(v) == 3 &&
+                  std::ranges::cdata(v) == v.data() && std::ranges::ssize(v) == 3,
+              "phase145 (15) and they all agree with the container on a real vector");
+        static_assert(std::ranges::constant_range<const V> &&
+                      !std::ranges::constant_range<V>);
+    }
+
+    // ── view_interface::cbegin / cend ([view.interface.members]) ─────────
+    {
+        std::vector<int> v{4, 5, 6};
+        auto             all = std::views::all(v);
+        Check(*all.cbegin() == 4 && (all.cend() - all.cbegin()) == 3,
+              "phase145 (16) a view offers cbegin/cend of its own");
+        static_assert(!std::indirectly_writable<
+                      decltype(std::views::all(std::declval<std::vector<int> &>()).cbegin()), int>);
+    }
+
+    // ── <iterator>: the two [iterator.range] noexcepts the standard names ─
+    {
+        int a[4] = {1, 2, 3, 4};
+        static_assert(noexcept(std::cbegin(a)));
+        static_assert(noexcept(std::cend(a)));
+        Check(std::cbegin(a) == a && std::cend(a) == a + 4,
+              "phase145 (17) the free cbegin/cend still point where they should");
+    }
+
+    // ── <memory>: owner_less<void> is a transparent comparator ───────────
+    {
+        std::map<std::shared_ptr<int>, int, std::owner_less<>> m;
+        auto sp = std::make_shared<int>(7);
+        m[sp]   = 1;
+        std::weak_ptr<int> wp = sp;
+        // Without is_transparent this line does not compile: the heterogeneous
+        // call operators are unreachable through the container, which is the
+        // entire point of P0074R0.
+        Check(m.find(wp) != m.end() && m.find(wp)->second == 1,
+              "phase145 (18) a weak_ptr finds its shared_ptr through owner_less<>");
+    }
+
+    // ── the six feature-test macros this batch makes honest ──────────────
+    static_assert(__cpp_lib_is_swappable == 201603L);
+    static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L);
+    static_assert(__cpp_lib_transparent_operators == 201510L);
+    static_assert(__cpp_lib_ranges_as_const == 202207L);
+    static_assert(__cpp_lib_hypot == 201603L);
+    static_assert(__cpp_lib_interpolate == 201902L);
+
+    printf("[CXX] PASS phase145: Ф31e-b-1 — mismatch consults the second range's end, "
+           "array<T,0> has its element and reverse surface, lerp and hypot3 exist, all "
+           "thirteen [range.access] names are CPOs, views carry cbegin/cend, "
+           "owner_less<> is transparent, and six feature-test macros became honest\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36649,6 +36839,7 @@ int main()
     Phase142();
     Phase143();
     Phase144();
+    Phase145();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
