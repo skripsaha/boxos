@@ -16,9 +16,15 @@
 // macro it does not itself own. Every macro exposed is nevertheless true
 // of boxcxx as a whole, and <version> exposes all of them anyway.
 //
+// map_try_emplace and unordered_map_try_emplace are P0083R3's try_emplace +
+// insert_or_assign. Both were withheld on missing overloads rather than
+// missing functions: map had two of the four of each, and unordered_map had
+// two of try_emplace and ONE of insert_or_assign -- so an rvalue key was
+// copied instead of moved, silently, which is the entire reason that overload
+// exists. Ф31e-f completed both sets.
+//
 // Deliberately absent (see <version>'s list): erase_if,
-// nonmember_container_access, map_try_emplace, unordered_map_try_emplace,
-// constexpr_vector, constexpr_string.
+// nonmember_container_access, constexpr_vector, constexpr_string.
 #ifndef BOXCXX_BITS_VERSION_CONTAINERS
 #define BOXCXX_BITS_VERSION_CONTAINERS
 
@@ -33,6 +39,12 @@
 #endif
 #ifndef __cpp_lib_containers_ranges
 #  define __cpp_lib_containers_ranges 202202L
+#endif
+#ifndef __cpp_lib_map_try_emplace
+#  define __cpp_lib_map_try_emplace 201411L
+#endif
+#ifndef __cpp_lib_unordered_map_try_emplace
+#  define __cpp_lib_unordered_map_try_emplace 201411L
 #endif
 #ifndef __cpp_lib_generic_associative_lookup
 #  define __cpp_lib_generic_associative_lookup 201304L

@@ -32,9 +32,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 141 |
+| Feature-test macros defined | 144 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 161 phases, 4 627 runtime checks, 1 339 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 162 phases, 4 645 runtime checks, 1 352 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,7 +129,7 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **141** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **144** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every one carries its N4950 value.** No macro is defined at a later
@@ -140,7 +140,7 @@ the whole set, not sampled:
   is the part that breaks most easily, because a macro added to a shared leaf
   tends to become visible from every header that includes it and from no other.
 
-**44 of the C++23 macros are not defined**, and `<version>` lists every one by
+**41 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -156,7 +156,7 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 44, nine belong to features whose owning header does not exist at all
+Of the 41, nine belong to features whose owning header does not exist at all
 (`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
 `syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
 them); the rest belong to headers that exist. The in-tree suite pins the absences
@@ -349,8 +349,11 @@ nothing has been found since.
   it wrong**: it also claimed `compare_three_way_result_t<T>` failed, and that was
   never true — the alias always carried its own default, and `<version>`'s note
   said so correctly. Measured before the fix, not recalled.
-  `__cpp_lib_three_way_comparison` is still not claimable: its 201907L value is
-  P1614R2, and `map`/`multimap`/`set`/`multiset` still have no `operator<=>`.
+- `✓` Closed in Ф31e-f: `__cpp_lib_three_way_comparison` is now defined. Its
+  201907L value is P1614R2, the library-wide `operator<=>`, and the last thing
+  missing was the four ordered associative containers (see `<map>`). All 26 of
+  the `<=>` overloads the paper asks for were re-measured before the macro was
+  released, rather than taken from the note claiming they were there.
 
 ## `<flat_map>` and `<flat_set>`
 
@@ -464,6 +467,38 @@ nothing has been found since.
   no `use_facet` / `has_facet`, and no `ctype` / `num_get` / `num_put` / … The
   named constructor accepts any name and ignores it; `name()` always returns
   `"C"`. The header exists to satisfy the stream machinery's references to it.
+
+## `<map>` / `<set>` / `<unordered_map>`
+
+- `✓` Closed in Ф31e-f: **`map`, `multimap`, `set` and `multiset` had no
+  relational operators at all.** [associative.map.syn] declares `==` and `<=>`
+  and nothing else, because `<`, `>`, `<=` and `>=` are *synthesized* from
+  `<=>` — so one missing operator took all four with it, and `m1 < m2` did not
+  compile on a `map` while it did on a `vector`. The document had recorded only
+  the missing `<=>`, not the four it implies. Comparison is lexicographic
+  through *synth-three-way*, so a key with only `operator<` still yields
+  `weak_ordering`. This closed `__cpp_lib_three_way_comparison`.
+- `✓` Closed in Ф31e-f: `map::try_emplace` and `map::insert_or_assign` had two
+  of their four overloads each — both `const_iterator` hint forms were absent,
+  so a caller holding a position had nowhere to put it. The hint is advisory
+  here ([associative.reqmts]): the tree finds the position itself, and a
+  deliberately wrong hint still lands the element correctly. Closed
+  `__cpp_lib_map_try_emplace`.
+- `✓` Closed in Ф31e-f, and this one answered wrongly in silence:
+  **`unordered_map::insert_or_assign` had ONE of its four overloads.** With only
+  the `const key_type&` form, `m.insert_or_assign(std::move(k), v)` compiled,
+  bound the rvalue to the const reference, and **copied the key** — which is the
+  entire reason the rvalue overload exists. `try_emplace` was missing its two
+  hint forms as well. Closed `__cpp_lib_unordered_map_try_emplace`.
+- `~` The move constructors of `map`, `set` and the `unordered_*` family are
+  hard-coded `noexcept` even when the comparator or hasher has a throwing move,
+  so such a move terminates instead of propagating. Both reference libraries
+  condition it. Re-measured in Ф31e-d: the move is genuinely *viable* and
+  genuinely `noexcept` — the `noexcept` is swallowed one level down in the tree
+  and hash-table engines, so [dcl.fct.def.default]/3 never deletes it.
+- `~` The iterator-pair constructors carry no input-iterator SFINAE guard.
+  Diagnostics quality only: a wrong call fails inside the body rather than at
+  the call site.
 
 ## `<memory>`
 
@@ -1009,6 +1044,14 @@ library cannot claim by inspection. Two previously unrecorded deviations
 surfaced while measuring: `zip`'s tuple-always shape, and `filter_view` accepting
 a move-only predicate the standard rejects. Both are in §2.
 
+Ф31e-f took the ordered associative containers (phase 150). They had no
+relational operators at all — [associative.map.syn] declares only `==` and
+`<=>`, with the other four synthesized from the latter, so one missing operator
+took all four with it and this document had recorded only the one. With them,
+`try_emplace` and `insert_or_assign` became 4-of-4 on both `map` and
+`unordered_map`, where the latter's single `insert_or_assign` overload had been
+**copying an rvalue key in silence**. Three more feature-test macros.
+
 What is left:
 
 - `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
@@ -1032,9 +1075,9 @@ What is left:
 - Containers: the iterator-pair constructors carry no input-iterator SFINAE guard
   (diagnostics quality only), and the move constructors of `map`, `set` and the
   `unordered_*` family are hard-coded `noexcept` even when the comparator or hasher
-  has a throwing move — so such a move terminates instead of propagating. Both
-  reference libraries condition it. (`basic_string`'s unconditional `noexcept` is
-  **not** a deviation: [string.cons] mandates it.)
+  has a throwing move — so such a move terminates instead of propagating (§2).
+  (`basic_string`'s unconditional `noexcept` is **not** a deviation:
+  [string.cons] mandates it.)
 - `box::heap::counters()` cannot see allocations of 8192 bytes or less — they come
   from the per-strand pool, and only the global-heap path increments the counters.
   **A test of the form "this does not allocate" is therefore not writable in
