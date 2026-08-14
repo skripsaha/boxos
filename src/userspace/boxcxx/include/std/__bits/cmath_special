@@ -818,5 +818,79 @@ inline float cyl_bessel_kf(float n,float x){return (float)cyl_bessel_k((double)n
 inline float sph_besself(unsigned n,float x){return (float)sph_bessel(n,(double)x);} inline long double sph_bessell(unsigned n,long double x){return (long double)sph_bessel(n,(double)x);}
 inline float sph_neumannf(unsigned n,float x){return (float)sph_neumann(n,(double)x);} inline long double sph_neumannl(unsigned n,long double x){return (long double)sph_neumann(n,(double)x);}
 } // namespace std (bessel)
+
+// ── [sf.cmath]/2: the same "additional overloads" the rest of <cmath> has ──
+// Without them std::riemann_zeta(2) and std::cyl_bessel_j(1, 2) are ambiguous
+// between the double and float entry points, exactly as std::sqrt(4) was.
+// __math::P1/P2/P3 and the Needs guards come from <cmath>, which includes this
+// file at its foot — see the block there for why the guard is load-bearing.
+namespace std {
+
+#define BOXCXX_SF_PROMOTE1(NAME)                                              \
+    template <class T>                                                        \
+        requires __math::Needs1<T>                                            \
+    inline auto NAME(T x)                                                     \
+    {                                                                         \
+        return NAME(static_cast<__math::P1<T>>(x));                           \
+    }
+#define BOXCXX_SF_PROMOTE2(NAME)                                              \
+    template <class T, class U>                                               \
+        requires __math::Needs2<T, U>                                         \
+    inline auto NAME(T x, U y)                                                \
+    {                                                                         \
+        using P = __math::P2<T, U>;                                           \
+        return NAME(static_cast<P>(x), static_cast<P>(y));                    \
+    }
+#define BOXCXX_SF_PROMOTE3(NAME)                                              \
+    template <class T, class U, class V>                                      \
+        requires __math::Needs3<T, U, V>                                      \
+    inline auto NAME(T x, U y, V z)                                           \
+    {                                                                         \
+        using P = __math::P3<T, U, V>;                                        \
+        return NAME(static_cast<P>(x), static_cast<P>(y),                     \
+                    static_cast<P>(z));                                       \
+    }
+// The leading unsigned degree/order parameters are NOT "double parameters",
+// so they are passed through untouched and only the final argument promotes.
+#define BOXCXX_SF_PROMOTE_N1(NAME)                                            \
+    template <class T>                                                        \
+        requires __math::Needs1<T>                                            \
+    inline auto NAME(unsigned n, T x)                                         \
+    {                                                                         \
+        return NAME(n, static_cast<__math::P1<T>>(x));                        \
+    }
+#define BOXCXX_SF_PROMOTE_NN1(NAME)                                           \
+    template <class T>                                                        \
+        requires __math::Needs1<T>                                            \
+    inline auto NAME(unsigned n, unsigned m, T x)                             \
+    {                                                                         \
+        return NAME(n, m, static_cast<__math::P1<T>>(x));                     \
+    }
+
+BOXCXX_SF_PROMOTE1(comp_ellint_1)  BOXCXX_SF_PROMOTE1(comp_ellint_2)
+BOXCXX_SF_PROMOTE1(expint)         BOXCXX_SF_PROMOTE1(riemann_zeta)
+
+BOXCXX_SF_PROMOTE2(beta)           BOXCXX_SF_PROMOTE2(comp_ellint_3)
+BOXCXX_SF_PROMOTE2(cyl_bessel_i)   BOXCXX_SF_PROMOTE2(cyl_bessel_j)
+BOXCXX_SF_PROMOTE2(cyl_bessel_k)   BOXCXX_SF_PROMOTE2(cyl_neumann)
+BOXCXX_SF_PROMOTE2(ellint_1)       BOXCXX_SF_PROMOTE2(ellint_2)
+
+BOXCXX_SF_PROMOTE3(ellint_3)
+
+BOXCXX_SF_PROMOTE_N1(hermite)      BOXCXX_SF_PROMOTE_N1(laguerre)
+BOXCXX_SF_PROMOTE_N1(legendre)     BOXCXX_SF_PROMOTE_N1(sph_bessel)
+BOXCXX_SF_PROMOTE_N1(sph_neumann)
+
+BOXCXX_SF_PROMOTE_NN1(assoc_laguerre)  BOXCXX_SF_PROMOTE_NN1(assoc_legendre)
+BOXCXX_SF_PROMOTE_NN1(sph_legendre)
+
+#undef BOXCXX_SF_PROMOTE1
+#undef BOXCXX_SF_PROMOTE2
+#undef BOXCXX_SF_PROMOTE3
+#undef BOXCXX_SF_PROMOTE_N1
+#undef BOXCXX_SF_PROMOTE_NN1
+
+} // namespace std
+
 // >>> AGENT-SPECIAL-APPEND <<<
 #endif

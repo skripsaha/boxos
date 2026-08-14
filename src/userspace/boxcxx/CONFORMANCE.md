@@ -34,7 +34,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 128 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 159 phases, 4 559 runtime checks, 1 312 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 160 phases, 4 567 runtime checks, 1 317 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -57,7 +57,6 @@ the library itself; there is no "no-exceptions" configuration.
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
-| `std::sqrt(4)`, `std::pow(2, 3)` | ambiguous, does not compile | `<cmath>` has no promoting overloads for all-integer arguments (§2 `<cmath>`). Pass a floating-point value: `std::sqrt(4.0)`. |
 | a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
 
 ---
@@ -289,13 +288,20 @@ nothing has been found since.
 - `✓` Closed in Ф31e-b-1: the **three-argument `hypot(x, y, z)`** was absent, which
   this document had failed to record — `<version>` had it, §2 did not. Present now
   at all three widths, with power-of-two scaling, closing `__cpp_lib_hypot`.
-- `!` **The "sufficient additional overloads" of [cmath.syn]/2 do not exist**, so a
-  call whose arguments are *all* integers is ambiguous rather than promoted:
-  `std::sqrt(4)`, `std::pow(2, 3)`, `std::atan2(1, 1)` and `std::hypot(3, 4)` are
-  all rejected. Mixed calls are fine — `std::fmax(1, 2.0)` picks the `double`
-  overload outright — so the gap only bites the all-integer form, which is also the
-  most idiomatic one. Epic-wide: it affects every function in the header, not the
-  ones listed here.
+- `✓` Closed in Ф31e-c: the "sufficient additional overloads" of [cmath.syn]/2 did
+  not exist, so a call whose arguments were *all* integers had three equally bad
+  candidates and was ambiguous — `std::sqrt(4)`, `std::pow(2, 3)`,
+  `std::atan2(1, 1)`, `std::fma(1, 2, 3)` and `std::abs(-3)` did not compile at
+  all. Mixing `float` with `double` did work (`float` → `double` is a promotion,
+  which outranks the conversion the `float` overload would need), but mixing
+  `float` with `long double` did not, because nothing promotes to `long double`.
+  [sf.cmath]/2 applies the same rule to the special functions, and they were
+  affected identically — `std::riemann_zeta(2)` was ambiguous too.
+- `~` `std::abs` for `int`, `long` and `long long` is declared in `<cmath>`.
+  [c.math.abs] puts those three in `<cstdlib>`, which BoxOS does not have (§1.1);
+  they are provided here rather than left to the promotion rule, because promoting
+  would turn `std::abs(-3)` from the `int` `3` every program expects into `3.0`.
+  Unsigned arguments remain ill-formed, which is what [c.math.abs]/3 asks for.
 - `~` `nan("payload")` ignores the payload string and returns a plain quiet NaN.
 - `?` `std::log10` is not exact on one of the 23 exactly-representable powers of
   ten (measured on BoxOS). `box::log(x, 10)` returns 22 of the 23 exactly by
@@ -841,7 +847,8 @@ range-access CPOs, `ssize` as a real CPO, `view_interface::cbegin`/`cend`,
 argument — which between them made six feature-test macros honest. Each is marked
 `✓` in §2 with what it used to do, and pinned by cxxtest phases 144 and 145.
 Ф31e-b-2 then added `views::take_while`, `views::drop_while`,
-`ranges::is_permutation` and a const-iterable `transform_view` (phase 146).
+`ranges::is_permutation` and a const-iterable `transform_view` (phase 146), and
+Ф31e-c gave the whole header its [cmath.syn]/2 promoting overloads (phase 147).
 What is left:
 
 The one with real teeth:
@@ -853,9 +860,6 @@ The one with real teeth:
 
 The rest:
 
-- `<cmath>`: **no promoting overloads for all-integer arguments** — `std::sqrt(4)`
-  is ambiguous. Epic-wide across the header, and the largest single thing left in
-  §2 (§2 `<cmath>`).
 - `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
   constant-evaluated (§2).
 - `<ranges>`: `views::istream` and its view types, `range_rvalue_reference_t`,

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <__bits/math_fenv_defs>
 #include <__bits/cmath_coeffs>
+#include <type_traits>   // conditional_t / is_same_v / is_arithmetic_v — [cmath.syn]/2's promoting overloads at the foot of this file
 #include <__bits/version_cmath>
 // Everything here is transplanted verbatim into src/runtime/cmath*.cpp.
 
@@ -2383,6 +2384,208 @@ inline float erff(float x){ return (float)erf((long double)x); }         inline 
 inline float erfcf(float x){ return (float)erfc((long double)x); }       inline long double erfcl(long double x){ return erfc(x); }
 inline float tgammaf(float x){ return (float)tgamma((long double)x); }   inline long double tgammal(long double x){ return tgamma(x); }
 inline float lgammaf(float x){ return (float)lgamma((long double)x); }   inline long double lgammal(long double x){ return lgamma(x); }
+
+// ════════════════════════════════════════════════════════════════════════
+//  [cmath.syn]/2 — the "sufficient additional overloads"
+// ════════════════════════════════════════════════════════════════════════
+// Without these, a call whose arguments are ALL integers has three equally
+// bad candidates and is ambiguous: std::sqrt(4), std::pow(2, 3),
+// std::atan2(1, 1) and std::fma(1, 2, 3) did not compile at all — the most
+// idiomatic spelling of each. Mixing float with double happened to work
+// (float -> double is a promotion, which outranks the conversion the float
+// overload would need), but mixing float with long double did not, because
+// nothing promotes to long double.
+//
+// The rule itself, verbatim: if any argument is long double, everything
+// becomes long double; otherwise if any is double OR an integer type,
+// everything becomes double; otherwise float. Mapping integers to double
+// first makes the second clause fall out of an ordinary three-way widest-wins.
+//
+// These are function TEMPLATES, and the concrete overloads above are not, so
+// an exact call still picks the real function: a non-template wins a tie.
+// The `Needs` guards below make that structural rather than incidental.
+namespace __math {
+
+template <class T>
+using P1 = conditional_t<is_same_v<T, long double>, long double,
+                         conditional_t<is_same_v<T, float>, float, double>>;
+template <class T, class U>
+using P2 = conditional_t<
+    is_same_v<P1<T>, long double> || is_same_v<P1<U>, long double>, long double,
+    conditional_t<is_same_v<P1<T>, float> && is_same_v<P1<U>, float>, float,
+                  double>>;
+template <class T, class U, class V> using P3 = P2<P2<T, U>, V>;
+
+// "Not already the target type." This guard is load-bearing twice over.
+// It stops the template competing with a concrete overload that is already an
+// exact match, so diagnostics name the real function — and, more seriously,
+// it stops infinite recursion: isgreater and its five siblings exist ONLY at
+// double, so an unguarded template asked for long double would promote to
+// long double, find no concrete overload, select itself, and never stop.
+template <class T>
+concept Needs1 = is_arithmetic_v<T> && !is_same_v<T, P1<T>>;
+template <class T, class U>
+concept Needs2 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
+                 !(is_same_v<T, P2<T, U>> && is_same_v<U, P2<T, U>>);
+template <class T, class U, class V>
+concept Needs3 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
+                 is_arithmetic_v<V> &&
+                 !(is_same_v<T, P3<T, U, V>> && is_same_v<U, P3<T, U, V>> &&
+                   is_same_v<V, P3<T, U, V>>);
+
+} // namespace __math
+
+// The return type is deduced, never named: that is what lets one macro serve
+// sqrt (returns the promoted type), ilogb (int), lround (long) and isnan
+// (bool) without this file having to restate any of them.
+#define BOXCXX_MATH_PROMOTE1(NAME)                                            \
+    template <class T>                                                        \
+        requires __math::Needs1<T>                                            \
+    inline auto NAME(T x)                                                     \
+    {                                                                         \
+        return NAME(static_cast<__math::P1<T>>(x));                           \
+    }
+#define BOXCXX_MATH_PROMOTE2(NAME)                                            \
+    template <class T, class U>                                               \
+        requires __math::Needs2<T, U>                                         \
+    inline auto NAME(T x, U y)                                                \
+    {                                                                         \
+        using P = __math::P2<T, U>;                                           \
+        return NAME(static_cast<P>(x), static_cast<P>(y));                    \
+    }
+#define BOXCXX_MATH_PROMOTE3(NAME)                                            \
+    template <class T, class U, class V>                                      \
+        requires __math::Needs3<T, U, V>                                      \
+    inline auto NAME(T x, U y, V z)                                           \
+    {                                                                         \
+        using P = __math::P3<T, U, V>;                                        \
+        return NAME(static_cast<P>(x), static_cast<P>(y),                     \
+                    static_cast<P>(z));                                       \
+    }
+
+// One floating argument; the result may be the promoted type (sqrt), an
+// integer (ilogb, lround) or bool (isnan) — all deduced.
+BOXCXX_MATH_PROMOTE1(acos)      BOXCXX_MATH_PROMOTE1(acosh)
+BOXCXX_MATH_PROMOTE1(asin)      BOXCXX_MATH_PROMOTE1(asinh)
+BOXCXX_MATH_PROMOTE1(atan)      BOXCXX_MATH_PROMOTE1(atanh)
+BOXCXX_MATH_PROMOTE1(cbrt)      BOXCXX_MATH_PROMOTE1(ceil)
+BOXCXX_MATH_PROMOTE1(cos)       BOXCXX_MATH_PROMOTE1(cosh)
+BOXCXX_MATH_PROMOTE1(erf)       BOXCXX_MATH_PROMOTE1(erfc)
+BOXCXX_MATH_PROMOTE1(exp)       BOXCXX_MATH_PROMOTE1(exp2)
+BOXCXX_MATH_PROMOTE1(expm1)     BOXCXX_MATH_PROMOTE1(fabs)
+BOXCXX_MATH_PROMOTE1(floor)     BOXCXX_MATH_PROMOTE1(lgamma)
+BOXCXX_MATH_PROMOTE1(log)       BOXCXX_MATH_PROMOTE1(log10)
+BOXCXX_MATH_PROMOTE1(log1p)     BOXCXX_MATH_PROMOTE1(log2)
+BOXCXX_MATH_PROMOTE1(logb)      BOXCXX_MATH_PROMOTE1(nearbyint)
+BOXCXX_MATH_PROMOTE1(rint)      BOXCXX_MATH_PROMOTE1(round)
+BOXCXX_MATH_PROMOTE1(sin)       BOXCXX_MATH_PROMOTE1(sinh)
+BOXCXX_MATH_PROMOTE1(sqrt)      BOXCXX_MATH_PROMOTE1(tan)
+BOXCXX_MATH_PROMOTE1(tanh)      BOXCXX_MATH_PROMOTE1(tgamma)
+BOXCXX_MATH_PROMOTE1(trunc)
+BOXCXX_MATH_PROMOTE1(ilogb)     BOXCXX_MATH_PROMOTE1(lrint)
+BOXCXX_MATH_PROMOTE1(llrint)    BOXCXX_MATH_PROMOTE1(lround)
+BOXCXX_MATH_PROMOTE1(llround)   BOXCXX_MATH_PROMOTE1(fpclassify)
+BOXCXX_MATH_PROMOTE1(isfinite)  BOXCXX_MATH_PROMOTE1(isinf)
+BOXCXX_MATH_PROMOTE1(isnan)     BOXCXX_MATH_PROMOTE1(isnormal)
+BOXCXX_MATH_PROMOTE1(signbit)
+
+// Two floating arguments.
+BOXCXX_MATH_PROMOTE2(atan2)     BOXCXX_MATH_PROMOTE2(copysign)
+BOXCXX_MATH_PROMOTE2(fdim)      BOXCXX_MATH_PROMOTE2(fmax)
+BOXCXX_MATH_PROMOTE2(fmin)      BOXCXX_MATH_PROMOTE2(fmod)
+BOXCXX_MATH_PROMOTE2(hypot)     BOXCXX_MATH_PROMOTE2(nextafter)
+BOXCXX_MATH_PROMOTE2(pow)       BOXCXX_MATH_PROMOTE2(remainder)
+BOXCXX_MATH_PROMOTE2(isgreater) BOXCXX_MATH_PROMOTE2(isgreaterequal)
+BOXCXX_MATH_PROMOTE2(isless)    BOXCXX_MATH_PROMOTE2(islessequal)
+BOXCXX_MATH_PROMOTE2(islessgreater)
+BOXCXX_MATH_PROMOTE2(isunordered)
+
+// Three floating arguments. lerp is deliberately absent: it is constexpr, and
+// a non-constexpr promoting overload would quietly cost every mixed-type call
+// its constant evaluation.
+BOXCXX_MATH_PROMOTE3(fma)       BOXCXX_MATH_PROMOTE3(hypot)
+
+// lerp's own promotion, constexpr like the concrete overloads it forwards to.
+template <class T, class U, class V>
+    requires __math::Needs3<T, U, V>
+constexpr auto lerp(T a, U b, V t)
+{
+    using P = __math::P3<T, U, V>;
+    return lerp(static_cast<P>(a), static_cast<P>(b), static_cast<P>(t));
+}
+
+// Shapes where only SOME parameters are "double parameters" in the sense of
+// [cmath.syn]/2 — the exponent of ldexp, the pointers of frexp and remquo,
+// and nexttoward's second argument, which is long double by definition and
+// must not drag the first one up with it.
+#define BOXCXX_MATH_PROMOTE_XN(NAME, NTYPE)                                   \
+    template <class T>                                                        \
+        requires __math::Needs1<T>                                            \
+    inline auto NAME(T x, NTYPE n)                                            \
+    {                                                                         \
+        return NAME(static_cast<__math::P1<T>>(x), n);                        \
+    }
+BOXCXX_MATH_PROMOTE_XN(ldexp, int)
+BOXCXX_MATH_PROMOTE_XN(scalbn, int)
+BOXCXX_MATH_PROMOTE_XN(scalbln, long)
+
+template <class T>
+    requires __math::Needs1<T>
+inline auto frexp(T x, int *e)
+{
+    return frexp(static_cast<__math::P1<T>>(x), e);
+}
+template <class T, class U>
+    requires __math::Needs2<T, U>
+inline auto remquo(T x, U y, int *q)
+{
+    using P = __math::P2<T, U>;
+    return remquo(static_cast<P>(x), static_cast<P>(y), q);
+}
+template <class T>
+    requires __math::Needs1<T>
+inline auto nexttoward(T x, long double y)
+{
+    return nexttoward(static_cast<__math::P1<T>>(x), y);
+}
+
+// modf gets NO promoting overload, deliberately: its second parameter is a
+// pointer to the SAME type as the first, so promoting the argument would
+// write the integral part into an object of the wrong type. Both reference
+// libraries leave it out for the same reason.
+
+// The six comparison entry points existed only at double. Promoting a pair of
+// long doubles to double before comparing them would answer questions about
+// values the caller never had, so they get their own widths rather than
+// leaning on the templates above.
+inline bool isgreater(float x, float y) { return __builtin_isgreater(x, y); }
+inline bool isgreaterequal(float x, float y) { return __builtin_isgreaterequal(x, y); }
+inline bool isless(float x, float y) { return __builtin_isless(x, y); }
+inline bool islessequal(float x, float y) { return __builtin_islessequal(x, y); }
+inline bool islessgreater(float x, float y) { return __builtin_islessgreater(x, y); }
+inline bool isunordered(float x, float y) { return __builtin_isunordered(x, y); }
+inline bool isgreater(long double x, long double y) { return __builtin_isgreater(x, y); }
+inline bool isgreaterequal(long double x, long double y) { return __builtin_isgreaterequal(x, y); }
+inline bool isless(long double x, long double y) { return __builtin_isless(x, y); }
+inline bool islessequal(long double x, long double y) { return __builtin_islessequal(x, y); }
+inline bool islessgreater(long double x, long double y) { return __builtin_islessgreater(x, y); }
+inline bool isunordered(long double x, long double y) { return __builtin_isunordered(x, y); }
+
+// [c.math.abs]: abs of an integer returns THAT integer type, not a double.
+// The three integral forms belong to <cstdlib>, which BoxOS does not have —
+// so they are provided here rather than promoted, because promoting would
+// change std::abs(-3) from the int 3 that every program expects into 3.0.
+// Unsigned arguments are left out on purpose: [c.math.abs]/3 makes calling
+// abs on a type that is unsigned and does not promote to int ill-formed, and
+// omitting the overload is how that is spelled.
+inline constexpr int abs(int j) { return j < 0 ? -j : j; }
+inline constexpr long abs(long j) { return j < 0 ? -j : j; }
+inline constexpr long long abs(long long j) { return j < 0 ? -j : j; }
+
+#undef BOXCXX_MATH_PROMOTE1
+#undef BOXCXX_MATH_PROMOTE2
+#undef BOXCXX_MATH_PROMOTE3
+#undef BOXCXX_MATH_PROMOTE_XN
 
 } // namespace std
 #include <__bits/cmath_special>
