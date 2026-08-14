@@ -38887,6 +38887,110 @@ void Phase157()
            "size\n");
 }
 
+// ── Ф32-d ───────────────────────────────────────────────────────────────
+void Phase158()
+{
+    using namespace std;
+    namespace r = std::ranges;
+    namespace v = std::views;
+
+    vector<int> a{1, 2, 3}, empty_{}, c{4, 5};
+
+    // An empty range in the MIDDLE is the case that separates a real
+    // implementation from one that only looks right: satisfy() has to walk
+    // past however many empty ranges follow, or the iterator parks on an end()
+    // nothing can reach.
+    {
+        auto cv = v::concat(a, empty_, c);
+        static_assert(r::random_access_range<decltype(cv)>,
+                      "phase158 (1) all-random-access, all-but-last common");
+        static_assert(r::sized_range<decltype(cv)>, "phase158 (2) and sized");
+        Check(r::size(cv) == 5u, "phase158 (3) size is the sum");
+        int  expect[5] = {1, 2, 3, 4, 5};
+        int  i         = 0;
+        bool ok        = true;
+        for (int x : cv) ok = ok && (i < 5) && x == expect[i++];
+        Check(ok && i == 5, "phase158 (4) iteration crosses the empty middle range");
+        Check(cv.begin()[4] == 5 && *(cv.begin() + 3) == 4,
+              "phase158 (5) random access indexes across the boundary");
+        Check((cv.end() - cv.begin()) == 5, "phase158 (6) iterator difference");
+        auto it = cv.begin() + 3;
+        --it;
+        Check(*it == 3, "phase158 (7) stepping backwards leaves a range into the previous one");
+        it -= 2;
+        Check(*it == 1, "phase158 (8) -= walks back over a whole range");
+        Check(cv.begin() < cv.end() && !(cv.end() < cv.begin()),
+              "phase158 (9) ordering is by position, not by which range you are in");
+    }
+    // Leading and trailing empties, and an all-empty concat.
+    {
+        auto lead = v::concat(empty_, a);
+        Check(r::size(lead) == 3u && *lead.begin() == 1,
+              "phase158 (10) a leading empty range is skipped by begin()");
+        auto trail = v::concat(a, empty_);
+        Check(r::size(trail) == 3u && r::distance(trail) == 3,
+              "phase158 (11) a trailing empty range still terminates");
+        auto none = v::concat(empty_, empty_);
+        Check(r::empty(none) && none.begin() == none.end(),
+              "phase158 (12) concatenating nothing with nothing is empty");
+    }
+    // [range.concat.overview]/2: ONE range is views::all(r), not a
+    // one-element concat_view -- concatenating a single thing must not change
+    // its type.
+    static_assert(is_same_v<decltype(v::concat(a)), r::ref_view<vector<int>>>,
+                  "phase158 (13) views::concat(r) is views::all(r)");
+    // Heterogeneous element types unify through common_reference, which is the
+    // whole reason the Concatable gate exists.
+    {
+        vector<int> x{1, 2};
+        list<long>  y{3, 4};
+        auto        hv = v::concat(x, y);
+        static_assert(is_same_v<r::range_value_t<decltype(hv)>, long>,
+                      "phase158 (14) the value type is the common type, not either input's");
+        static_assert(r::bidirectional_range<decltype(hv)>,
+                      "phase158 (15) a list drags the whole concat down to bidirectional");
+        static_assert(!r::random_access_range<decltype(hv)>, "phase158 (16) ...and no further");
+        long sum = 0;
+        for (long e : hv) sum += e;
+        Check(sum == 10, "phase158 (17) and it iterates");
+        auto b = hv.begin();
+        ++b;
+        ++b;
+        Check(*b == 3, "phase158 (18) crossing from the vector into the list");
+        --b;
+        Check(*b == 2, "phase158 (19) and back again");
+    }
+    // Writing through it, and the P2846R6 member the C++26 synopsis gives it.
+    {
+        vector<int> p{1, 2}, q{3, 4};
+        auto        w = v::concat(p, q);
+        for (int &e : w) e *= 10;
+        Check(p[0] == 10 && q[1] == 40, "phase158 (20) concat hands out real references");
+        Check(r::reserve_hint(v::concat(p, q)) == 4u,
+              "phase158 (21) concat_view has reserve_hint, per its C++26 synopsis");
+        auto out = v::concat(p, q) | r::to<vector<int>>();
+        Check(out.size() == 4 && out[3] == 40, "phase158 (22) ranges::to over a concat");
+    }
+    // Three ranges, and a non-common last one (an unbounded sentinel) so end()
+    // falls back to default_sentinel rather than an iterator.
+    {
+        vector<int> t{7, 8, 9};
+        auto        tail = t | v::take_while([](int x) { return x < 9; });
+        auto        cv   = v::concat(a, tail);
+        int         n    = 0;
+        for (int x : cv) { (void)x; ++n; }
+        Check(n == 5, "phase158 (23) a non-common last range ends on default_sentinel");
+    }
+    static_assert(__cpp_lib_ranges_concat == 202403L,
+                  "phase158 (24) P2542R8 is complete, so the macro is claimed");
+
+    printf("[CXX] PASS phase158: Ф32-d — P2542R8 concat_view / views::concat: a "
+           "variant-of-iterators position, satisfy() walking past empty ranges "
+           "in the middle, bidirectional and random-access crossing range "
+           "boundaries in both directions, the common-reference element type "
+           "the Concatable gate already existed for, and reserve_hint from its "
+           "C++26 synopsis\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39066,6 +39170,7 @@ int main()
     Phase155();
     Phase156();
     Phase157();
+    Phase158();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

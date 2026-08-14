@@ -1,0 +1,566 @@
+// boxcxx — <__bits/ranges_concat>
+//
+// concat_view / views::concat ([range.concat], P2542R8, C++26). The one view
+// whose element type is not any single adapted range's: it is the common
+// reference of all of them, which is why the Concatable chain exists and why
+// it lives in <__bits/ranges_join_with> rather than here -- join_with needed
+// exactly the same agreement between its range and its pattern (LWG 4074), so
+// the gate was built there first and this file is its second consumer.
+//
+// The iterator holds a variant over the adapted iterators. That is the
+// standard's own representation, and the reason is that concat's position is
+// genuinely a sum type: it is inside exactly one of the ranges, and which one
+// is a runtime fact. Every operation therefore dispatches on the index, and
+// every dispatch here is written as an `if constexpr` recursion over I rather
+// than with C++26 pack indexing -- boxcxx compiles at -std=gnu++23, where
+// T...[I] is available only as an extension.
+//
+// The standard's wording uses pack indexing throughout; ViewAt<I> below is the
+// tuple_element_t spelling of the same thing.
+#ifndef BOXCXX_BITS_RANGES_CONCAT
+#define BOXCXX_BITS_RANGES_CONCAT
+
+#include <__bits/ranges_core>
+#include <__bits/ranges_join_with> // the Concatable chain
+#include <__bits/ranges_views>     // MaybeConst / SimpleView / view_interface
+#include <compare>
+#include <tuple>
+#include <variant>
+
+namespace std {
+namespace ranges {
+
+namespace __views_detail {
+
+// concat-is-random-access / concat-is-bidirectional ([range.concat.view]).
+// The "all but the last is common" half is what makes stepping backwards out
+// of a range possible at all: to leave range i-1 backwards you must be able to
+// name its end, and a non-common range cannot hand you an iterator there.
+template <bool Const, typename... Vs>
+concept ConcatIsRandomAccess =
+    (random_access_range<MaybeConst<Const, Vs>> && ...) &&
+    []<size_t... I>(index_sequence<I...>) {
+        return ((I + 1 == sizeof...(Vs) ||
+                 common_range<MaybeConst<Const, tuple_element_t<I, tuple<Vs...>>>>) &&
+                ...);
+    }(make_index_sequence<sizeof...(Vs)>{});
+
+template <bool Const, typename... Vs>
+concept ConcatIsBidirectional =
+    (bidirectional_range<MaybeConst<Const, Vs>> && ...) &&
+    []<size_t... I>(index_sequence<I...>) {
+        return ((I + 1 == sizeof...(Vs) ||
+                 common_range<MaybeConst<Const, tuple_element_t<I, tuple<Vs...>>>>) &&
+                ...);
+    }(make_index_sequence<sizeof...(Vs)>{});
+
+template <bool Const, typename... Vs>
+concept ConcatAllForward = (forward_range<MaybeConst<Const, Vs>> && ...);
+
+// The category the standard hands out when every adapted range is a forward
+// range: the weakest of the adapted categories, capped at random_access, and
+// dropped to input outright when the common reference is not a real reference
+// (a proxy cannot satisfy the forward-iterator requirements).
+template <typename... Vs>
+struct ConcatCategory {
+    using Ref = ConcatReferenceT<Vs...>;
+    static consteval auto Pick()
+    {
+        if constexpr (!is_reference_v<Ref>) {
+            return input_iterator_tag{};
+        } else if constexpr ((derived_from<typename iterator_traits<iterator_t<Vs>>::iterator_category,
+                                           random_access_iterator_tag> &&
+                              ...)) {
+            return random_access_iterator_tag{};
+        } else if constexpr ((derived_from<typename iterator_traits<iterator_t<Vs>>::iterator_category,
+                                           bidirectional_iterator_tag> &&
+                              ...)) {
+            return bidirectional_iterator_tag{};
+        } else if constexpr ((derived_from<typename iterator_traits<iterator_t<Vs>>::iterator_category,
+                                           forward_iterator_tag> &&
+                              ...)) {
+            return forward_iterator_tag{};
+        } else {
+            return input_iterator_tag{};
+        }
+    }
+    using type = decltype(Pick());
+};
+
+} // namespace __views_detail
+
+// ── concat_view ([range.concat.view]) ────────────────────────────────────
+
+template <input_range... Views>
+    requires(view<Views> && ...) && (sizeof...(Views) > 0) &&
+            __views_detail::Concatable<Views...>
+class concat_view : public view_interface<concat_view<Views...>> {
+    static constexpr size_t kN = sizeof...(Views);
+
+    tuple<Views...> __views;
+
+    template <size_t I>
+    using ViewAt = tuple_element_t<I, tuple<Views...>>;
+
+    template <bool Const>
+    class Iterator;
+
+public:
+    concat_view()
+        requires(default_initializable<Views> && ...)
+    = default;
+
+    constexpr explicit concat_view(Views... views) : __views(std::move(views)...) {}
+
+    constexpr Iterator<false> begin()
+        requires(!(__views_detail::SimpleView<Views> && ...))
+    {
+        Iterator<false> it{this, in_place_index<0>, ranges::begin(std::get<0>(__views))};
+        it.template Satisfy<0>();
+        return it;
+    }
+    constexpr Iterator<true> begin() const
+        requires(range<const Views> && ...) && __views_detail::Concatable<const Views...>
+    {
+        Iterator<true> it{this, in_place_index<0>, ranges::begin(std::get<0>(__views))};
+        it.template Satisfy<0>();
+        return it;
+    }
+
+    constexpr auto end()
+        requires(!(__views_detail::SimpleView<Views> && ...))
+    {
+        if constexpr (common_range<ViewAt<kN - 1>>) {
+            return Iterator<false>{this, in_place_index<kN - 1>,
+                                   ranges::end(std::get<kN - 1>(__views))};
+        } else {
+            return default_sentinel;
+        }
+    }
+    constexpr auto end() const
+        requires(range<const Views> && ...) && __views_detail::Concatable<const Views...>
+    {
+        if constexpr (common_range<const ViewAt<kN - 1>>) {
+            return Iterator<true>{this, in_place_index<kN - 1>,
+                                  ranges::end(std::get<kN - 1>(__views))};
+        } else {
+            return default_sentinel;
+        }
+    }
+
+    constexpr auto size()
+        requires(sized_range<Views> && ...)
+    {
+        return std::apply(
+            [](auto &...vs) {
+                using CT = common_type_t<decltype(ranges::size(vs))...>;
+                return (static_cast<CT>(ranges::size(vs)) + ...);
+            },
+            __views);
+    }
+    constexpr auto size() const
+        requires(sized_range<const Views> && ...)
+    {
+        return std::apply(
+            [](const auto &...vs) {
+                using CT = common_type_t<decltype(ranges::size(vs))...>;
+                return (static_cast<CT>(ranges::size(vs)) + ...);
+            },
+            __views);
+    }
+
+    // P2846R6 gave concat_view a reserve_hint in the same revision of the
+    // working draft that adopted the view, so it ships with one rather than
+    // waiting to have one bolted on.
+    constexpr auto reserve_hint()
+        requires(approximately_sized_range<Views> && ...)
+    {
+        return std::apply(
+            [](auto &...vs) {
+                using CT = common_type_t<decltype(ranges::reserve_hint(vs))...>;
+                return (static_cast<CT>(ranges::reserve_hint(vs)) + ...);
+            },
+            __views);
+    }
+    constexpr auto reserve_hint() const
+        requires(approximately_sized_range<const Views> && ...)
+    {
+        return std::apply(
+            [](const auto &...vs) {
+                using CT = common_type_t<decltype(ranges::reserve_hint(vs))...>;
+                return (static_cast<CT>(ranges::reserve_hint(vs)) + ...);
+            },
+            __views);
+    }
+};
+
+template <typename... R>
+concat_view(R &&...) -> concat_view<views::all_t<R>...>;
+
+// ── concat_view::Iterator ([range.concat.iterator]) ──────────────────────
+
+template <input_range... Views>
+    requires(view<Views> && ...) && (sizeof...(Views) > 0) &&
+            __views_detail::Concatable<Views...>
+template <bool Const>
+class concat_view<Views...>::Iterator {
+    friend class concat_view;
+    template <bool>
+    friend class Iterator;
+
+    static constexpr size_t kN = sizeof...(Views);
+
+    template <size_t I>
+    using VAt = __views_detail::MaybeConst<Const, tuple_element_t<I, tuple<Views...>>>;
+
+    using Parent = __views_detail::MaybeConst<Const, concat_view>;
+
+    Parent                                                     *__parent = nullptr;
+    variant<iterator_t<__views_detail::MaybeConst<Const, Views>>...> __it;
+
+    template <size_t I, typename It>
+    constexpr Iterator(Parent *p, in_place_index_t<I> tag, It it) : __parent(p), __it(tag, std::move(it))
+    {
+    }
+
+    template <size_t I>
+    constexpr auto &ViewOf() const
+    {
+        return std::get<I>(__parent->__views);
+    }
+
+    // satisfy ([range.concat.iterator]): having landed at the end of range I,
+    // walk forward over however many empty ranges follow. Without this an empty
+    // range in the middle would leave the iterator sitting on an end() that
+    // compares equal to nothing the user can reach.
+    template <size_t I>
+    constexpr void Satisfy()
+    {
+        if constexpr (I + 1 < kN) {
+            if (std::get<I>(__it) == ranges::end(ViewOf<I>())) {
+                __it.template emplace<I + 1>(ranges::begin(ViewOf<I + 1>()));
+                Satisfy<I + 1>();
+            }
+        }
+    }
+
+    template <size_t I>
+    constexpr void IncImpl()
+    {
+        if constexpr (I < kN) {
+            if (__it.index() == I) {
+                ++std::get<I>(__it);
+                Satisfy<I>();
+            } else {
+                IncImpl<I + 1>();
+            }
+        }
+    }
+
+    template <size_t I>
+    constexpr void DecImpl()
+    {
+        if constexpr (I == 0) {
+            --std::get<0>(__it);
+        } else {
+            if (__it.index() == I) {
+                if (std::get<I>(__it) == ranges::begin(ViewOf<I>())) {
+                    __it.template emplace<I - 1>(ranges::end(ViewOf<I - 1>()));
+                    DecImpl<I - 1>();
+                } else {
+                    --std::get<I>(__it);
+                }
+            } else {
+                DecImpl<I - 1>();
+            }
+        }
+    }
+
+public:
+    using iterator_concept =
+        conditional_t<__views_detail::ConcatIsRandomAccess<Const, Views...>,
+                      random_access_iterator_tag,
+                      conditional_t<__views_detail::ConcatIsBidirectional<Const, Views...>,
+                                    bidirectional_iterator_tag,
+                                    conditional_t<__views_detail::ConcatAllForward<Const, Views...>,
+                                                  forward_iterator_tag, input_iterator_tag>>>;
+    using value_type =
+        __views_detail::ConcatValueT<__views_detail::MaybeConst<Const, Views>...>;
+    using difference_type =
+        common_type_t<range_difference_t<__views_detail::MaybeConst<Const, Views>>...>;
+
+    Iterator() = default;
+
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const &&
+                 (convertible_to<iterator_t<Views>, iterator_t<const Views>> && ...)
+        : __parent(i.__parent)
+    {
+        [&]<size_t... I>(index_sequence<I...>) {
+            ((i.__it.index() == I ? (void)__it.template emplace<I>(std::get<I>(i.__it)) : (void)0),
+             ...);
+        }(make_index_sequence<kN>{});
+    }
+
+    constexpr decltype(auto) operator*() const
+    {
+        using Ref = __views_detail::ConcatReferenceT<__views_detail::MaybeConst<Const, Views>...>;
+        return std::visit([](auto &&it) -> Ref { return static_cast<Ref>(*it); }, __it);
+    }
+
+    constexpr Iterator &operator++()
+    {
+        IncImpl<0>();
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+    constexpr Iterator operator++(int)
+        requires __views_detail::ConcatAllForward<Const, Views...>
+    {
+        Iterator tmp = *this;
+        ++*this;
+        return tmp;
+    }
+
+    constexpr Iterator &operator--()
+        requires __views_detail::ConcatIsBidirectional<Const, Views...>
+    {
+        DecImpl<kN - 1>();
+        return *this;
+    }
+    constexpr Iterator operator--(int)
+        requires __views_detail::ConcatIsBidirectional<Const, Views...>
+    {
+        Iterator tmp = *this;
+        --*this;
+        return tmp;
+    }
+
+private:
+    // advance-fwd / advance-bwd ([range.concat.iterator]): spend the offset in
+    // the current range if it fits there, otherwise consume what is left of it
+    // and carry the remainder into the neighbour.
+    template <size_t I>
+    constexpr void AdvanceFwd(difference_type off)
+    {
+        if constexpr (I + 1 == kN) {
+            std::get<I>(__it) += off;
+        } else {
+            if (__it.index() != I) {
+                AdvanceFwd<I + 1>(off);
+                return;
+            }
+            const auto left =
+                static_cast<difference_type>(ranges::end(ViewOf<I>()) - std::get<I>(__it));
+            if (off < left) {
+                std::get<I>(__it) += off;
+            } else {
+                __it.template emplace<I + 1>(ranges::begin(ViewOf<I + 1>()));
+                AdvanceFwd<I + 1>(off - left);
+            }
+        }
+    }
+    template <size_t I>
+    constexpr void AdvanceBwd(difference_type off)
+    {
+        if constexpr (I == 0) {
+            std::get<0>(__it) -= off;
+        } else {
+            if (__it.index() != I) {
+                AdvanceBwd<I - 1>(off);
+                return;
+            }
+            const auto left =
+                static_cast<difference_type>(std::get<I>(__it) - ranges::begin(ViewOf<I>()));
+            if (off <= left) {
+                std::get<I>(__it) -= off;
+            } else {
+                __it.template emplace<I - 1>(ranges::end(ViewOf<I - 1>()));
+                AdvanceBwd<I - 1>(off - left);
+            }
+        }
+    }
+
+    // How far this iterator is from the concatenation's first element. Every
+    // difference below is expressed through this rather than by walking pairs
+    // of indices: with random access and all-but-last common, the length of
+    // each fully-consumed range is end - begin, so one linear-in-N sum answers
+    // every distance question without a second dispatch.
+    template <size_t I>
+    constexpr difference_type OffsetFromBegin() const
+    {
+        if constexpr (I == kN) {
+            return 0;
+        } else {
+            if (__it.index() == I) {
+                return static_cast<difference_type>(std::get<I>(__it) -
+                                                    ranges::begin(ViewOf<I>()));
+            }
+            return static_cast<difference_type>(ranges::end(ViewOf<I>()) -
+                                                ranges::begin(ViewOf<I>())) +
+                   OffsetFromBegin<I + 1>();
+        }
+    }
+
+public:
+    constexpr Iterator &operator+=(difference_type n)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        if (n > 0)
+            AdvanceFwd<0>(n);
+        else if (n < 0)
+            AdvanceBwd<kN - 1>(-n);
+        return *this;
+    }
+    constexpr Iterator &operator-=(difference_type n)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return *this += -n;
+    }
+    constexpr decltype(auto) operator[](difference_type n) const
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return *((*this) + n);
+    }
+
+    friend constexpr bool operator==(const Iterator &x, const Iterator &y)
+        requires(equality_comparable<iterator_t<__views_detail::MaybeConst<Const, Views>>> && ...)
+    {
+        return x.__it == y.__it;
+    }
+    friend constexpr bool operator==(const Iterator &x, default_sentinel_t)
+    {
+        constexpr size_t kLast = kN - 1;
+        return x.__it.index() == kLast &&
+               std::get<kLast>(x.__it) == ranges::end(x.template ViewOf<kLast>());
+    }
+
+    friend constexpr bool operator<(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return x.template OffsetFromBegin<0>() < y.template OffsetFromBegin<0>();
+    }
+    friend constexpr bool operator>(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return y < x;
+    }
+    friend constexpr bool operator<=(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return !(y < x);
+    }
+    friend constexpr bool operator>=(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return !(x < y);
+    }
+    friend constexpr auto operator<=>(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...> &&
+                 (three_way_comparable<iterator_t<__views_detail::MaybeConst<Const, Views>>> && ...)
+    {
+        return x.template OffsetFromBegin<0>() <=> y.template OffsetFromBegin<0>();
+    }
+
+    friend constexpr Iterator operator+(const Iterator &it, difference_type n)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        Iterator t = it;
+        t += n;
+        return t;
+    }
+    friend constexpr Iterator operator+(difference_type n, const Iterator &it)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return it + n;
+    }
+    friend constexpr Iterator operator-(const Iterator &it, difference_type n)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        Iterator t = it;
+        t -= n;
+        return t;
+    }
+    friend constexpr difference_type operator-(const Iterator &x, const Iterator &y)
+        requires __views_detail::ConcatIsRandomAccess<Const, Views...>
+    {
+        return x.template OffsetFromBegin<0>() - y.template OffsetFromBegin<0>();
+    }
+    friend constexpr difference_type operator-(const Iterator &x, default_sentinel_t)
+        requires(sized_range<__views_detail::MaybeConst<Const, Views>> && ...)
+    {
+        difference_type total = std::apply(
+            [](const auto &...vs) {
+                return (static_cast<difference_type>(ranges::size(vs)) + ...);
+            },
+            x.__parent->__views);
+        return x.template OffsetFromBegin<0>() - total;
+    }
+    friend constexpr difference_type operator-(default_sentinel_t, const Iterator &x)
+        requires(sized_range<__views_detail::MaybeConst<Const, Views>> && ...)
+    {
+        return -(x - default_sentinel);
+    }
+
+    friend constexpr decltype(auto) iter_move(const Iterator &it)
+    {
+        using RRef =
+            __views_detail::ConcatRvalueReferenceT<__views_detail::MaybeConst<Const, Views>...>;
+        return std::visit([](auto &&i) -> RRef { return static_cast<RRef>(ranges::iter_move(i)); },
+                          it.__it);
+    }
+
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        requires(swappable_with<iter_reference_t<iterator_t<__views_detail::MaybeConst<Const, Views>>>,
+                                iter_reference_t<iterator_t<__views_detail::MaybeConst<Const, Views>>>> &&
+                 ...)
+    {
+        // Same range: hand the swap to that range's own customization, which
+        // may know something ranges::swap on two references cannot. Different
+        // ranges: the references are all that is common between them.
+        if (x.__it.index() == y.__it.index()) {
+            [&]<size_t... I>(index_sequence<I...>) {
+                ((x.__it.index() == I
+                      ? (void)ranges::iter_swap(std::get<I>(x.__it), std::get<I>(y.__it))
+                      : (void)0),
+                 ...);
+            }(make_index_sequence<kN>{});
+        } else {
+            ranges::swap(*x, *y);
+        }
+    }
+};
+
+namespace views {
+namespace __detail {
+
+struct ConcatFn {
+    // [range.concat.overview]/2: a single range is views::all(r), NOT a
+    // one-element concat_view -- concatenating one thing must not change its
+    // type, or `concat(v)` would stop being usable where v was.
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        return views::all(std::forward<R>(r));
+    }
+    template <viewable_range... Rs>
+        requires(sizeof...(Rs) > 1) && requires { concat_view(std::declval<Rs>()...); }
+    constexpr auto operator()(Rs &&...rs) const
+    {
+        return concat_view(std::forward<Rs>(rs)...);
+    }
+};
+
+} // namespace __detail
+
+inline constexpr __detail::ConcatFn concat{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_CONCAT
