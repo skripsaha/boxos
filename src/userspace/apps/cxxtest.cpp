@@ -38613,6 +38613,73 @@ void Phase154()
            "standard's three constructors so the three-argument one stops being "
            "explicit\n");
 }
+
+void Phase155()
+{
+    using namespace std;
+    using namespace std::chrono;
+
+    // [thread.thread.this]/4 says sleep_for blocks for AT LEAST the requested
+    // duration, and before this it did not. The kernel arms the timeout in
+    // scheduler ticks anchored at the current one (SysAddrPark:
+    // fire_at = g_global_tick + ms * HZ / 1000), so the first tick of the count
+    // is only the remainder of the one already running: at 250 Hz a 20 ms sleep
+    // is 5 ticks and could return after 16, and a 1 ms sleep -- which rounds
+    // down to zero ticks and is then floored to one -- could return after
+    // almost nothing. That is what took phase48's floor below its 15 ms bound
+    // on a 16-core run: the sibling's 20 ms sleep was not 20 ms.
+    //
+    // These are FLOORS measured on the very steady_clock sleep_for now loops
+    // against, so they cannot flake the way a ceiling can -- host deschedule
+    // inflates a floor and never deflates it. The 1 ms case is the sharp one:
+    // it is the request that used to round down to nothing.
+    {
+        unsigned short_sleeps = 0;
+        nanoseconds    worst   = nanoseconds::max();
+        for (int i = 0; i < 20; ++i) {
+            box::stopwatch sw;
+            this_thread::sleep_for(milliseconds(1));
+            auto e = sw.elapsed();
+            if (e < milliseconds(1)) ++short_sleeps;
+            if (e < worst) worst = e;
+        }
+        Check(short_sleeps == 0,
+              "phase155 (1) twenty consecutive sleep_for(1ms) each slept at least 1ms");
+        Check(worst >= milliseconds(1), "phase155 (2) ...including the shortest of them");
+    }
+    {
+        box::stopwatch sw;
+        this_thread::sleep_for(milliseconds(5));
+        Check(sw.elapsed() >= milliseconds(5), "phase155 (3) sleep_for(5ms) sleeps at least 5ms");
+    }
+    {
+        box::stopwatch sw;
+        this_thread::sleep_for(milliseconds(20));
+        Check(sw.elapsed() >= milliseconds(20),
+              "phase155 (4) sleep_for(20ms) sleeps at least 20ms -- the duration "
+              "phase48's sibling relies on");
+    }
+    {
+        // sleep_until with a deadline in the past must not sleep, and a
+        // deadline in the future goes through the same floor.
+        box::stopwatch sw;
+        this_thread::sleep_until(steady_clock::now() + milliseconds(5));
+        Check(sw.elapsed() >= milliseconds(5),
+              "phase155 (5) sleep_until honours the same lower bound");
+    }
+    // A non-positive request must not park at all. No ceiling on the timing:
+    // the assertion is that it returns, which the phase completing proves.
+    this_thread::sleep_for(milliseconds(0));
+    this_thread::sleep_for(milliseconds(-5));
+    this_thread::sleep_until(steady_clock::now() - milliseconds(5));
+    Check(true, "phase155 (6) a non-positive duration and a past deadline return without parking");
+
+    printf("[CXX] PASS phase155: this_thread::sleep_for now blocks for AT LEAST "
+           "the requested duration ([thread.thread.this]/4) -- one kernel park "
+           "is armed in whole scheduler ticks from the current one and returns "
+           "up to a tick early, so the sleep re-parks against steady_clock "
+           "until the deadline it was given actually passes\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38789,6 +38856,7 @@ int main()
     Phase152();
     Phase153();
     Phase154();
+    Phase155();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

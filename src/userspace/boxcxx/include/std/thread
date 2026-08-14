@@ -36,14 +36,46 @@ template <class Rep, class Period>
 inline void sleep_for(const chrono::duration<Rep, Period> &d)
 {
     if (d <= chrono::duration<Rep, Period>::zero()) return;      // <=0 → no sleep
-    auto ms = chrono::ceil<chrono::milliseconds>(d).count();     // round UP (>= requested)
-    if (ms < 1) ms = 1;                                          // sub-ms positive → >=1ms
-    if (ms > 0xFFFFFFFFLL) ms = 0xFFFFFFFFLL;                    // clamp to addr_park u32
-    // Park on a private stack word nobody wakes → returns only on the timeout.
-    // expected == *word so SysAddrPark proceeds (no instant value-mismatch).
-    volatile uint64_t word = 0;
-    addr_park((const volatile void *)&word,
-              __atomic_load_n(&word, __ATOMIC_RELAXED), (uint32_t)ms);
+    // [thread.thread.this]/4 says "at least", and ONE park cannot promise that.
+    // The kernel arms the timeout in scheduler ticks -- SysAddrPark computes
+    // fire_at = g_global_tick + ms * HZ / 1000 -- so the first tick of that
+    // count is only however much of the CURRENT tick is left. At 250 Hz a 20 ms
+    // sleep is 5 ticks and can return after 16, and a 1 ms sleep, which rounds
+    // down to zero ticks and is then floored to one, can return almost at once.
+    // So park in a loop against the same steady_clock the caller measures with:
+    // what leaves this function is then the duration the standard promises,
+    // rather than a tick count that happens to be close to it. The extra passes
+    // cost one clock read each and, on a park that does run to its deadline,
+    // there are none.
+    const auto deadline =
+        chrono::steady_clock::now() + chrono::ceil<chrono::steady_clock::duration>(d);
+    for (;;) {
+        const auto now = chrono::steady_clock::now();
+        if (now >= deadline) return;
+        auto ms = chrono::ceil<chrono::milliseconds>(deadline - now).count();
+        if (ms < 1) ms = 1;                                      // sub-ms remainder → >=1ms
+        if (ms > 0xFFFFFFFFLL) ms = 0xFFFFFFFFLL;                // clamp to addr_park u32
+        // Park on a private stack word nobody wakes → returns only on the
+        // timeout. expected == *word so SysAddrPark proceeds (no instant
+        // value-mismatch).
+        volatile uint64_t word = 0;
+        error_t           rc   = addr_park((const volatile void *)&word,
+                                           __atomic_load_n(&word, __ATOMIC_RELAXED), (uint32_t)ms);
+        // Only OK and ERR_TIMEOUT mean a park actually happened. Anything else
+        // -- a value mismatch, a kernel error -- means it did NOT sleep and
+        // will not on the next pass either, so looping would burn a core for
+        // the rest of the duration instead of yielding it. Neither can occur
+        // here (the word is this strand's own stack, expected is loaded from
+        // it, and nobody else knows the address), but a sleep that turns into
+        // a hot spin is a far worse failure than a sleep that comes back
+        // early, so the loop refuses to be the one that does it.
+        if (rc != OK && rc != ERR_TIMEOUT) return;
+        // Guard against a stopped clock rather than against a count of passes:
+        // if a whole park went by and steady_clock did not advance at all, it
+        // will not advance on the next pass either. This cannot fire while the
+        // clock works, so it never turns a real sleep short.
+        if (chrono::steady_clock::now() <= now) return;
+    }
 }
 
 template <class Clock, class Duration>
