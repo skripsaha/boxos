@@ -487,11 +487,14 @@ public:
 } // namespace __format
 
 // [format.syn] — the catch-all every std::formattable range picks up
-// automatically, unless it already has an explicit (full) specialization
-// (string/string_view/const char*/char* — chosen before partial-
-// specialization matching even starts, D12) or is more specialized itself
-// (formatter<char[N],char> from c1 — a char[N] argument can never be
-// produced by deducing an arbitrary R, so char[N] wins outright, D12).
+// automatically, unless it already has a full specialization (const char* /
+// char* — chosen before partial-specialization matching even starts, D12) or
+// is more specialized itself. The latter is what keeps every string out of
+// here: formatter<char[N],char> from c1, and the basic_string /
+// basic_string_view partial specializations in <format>, all name patterns
+// that an arbitrary R can be deduced from but which cannot be deduced from an
+// arbitrary R — so each is more specialized outright and wins with no
+// ambiguity, for any traits and any allocator (D12).
 template <ranges::input_range R>
     requires(format_kind<R> != range_format::disabled) &&
             formattable<ranges::range_reference_t<R>, char>

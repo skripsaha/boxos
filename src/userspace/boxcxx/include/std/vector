@@ -716,6 +716,22 @@ public:
                 *w_ &= ~mask_;
             return *this;
         }
+        // P2321R2 ([vector.bool.pspc]): assigning through a CONST proxy. The
+        // proxy is a handle, so constness of the handle says nothing about the
+        // bit it names — and this overload is exactly what std::indirectly_
+        // writable tests for, via
+        //   const_cast<const iter_reference_t<Out>&&>(*o) = t
+        // on a prvalue reference. Without it vector<bool>::iterator models no
+        // output_iterator at all and every algorithm constrained on one — the
+        // ranges::copy/transform/fill family — rejects the container outright.
+        const reference &operator=(bool x) const noexcept
+        {
+            if (x)
+                *w_ |= mask_;
+            else
+                *w_ &= ~mask_;
+            return *this;
+        }
         reference &operator=(const reference &o) noexcept
         {
             return *this = bool(o);
@@ -1102,6 +1118,19 @@ public:
     }
     void swap(vector &o) noexcept
     {
+        // [container.reqmts]: swap exchanges allocators iff
+        // propagate_on_container_swap. The primary template has always done
+        // this; the bool specialization silently skipped it, so a POCS
+        // allocator was honoured by vector<int> and ignored by vector<bool> —
+        // leaving each vector holding words allocated by the other's allocator,
+        // which is exactly the mismatch POCS exists to prevent. WTraits, not
+        // allocator_traits<Alloc>, because the rebound Word allocator is the
+        // object actually stored here.
+        if constexpr (WTraits::propagate_on_container_swap::value) {
+            WAlloc ta = alloc_;
+            alloc_    = o.alloc_;
+            o.alloc_  = ta;
+        }
         Word  *tw = words_;
         words_    = o.words_;
         o.words_  = tw;

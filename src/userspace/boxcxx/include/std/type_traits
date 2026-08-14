@@ -1123,11 +1123,32 @@ inline constexpr bool is_nothrow_invocable_r_v =
 // identical signature — these are the standard-mandated declarations)
 // ════════════════════════════════════════════════════════════════════════
 
+template <class T> struct is_swappable;
+template <class T> struct is_nothrow_swappable;
+
 template <class T>
 constexpr enable_if_t<is_move_constructible<T>::value &&
                       is_move_assignable<T>::value>
 swap(T &a, T &b) noexcept(is_nothrow_move_constructible<T>::value &&
                           is_nothrow_move_assignable<T>::value);
+
+// The array overload has to be declared HERE, beside the scalar one, even
+// though <utility> defines both. SwappableWithImpl below detects swappability
+// by an unqualified call to `swap`, and for a dependent call that means
+// ordinary lookup at THIS point plus ADL at the point of instantiation. A
+// built-in array has no associated namespace, so ADL reaches nothing: a
+// declaration living only in <utility> is invisible to the trait forever.
+// That is what made is_swappable_v<int[3]> answer false while
+// std::swap(int[3], int[3]) worked, and made int[2][2] — whose overload is
+// constrained on is_swappable of its element type int[2] — fail to compile at
+// all. Both reference libraries declare the two together for the same reason.
+// The exception specification is spelled with ::value rather than the _v alias
+// so that it is token-for-token identical to <utility>'s definition: a
+// noexcept-specifier that merely means the same thing would declare a second,
+// ambiguous overload ([temp.over.link]).
+template <class T, size_t N>
+constexpr enable_if_t<is_swappable<T>::value>
+swap(T (&a)[N], T (&b)[N]) noexcept(is_nothrow_swappable<T>::value);
 
 namespace __bits {
 template <class T, class U, class = void>
