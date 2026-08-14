@@ -67,24 +67,9 @@ struct in_in_result {
     }
 };
 
-template <class I, class O>
-struct in_out_result {
-    [[no_unique_address]] I in;
-    [[no_unique_address]] O out;
-
-    template <class I2, class O2>
-        requires convertible_to<const I &, I2> && convertible_to<const O &, O2>
-    constexpr operator in_out_result<I2, O2>() const &
-    {
-        return {in, out};
-    }
-    template <class I2, class O2>
-        requires convertible_to<I, I2> && convertible_to<O, O2>
-    constexpr operator in_out_result<I2, O2>() &&
-    {
-        return {std::move(in), std::move(out)};
-    }
-};
+// in_out_result relocated to __bits/ranges_core (used by <memory>'s ranges::
+// uninitialized_copy/_move family, which must not pull in the rest of
+// <algorithm>/<ranges> — every container includes <memory>).
 
 template <class I1, class I2, class O>
 struct in_in_out_result {

@@ -1,0 +1,411 @@
+// boxcxx — <__bits/ranges_uninitialized>
+//
+// The ranges:: half of [specialized.algorithms] — fourteen names that the
+// std:: half in <memory> has had since Ф7 and that ranges:: did not. They are
+// the last block of [ranges] entities missing, and with them
+// __cpp_lib_ranges becomes claimable.
+//
+// This is a leaf rather than more text in <memory> for two reasons: <memory>
+// is already the largest header in the tree, and the family needs the range
+// vocabulary (iterator_t, borrowed_iterator_t, in_out_result) that <memory>
+// itself must not drag <ranges> in to get. <__bits/ranges_core> carries all
+// three; in_out_result was relocated there for exactly this include, beside
+// out_value_result which <numeric> had already moved for its own.
+//
+// The difference from the std:: half is not cosmetic:
+//
+//   * each algorithm has a RANGE overload as well as an iterator one, and
+//     the range overload returns borrowed_iterator_t, so calling it on an
+//     expiring container yields `dangling` instead of an iterator into freed
+//     storage — a diagnosis at compile time rather than a use-after-free;
+//   * uninitialized_copy / _move take a sentinel for the OUTPUT too, so the
+//     destination is bounded. The std:: forms cannot express that and will
+//     happily run off the end of a short buffer;
+//   * uninitialized_move moves through ranges::iter_move, so a proxy
+//     iterator's own ADL iter_move participates instead of a hand-rolled
+//     std::move(*i);
+//   * construct_at and destroy_at are constrained rather than open, and
+//     destroy_at on an array destroys each element ([specialized.destroy]/5).
+//
+// The no-throw-* concepts are [specialized.algorithms.general]'s
+// exposition-only ones. They do not check noexcept — nothing in the standard
+// requires the operations to be non-throwing. What they require is that the
+// ITERATOR operations do not throw, which is what makes the roll-back on a
+// mid-range construction failure implementable at all: the cleanup loop has
+// to be able to walk back over what it built.
+#ifndef BOXCXX_BITS_RANGES_UNINITIALIZED
+#define BOXCXX_BITS_RANGES_UNINITIALIZED
+
+// allocator_core is here for std::addressof, which every one of these
+// algorithms calls. <memory> happens to include it before this file, so
+// leaving it out worked — and would have broken the day that include block
+// was reordered, since the calls are dependent and resolve at instantiation.
+#include <__bits/allocator_core>
+#include <__bits/ranges_core>
+#include <concepts>
+#include <cstddef>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── exposition-only concepts ([special.mem.concepts]) ────────────────────
+
+template <typename I>
+concept __nothrow_input_iterator =
+    input_iterator<I> && is_lvalue_reference_v<iter_reference_t<I>> &&
+    same_as<remove_cvref_t<iter_reference_t<I>>, iter_value_t<I>>;
+
+template <typename S, typename I>
+concept __nothrow_sentinel_for = sentinel_for<S, I>;
+
+template <typename R>
+concept __nothrow_input_range =
+    range<R> && __nothrow_input_iterator<iterator_t<R>> &&
+    __nothrow_sentinel_for<sentinel_t<R>, iterator_t<R>>;
+
+template <typename I>
+concept __nothrow_forward_iterator =
+    __nothrow_input_iterator<I> && forward_iterator<I> &&
+    __nothrow_sentinel_for<I, I>;
+
+template <typename R>
+concept __nothrow_forward_range =
+    __nothrow_input_range<R> && __nothrow_forward_iterator<iterator_t<R>>;
+
+// ── result aliases ([specialized.algorithms]) ────────────────────────────
+
+template <class I, class O>
+using uninitialized_copy_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_copy_n_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_move_result = in_out_result<I, O>;
+template <class I, class O>
+using uninitialized_move_n_result = in_out_result<I, O>;
+
+// ── destroy_at / destroy / destroy_n ([specialized.destroy]) ─────────────
+
+namespace __uninit {
+
+// [specialized.destroy]/1: for an array, destroy each element in turn.
+// Recursive, so an array of arrays unwinds all the way down.
+struct DestroyAt {
+    template <destructible T>
+    constexpr void operator()(T *p) const noexcept
+    {
+        if constexpr (is_array_v<T>)
+            for (auto &e : *p) (*this)(addressof(e));
+        else
+            p->~T();
+    }
+};
+
+} // namespace __uninit
+
+inline constexpr __uninit::DestroyAt destroy_at{};
+
+namespace __uninit {
+
+struct Destroy {
+    template <__nothrow_input_iterator I, __nothrow_sentinel_for<I> S>
+        requires destructible<iter_value_t<I>>
+    constexpr I operator()(I first, S last) const noexcept
+    {
+        for (; first != last; ++first) ranges::destroy_at(addressof(*first));
+        return first;
+    }
+    template <__nothrow_input_range R>
+        requires destructible<range_value_t<R>>
+    constexpr borrowed_iterator_t<R> operator()(R &&r) const noexcept
+    {
+        return (*this)(ranges::begin(r), ranges::end(r));
+    }
+};
+
+struct DestroyN {
+    template <__nothrow_input_iterator I>
+        requires destructible<iter_value_t<I>>
+    constexpr I operator()(I first, iter_difference_t<I> n) const noexcept
+    {
+        for (; n > 0; ++first, (void)--n) ranges::destroy_at(addressof(*first));
+        return first;
+    }
+};
+
+} // namespace __uninit
+
+inline constexpr __uninit::Destroy   destroy{};
+inline constexpr __uninit::DestroyN  destroy_n{};
+
+// ── construct_at ([specialized.construct]) ───────────────────────────────
+
+namespace __uninit {
+
+struct ConstructAt {
+    // [specialized.construct]/1's own constraint, spelled as the standard
+    // spells it: the placement-new expression must be well-formed as an
+    // unevaluated operand.
+    template <class T, class... Args>
+        requires requires(void *p, Args &&...a) {
+            ::new (p) T(std::forward<Args>(a)...);
+        }
+    constexpr T *operator()(T *p, Args &&...args) const
+    {
+        return ::new (const_cast<void *>(static_cast<const volatile void *>(p)))
+            T(std::forward<Args>(args)...);
+    }
+};
+
+// Every algorithm below builds forwards and, if a construction throws, walks
+// back over exactly what it built. This guard is that walk-back: `Release()`
+// is called only once the whole range is constructed, so an exception
+// escaping anywhere in the loop leaves the destination with no half-built
+// elements. Without it the caller could not tell which prefix to destroy.
+template <typename I>
+struct RollBack {
+    I  __first;
+    I *__cur;
+    constexpr ~RollBack()
+    {
+        if (__cur)
+            for (I i = __first; i != *__cur; ++i)
+                ranges::destroy_at(addressof(*i));
+    }
+    constexpr void Release() noexcept { __cur = nullptr; }
+};
+
+} // namespace __uninit
+
+inline constexpr __uninit::ConstructAt construct_at{};
+
+// ── uninitialized_default_construct / _value_construct ───────────────────
+
+namespace __uninit {
+
+struct UninitDefaultConstruct {
+    template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S>
+        requires default_initializable<iter_value_t<I>>
+    I operator()(I first, S last) const
+    {
+        using T = remove_reference_t<iter_reference_t<I>>;
+        I               cur = first;
+        RollBack<I>     rb{first, &cur};
+        for (; cur != last; ++cur)
+            ::new (const_cast<void *>(static_cast<const volatile void *>(
+                addressof(*cur)))) T;
+        rb.Release();
+        return cur;
+    }
+    template <__nothrow_forward_range R>
+        requires default_initializable<range_value_t<R>>
+    borrowed_iterator_t<R> operator()(R &&r) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r));
+    }
+};
+
+struct UninitDefaultConstructN {
+    template <__nothrow_forward_iterator I>
+        requires default_initializable<iter_value_t<I>>
+    I operator()(I first, iter_difference_t<I> n) const
+    {
+        using T = remove_reference_t<iter_reference_t<I>>;
+        I           cur = first;
+        RollBack<I> rb{first, &cur};
+        for (; n > 0; ++cur, (void)--n)
+            ::new (const_cast<void *>(static_cast<const volatile void *>(
+                addressof(*cur)))) T;
+        rb.Release();
+        return cur;
+    }
+};
+
+// Value-initialization is `::new (p) T()` IN PLACE, not a copy from a
+// value-initialized temporary. The difference is not the zeroing — it is that
+// the copy form silently adds a copy/move requirement the standard does not
+// ask for, so a default-constructible but non-copyable element would fail to
+// compile here and nowhere else.
+struct UninitValueConstruct {
+    template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S>
+        requires default_initializable<iter_value_t<I>>
+    I operator()(I first, S last) const
+    {
+        using T = remove_reference_t<iter_reference_t<I>>;
+        I           cur = first;
+        RollBack<I> rb{first, &cur};
+        for (; cur != last; ++cur)
+            ::new (const_cast<void *>(static_cast<const volatile void *>(
+                addressof(*cur)))) T();
+        rb.Release();
+        return cur;
+    }
+    template <__nothrow_forward_range R>
+        requires default_initializable<range_value_t<R>>
+    borrowed_iterator_t<R> operator()(R &&r) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r));
+    }
+};
+
+struct UninitValueConstructN {
+    template <__nothrow_forward_iterator I>
+        requires default_initializable<iter_value_t<I>>
+    I operator()(I first, iter_difference_t<I> n) const
+    {
+        using T = remove_reference_t<iter_reference_t<I>>;
+        I           cur = first;
+        RollBack<I> rb{first, &cur};
+        for (; n > 0; ++cur, (void)--n)
+            ::new (const_cast<void *>(static_cast<const volatile void *>(
+                addressof(*cur)))) T();
+        rb.Release();
+        return cur;
+    }
+};
+
+} // namespace __uninit
+
+inline constexpr __uninit::UninitDefaultConstruct  uninitialized_default_construct{};
+inline constexpr __uninit::UninitDefaultConstructN uninitialized_default_construct_n{};
+inline constexpr __uninit::UninitValueConstruct    uninitialized_value_construct{};
+inline constexpr __uninit::UninitValueConstructN   uninitialized_value_construct_n{};
+
+// ── uninitialized_copy / _copy_n / _move / _move_n ───────────────────────
+// Both ends are bounded. The std:: forms take one output iterator and trust
+// the caller that the destination is long enough; these stop at whichever
+// end arrives first, which is the difference between a short buffer being a
+// diagnosable early return and being a heap overrun.
+
+namespace __uninit {
+
+struct UninitCopy {
+    template <input_iterator I, sentinel_for<I> S1, __nothrow_forward_iterator O,
+              __nothrow_sentinel_for<O> S2>
+        requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
+    uninitialized_copy_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
+                                               S2 olast) const
+    {
+        O           cur = ofirst;
+        RollBack<O> rb{ofirst, &cur};
+        for (; ifirst != ilast && cur != olast; ++ifirst, (void)++cur)
+            ranges::construct_at(addressof(*cur), *ifirst);
+        rb.Release();
+        return {std::move(ifirst), cur};
+    }
+    template <input_range IR, __nothrow_forward_range OR>
+        requires constructible_from<range_value_t<OR>, range_reference_t<IR>>
+    uninitialized_copy_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+    operator()(IR &&in, OR &&out) const
+    {
+        return (*this)(ranges::begin(in), ranges::end(in), ranges::begin(out),
+                       ranges::end(out));
+    }
+};
+
+struct UninitCopyN {
+    template <input_iterator I, __nothrow_forward_iterator O,
+              __nothrow_sentinel_for<O> S>
+        requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
+    uninitialized_copy_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
+                                                 O ofirst, S olast) const
+    {
+        O           cur = ofirst;
+        RollBack<O> rb{ofirst, &cur};
+        for (; n > 0 && cur != olast; ++ifirst, (void)++cur, (void)--n)
+            ranges::construct_at(addressof(*cur), *ifirst);
+        rb.Release();
+        return {std::move(ifirst), cur};
+    }
+};
+
+struct UninitMove {
+    template <input_iterator I, sentinel_for<I> S1, __nothrow_forward_iterator O,
+              __nothrow_sentinel_for<O> S2>
+        requires constructible_from<iter_value_t<O>, iter_rvalue_reference_t<I>>
+    uninitialized_move_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
+                                               S2 olast) const
+    {
+        O           cur = ofirst;
+        RollBack<O> rb{ofirst, &cur};
+        for (; ifirst != ilast && cur != olast; ++ifirst, (void)++cur)
+            ranges::construct_at(addressof(*cur), ranges::iter_move(ifirst));
+        rb.Release();
+        return {std::move(ifirst), cur};
+    }
+    template <input_range IR, __nothrow_forward_range OR>
+        requires constructible_from<range_value_t<OR>,
+                                    range_rvalue_reference_t<IR>>
+    uninitialized_move_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+    operator()(IR &&in, OR &&out) const
+    {
+        return (*this)(ranges::begin(in), ranges::end(in), ranges::begin(out),
+                       ranges::end(out));
+    }
+};
+
+struct UninitMoveN {
+    template <input_iterator I, __nothrow_forward_iterator O,
+              __nothrow_sentinel_for<O> S>
+        requires constructible_from<iter_value_t<O>, iter_rvalue_reference_t<I>>
+    uninitialized_move_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
+                                                 O ofirst, S olast) const
+    {
+        O           cur = ofirst;
+        RollBack<O> rb{ofirst, &cur};
+        for (; n > 0 && cur != olast; ++ifirst, (void)++cur, (void)--n)
+            ranges::construct_at(addressof(*cur), ranges::iter_move(ifirst));
+        rb.Release();
+        return {std::move(ifirst), cur};
+    }
+};
+
+// ── uninitialized_fill / _fill_n ─────────────────────────────────────────
+
+struct UninitFill {
+    template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S, class T>
+        requires constructible_from<iter_value_t<I>, const T &>
+    I operator()(I first, S last, const T &x) const
+    {
+        I           cur = first;
+        RollBack<I> rb{first, &cur};
+        for (; cur != last; ++cur) ranges::construct_at(addressof(*cur), x);
+        rb.Release();
+        return cur;
+    }
+    template <__nothrow_forward_range R, class T>
+        requires constructible_from<range_value_t<R>, const T &>
+    borrowed_iterator_t<R> operator()(R &&r, const T &x) const
+    {
+        return (*this)(ranges::begin(r), ranges::end(r), x);
+    }
+};
+
+struct UninitFillN {
+    template <__nothrow_forward_iterator I, class T>
+        requires constructible_from<iter_value_t<I>, const T &>
+    I operator()(I first, iter_difference_t<I> n, const T &x) const
+    {
+        I           cur = first;
+        RollBack<I> rb{first, &cur};
+        for (; n > 0; ++cur, (void)--n) ranges::construct_at(addressof(*cur), x);
+        rb.Release();
+        return cur;
+    }
+};
+
+} // namespace __uninit
+
+inline constexpr __uninit::UninitCopy   uninitialized_copy{};
+inline constexpr __uninit::UninitCopyN  uninitialized_copy_n{};
+inline constexpr __uninit::UninitMove   uninitialized_move{};
+inline constexpr __uninit::UninitMoveN  uninitialized_move_n{};
+inline constexpr __uninit::UninitFill   uninitialized_fill{};
+inline constexpr __uninit::UninitFillN  uninitialized_fill_n{};
+
+} // namespace ranges
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_UNINITIALIZED

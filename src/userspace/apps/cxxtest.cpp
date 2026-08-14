@@ -37284,6 +37284,278 @@ void Phase148()
            "halves of atomic and atomic_flag are no longer missing\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-e — the last [ranges] entities. The ranges:: uninitialized-memory
+// family, subrange's range constructors and guides, the two remaining range
+// aliases, range_adaptor_closure, and views::istream.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Instrumented element: counts constructions and destructions, and can be
+// told to throw on the Nth construction so the roll-back is observable.
+struct P149Elem {
+    static int  live;
+    static int  built;
+    static int  throw_at; // -1 = never
+    int         v;
+    P149Elem() : v(0) { Arrive(); }
+    explicit P149Elem(int x) : v(x) { Arrive(); }
+    P149Elem(const P149Elem &o) : v(o.v) { Arrive(); }
+    P149Elem(P149Elem &&o) noexcept(false) : v(o.v) { Arrive(); }
+    ~P149Elem() { live--; }
+    static void Arrive()
+    {
+        if (throw_at >= 0 && built == throw_at) {
+            built++;
+            throw 42;
+        }
+        built++;
+        live++;
+    }
+    static void Reset()
+    {
+        live = built = 0;
+        throw_at     = -1;
+    }
+};
+int P149Elem::live     = 0;
+int P149Elem::built    = 0;
+int P149Elem::throw_at = -1;
+
+// A user-defined adaptor closure — the whole point of P2387R3.
+struct P149TakeTwo : std::ranges::range_adaptor_closure<P149TakeTwo> {
+    template <std::ranges::viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        return std::ranges::views::take(std::forward<R>(r), 2);
+    }
+};
+inline constexpr P149TakeTwo p149_take_two{};
+
+struct P149Base {
+    int a;
+};
+struct P149Derived : P149Base {
+    int b;
+};
+template <class Sub, class It>
+constexpr bool P149Buildable = requires(It a, It b) { Sub(a, b); };
+
+void Phase149()
+{
+    namespace rg = std::ranges;
+    using V      = std::vector<int>;
+
+    // ── the two remaining range aliases + iter_common_reference_t ─────────
+    {
+        static_assert(std::is_same_v<rg::range_rvalue_reference_t<V>, int &&>);
+        static_assert(std::is_same_v<rg::range_common_reference_t<V>, int &>);
+        static_assert(std::is_same_v<std::iter_common_reference_t<int *>, int &>);
+        // A proxy range. The alias routes through ranges::iter_move, so this
+        // is zip's OWN iter_move result, not a synthesized std::move(*i).
+        // Note the shape: boxcxx's zip is tuple-always, where the standard's
+        // tuple-or-pair would give pair at N == 2 (a deliberate Ф29d decision,
+        // recorded in CONFORMANCE §2 <ranges>) — asserted here so the choice
+        // stays visible rather than drifting.
+        using Z = decltype(rg::views::zip(std::declval<V &>(), std::declval<V &>()));
+        static_assert(
+            std::is_same_v<rg::range_rvalue_reference_t<Z>,
+                           std::tuple<int &&, int &&>>);
+        static_assert(
+            std::is_same_v<rg::range_reference_t<Z>, std::tuple<int &, int &>>);
+        Check(true, "phase149 (1) range_rvalue_reference_t and "
+                    "range_common_reference_t name the right types");
+    }
+
+    // ── subrange: range constructors, guides, and the slicing gate ────────
+    {
+        V    v{1, 2, 3, 4};
+        auto s = rg::subrange(v);
+        static_assert(std::is_same_v<decltype(s),
+                                     rg::subrange<V::iterator, V::iterator,
+                                                  rg::subrange_kind::sized>>);
+        Check(s.size() == 4 && !s.empty() && *s.begin() == 1,
+              "phase149 (2) subrange(R&&) deduces a SIZED subrange and spans "
+              "the range");
+        auto s2 = rg::subrange(v, 4u);
+        Check(s2.size() == 4, "phase149 (3) and the (R&&, n) form too");
+        // std::get, which [ranges.syn] hoists out of ranges
+        Check(*std::get<0>(s) == 1 && std::get<1>(s) == v.end(),
+              "phase149 (4) std::get reaches subrange's tuple protocol");
+        auto [b, e] = s;
+        Check(b == v.begin() && e == v.end(),
+              "phase149 (5) and structured bindings still work");
+        // A qualification conversion is fine; a derived-to-base one is not —
+        // it would stride by the wrong size over the array.
+        static_assert(P149Buildable<rg::subrange<const int *>, int *>);
+        static_assert(!P149Buildable<rg::subrange<P149Base *>, P149Derived *>);
+        Check(true, "phase149 (6) subrange rejects a slicing iterator "
+                    "conversion and accepts a qualifying one");
+    }
+
+    // ── range_adaptor_closure ([range.adaptor.object]) ────────────────────
+    {
+        V    v{1, 2, 3, 4};
+        auto a   = v | p149_take_two;
+        int  sum = 0;
+        for (int x : a) sum += x;
+        Check(sum == 3, "phase149 (7) a user closure pipes with |");
+        int  rsum  = 0;
+        auto b     = v | p149_take_two | rg::views::reverse;
+        for (int x : b) rsum = rsum * 10 + x;
+        Check(rsum == 21, "phase149 (8) and composes with the built-in ones");
+        auto composed = p149_take_two | rg::views::reverse;
+        int  csum     = 0;
+        for (int x : v | composed) csum = csum * 10 + x;
+        Check(csum == 21, "phase149 (9) closure|closure composes before it is "
+                          "given a range");
+    }
+
+    // ── ranges:: uninitialized-memory family ──────────────────────────────
+    {
+        alignas(P149Elem) unsigned char raw[sizeof(P149Elem) * 4];
+        auto *p   = reinterpret_cast<P149Elem *>(raw);
+        auto  dst = rg::subrange(p, p + 4);
+
+        P149Elem::Reset();
+        auto it = rg::uninitialized_value_construct(dst);
+        Check(P149Elem::live == 4 && it == p + 4 && p[0].v == 0,
+              "phase149 (10) uninitialized_value_construct over a RANGE");
+        Check(rg::destroy(dst) == p + 4 && P149Elem::live == 0,
+              "phase149 (11) and destroy takes the range back down");
+
+        P149Elem::Reset();
+        rg::uninitialized_default_construct_n(p, 3);
+        Check(P149Elem::live == 3, "phase149 (12) the _n forms count");
+        rg::destroy_n(p, 3);
+        Check(P149Elem::live == 0, "phase149 (13) destroy_n matches");
+
+        P149Elem::Reset();
+        // The filled-from temporary dies at this semicolon, so only the four
+        // constructed slots are still live when Check runs.
+        rg::uninitialized_fill(dst, P149Elem(9));
+        Check(P149Elem::live == 4 && P149Elem::built == 5 && p[3].v == 9,
+              "phase149 (14) uninitialized_fill copies the value into every "
+              "slot");
+        rg::destroy(dst);
+
+        // The output is BOUNDED — the std:: forms cannot express this and
+        // would run past the end of a short destination.
+        P149Elem::Reset();
+        std::vector<P149Elem> src;
+        src.reserve(8);
+        for (int i = 0; i < 8; i++) src.emplace_back(i);
+        auto r = rg::uninitialized_copy(src, dst);
+        Check(r.out == p + 4 && r.in == src.begin() + 4 && p[3].v == 3,
+              "phase149 (15) uninitialized_copy stops at the SHORTER of the "
+              "two ranges");
+        rg::destroy(dst);
+        auto r2 = rg::uninitialized_move(src.begin(), src.end(), p, p + 2);
+        Check(r2.out == p + 2 && r2.in == src.begin() + 2,
+              "phase149 (16) uninitialized_move is bounded on both ends too");
+        rg::destroy(p, p + 2);
+
+        // Roll-back: a construction that throws mid-range must leave NOTHING
+        // constructed, or the caller cannot know what to destroy.
+        P149Elem::Reset();
+        P149Elem::throw_at = 2;
+        bool threw         = false;
+        try {
+            rg::uninitialized_value_construct(dst);
+        } catch (int) {
+            threw = true;
+        }
+        P149Elem::throw_at = -1;
+        Check(threw && P149Elem::live == 0,
+              "phase149 (17) a throwing construction rolls the whole range "
+              "back");
+
+        // borrowed_iterator_t: an expiring range yields dangling, which is a
+        // compile-time diagnosis rather than an iterator into freed storage.
+        static_assert(
+            std::is_same_v<decltype(rg::uninitialized_value_construct(
+                               std::vector<P149Elem>{})),
+                           rg::dangling>);
+        static_assert(std::is_same_v<decltype(rg::destroy(std::vector<P149Elem>{})),
+                                     rg::dangling>);
+        Check(true, "phase149 (18) the range overloads return dangling for an "
+                    "rvalue container");
+
+        // Default- and value-construction must not require a copy: the
+        // standard says `::new (p) T` / `::new (p) T()` in place. Building a
+        // temporary and copying it would compile for P149Elem and fail here.
+        {
+            struct NonCopyable {
+                int  v = 5;
+                NonCopyable()                               = default;
+                NonCopyable(const NonCopyable &)            = delete;
+                NonCopyable &operator=(const NonCopyable &) = delete;
+            };
+            alignas(NonCopyable) unsigned char nraw[sizeof(NonCopyable) * 2];
+            auto *np = reinterpret_cast<NonCopyable *>(nraw);
+            rg::uninitialized_value_construct_n(np, 2);
+            Check(np[0].v == 5 && np[1].v == 5,
+                  "phase149 (19) value-construction works on a NON-COPYABLE "
+                  "element, so it is in-place and not a copy");
+            rg::destroy_n(np, 2);
+            rg::uninitialized_default_construct(np, np + 2);
+            rg::destroy(np, np + 2);
+        }
+
+        // construct_at / destroy_at, including the array form
+        P149Elem::Reset();
+        rg::construct_at(p, 11);
+        Check(P149Elem::live == 1 && p->v == 11,
+              "phase149 (20) ranges::construct_at");
+        rg::destroy_at(p);
+        Check(P149Elem::live == 0, "phase149 (21) ranges::destroy_at");
+        // [specialized.destroy]/1: destroy_at on an array destroys each element
+        alignas(P149Elem[3]) unsigned char araw[sizeof(P149Elem) * 3];
+        auto *arr = reinterpret_cast<P149Elem(*)[3]>(araw);
+        P149Elem::Reset();
+        rg::uninitialized_value_construct_n(&(*arr)[0], 3);
+        Check(P149Elem::live == 3, "phase149 (22) three array elements built");
+        rg::destroy_at(arr);
+        Check(P149Elem::live == 0,
+              "phase149 (23) destroy_at on an ARRAY destroys every element");
+    }
+
+    // ── views::istream ────────────────────────────────────────────────────
+    {
+        std::istringstream in("10 20 30");
+        auto               v = rg::istream_view<int>(in);
+        static_assert(rg::input_range<decltype(v)>);
+        static_assert(!rg::forward_range<decltype(v)>);
+        int sum = 0;
+        for (int x : v) sum += x;
+        Check(sum == 60, "phase149 (24) istream_view pulls every value out of "
+                         "the stream");
+
+        std::istringstream in2("1 2 3 4");
+        int                doubled = 0;
+        for (int x : rg::views::istream<int>(in2) |
+                         rg::views::transform([](int y) { return y * 2; }))
+            doubled += x;
+        Check(doubled == 20,
+              "phase149 (25) and composes with the adaptors as a pipeline "
+              "stage");
+
+        // Extraction stops at the first failure, not at end-of-stream.
+        std::istringstream in3("7 oops 9");
+        int                count = 0;
+        for (int x : rg::istream_view<int>(in3)) {
+            (void)x;
+            count++;
+        }
+        Check(count == 1, "phase149 (26) a failed extraction ends the range");
+    }
+
+    printf("[CXX] PASS phase149: Ф31e-e — the ranges:: uninitialized-memory family "
+           "(bounded on both ends, rolling back on a throw, dangling for an rvalue "
+           "range), subrange's range constructors and guides with the slicing gate, "
+           "range_rvalue_reference_t/range_common_reference_t, range_adaptor_closure, "
+           "and views::istream\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -37454,6 +37726,7 @@ int main()
     Phase146();
     Phase147();
     Phase148();
+    Phase149();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
