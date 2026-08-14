@@ -36812,6 +36812,105 @@ void Phase146()
            "standard requires), and ranges::is_permutation counts multiplicities\n");
 }
 
+
+// [c.math.abs]/3 makes abs ill-formed for an unsigned type that does not
+// promote to int. Dependent, so the failure is a substitution failure.
+template <class X>
+constexpr bool Phase147AbsOk = requires(X x) { std::abs(x); };
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-c — [cmath.syn]/2's "sufficient additional overloads". The whole
+// batch is about which overload a call RESOLVES to, so the static_asserts
+// on the return type carry the weight and the runtime checks confirm the
+// promoted call computes what the concrete one would.
+// ─────────────────────────────────────────────────────────────────────────
+void Phase147()
+{
+#define PH147_T(e, ty) static_assert(std::is_same_v<decltype(e), ty>)
+    // ── all-integer arguments: none of these compiled before ─────────────
+    PH147_T(std::sqrt(4), double);        PH147_T(std::pow(2, 3), double);
+    PH147_T(std::atan2(1, 1), double);    PH147_T(std::hypot(3, 4), double);
+    PH147_T(std::hypot(1, 2, 2), double); PH147_T(std::fma(1, 2, 3), double);
+    PH147_T(std::fabs(-3), double);       PH147_T(std::ldexp(2, 3), double);
+    PH147_T(std::lerp(0, 10, 1), double); PH147_T(std::scalbn(2, 3), double);
+    // the return type is NOT always the promoted one
+    PH147_T(std::ilogb(4), int);          PH147_T(std::lround(4), long);
+    PH147_T(std::llround(4), long long);  PH147_T(std::isnan(1), bool);
+    PH147_T(std::signbit(1), bool);       PH147_T(std::fpclassify(1), int);
+    PH147_T(std::isgreater(1, 2), bool);
+    Check(std::sqrt(4) == 2.0 && std::pow(2, 3) == 8.0 &&
+              std::hypot(3, 4) == 5.0 && std::hypot(1, 2, 2) == 3.0 &&
+              std::fma(2, 3, 4) == 10.0 && std::fabs(-3) == 3.0 &&
+              std::ldexp(2, 3) == 16.0 && std::lerp(0, 10, 1) == 10.0,
+          "phase147 (1) an all-integer call promotes to double and computes");
+    Check(std::ilogb(4) == 2 && std::lround(4) == 4L && !std::isnan(1) &&
+              std::isgreater(2, 1) && !std::isgreater(1, 2),
+          "phase147 (2) and keeps the int/long/bool return types it should");
+
+    // ── float mixed with long double: nothing promotes to long double, so
+    //    this pair was ambiguous where float-with-double was not ──────────
+    PH147_T(std::atan2(1.0f, 2.0L), long double);
+    PH147_T(std::pow(1.0f, 2.0L), long double);
+    PH147_T(std::fma(1.0f, 2.0, 3.0L), long double);
+    Check(std::atan2(1.0f, 2.0L) == std::atan2(1.0L, 2.0L) &&
+              std::pow(1.0f, 2.0L) == std::pow(1.0L, 2.0L),
+          "phase147 (3) float mixed with long double widens to long double");
+
+    // ── the rule itself, clause by clause ────────────────────────────────
+    PH147_T(std::pow(1.0f, 2.0f), float);   // all float stays float
+    PH147_T(std::pow(1.0f, 2), double);     // an INTEGER forces double
+    PH147_T(std::pow(1.0f, 2.0), double);
+    PH147_T(std::pow(1.0, 2.0L), long double);
+    PH147_T(std::sqrt(1.0f), float);
+    PH147_T(std::sqrt(1.0), double);
+    PH147_T(std::sqrt(1.0L), long double);
+    Check(std::pow(1.0f, 2.0f) == 1.0f && std::sqrt(4.0f) == 2.0f,
+          "phase147 (4) an exact float call still reaches the float overload");
+
+    // ── abs keeps integers integral ([c.math.abs]) ───────────────────────
+    PH147_T(std::abs(-3), int);
+    PH147_T(std::abs(-3L), long);
+    PH147_T(std::abs(-3LL), long long);
+    PH147_T(std::abs(-3.0f), float);
+    PH147_T(std::abs(-3.0L), long double);
+    static_assert(std::abs(-3) == 3 && std::abs(-3L) == 3L);
+    Check(std::abs(-3) == 3 && std::abs(3) == 3 && std::abs(-3.5) == 3.5,
+          "phase147 (5) abs of an integer stays an integer, not a double");
+    // [c.math.abs]/3: unsigned that does not promote to int stays ill-formed
+    static_assert(!Phase147AbsOk<unsigned long>);
+    static_assert(Phase147AbsOk<int> && Phase147AbsOk<double>);
+
+    // ── special math is covered by the same rule [sf.cmath]/2 ────────────
+    PH147_T(std::riemann_zeta(2), double);
+    PH147_T(std::cyl_bessel_j(1, 2), double);
+    PH147_T(std::comp_ellint_1(0), double);
+    PH147_T(std::ellint_3(0, 0, 0), double);
+    PH147_T(std::hermite(1u, 2), double);
+    PH147_T(std::assoc_laguerre(1u, 1u, 2), double);
+    Check(std::riemann_zeta(2) == std::riemann_zeta(2.0) &&
+              std::cyl_bessel_j(1, 2) == std::cyl_bessel_j(1.0, 2.0) &&
+              std::hermite(1u, 2) == std::hermite(1u, 2.0),
+          "phase147 (6) the special functions promote to the same answer");
+
+    // ── the guard that keeps the templates out of the way ────────────────
+    // isgreater and its siblings existed only at double. An unguarded
+    // promoting template asked for long double would promote to long double,
+    // find nothing concrete, pick itself, and recurse without end; the pair
+    // below is what proves the guard holds and that no narrowing happens.
+    Check(std::isgreater(1.0L, 2.0L) == false &&
+              std::isless(1.0L, 2.0L) == true &&
+              std::isunordered(std::kQNaNL, 1.0L) == true,
+          "phase147 (7) the comparison entry points answer at long double width");
+    Check(std::isgreater(2.0f, 1.0f) && !std::islessgreater(1.0f, 1.0f),
+          "phase147 (8) and at float width");
+#undef PH147_T
+
+    printf("[CXX] PASS phase147: Ф31e-c — [cmath.syn]/2's additional overloads, so an "
+           "all-integer call like sqrt(4) resolves at last, float mixes with long double, "
+           "abs of an integer stays integral, and the special functions follow the same "
+           "rule\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36980,6 +37079,7 @@ int main()
     Phase144();
     Phase145();
     Phase146();
+    Phase147();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
