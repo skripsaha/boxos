@@ -19,10 +19,14 @@
 #ifndef BOXCXX_OSTREAM
 #define BOXCXX_OSTREAM
 
+#include <__bits/version_print>
 #include <ios>
 #include <streambuf>
 #include <charconv>
 #include <exception>
+#include <format>       // [ostream.formatted.print]
+#include <string>
+#include <string_view>
 #include <type_traits>
 #include <cstdint>
 #include <cstddef>
@@ -764,6 +768,36 @@ basic_ostream<char> &InsertFloat(basic_ostream<char> &os, F value)
     return os;
 }
 
+
+// [ostream.formatted.print]/6 (P2539R4). The exception rule is the whole
+// reason this is not three lines: vformat's exception must propagate
+// UNTOUCHED -- no badbit, no regard for os.exceptions() -- while a failure
+// of the INSERTION must set badbit. So the formatting happens after the
+// sentry and outside the try, and only the sputn is guarded.
+//
+// There is no "terminal capable of displaying Unicode" branch: no ostream in
+// this library can be one (there is no file or console stream type), so
+// vprint_unicode and vprint_nonunicode necessarily coincide -- the same
+// coincidence <print> documents for the console forms, arrived at from the
+// other direction.
+//
+// os.getloc() is not passed to vformat: <format> here is locale-independent
+// and std::locale can only ever be the "C" locale (a permanent exclusion),
+// so the locale-taking overload would have exactly one possible answer.
+inline void VPrintTo(basic_ostream<char> &os, string_view fmt, format_args args)
+{
+    typename basic_ostream<char>::sentry ok(os);
+    if (!ok) return;
+    string out = vformat(fmt, args);
+    try {
+        const streamsize n = static_cast<streamsize>(out.size());
+        if (os.rdbuf()->sputn(out.data(), n) != n)
+            os.setstate(ios_base::badbit);
+    } catch (...) {
+        HandleException(os);
+    }
+}
+
 // [ostream.inserters.arithmetic]: "as if" the %p conversion specifier -- the
 // standard mandates only this much, leaving the exact rendering
 // implementation-defined. boxcxx renders a fixed "0x" + lowercase hex of the
@@ -791,6 +825,37 @@ inline basic_ostream<char> &InsertPointer(basic_ostream<char> &os, const void *v
 }
 
 } // namespace __ios
+
+// ── [ostream.formatted.print] ───────────────────────────────────────────
+// P2539R4 added these four to [ostream.syn]; <ostream> is a co-owner of
+// __cpp_lib_print with <print>, which is why the macro could not be defined
+// while they were missing.
+
+inline void vprint_unicode(ostream &os, string_view fmt, format_args args)
+{
+    __ios::VPrintTo(os, fmt, args);
+}
+inline void vprint_nonunicode(ostream &os, string_view fmt, format_args args)
+{
+    __ios::VPrintTo(os, fmt, args);
+}
+
+template <class... Args>
+void print(ostream &os, format_string<Args...> fmt, Args &&...args)
+{
+    // The ordinary literal encoding here IS UTF-8, so [ostream.formatted.
+    // print]/1 selects the unicode form.
+    vprint_unicode(os, fmt.get(), make_format_args(args...));
+}
+
+template <class... Args>
+void println(ostream &os, format_string<Args...> fmt, Args &&...args)
+{
+    // Specified as print(os, "{}\n", format(fmt, args...)) -- one insertion,
+    // newline included, rather than two.
+    print(os, "{}\n", format(fmt, std::forward<Args>(args)...));
+}
+
 } // namespace std
 
 #endif // BOXCXX_OSTREAM

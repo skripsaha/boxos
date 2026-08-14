@@ -607,6 +607,8 @@ template <class T, class A>
 class deque;
 template <class T, class A>
 class list;
+template <class T, class A>
+class forward_list;
 template <class K, class C, class A>
 class set;
 template <class K, class C, class A>
@@ -638,16 +640,22 @@ template <class T>
 using deque = std::deque<T, polymorphic_allocator<T>>;
 template <class T>
 using list = std::list<T, polymorphic_allocator<T>>;
+template <class T>
+using forward_list = std::forward_list<T, polymorphic_allocator<T>>;
 
-using string =
-    std::basic_string<char, char_traits<char>, polymorphic_allocator<char>>;
-using u16string = std::basic_string<char16_t, char_traits<char16_t>,
-                                    polymorphic_allocator<char16_t>>;
-using u32string = std::basic_string<char32_t, char_traits<char32_t>,
-                                    polymorphic_allocator<char32_t>>;
-using wstring =
-    std::basic_string<wchar_t, char_traits<wchar_t>,
-                      polymorphic_allocator<wchar_t>>;
+// [string.syn] gives the string aliases an alias TEMPLATE first and spells
+// the five concrete ones through it; boxcxx had the five and not the
+// template, so pmr::basic_string<C> -- the only way to name a pmr string of
+// a character type the standard did not enumerate -- did not exist, and
+// neither did pmr::u8string with it.
+template <class C, class Tr = char_traits<C>>
+using basic_string = std::basic_string<C, Tr, polymorphic_allocator<C>>;
+
+using string    = basic_string<char>;
+using u8string  = basic_string<char8_t>;
+using u16string = basic_string<char16_t>;
+using u32string = basic_string<char32_t>;
+using wstring   = basic_string<wchar_t>;
 
 template <class K, class C = less<K>>
 using set = std::set<K, C, polymorphic_allocator<K>>;

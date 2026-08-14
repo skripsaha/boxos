@@ -32,9 +32,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 159 |
+| Feature-test macros defined | 164 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 164 phases, 4 688 runtime checks, 1 406 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 165 phases, 4 697 runtime checks, 1 431 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,7 +129,7 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **159** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **164** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every one carries its N4950 value.** No macro is defined at a later
@@ -140,7 +140,7 @@ the whole set, not sampled:
   is the part that breaks most easily, because a macro added to a shared leaf
   tends to become visible from every header that includes it and from no other.
 
-**26 of the C++23 macros are not defined**, and `<version>` lists every one by
+**21 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -156,7 +156,7 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 26, nine belong to features whose owning header does not exist at all
+Of the 21, nine belong to features whose owning header does not exist at all
 (`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
 `syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
 them); the rest belong to headers that exist. The in-tree suite pins the absences
@@ -191,12 +191,13 @@ nothing has been found since.
   `__cpp_lib_robust_nonmodifying_seq_ops`.
 - `~` `stable_sort` and `inplace_merge` are not `constexpr`. This is correct for
   C++23; P2562 (C++26) would change it.
-- `!` **`stable_partition` is *declared* `constexpr` but can never be constant-
-  evaluated.** It is annotated ahead of C++23 (libstdc++ gates the same function
-  behind C++26), yet any call with a non-empty range reaches
-  `::operator new(size_t, nothrow_t)`, which boxcxx's `<new>` does not mark
-  `constexpr`. The result is a specifier that promises something the function
-  cannot do — worse than its two honestly-unannotated siblings, because the error
+- `✓` Closed in Ф31e-g-3: `stable_partition` was *declared* `constexpr` and could
+  never be constant-evaluated — any call with a non-empty range reaches
+  `::operator new(size_t, nothrow_t)`. The annotation is gone rather than made
+  true: C++23 does not ask for a constexpr `stable_partition` (P0202's original
+  exclusion list names it, and P2562R1 is C++26), and `ranges::stable_partition`
+  next to it already said so. A specifier that promises what the function cannot
+  do is worse than its two honestly-unannotated siblings, because the error
   appears only at the point of use.
 - `✓` Closed in Ф31e-g: **`std::sample` and `std::shuffle` did not exist** —
   only the `ranges::` forms did, so the spelling in every pre-ranges algorithm
@@ -347,7 +348,20 @@ nothing has been found since.
   ten (measured on BoxOS). `box::log(x, 10)` returns 22 of the 23 exactly by
   calling `log10` directly rather than dividing logarithms.
 
-## `<compare>`
+## `<compare>` / `<concepts>`
+
+- `✓` Closed in Ф31e-g-3: P2404R3's *comparison-common-type-with* was not
+  implemented, so `equality_comparable_with`, `totally_ordered_with` and
+  `three_way_comparable_with` still asked C++20's `common_reference_with` — which
+  requires the common reference to be **constructible** from each side. When that
+  common reference is a prvalue, constructible means *copyable*, so a move-only
+  type could not be compared with anything it converts from, however well-formed
+  every `==` and `<=>` between them was. The C++23 relaxation asks instead whether
+  each side converts to `const C&`, which binds a reference and copies nothing.
+  The concept lives in `<compare>` — the lower of the two headers — and is spelled
+  with type traits rather than `same_as`/`convertible_to` for the same reason the
+  rest of `__cmp` is. `totally_ordered_with` needed no edit: it inherits the
+  relaxation through `equality_comparable_with`. Closed `__cpp_lib_concepts`.
 
 - `✓` Closed in Ф31e-b-1: `compare_three_way_result` was declared with two required
   parameters where the standard declares `template<class T, class U = T>`, so
@@ -439,6 +453,19 @@ nothing has been found since.
 - `?` For a type with no formatter, the intended `static_assert` message does fire
   — but four noisier errors precede it (a deleted constructor, a missing `parse`,
   and two consteval failures).
+
+## `<functional>`
+
+- `✓` Closed in Ф31e-g-3: P2655R3's two `basic_common_reference` specializations
+  for `reference_wrapper` were absent, so
+  `common_reference_t<reference_wrapper<int>&, int&>` had **no type at all** —
+  not a surprising type, none. `COND-RES` is ambiguous there (the wrapper
+  converts to `int&` and `int&` converts to a wrapper), so bullet (1) of
+  [meta.trans.other]/5 fails and `basic_common_reference` is what has to answer.
+  The pair of specializations is asymmetric on purpose: exactly one side may be a
+  wrapper, or the answer would not be unique. Closed
+  `__cpp_lib_common_reference_wrapper` and, with it,
+  `__cpp_lib_common_reference` (which `<type_traits>` owns for the same paper).
 
 ## `<generator>`
 
@@ -650,6 +677,24 @@ nothing has been found since.
 
 ## `<print>`
 
+- `✓` Closed in Ф31e-g-3 (in `<ostream>`, which co-owns the macro): P2539R4's
+  four `ostream`-taking overloads — `print`, `println`, `vprint_unicode`,
+  `vprint_nonunicode` — did not exist, and that alone was what kept
+  `__cpp_lib_print` undefined while the console forms had been complete since
+  Ф9B-2. The exception rule is the part with teeth: [ostream.formatted.print]/6
+  says `vformat`'s exception propagates **untouched** — no `badbit`, regardless of
+  `os.exceptions()` — while a failure of the *insertion* sets `badbit`, so the
+  formatting happens after the sentry and outside the guarded region.
+- `–` There is no "terminal capable of displaying Unicode" branch: no stream type
+  in this library can be one, so `vprint_unicode` and `vprint_nonunicode`
+  necessarily coincide — the same coincidence the console forms document, reached
+  from the other direction. `os.getloc()` is not passed to `vformat` either:
+  `std::locale` can only ever be `"C"` here (§1.2), so the locale-taking overload
+  would have exactly one possible answer.
+- `~` `println()` with no arguments is provided and is **not** C++23 — it is
+  P3142R0 (C++26), pre-existing. Its `ostream` counterpart, `println(ostream&)`,
+  is deliberately not added: this library pins C++23.
+
 - `–` There are no `FILE*` overloads of `print`, `println`, `vprint_unicode` or
   `vprint_nonunicode`. BoxOS has no `FILE` type anywhere for them to be declared
   against; the console forms simply omit the stream argument.
@@ -801,10 +846,33 @@ nothing has been found since.
   `constexpr` function that builds a `std::string` fails at the point of constant
   evaluation, not at definition. This is what keeps `bitset::to_string()` and
   several other correctly-annotated functions from folding.
-- `–` `pmr::basic_string`, `pmr::u8string` and `pmr::forward_list` do not exist.
-  Fifteen other `pmr::` aliases do — but they are declared in `<memory_resource>`,
-  not in the header that owns the container, so a translation unit that includes
-  only `<string>` cannot see `pmr::string`.
+- `✓` Closed in Ф31e-g-3: `pmr::basic_string`, `pmr::u8string` and
+  `pmr::forward_list` did not exist. [string.syn] gives the string aliases an
+  alias **template** first and spells the five concrete ones through it; boxcxx
+  had the five and not the template, so a `pmr` string of any character type the
+  standard did not enumerate could not be named, and `pmr::u8string` was missing
+  with it.
+- `~` All the `pmr::` aliases are declared in `<memory_resource>`, not in the
+  header that owns the container as [string.syn] / [vector.syn] / … specify, so a
+  translation unit that includes only `<string>` cannot see `pmr::string`. The
+  aliases themselves are all present and correct.
+
+## `<tuple>`
+
+- `✓` Closed in Ф31e-g-3: `apply`, `tuple_cat` and `make_from_tuple` were not
+  constrained by the *tuple-like* concept, which C++23 applies to all three. They
+  duck-typed on `tuple_size_v`/`get` instead, so they accepted any type carrying
+  the protocol, and — the part that actually bites — a type carrying *neither*
+  produced a hard error from inside the function body rather than a clean
+  rejection, because the arity is computed there. **This document had recorded a
+  different reason for the macro entirely** (that P2165R4's converting machinery
+  did not compile); that machinery landed in `c5ba9fa` and works, and cxxtest
+  phase137 had been carrying the correct reason all along. Closed
+  `__cpp_lib_tuple_like`.
+- `✓` Closed in Ф31e-g-3: P2517R1's conditional `noexcept` on `apply` — its
+  exception specification is that of the `INVOKE` it performs. `apply` was
+  unconditionally potentially-throwing, so a `noexcept` function could not call
+  it over a `noexcept` callable without going through `noexcept(false)`.
 
 ## `<type_traits>`
 
@@ -1197,10 +1265,32 @@ macros. Two entries in this document were rewritten rather than closed:
 library-only approximation can separate a user-provided destructor from a
 member-induced non-trivial one.
 
+Ф31e-g-3 took the five that needed a decision rather than a keystroke
+(phase 153). Four of them were straightforward once decided; the first was not
+what the backlog said it was. `<version>` recorded `__cpp_lib_tuple_like` as
+blocked because P2165R4's converting machinery did not compile — measured, and
+wrong: that machinery landed in `c5ba9fa` and works. The real gap was the
+*other* half of the paper, and cxxtest phase137 had been carrying the correct
+reason all along while the document carried the stale one: `apply`, `tuple_cat`
+and `make_from_tuple` were still duck-typed on `tuple_size_v`/`get`, so they
+accepted any type with the protocol and — worse — gave a hard error rather than
+a clean rejection for a type with neither, because the arity was computed in the
+function body. P2517R1's conditional `noexcept` on `apply` was missing with
+them. Then: P2655R3's `basic_common_reference` for `reference_wrapper`, without
+which `common_reference_t<reference_wrapper<int>&, int&>` has no type at all
+(`COND-RES` is ambiguous — the wrapper converts to `int&` and `int&` converts to
+a wrapper); P2404R3, which let a **move-only** type be compared with something
+it converts from; P2539R4's four `ostream`-taking `print` overloads, the sole
+reason `__cpp_lib_print` was undefined while the console forms had been complete
+since Ф9B-2; and `pmr::basic_string`, which [string.syn] gives as an alias
+*template* — boxcxx had the five concrete aliases spelled out and not the
+template they are spelled through, so `pmr::u8string` was missing with it, and
+`pmr::forward_list` too. Five macros. `stable_partition`'s `constexpr` came off
+in the same step: C++23 does not ask for it (P2562R1 is C++26), and
+`ranges::stable_partition` beside it already said so.
+
 What is left:
 
-- `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
-  constant-evaluated (§2).
 - `<ranges>`: **every entity `__cpp_lib_ranges` promises now exists** (Ф31e-e),
   and the macro is still not defined — for a reason that changed completely. Its
   C++23 value is not one number the field agrees on: LWG 3931 exists because
@@ -1275,7 +1365,10 @@ recalled: **phases** are the `Phase*()` entry points `main` invokes, plus phase 
 which is proven by its translation unit linking at all rather than by a call;
 **runtime checks** are `Check(` call sites; **`static_assert`s** are occurrences
 of the keyword. Two of the three figures had drifted before Ф31e-d and were
-re-measured there.
+re-measured there. The macro count is the one a translation unit actually sees:
+`-dM -E` over a file containing only `#include <version>`, counting
+`__cpp_lib_` defines — not a grep of the leaf files, which undercounts by one
+because two macros are self-declared rather than defined in a leaf.
 
 A claim about a *defect* is not written here from reading the new code either.
 Each one in §2 marked `✓` was re-checked against the pre-fix headers — extracted

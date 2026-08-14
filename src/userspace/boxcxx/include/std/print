@@ -31,6 +31,7 @@
 #ifndef BOXCXX_PRINT
 #define BOXCXX_PRINT
 
+#include <__bits/version_print>
 #include <cstddef>
 #include <format>
 #include <string>

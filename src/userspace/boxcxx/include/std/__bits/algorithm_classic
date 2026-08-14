@@ -1472,8 +1472,14 @@ constexpr auto lexicographical_compare_three_way(In1 first1, In1 last1,
 
 // ── stable_partition ─────────────────────────────────────────────────────
 
+// NOT constexpr, and the annotation it used to carry was a lie: the buffered
+// path below calls ::operator new(nothrow), which is not a constant
+// expression, so no call could ever be constant-evaluated. C++23 does not ask
+// for a constexpr stable_partition either -- P0202's original exclusion list
+// names it, and P2562R1, which removes the exclusion, is C++26. ranges::
+// stable_partition already said so; this is the classic side agreeing.
 template <class It, class Pred>
-constexpr It stable_partition(It first, It last, Pred pred)
+It stable_partition(It first, It last, Pred pred)
 {
     using T = typename iterator_traits<It>::value_type;
     auto n  = std::distance(first, last);

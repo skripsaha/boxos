@@ -46,6 +46,9 @@
 #ifndef __cpp_lib_tuples_by_type
 #  define __cpp_lib_tuples_by_type 201304L
 #endif
+#ifndef __cpp_lib_tuple_like
+#  define __cpp_lib_tuple_like 202207L
+#endif
 #ifndef __cpp_lib_unreachable
 #  define __cpp_lib_unreachable 202202L
 #endif

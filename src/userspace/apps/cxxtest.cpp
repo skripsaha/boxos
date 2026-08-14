@@ -29416,6 +29416,13 @@ void Phase131()
     static_assert(__cpp_lib_shared_timed_mutex == 201402L, "phase131 shared_timed_mutex");
 
     // <version> must expose the two self-declaring macros too.
+    static_assert(__cpp_lib_common_reference == 202302L, "phase131 common_reference");
+    static_assert(__cpp_lib_common_reference_wrapper == 202302L,
+                  "phase131 common_reference_wrapper");
+    static_assert(__cpp_lib_concepts == 202207L, "phase131 concepts");
+    static_assert(__cpp_lib_print == 202207L, "phase131 print");
+    static_assert(__cpp_lib_tuple_like == 202207L, "phase131 tuple_like");
+
     static_assert(__cpp_lib_coroutine == 201902L, "phase131 coroutine");
     static_assert(__cpp_lib_generator == 202207L, "phase131 generator");
 
@@ -29435,22 +29442,14 @@ void Phase131()
 //  transformation_trait_aliases until Ф31e-g-1; allocate_at_least,
 //  assume_aligned, constexpr_memory, is_layout_compatible,
 //  is_pointer_interconvertible, shared_ptr_arrays, smart_ptr_for_overwrite
-//  and start_lifetime_as until Ф31e-g-2. Their positive assertions are
-//  in list (A) above.)
+//  and start_lifetime_as until Ф31e-g-2; common_reference,
+//  common_reference_wrapper, concepts, print and tuple_like until Ф31e-g-3.
+//  Their positive assertions are in list (A) above.)
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
 #endif
 #ifdef __cpp_lib_chrono
 #  error "phase131: __cpp_lib_chrono must stay undefined"
-#endif
-#ifdef __cpp_lib_common_reference
-#  error "phase131: __cpp_lib_common_reference must stay undefined"
-#endif
-#ifdef __cpp_lib_common_reference_wrapper
-#  error "phase131: __cpp_lib_common_reference_wrapper must stay undefined"
-#endif
-#ifdef __cpp_lib_concepts
-#  error "phase131: __cpp_lib_concepts must stay undefined"
 #endif
 #ifdef __cpp_lib_constexpr_bitset
 #  error "phase131: __cpp_lib_constexpr_bitset must stay undefined"
@@ -29498,9 +29497,6 @@ static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappab
 #ifdef __cpp_lib_parallel_algorithm
 #  error "phase131: __cpp_lib_parallel_algorithm must stay undefined"
 #endif
-#ifdef __cpp_lib_print
-#  error "phase131: __cpp_lib_print must stay undefined"
-#endif
     // Ф31a-5 dropped these two: __cpp_lib_ranges is short 23 entities
     // (take_while, drop_while, istream_view, seven [range.access] CPOs,
     // range_rvalue_reference_t, range_common_reference_t, subrange's two
@@ -29531,9 +29527,6 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #  error "phase131: __cpp_lib_syncbuf must stay undefined"
 #endif
 static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_transparent_operators — closed by Ф31e");
-#ifdef __cpp_lib_tuple_like
-#  error "phase131: __cpp_lib_tuple_like must stay undefined"
-#endif
 
     // ── (C) <utility> ───────────────────────────────────────────────────
     {
@@ -34107,18 +34100,16 @@ void Phase137()
 {
     using namespace std;
 
-    // ── (A) __cpp_lib_tuple_like intentionally left undefined ───────────
+    // ── (A) __cpp_lib_tuple_like ────────────────────────────────────────
     // Construction, assignment (both), and (for tuple) comparison against
-    // any tuple-like source are fully implemented below. The macro still
-    // stays undefined: [tuple.syn] also constrains tuple_cat/apply/
-    // make_from_tuple's argument with the tuple-like concept, and boxcxx's
-    // versions of those three still use the older duck-typed
-    // tuple_size_v/get check instead -- not 100% per the epic's
-    // "macro only when complete" policy (Ф31a-3).
-#ifdef __cpp_lib_tuple_like
-    Check(false, "phase137 __cpp_lib_tuple_like must stay undefined until tuple_cat/apply/"
-                 "make_from_tuple are also constrained by the tuple-like concept");
-#endif
+    // any tuple-like source are implemented below and have been since
+    // c5ba9fa. The macro nevertheless stayed undefined until Ф31e-g-3,
+    // because [tuple.syn] ALSO constrains tuple_cat/apply/make_from_tuple's
+    // argument with the tuple-like concept and those three still used the
+    // older duck-typed tuple_size_v/get check. Phase153 pins that half.
+    static_assert(__cpp_lib_tuple_like == 202207L,
+                  "phase137 tuple_like is claimable now that all three "
+                  "consumers are constrained too");
 
     // ── (B) pair from any tuple-like source ([pairs.pair]/14-17) ────────
     {
@@ -38229,6 +38220,210 @@ void Phase152()
            "and allocate_shared finally constructing and destroying through "
            "allocator_traits\n");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-g-3 — the five that needed a decision rather than a keystroke:
+// the tuple-like constraint on apply/tuple_cat/make_from_tuple, P2655R3's
+// common_reference for reference_wrapper, P2404R3's comparison-common-type,
+// P2539R4's <ostream> print family, and pmr::basic_string.
+// ─────────────────────────────────────────────────────────────────────────
+
+// Move-only, and convertible FROM the type it is compared with. That pair of
+// properties is exactly what C++20's common_reference_with rejected: the
+// common reference is the prvalue MoveOnlyString, and converting a
+// const MoveOnlyString& TO it needs a copy. P2404R3 asks instead whether the
+// operands convert to `const C&` -- binding a reference, not copying -- so
+// these three concepts become true without weakening what they mean.
+struct P153MoveOnlyString {
+    P153MoveOnlyString(const char *) {}
+    P153MoveOnlyString(P153MoveOnlyString &&)                 = default;
+    P153MoveOnlyString(const P153MoveOnlyString &)            = delete;
+    bool operator==(const P153MoveOnlyString &) const { return true; }
+    bool operator==(const char *) const { return true; }
+    std::strong_ordering operator<=>(const P153MoveOnlyString &) const
+    {
+        return std::strong_ordering::equal;
+    }
+    std::strong_ordering operator<=>(const char *) const
+    {
+        return std::strong_ordering::equal;
+    }
+};
+
+// Dependent, so an unsatisfied constraint is a substitution failure and not a
+// hard error -- [expr.prim.req]/5 only gives `false` under substitution.
+template <class F, class T>
+constexpr bool P153ApplyOk = requires(F f, T t) { std::apply(f, t); };
+template <class... Ts>
+constexpr bool P153CatOk = requires(Ts... ts) { std::tuple_cat(ts...); };
+template <class R, class T>
+constexpr bool P153FromTupleOk = requires(T t) { std::make_from_tuple<R>(t); };
+
+void Phase153()
+{
+    using namespace std;
+
+    // ── tuple-like: the four real ones go through, nothing else does ──────
+    {
+        array<int, 2>  a{1, 2};
+        pair<int, int> p{3, 4};
+        auto           c = tuple_cat(a, p, tuple<int>{5});
+        static_assert(tuple_size_v<decltype(c)> == 5);
+        Check(get<0>(c) == 1 && get<2>(c) == 3 && get<4>(c) == 5,
+              "phase153 (1) tuple_cat over array + pair + tuple");
+
+        int sum = 0;
+        apply([&](int x, int y) { sum = x + y; }, a);
+        Check(sum == 3, "phase153 (2) apply over an array");
+
+        auto m = make_from_tuple<tuple<int, int>>(p);
+        Check(get<1>(m) == 4, "phase153 (3) make_from_tuple from a pair");
+
+        vector<int>          v{7, 8, 9};
+        ranges::subrange     sr(v.begin(), v.end());
+        auto                 sp = make_from_tuple<pair<vector<int>::iterator,
+                                                       vector<int>::iterator>>(sr);
+        Check(*sp.first == 7, "phase153 (4) ...and from a subrange, which is "
+                              "tuple-like for exactly this reason");
+    }
+    // Before Ф31e-g-3 all three took anything with a tuple_size/get pair --
+    // and, worse, gave a hard error rather than a clean rejection for a type
+    // with neither, because the arity was computed in the function BODY.
+    static_assert(!P153ApplyOk<void (*)(int), int>,
+                  "phase153 (5) apply rejects a non-tuple-like by constraint");
+    static_assert(!P153CatOk<int>,
+                  "phase153 (6) ...and so does tuple_cat");
+    static_assert(!P153FromTupleOk<int, int>,
+                  "phase153 (7) ...and make_from_tuple");
+    static_assert(P153ApplyOk<void (*)(int, int), array<int, 2>>,
+                  "phase153 (8) while a real tuple-like still passes");
+    static_assert(__cpp_lib_tuple_like == 202207L, "phase153 tuple_like");
+
+    // ── P2655R3: common_reference over reference_wrapper ─────────────────
+    {
+        // COND-RES is ambiguous here -- the wrapper converts to int& and int&
+        // converts to a wrapper -- so bullet (1) fails and basic_common_
+        // reference has to answer. Without the specialization there is no
+        // answer at all.
+        static_assert(
+            is_same_v<common_reference_t<reference_wrapper<int> &, int &>, int &>,
+            "phase153 (9) common_reference_t<reference_wrapper<int>&, int&> is int&");
+        static_assert(
+            is_same_v<common_reference_t<int &, reference_wrapper<int> &>, int &>,
+            "phase153 (10) ...in either order");
+        // Two wrappers: neither direction is uniquely a wrapper, so the
+        // specialization must NOT apply and the ordinary rules take over.
+        static_assert(is_same_v<common_reference_t<reference_wrapper<int> &,
+                                                   reference_wrapper<int> &>,
+                                reference_wrapper<int> &>,
+                      "phase153 (11) ...and it does not fire when both sides "
+                      "are wrappers");
+        // Bullet (1) still wins where it can: a const wrapper cannot be made
+        // from a const int&, so COND-RES is unambiguous and answers first.
+        static_assert(is_same_v<common_reference_t<const reference_wrapper<int> &,
+                                                   int &>,
+                                const int &>,
+                      "phase153 (12) ...and does not displace bullet (1)");
+        static_assert(__cpp_lib_common_reference == 202302L,
+                      "phase153 common_reference");
+        static_assert(__cpp_lib_common_reference_wrapper == 202302L,
+                      "phase153 common_reference_wrapper");
+    }
+
+    // ── P2404R3: move-only comparands ────────────────────────────────────
+    {
+        static_assert(equality_comparable_with<P153MoveOnlyString, const char *>,
+                      "phase153 (13) equality_comparable_with over a move-only "
+                      "comparand");
+        static_assert(totally_ordered_with<P153MoveOnlyString, const char *>,
+                      "phase153 (14) ...totally_ordered_with too");
+        static_assert(three_way_comparable_with<P153MoveOnlyString, const char *>,
+                      "phase153 (15) ...and three_way_comparable_with, which "
+                      "lives in <compare> and needed the same relaxation");
+        // The relaxation must not lose the constraint: two types with no
+        // common reference at all are still rejected.
+        struct NoCommon {
+            bool operator==(const NoCommon &) const { return true; }
+        };
+        static_assert(!equality_comparable_with<NoCommon, int>,
+                      "phase153 (16) ...and a pair with no common reference is "
+                      "still rejected");
+        static_assert(__cpp_lib_concepts == 202207L, "phase153 concepts");
+    }
+
+    // ── P2539R4: print into an ostream ───────────────────────────────────
+    {
+        ostringstream os;
+        int           a = 1, b = 2;
+        print(os, "{}-{}", a, b);
+        println(os, "{}", a);
+        vprint_unicode(os, "[{}]", make_format_args(b));
+        vprint_nonunicode(os, "({})", make_format_args(a));
+        Check(os.str() == "1-21\n[2](1)",
+              "phase153 (17) print/println/vprint_unicode/vprint_nonunicode "
+              "all insert into the stream, println's newline included");
+        Check(os.good(), "phase153 (18) ...and leave the stream good");
+    }
+    {
+        // The stream's state gates it like any other formatted output
+        // function: a failed stream takes no output at all.
+        ostringstream os;
+        os.setstate(ios_base::failbit);
+        int a = 5;
+        print(os, "{}", a);
+        Check(os.str().empty(),
+              "phase153 (19) a stream in a failed state produces no output "
+              "(the sentry says no)");
+    }
+    {
+        // [ostream.formatted.print]/6: vformat's exception propagates
+        // untouched -- no badbit, and regardless of exceptions().
+        ostringstream os;
+        string        bad   = "x";
+        bool          threw = false;
+        try {
+            vprint_nonunicode(os, "{:d}", make_format_args(bad));
+        } catch (const format_error &) {
+            threw = true;
+        }
+        Check(threw && !os.bad(),
+              "phase153 (20) a formatting error propagates and does NOT set "
+              "badbit");
+    }
+    static_assert(__cpp_lib_print == 202207L, "phase153 print");
+
+    // ── pmr::basic_string, and the two aliases that waited on it ─────────
+    {
+        pmr::u8string       s;
+        pmr::basic_string<char> t;
+        pmr::string         u{"pmr"};
+        pmr::forward_list<int> fl;
+        s.push_back(u8'x');
+        t.push_back('y');
+        fl.push_front(3);
+        Check(s.size() == 1 && t == "y" && u == "pmr" && fl.front() == 3,
+              "phase153 (21) pmr::basic_string, pmr::u8string and "
+              "pmr::forward_list exist and use the polymorphic allocator");
+        static_assert(is_same_v<pmr::u8string::allocator_type,
+                                pmr::polymorphic_allocator<char8_t>>,
+                      "phase153 (22) ...and it really is the pmr allocator");
+    }
+    // __cpp_lib_char8_t stays undefined even so: <locale> owns half of it and
+    // has no facets at all. See <version>.
+#ifdef __cpp_lib_char8_t
+    Check(false, "phase153 __cpp_lib_char8_t must stay undefined -- "
+                 "codecvt<charN_t, char8_t, mbstate_t> needs facets <locale> "
+                 "does not have");
+#endif
+
+    printf("[CXX] PASS phase153: Ф31e-g-3 — apply/tuple_cat/make_from_tuple "
+           "constrained by tuple-like, common_reference over reference_wrapper "
+           "(P2655R3), move-only comparands in equality_comparable_with / "
+           "totally_ordered_with / three_way_comparable_with (P2404R3), the "
+           "<ostream> print family (P2539R4) with vformat's exception "
+           "propagating untouched, and pmr::basic_string with u8string and "
+           "forward_list\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38403,6 +38598,7 @@ int main()
     Phase150();
     Phase151();
     Phase152();
+    Phase153();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

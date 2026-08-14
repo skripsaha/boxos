@@ -12,6 +12,10 @@
 #ifndef BOXCXX_BITS_VERSION_FUNCTIONAL
 #define BOXCXX_BITS_VERSION_FUNCTIONAL
 
+#ifndef __cpp_lib_common_reference_wrapper
+#  define __cpp_lib_common_reference_wrapper 202302L
+#endif
+
 #ifndef __cpp_lib_move_only_function
 #  define __cpp_lib_move_only_function 202110L
 #endif
