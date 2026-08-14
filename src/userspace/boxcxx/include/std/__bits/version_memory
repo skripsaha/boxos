@@ -24,9 +24,20 @@
 // specializations; Annex D's free shared_ptr atomic functions, which the same
 // step added, are not part of it.
 //
-// Deliberately absent (see <version>'s list): allocate_at_least,
-// assume_aligned, constexpr_memory, shared_ptr_arrays,
-// smart_ptr_for_overwrite, start_lifetime_as.
+// allocate_at_least is P0401R6 as C++23 shipped it: allocation_result plus
+// allocator_traits::allocate_at_least plus allocator::allocate_at_least.
+// There is no free std::allocate_at_least in C++23 -- [memory.syn] has no
+// such declaration -- so none is provided.
+//
+// shared_ptr_arrays and smart_ptr_for_overwrite are claimed on the four
+// allocate_shared / allocate_shared_for_overwrite array overloads that
+// Ф31e-g-2 added, and on the initialisation rules going with them:
+// allocate_shared now routes element construction and destruction through
+// allocator_traits<A2> per [util.smartptr.shared.create]/7-8, while the
+// *_for_overwrite pair default-initialises via `::new (pv) U`.
+//
+// Deliberately absent (see <version>'s list): start_lifetime_as's sibling
+// is_implicit_lifetime (no toolchain builtin).
 #ifndef BOXCXX_BITS_VERSION_MEMORY
 #define BOXCXX_BITS_VERSION_MEMORY
 
@@ -36,6 +47,15 @@
 
 #ifndef __cpp_lib_addressof_constexpr
 #  define __cpp_lib_addressof_constexpr 201603L
+#endif
+#ifndef __cpp_lib_allocate_at_least
+#  define __cpp_lib_allocate_at_least 202302L
+#endif
+#ifndef __cpp_lib_assume_aligned
+#  define __cpp_lib_assume_aligned 201811L
+#endif
+#ifndef __cpp_lib_constexpr_memory
+#  define __cpp_lib_constexpr_memory 202202L
 #endif
 #ifndef __cpp_lib_constexpr_dynamic_alloc
 #  define __cpp_lib_constexpr_dynamic_alloc 201907L
@@ -57,8 +77,17 @@
 #ifndef __cpp_lib_raw_memory_algorithms
 #  define __cpp_lib_raw_memory_algorithms 201606L
 #endif
+#ifndef __cpp_lib_shared_ptr_arrays
+#  define __cpp_lib_shared_ptr_arrays 201707L
+#endif
 #ifndef __cpp_lib_shared_ptr_weak_type
 #  define __cpp_lib_shared_ptr_weak_type 201606L
+#endif
+#ifndef __cpp_lib_smart_ptr_for_overwrite
+#  define __cpp_lib_smart_ptr_for_overwrite 202002L
+#endif
+#ifndef __cpp_lib_start_lifetime_as
+#  define __cpp_lib_start_lifetime_as 202207L
 #endif
 #ifndef __cpp_lib_to_address
 #  define __cpp_lib_to_address 201711L

@@ -69,6 +69,18 @@ struct uses_allocator<T, Alloc>
 template <typename T, typename Alloc>
 inline constexpr bool uses_allocator_v = uses_allocator<T, Alloc>::value;
 
+// ── allocation_result ([allocator.traits] / [default.allocator]) ─────────
+// The return of the allocate_at_least family: the pointer AND the count
+// the allocator actually gave out, which is what makes the "at least"
+// worth asking for -- a vector that asks for 100 and is handed 128 can
+// use all 128 instead of throwing the slack away. An aggregate by
+// mandate, so structured bindings work: auto [p, n] = a.allocate_at_least(k).
+template <typename Pointer, typename SizeType = size_t>
+struct allocation_result {
+    Pointer  ptr;
+    SizeType count;
+};
+
 // ── std::allocator ──────────────────────────────────────────────────────
 
 template <typename T>
@@ -96,6 +108,16 @@ public:
                 ::operator new(n * sizeof(T), align_val_t{alignof(T)}));
         else
             return static_cast<T *>(::operator new(n * sizeof(T)));
+    }
+
+    // The default allocator has no way to learn what the heap rounded the
+    // request up to -- boxlib's malloc_impl does not report its bucket
+    // size back -- so it hands back exactly what was asked for. That is a
+    // conforming answer ([allocator.members]: count >= n), and it is the
+    // same answer libstdc++ and libc++ give.
+    [[nodiscard]] constexpr allocation_result<T *> allocate_at_least(size_type n)
+    {
+        return {allocate(n), n};
     }
 
     constexpr void deallocate(T *p, size_type n)
@@ -277,6 +299,18 @@ struct allocator_traits {
             return a.allocate(n, hint);
         else
             return a.allocate(n);
+    }
+
+    // Opts the allocator in if it has the member, otherwise synthesises the
+    // honest {exactly n} answer -- so callers can always ask, and only
+    // allocators that can do better have to say so.
+    [[nodiscard]] static constexpr allocation_result<pointer, size_type>
+    allocate_at_least(Alloc &a, size_type n)
+    {
+        if constexpr (requires { a.allocate_at_least(n); })
+            return a.allocate_at_least(n);
+        else
+            return {a.allocate(n), n};
     }
 
     static constexpr void deallocate(Alloc &a, pointer p, size_type n)

@@ -29310,8 +29310,12 @@ void Phase131()
     static_assert(__cpp_lib_is_constant_evaluated == 201811L, "phase131 is_constant_evaluated");
     static_assert(__cpp_lib_is_final == 201402L, "phase131 is_final");
     static_assert(__cpp_lib_is_invocable == 201703L, "phase131 is_invocable");
+    static_assert(__cpp_lib_is_layout_compatible == 201907L,
+                  "phase131 is_layout_compatible");
     static_assert(__cpp_lib_is_nothrow_convertible == 201806L, "phase131 is_nothrow_convertible");
     static_assert(__cpp_lib_is_null_pointer == 201309L, "phase131 is_null_pointer");
+    static_assert(__cpp_lib_is_pointer_interconvertible == 201907L,
+                  "phase131 is_pointer_interconvertible");
     static_assert(__cpp_lib_is_scoped_enum == 202011L, "phase131 is_scoped_enum");
     static_assert(__cpp_lib_logical_traits == 201510L, "phase131 logical_traits");
     static_assert(__cpp_lib_reference_from_temporary == 202202L,
@@ -29335,14 +29339,21 @@ void Phase131()
     static_assert(__cpp_lib_atomic_wait == 201907L, "phase131 atomic_wait");
 
     static_assert(__cpp_lib_addressof_constexpr == 201603L, "phase131 addressof_constexpr");
+    static_assert(__cpp_lib_allocate_at_least == 202302L, "phase131 allocate_at_least");
+    static_assert(__cpp_lib_assume_aligned == 201811L, "phase131 assume_aligned");
     static_assert(__cpp_lib_atomic_shared_ptr == 201711L, "phase131 atomic_shared_ptr");
     static_assert(__cpp_lib_constexpr_dynamic_alloc == 201907L,
                   "phase131 constexpr_dynamic_alloc");
+    static_assert(__cpp_lib_constexpr_memory == 202202L, "phase131 constexpr_memory");
     static_assert(__cpp_lib_enable_shared_from_this == 201603L,
                   "phase131 enable_shared_from_this");
     static_assert(__cpp_lib_make_unique == 201304L, "phase131 make_unique");
     static_assert(__cpp_lib_raw_memory_algorithms == 201606L, "phase131 raw_memory_algorithms");
+    static_assert(__cpp_lib_shared_ptr_arrays == 201707L, "phase131 shared_ptr_arrays");
     static_assert(__cpp_lib_shared_ptr_weak_type == 201606L, "phase131 shared_ptr_weak_type");
+    static_assert(__cpp_lib_smart_ptr_for_overwrite == 202002L,
+                  "phase131 smart_ptr_for_overwrite");
+    static_assert(__cpp_lib_start_lifetime_as == 202207L, "phase131 start_lifetime_as");
     static_assert(__cpp_lib_to_address == 201711L, "phase131 to_address");
     static_assert(__cpp_lib_memory_resource == 201603L, "phase131 memory_resource");
     static_assert(__cpp_lib_polymorphic_allocator == 201902L, "phase131 polymorphic_allocator");
@@ -29416,18 +29427,15 @@ void Phase131()
 #ifdef __cpp_lib_algorithm_iterator_requirements
 #  error "phase131: __cpp_lib_algorithm_iterator_requirements must stay undefined"
 #endif
-#ifdef __cpp_lib_allocate_at_least
-#  error "phase131: __cpp_lib_allocate_at_least must stay undefined"
-#endif
-#ifdef __cpp_lib_assume_aligned
-#  error "phase131: __cpp_lib_assume_aligned must stay undefined"
-#endif
 // (atomic_flag_test, atomic_float, atomic_ref, atomic_shared_ptr,
 //  atomic_wait and barrier were guarded here until Ф31e-d closed all six,
 //  scoped_lock with them; map_try_emplace, unordered_map_try_emplace and
 //  three_way_comparison until Ф31e-f; erase_if, nonmember_container_access,
 //  sample, span, string_resize_and_overwrite, string_view and
-//  transformation_trait_aliases until Ф31e-g. Their positive assertions are
+//  transformation_trait_aliases until Ф31e-g-1; allocate_at_least,
+//  assume_aligned, constexpr_memory, is_layout_compatible,
+//  is_pointer_interconvertible, shared_ptr_arrays, smart_ptr_for_overwrite
+//  and start_lifetime_as until Ф31e-g-2. Their positive assertions are
 //  in list (A) above.)
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
@@ -29449,9 +29457,6 @@ void Phase131()
 #endif
 #ifdef __cpp_lib_constexpr_cmath
 #  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
-#endif
-#ifdef __cpp_lib_constexpr_memory
-#  error "phase131: __cpp_lib_constexpr_memory must stay undefined"
 #endif
 #ifdef __cpp_lib_constexpr_string
 #  error "phase131: __cpp_lib_constexpr_string must stay undefined"
@@ -29483,12 +29488,6 @@ static_assert(__cpp_lib_interpolate == 201902L, "phase131: __cpp_lib_interpolate
 #ifdef __cpp_lib_is_implicit_lifetime
 #  error "phase131: __cpp_lib_is_implicit_lifetime must stay undefined"
 #endif
-#ifdef __cpp_lib_is_layout_compatible
-#  error "phase131: __cpp_lib_is_layout_compatible must stay undefined"
-#endif
-#ifdef __cpp_lib_is_pointer_interconvertible
-#  error "phase131: __cpp_lib_is_pointer_interconvertible must stay undefined"
-#endif
 static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappable — closed by Ф31e");
 #ifdef __cpp_lib_mdspan
 #  error "phase131: __cpp_lib_mdspan must stay undefined"
@@ -29519,20 +29518,11 @@ static_assert(__cpp_lib_ranges_as_const == 202207L, "phase131: __cpp_lib_ranges_
 static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp_lib_robust_nonmodifying_seq_ops — closed by Ф31e");
 // (scoped_lock joined them in Ф31e-d, once scoped_lock<Mutex> gained the
 //  mutex_type [thread.lock.scoped] asks for.)
-#ifdef __cpp_lib_shared_ptr_arrays
-#  error "phase131: __cpp_lib_shared_ptr_arrays must stay undefined"
-#endif
-#ifdef __cpp_lib_smart_ptr_for_overwrite
-#  error "phase131: __cpp_lib_smart_ptr_for_overwrite must stay undefined"
-#endif
 #ifdef __cpp_lib_spanstream
 #  error "phase131: __cpp_lib_spanstream must stay undefined"
 #endif
 #ifdef __cpp_lib_stacktrace
 #  error "phase131: __cpp_lib_stacktrace must stay undefined"
-#endif
-#ifdef __cpp_lib_start_lifetime_as
-#  error "phase131: __cpp_lib_start_lifetime_as must stay undefined"
 #endif
 #ifdef __cpp_lib_stdatomic_h
 #  error "phase131: __cpp_lib_stdatomic_h must stay undefined"
@@ -37901,6 +37891,344 @@ void Phase151()
            "aligned_storage_t defaulting to the alignment the standard asks for; "
            "and the classic sample/shuffle\n");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-g-2 — lifetime and allocation: allocate_at_least, assume_aligned,
+// std::align (which was absent and in no tracker), start_lifetime_as and
+// start_lifetime_as_array, the two [meta.member] functions, the four
+// missing allocate_shared array overloads, allocate_shared_for_overwrite,
+// and the [util.smartptr.shared.create]/7-8 routing rule that
+// allocate_shared had been ignoring in silence.
+// ─────────────────────────────────────────────────────────────────────────
+
+int g_p152_ctor = 0;
+int g_p152_dtor = 0;
+
+// Counts exactly the two routes /7 and /8 require allocate_shared to take.
+// A factory that placement-news instead leaves both at zero, which is what
+// this library did before Ф31e-g-2 -- and the same silence would swallow
+// polymorphic_allocator's uses-allocator construction.
+template <class T>
+struct P152Counting {
+    using value_type = T;
+    P152Counting() = default;
+    template <class U>
+    P152Counting(const P152Counting<U> &) {}
+    T   *allocate(std::size_t n) { return std::allocator<T>().allocate(n); }
+    void deallocate(T *p, std::size_t n)
+    {
+        std::allocator<T>().deallocate(p, n);
+    }
+    template <class U, class... A>
+    void construct(U *p, A &&...a)
+    {
+        ++g_p152_ctor;
+        ::new (static_cast<void *>(p)) U(static_cast<A &&>(a)...);
+    }
+    template <class U>
+    void destroy(U *p)
+    {
+        ++g_p152_dtor;
+        p->~U();
+    }
+    bool operator==(const P152Counting &) const { return true; }
+};
+
+// Opts in to allocate_at_least and really does hand back more than asked.
+template <class T>
+struct P152Generous {
+    using value_type = T;
+    P152Generous() = default;
+    template <class U>
+    P152Generous(const P152Generous<U> &) {}
+    T   *allocate(std::size_t n) { return std::allocator<T>().allocate(n); }
+    void deallocate(T *p, std::size_t n)
+    {
+        std::allocator<T>().deallocate(p, n);
+    }
+    std::allocation_result<T *> allocate_at_least(std::size_t n)
+    {
+        return {allocate(2 * n), 2 * n};
+    }
+    bool operator==(const P152Generous &) const { return true; }
+};
+
+// [meta.member]'s own example. C is NOT standard-layout (two base classes
+// with data), which is exactly what makes the two answers differ.
+struct P152A {
+    int a;
+};
+struct P152B {
+    int b;
+};
+struct P152C : P152A, P152B {};
+struct P152Two {
+    int a;
+    int b;
+};
+struct P152NSL {
+public:
+    int x;
+
+private:
+    int y;
+};
+
+// A trivially copyable aggregate standing in for the kind of thing a
+// device or a firmware table leaves in memory: implicit-lifetime, so
+// start_lifetime_as may adopt bytes that were never "constructed".
+struct P152Wire {
+    unsigned int   magic;
+    unsigned short lo;
+    unsigned short hi;
+};
+
+void Phase152()
+{
+    // ── allocate_at_least: the default allocator, the fallback, the opt-in ──
+    {
+        std::allocator<int> a;
+        auto                r = a.allocate_at_least(7);
+        Check(r.ptr != nullptr && r.count >= 7,
+              "phase152 (1) allocator<int>::allocate_at_least returns a "
+              "pointer and a count that is at least what was asked for");
+        r.ptr[6] = 42;
+        Check(r.ptr[6] == 42,
+              "phase152 (2) ...and all count elements are really there");
+        a.deallocate(r.ptr, r.count);
+
+        // Aggregate by mandate, so structured bindings work.
+        auto [p, n] =
+            std::allocator_traits<std::allocator<int>>::allocate_at_least(a, 5);
+        Check(p != nullptr && n >= 5,
+              "phase152 (3) allocation_result binds structurally");
+        a.deallocate(p, n);
+    }
+    {
+        // No member -> the traits synthesise the honest {allocate(n), n}.
+        P152Counting<int> c;
+        auto              r =
+            std::allocator_traits<P152Counting<int>>::allocate_at_least(c, 5);
+        Check(r.count == 5,
+              "phase152 (4) allocator_traits::allocate_at_least falls back to "
+              "exactly n for an allocator without the member");
+        std::allocator_traits<P152Counting<int>>::deallocate(c, r.ptr, r.count);
+
+        // Has the member -> the traits must forward, not second-guess.
+        P152Generous<int> g;
+        auto              r2 =
+            std::allocator_traits<P152Generous<int>>::allocate_at_least(g, 5);
+        Check(r2.count == 10,
+              "phase152 (5) ...and forwards to the allocator's own answer "
+              "when it has one");
+        std::allocator_traits<P152Generous<int>>::deallocate(g, r2.ptr,
+                                                             r2.count);
+    }
+
+    // ── assume_aligned ────────────────────────────────────────────────────
+    {
+        alignas(64) int arr[16]{};
+        int            *p = std::assume_aligned<64>(arr);
+        Check(p == arr, "phase152 (6) assume_aligned returns its argument");
+        static constexpr int c4[4]{1, 2, 3, 4};
+        static_assert(std::assume_aligned<alignof(int)>(c4) == c4,
+                      "phase152 (7) ...and is usable in a constant expression, "
+                      "which the builtin alone is not");
+    }
+
+    // ── std::align: absent entirely before Ф31e-g-2 ───────────────────────
+    {
+        alignas(64) unsigned char raw[128]{};
+        void                     *p     = raw + 1; // deliberately misaligned
+        std::size_t               space = sizeof(raw) - 1;
+        void                     *q     = std::align(32, 32, p, space);
+        Check(q != nullptr && q == p &&
+                  reinterpret_cast<std::uintptr_t>(q) % 32 == 0,
+              "phase152 (8) std::align moves ptr forward to the first "
+              "32-aligned byte");
+        Check(space == sizeof(raw) - 1 -
+                           (reinterpret_cast<std::uintptr_t>(q) -
+                            reinterpret_cast<std::uintptr_t>(raw + 1)),
+              "phase152 (9) ...and decreases space by exactly the padding");
+
+        void       *p2     = raw + 1;
+        std::size_t space2 = 8;
+        Check(std::align(32, 32, p2, space2) == nullptr && p2 == raw + 1 &&
+                  space2 == 8,
+              "phase152 (10) a request that does not fit returns null and "
+              "leaves both arguments untouched");
+    }
+
+    // ── start_lifetime_as / start_lifetime_as_array ───────────────────────
+    {
+        alignas(P152Wire) unsigned char buf[sizeof(P152Wire)];
+        const unsigned char             wire[] = {0xEF, 0xBE, 0xAD, 0xDE,
+                                                  0x34, 0x12, 0x78, 0x56};
+        for (unsigned i = 0; i < sizeof(P152Wire); ++i) buf[i] = wire[i];
+
+        const P152Wire *w = std::start_lifetime_as<P152Wire>(buf);
+        Check(w->magic == 0xDEADBEEFu && w->lo == 0x1234 && w->hi == 0x5678,
+              "phase152 (11) start_lifetime_as adopts bytes nobody "
+              "constructed and reads them as the struct they encode");
+
+        alignas(unsigned short) unsigned char abuf[8];
+        for (unsigned i = 0; i < 8; ++i)
+            abuf[i] = static_cast<unsigned char>(i + 1);
+        const unsigned short *a = std::start_lifetime_as_array<unsigned short>(
+            abuf, 4);
+        Check(a[0] == 0x0201 && a[3] == 0x0807,
+              "phase152 (12) start_lifetime_as_array does the same for n "
+              "elements");
+        Check(std::start_lifetime_as_array<unsigned short>(abuf, 0) ==
+                  reinterpret_cast<const unsigned short *>(abuf),
+              "phase152 (13) n == 0 has no effects and returns p unchanged");
+    }
+
+    // ── [meta.member]: the two functions ──────────────────────────────────
+    // The explicitly-parameterised half of the standard's own example
+    // (is_pointer_interconvertible_with_class<C>(&C::b)) is NOT tested,
+    // because it does not compile against the signature the standard
+    // itself gives: with S fixed to C the parameter is `M C::*`, and
+    // template argument deduction does not perform the base-to-derived
+    // pointer-to-member conversion that would be needed to match an
+    // `int B::*`. Measured against libstdc++ 15, whose declaration is
+    // character-for-character the same shape, and against clang, which
+    // rejects the identical construct with "could not match 'C' against
+    // 'B'". The DEDUCED half -- the genuinely surprising one -- is exactly
+    // what is pinned here.
+    {
+        static_assert(std::is_pointer_interconvertible_with_class(&P152A::a),
+                      "phase152 (14) the first member of a standard-layout "
+                      "class is pointer-interconvertible with the object");
+        static_assert(std::is_pointer_interconvertible_with_class(&P152C::b),
+                      "phase152 (15) &C::b has type 'pointer to member of B', "
+                      "so the deduced call asks about B -- and succeeds, even "
+                      "though C itself is not standard-layout");
+        static_assert(!std::is_pointer_interconvertible_with_class(&P152Two::b),
+                      "phase152 (16) ...but the SECOND member is not");
+        static_assert(!std::is_pointer_interconvertible_with_class(&P152NSL::x),
+                      "phase152 (17) ...nor any member of a class that mixes "
+                      "access levels, which is not standard-layout");
+        static_assert(std::is_corresponding_member(&P152C::a, &P152C::b),
+                      "phase152 (18) likewise A::a and B::b correspond, "
+                      "because the pointers are to members of A and of B");
+        static_assert(!std::is_corresponding_member(&P152Two::b, &P152B::b),
+                      "phase152 (19) ...and a second member corresponds to no "
+                      "first one");
+        static_assert(std::is_layout_compatible_v<P152A, P152B>,
+                      "phase152 (20) the trait half was already there");
+    }
+
+    // ── allocate_shared must route through the allocator ──────────────────
+    {
+        g_p152_ctor = g_p152_dtor = 0;
+        {
+            auto s = std::allocate_shared<int>(P152Counting<int>(), 7);
+            Check(*s == 7, "phase152 (21) allocate_shared<int> still works");
+        }
+        Check(g_p152_ctor == 1 && g_p152_dtor == 1,
+              "phase152 (22) ...and construction AND destruction went through "
+              "allocator_traits, per [util.smartptr.shared.create]/7-8 -- "
+              "before Ф31e-g-2 both counters stayed at zero");
+    }
+    {
+        g_p152_ctor = g_p152_dtor = 0;
+        {
+            auto s = std::allocate_shared<int[3]>(P152Counting<int>(), 9);
+            Check(s[0] == 9 && s[1] == 9 && s[2] == 9,
+                  "phase152 (23) the bounded-array allocate_shared with a fill "
+                  "value -- an overload that did not exist");
+            Check(g_p152_ctor == 3,
+                  "phase152 (24) ...one allocator construct per element");
+        }
+        Check(g_p152_dtor == 3,
+              "phase152 (25) ...and one allocator destroy per element");
+    }
+    {
+        g_p152_ctor = 0;
+        auto s = std::allocate_shared<int[2]>(P152Counting<int>());
+        Check(s[0] == 0 && s[1] == 0 && g_p152_ctor == 2,
+              "phase152 (26) the value-initialising bounded-array form");
+    }
+    {
+        // /7 names ::new (pv) U for the *_for_overwrite pair even when an
+        // allocator is in hand: default-initialisation is the whole point.
+        g_p152_ctor = g_p152_dtor = 0;
+        {
+            auto s1 = std::allocate_shared_for_overwrite<int>(
+                P152Counting<int>());
+            auto s2 = std::allocate_shared_for_overwrite<int[]>(
+                P152Counting<int>(), 4);
+            auto s3 = std::allocate_shared_for_overwrite<int[2]>(
+                P152Counting<int>());
+            *s1     = 1;
+            s2[3]   = 2;
+            s3[1]   = 3;
+            Check(*s1 == 1 && s2[3] == 2 && s3[1] == 3,
+                  "phase152 (27) all three allocate_shared_for_overwrite forms "
+                  "produce usable storage");
+        }
+        Check(g_p152_ctor == 0 && g_p152_dtor == 0,
+              "phase152 (28) ...and none of them went through the allocator's "
+              "construct/destroy");
+    }
+    {
+        // The union member is remove_cv_t<T>: storage that is itself const
+        // cannot be placement-new'd into, which is why this did not compile.
+        auto p = std::make_shared<const int>(5);
+        Check(*p == 5, "phase152 (29) make_shared<const int> compiles at all");
+        std::allocator<int> a;
+        auto                q = std::allocate_shared<const int>(a, 6);
+        Check(*q == 6, "phase152 (30) ...and so does allocate_shared");
+        auto r = std::make_shared<const int[]>(3, 8);
+        Check(r[0] == 8 && r[2] == 8,
+              "phase152 (31) ...and the array forms of both");
+    }
+    {
+        // An exception halfway through an array must destroy exactly the
+        // elements that exist, through the same route they were built by.
+        struct Boom {
+            static int &Live()
+            {
+                static int n = 0;
+                return n;
+            }
+            static int &Budget()
+            {
+                static int n = 0;
+                return n;
+            }
+            Boom()
+            {
+                if (Budget()-- <= 0) throw 1;
+                ++Live();
+            }
+            ~Boom() { --Live(); }
+        };
+        Boom::Live()   = 0;
+        Boom::Budget() = 3;
+        bool threw     = false;
+        try {
+            auto s = std::allocate_shared<Boom[]>(std::allocator<Boom>(), 5);
+            (void)s;
+        } catch (int) {
+            threw = true;
+        }
+        Check(threw && Boom::Live() == 0,
+              "phase152 (32) a throwing element unwinds the three that were "
+              "built and leaks none");
+    }
+
+    printf("[CXX] PASS phase152: Ф31e-g-2 — allocate_at_least (member, traits "
+           "fallback and traits forwarding), assume_aligned usable in a "
+           "constant expression, std::align which was absent outright, "
+           "start_lifetime_as/_array adopting raw bytes, the two "
+           "[meta.member] functions and the surprising answer a deduced "
+           "&C::b gives, the four missing allocate_shared array overloads, all "
+           "three allocate_shared_for_overwrite forms, make_shared<const T>, "
+           "and allocate_shared finally constructing and destroying through "
+           "allocator_traits\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38074,6 +38402,7 @@ int main()
     Phase149();
     Phase150();
     Phase151();
+    Phase152();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
