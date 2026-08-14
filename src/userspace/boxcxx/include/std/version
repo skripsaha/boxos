@@ -41,6 +41,7 @@
 #include <__bits/version_chrono>          // <chrono>
 #include <__bits/version_cmath>           // <cmath>
 #include <__bits/version_compare>         // <compare>
+#include <__bits/version_concepts>        // <concepts> (+ <compare>)
 #include <__bits/version_complex>         // <complex>
 #include <__bits/version_containers>      // container family (+ <memory>)
 #include <__bits/version_cstddef>         // <cstddef>
@@ -59,6 +60,7 @@
 #include <__bits/version_numbers>         // <numbers>
 #include <__bits/version_numeric>         // <numeric>
 #include <__bits/version_optional>        // <optional>
+#include <__bits/version_print>           // <print> (+ <ostream>)
 #include <__bits/version_ranges>          // <ranges>
 #include <__bits/version_source_location> // <source_location>
 #include <__bits/version_span>            // <span>
@@ -110,9 +112,10 @@
 //                          the whole reason, and it is NOT the one this
 //                          entry gave before -- it said pmr::u8string was
 //                          the last gap and the macro was "one alias away",
-//                          which was measured and is wrong. (pmr::u8string
-//                          is indeed still absent; see <string> in
-//                          CONFORMANCE §2.) Everything else P0482R6 asks
+//                          which was measured and is wrong. pmr::u8string
+//                          exists as of Ф31e-g-3, with pmr::basic_string
+//                          and pmr::forward_list, and the macro is no
+//                          closer. Everything else P0482R6 asks
 //                          for -- char8_t, u8string, u8string_view,
 //                          char_traits<char8_t>, atomic_char8_t,
 //                          hash<u8string>, numeric_limits<char8_t> and the
@@ -120,15 +123,6 @@
 //                          present and verified.
 // chrono                   <chrono> excludes time zones by design: no
 //                          tzdb, time_zone, zoned_time or leap seconds.
-// common_reference         P2655R3's basic_common_reference specialization
-// common_reference_wrapper for reference_wrapper is absent, so
-//                          common_reference_t<reference_wrapper<T>&, T&>
-//                          has no type. Both macros are P2655R3's.
-// concepts                 P2404R3 is not implemented: equality_comparable
-//                          _with / totally_ordered_with still require
-//                          common_reference_with rather than the
-//                          comparison-common-type-with relaxation, so
-//                          move-only comparands are rejected.
 // constexpr_bitset         every bit operation IS constexpr, but the
 //                          basic_string-taking constructor bitset(str, pos,
 //                          n, zero, one) and both to_string() forms are not
@@ -166,10 +160,6 @@
 // mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
 // parallel_algorithm       no <execution>, so no ExecutionPolicy overloads.
-// print                    print/println/vprint_unicode/vprint_nonunicode
-//                          exist for the terminal, but every <ostream>
-//                          overload of them is absent -- and <ostream> is a
-//                          co-owner of this macro.
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
 //                          algorithms] — and 23 of the entities it promises
@@ -208,12 +198,5 @@
 // stacktrace               no <stacktrace> header.
 // stdatomic_h              no <stdatomic.h> header.
 // syncbuf                  no <syncbuf> header.
-// tuple_like               P2165R4's tuple-like is EXPOSITION-ONLY in C++23,
-//                          so there is no std::tuple_like to be missing —
-//                          the reason is entirely the converting machinery
-//                          the concept exists to constrain: tuple<int,int>
-//                          t(array<int,2>{}) does not compile, and neither
-//                          does the pair form. Assignment and comparison
-//                          from a tuple-like are missing with them.
 
 #endif // BOXCXX_VERSION

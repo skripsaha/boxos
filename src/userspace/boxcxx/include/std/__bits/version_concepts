@@ -1,0 +1,24 @@
+// boxcxx — <__bits/version_concepts>
+//
+// The one feature-test macro [version.syn] gives <concepts> -- and it gives
+// it to <compare> as well, which is why this is a leaf rather than a
+// definition inside either header: the same [support.limits.general] rule
+// every other version_* file exists for (see <__bits/version_any>).
+//
+// 202207L is P2404R3, the C++23 value. Both reference libraries still report
+// the C++20 202002L under -std=c++23, because neither implements the paper;
+// this library does, so it reports what C++23 specifies. The macro was
+// withheld until Ф31e-g-3 for exactly that reason -- equality_comparable_with,
+// totally_ordered_with and three_way_comparable_with still carried C++20's
+// common_reference_with, which demands the common reference be CONSTRUCTIBLE
+// from each operand. Where that common reference is a prvalue, constructible
+// means copyable, so a move-only type could not be compared with anything it
+// converts from, however well-formed every == and <=> between them was.
+#ifndef BOXCXX_BITS_VERSION_CONCEPTS
+#define BOXCXX_BITS_VERSION_CONCEPTS
+
+#ifndef __cpp_lib_concepts
+#  define __cpp_lib_concepts 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_CONCEPTS

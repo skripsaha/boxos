@@ -1,0 +1,23 @@
+// boxcxx — <__bits/version_print>
+//
+// The one feature-test macro [version.syn] gives <print>, which it co-owns
+// with <ostream> -- hence a leaf, for the same [support.limits.general]
+// reason as every other version_* file (see <__bits/version_any>).
+//
+// 202207L is N4950's own value. libstdc++ reports 202211L under -std=c++23;
+// this library pins what C++23 specifies, the same policy that keeps
+// __cpp_lib_out_ptr at 202106L (see <version>).
+//
+// The console half of [print.fun] shipped in Ф9B-2 and the macro still could
+// not be defined: P2539R4's four ostream-taking overloads did not exist, and
+// <ostream> is a co-owner. They arrived in Ф31e-g-3. What remains absent is
+// deliberate and documented: there are no FILE*-taking forms, because BoxOS
+// has no FILE type for them to be declared against.
+#ifndef BOXCXX_BITS_VERSION_PRINT
+#define BOXCXX_BITS_VERSION_PRINT
+
+#ifndef __cpp_lib_print
+#  define __cpp_lib_print 202207L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_PRINT

@@ -5,6 +5,7 @@
 #ifndef BOXCXX_COMPARE
 #define BOXCXX_COMPARE
 
+#include <__bits/version_concepts>
 #include <__bits/version_compare>
 #include <type_traits>
 #include <bit>          // bit_cast for the IEEE strong/weak total orders (acyclic:
@@ -270,6 +271,38 @@ concept PartiallyOrderedWith =
     };
 } // namespace __cmp
 
+namespace __cmp {
+// [concept.comparisoncommontype] (P2404R3), the relaxation that lets a
+// MOVE-ONLY type be compared with something it converts from. C++20 asked
+// common_reference_with<const T&, const U&>, which requires the common
+// reference to be CONSTRUCTIBLE from each side -- a copy, when that common
+// reference is a prvalue. P2404R3 asks instead whether each side converts to
+// `const C&`, which binds a reference and copies nothing.
+//
+// Written with type traits rather than same_as/convertible_to because
+// <compare> sits BELOW <concepts> and must stay independent of it -- the
+// same reason the rest of __cmp is spelled this way. The leading
+// requires-guard is not decoration: the conjuncts after it name
+// common_reference_t unconditionally, and a conjunction short-circuits
+// SUBSTITUTION, not just evaluation.
+template <class T, class U>
+concept ComparisonCommonTypeWithImpl =
+    requires { typename common_reference_t<const T &, const U &>; } &&
+    requires { typename common_reference_t<const U &, const T &>; } &&
+    is_same_v<common_reference_t<const T &, const U &>,
+              common_reference_t<const U &, const T &>> &&
+    (is_convertible_v<const T &,
+                      const common_reference_t<const T &, const U &> &> ||
+     is_convertible_v<T, const common_reference_t<const T &, const U &> &>) &&
+    (is_convertible_v<const U &,
+                      const common_reference_t<const T &, const U &> &> ||
+     is_convertible_v<U, const common_reference_t<const T &, const U &> &>);
+
+template <class T, class U>
+concept ComparisonCommonTypeWith =
+    ComparisonCommonTypeWithImpl<remove_cvref_t<T>, remove_cvref_t<U>>;
+} // namespace __cmp
+
 template <class T, class Cat = partial_ordering>
 concept three_way_comparable =
     __cmp::WeaklyEqCmpWith<T, T> && __cmp::PartiallyOrderedWith<T, T> &&
@@ -277,21 +310,10 @@ concept three_way_comparable =
         { a <=> b } -> __cmp::ComparesAs<Cat>;
     };
 
-// common_reference_with's requirements are replicated inline so <compare>
-// stays independent of <concepts> (which includes this header).
 template <class T, class U, class Cat = partial_ordering>
 concept three_way_comparable_with =
     three_way_comparable<T, Cat> && three_way_comparable<U, Cat> &&
-    is_same_v<common_reference_t<const remove_reference_t<T> &,
-                                 const remove_reference_t<U> &>,
-              common_reference_t<const remove_reference_t<U> &,
-                                 const remove_reference_t<T> &>> &&
-    is_convertible_v<const remove_reference_t<T> &,
-                     common_reference_t<const remove_reference_t<T> &,
-                                        const remove_reference_t<U> &>> &&
-    is_convertible_v<const remove_reference_t<U> &,
-                     common_reference_t<const remove_reference_t<T> &,
-                                        const remove_reference_t<U> &>> &&
+    __cmp::ComparisonCommonTypeWith<T, U> &&
     three_way_comparable<
         common_reference_t<const remove_reference_t<T> &,
                            const remove_reference_t<U> &>,

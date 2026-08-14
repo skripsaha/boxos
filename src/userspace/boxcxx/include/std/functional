@@ -116,6 +116,35 @@ public:
     }
 };
 
+namespace __bits {
+// [refwrap.common.ref] (P2655R3). Without these, common_reference_t of a
+// reference_wrapper<T>& and a T& has no type at all, because the ternary
+// COND-RES is ambiguous: the wrapper converts to T& and T& converts to a
+// wrapper. The pair of specializations is asymmetric on purpose -- exactly
+// one of the two directions may be a wrapper, or the answer is not unique.
+template <class R, class T, class RQ, class TQ>
+concept RefWrapCommonReferenceExistsWith =
+    IsRefWrapper<R>::value &&
+    requires { typename common_reference_t<typename R::type &, TQ>; } &&
+    convertible_to<RQ, common_reference_t<typename R::type &, TQ>>;
+} // namespace __bits
+
+template <class R, class T, template <class> class RQual,
+          template <class> class TQual>
+    requires(__bits::RefWrapCommonReferenceExistsWith<R, T, RQual<R>, TQual<T>> &&
+             !__bits::RefWrapCommonReferenceExistsWith<T, R, TQual<T>, RQual<R>>)
+struct basic_common_reference<R, T, RQual, TQual> {
+    using type = common_reference_t<typename R::type &, TQual<T>>;
+};
+template <class T, class R, template <class> class TQual,
+          template <class> class RQual>
+    requires(__bits::RefWrapCommonReferenceExistsWith<R, T, RQual<R>, TQual<T>> &&
+             !__bits::RefWrapCommonReferenceExistsWith<T, R, TQual<T>, RQual<R>>)
+struct basic_common_reference<T, R, TQual, RQual> {
+    using type = common_reference_t<typename R::type &, TQual<T>>;
+};
+
+
 template <class T>
 reference_wrapper(T &) -> reference_wrapper<T>;
 

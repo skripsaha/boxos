@@ -25,6 +25,9 @@
 #  define __cpp_lib_transformation_trait_aliases 201304L
 #endif
 
+#ifndef __cpp_lib_common_reference
+#  define __cpp_lib_common_reference 202302L
+#endif
 #ifndef __cpp_lib_bool_constant
 #  define __cpp_lib_bool_constant 201505L
 #endif

@@ -3,6 +3,7 @@
 #define BOXCXX_CONCEPTS
 
 #include <type_traits>
+#include <__bits/version_concepts>
 #include <compare>      // __cmp:: helper concepts shared with <=> machinery
 #include <utility>      // move, swap building blocks
 
@@ -170,8 +171,7 @@ concept equality_comparable = __cmp::WeaklyEqCmpWith<T, T>;
 template <class T, class U>
 concept equality_comparable_with =
     equality_comparable<T> && equality_comparable<U> &&
-    common_reference_with<const remove_reference_t<T> &,
-                          const remove_reference_t<U> &> &&
+    __cmp::ComparisonCommonTypeWith<T, U> &&
     equality_comparable<common_reference_t<const remove_reference_t<T> &,
                                            const remove_reference_t<U> &>> &&
     __cmp::WeaklyEqCmpWith<T, U>;

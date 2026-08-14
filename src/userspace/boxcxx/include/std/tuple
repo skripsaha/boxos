@@ -625,7 +625,7 @@ constexpr auto Cat2(T1 &&a, T2 &&b, index_sequence<I1...>,
     return {};
 }
 
-template <class T1>
+template <__bits::TupleLike T1>
 [[nodiscard]] constexpr auto tuple_cat(T1 &&a)
 {
     return __bits::Cat2(
@@ -634,7 +634,7 @@ template <class T1>
         index_sequence<>{});
 }
 
-template <class T1, class T2, class... Rest>
+template <__bits::TupleLike T1, __bits::TupleLike T2, __bits::TupleLike... Rest>
 [[nodiscard]] constexpr auto tuple_cat(T1 &&a, T2 &&b, Rest &&...rest)
 {
     auto merged = __bits::Cat2(
@@ -660,17 +660,27 @@ constexpr T MakeFromTupleImpl(Tuple &&t, index_sequence<Is...>)
 {
     return T(get<Is>(forward<Tuple>(t))...);
 }
+// [tuple.apply]/3 (P2517R1): apply's exception specification is that of the
+// INVOKE it performs. Declared as a constexpr function rather than written
+// inline so the index pack has somewhere to live.
+template <class F, class Tuple, size_t... Is>
+constexpr bool ApplyNoexcept(index_sequence<Is...>) noexcept
+{
+    return noexcept(invoke(declval<F>(), get<Is>(declval<Tuple>())...));
+}
 } // namespace __bits
 
-template <class F, class Tuple>
-constexpr decltype(auto) apply(F &&f, Tuple &&t)
+template <class F, __bits::TupleLike Tuple>
+constexpr decltype(auto) apply(F &&f, Tuple &&t) noexcept(
+    __bits::ApplyNoexcept<F, Tuple>(
+        make_index_sequence<tuple_size_v<remove_reference_t<Tuple>>>{}))
 {
     return __bits::ApplyImpl(
         forward<F>(f), forward<Tuple>(t),
         make_index_sequence<tuple_size_v<remove_cvref_t<Tuple>>>{});
 }
 
-template <class T, class Tuple>
+template <class T, __bits::TupleLike Tuple>
 [[nodiscard]] constexpr T make_from_tuple(Tuple &&t)
 {
     return __bits::MakeFromTupleImpl<T>(
