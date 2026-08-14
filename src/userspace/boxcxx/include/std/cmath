@@ -952,6 +952,71 @@ inline float  fmax(float x, float y) { return float(fmax(double(x), double(y)));
 inline float  fmin(float x, float y) { return float(fmin(double(x), double(y))); }
 inline float  fma(float x, float y, float z) { return float(fma(double(x), double(y), double(z))); }
 
+// ── hypot, three-argument ([c.math.hypot3], C++17) ────────────────────────
+// sqrt(x²+y²+z²) without squaring first, which would overflow for arguments
+// past ~1e154. Scaling is by a POWER OF TWO taken from the largest magnitude,
+// so it is exact both ways and costs no accuracy — after it the largest term
+// is in [1,2), the sum of three squares cannot overflow, and subnormal inputs
+// have been lifted out of the range where squaring flushes them to zero.
+// The infinity rule is the one the two-argument form already follows: an
+// infinite argument gives +Inf even when another argument is NaN, because the
+// result is determined regardless of what the NaN stands for.
+inline double hypot(double x, double y, double z) {
+    if (isinf(x) || isinf(y) || isinf(z)) return kInf;
+    if (isnan(x) || isnan(y) || isnan(z)) return kQNaN;
+    double ax = fabs(x), ay = fabs(y), az = fabs(z);
+    double m = ax > ay ? ax : ay;
+    if (az > m) m = az;
+    if (m == 0.0) return 0.0;
+    const int e = ilogb(m);
+    ax = scalbn(ax, -e); ay = scalbn(ay, -e); az = scalbn(az, -e);
+    return scalbn(sqrt(ax * ax + ay * ay + az * az), e);   // ≤2 ULP
+}
+// float: each square is exact in double (2×24 ≤ 53) and only the two sums and
+// the sqrt round, so the narrowed result is correctly rounded away from ties.
+inline float hypot(float x, float y, float z) {
+    if (isinf(x) || isinf(y) || isinf(z)) return kInfF;
+    if (isnan(x) || isnan(y) || isnan(z)) return kQNaNF;
+    double dx = x, dy = y, dz = z;
+    return float(sqrt(dx * dx + dy * dy + dz * dz));
+}
+
+// ── lerp ([c.math.lerp], C++20 / P0811R3) ─────────────────────────────────
+// Not `a + t*(b-a)`, which overshoots past the endpoint near t=1, and not
+// `(1-t)*a + t*b`, which is not monotonic. P0811R3's shape is the one that
+// keeps all four guarantees at once — exact at t==0 and t==1, bounded inside
+// [0,1], monotonic, and consistent — so it is reproduced here verbatim rather
+// than re-derived.
+//   * the straddling-zero branch is where (1-t)*a is safe and cannot overflow;
+//   * `t == 1` is returned exactly, before any arithmetic can perturb it;
+//   * the final clamp against b is what restores monotonicity near t == 1.
+// A NaN t is NOT propagated: it falls through to the clamp and yields b. That
+// is what [c.math.lerp]/2 permits — it says only when the result must *not* be
+// NaN — and it is what both reference libraries do, measured, so the choice is
+// theirs as much as ours.
+template <typename T>
+constexpr T __lerp_core(T a, T b, T t) noexcept
+{
+    if ((a <= T(0) && b >= T(0)) || (a >= T(0) && b <= T(0)))
+        return t * b + (T(1) - t) * a;
+    if (t == T(1)) return b;
+    const T x = a + t * (b - a);
+    if ((t > T(1)) == (b > a)) return b < x ? x : b;
+    return x < b ? x : b;
+}
+constexpr float lerp(float a, float b, float t) noexcept
+{
+    return __lerp_core(a, b, t);
+}
+constexpr double lerp(double a, double b, double t) noexcept
+{
+    return __lerp_core(a, b, t);
+}
+constexpr long double lerp(long double a, long double b, long double t) noexcept
+{
+    return __lerp_core(a, b, t);
+}
+
 // ── completeness: long double overloads + C-named (f,l) + comparisons ──────
 // erf/erfc/tgamma/lgamma long double are genuine 80-bit, defined at the end of
 // this namespace (Ф27d2); asin/acos, the hyperbolics + inverse hyperbolics,
@@ -1990,6 +2055,18 @@ inline long double hypot(long double x, long double y){
     if (m == 0.0L) return 0.0L;
     long double rx = ax / m, ry = ay / m;
     return m * sqrt(rx * rx + ry * ry);                  // genuine 80-bit (fsqrt + arithmetic)
+}
+// Three-argument form ([c.math.hypot3]); power-of-two scaling like the double
+// path, so the reduction is exact and only the squares and the fsqrt round.
+inline long double hypot(long double x, long double y, long double z){
+    if (isinf(x) || isinf(y) || isinf(z)) return kInfL;  // +Inf even if another is NaN
+    if (isnan(x) || isnan(y) || isnan(z)) return kQNaNL;
+    long double ax = fabs(x), ay = fabs(y), az = fabs(z);
+    long double m = fmax(fmax(ax, ay), az);
+    if (m == 0.0L) return 0.0L;
+    const int e = ilogb(m);
+    ax = scalbn(ax, -e); ay = scalbn(ay, -e); az = scalbn(az, -e);
+    return scalbn(sqrt(ax * ax + ay * ay + az * az), e); // genuine 80-bit
 }
 // ── correctly-rounded cbrt (software double-double, 80-bit) ──────────────────
 // Reduce a=|x|=m·2^(3k+j) (j∈{0,1,2}, m·2^j ∈ [1,8)); cbrt(a)=2^k·cbrt(m·2^j),

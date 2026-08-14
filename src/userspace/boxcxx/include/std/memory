@@ -1468,6 +1468,12 @@ struct owner_less<void> {
     {
         return a.owner_before(b);
     }
+    // [util.smartptr.ownerless]: the member that makes this a TRANSPARENT
+    // comparator. Without it the four heterogeneous call operators above are
+    // unreachable through an associative container — map<shared_ptr<T>, …,
+    // owner_less<>>::find(weak_ptr) does not compile, and that pairing is the
+    // entire reason P0074R0 added owner_less<void>.
+    using is_transparent = void;
 };
 
 template <class T>

@@ -584,13 +584,19 @@ constexpr T *end(T (&arr)[N]) noexcept
 {
     return arr + N;
 }
+// [iterator.range]/7 and /9 mandate a CONDITIONAL noexcept on these two, and
+// on no other member of the family: they forward to begin/end on an argument
+// already bound as const, so there is nothing left for them to do that could
+// throw beyond what the forwarded-to call does. Spelling it out is what lets
+// a caller's own noexcept(noexcept(std::cbegin(c))) come out true.
 template <typename C>
-constexpr auto cbegin(const C &c) -> decltype(begin(c))
+constexpr auto cbegin(const C &c) noexcept(noexcept(begin(c)))
+    -> decltype(begin(c))
 {
     return begin(c);
 }
 template <typename C>
-constexpr auto cend(const C &c) -> decltype(end(c))
+constexpr auto cend(const C &c) noexcept(noexcept(end(c))) -> decltype(end(c))
 {
     return end(c);
 }

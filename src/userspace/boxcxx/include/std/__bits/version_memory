@@ -36,6 +36,11 @@
 #ifndef __cpp_lib_make_unique
 #  define __cpp_lib_make_unique 201304L
 #endif
+#ifndef __cpp_lib_transparent_operators
+// P0074R0, co-owned with <functional> -- see the note there. owner_less<void>
+// is this header's half of the paper.
+#  define __cpp_lib_transparent_operators 201510L
+#endif
 #ifndef __cpp_lib_out_ptr
 #  define __cpp_lib_out_ptr 202106L
 #endif

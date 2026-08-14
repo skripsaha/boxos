@@ -159,23 +159,33 @@ struct Data {
     }
 };
 
+// [range.prim.ssize] is a customization point object like its twelve
+// siblings, not a function template. The difference is not cosmetic: only an
+// object can be passed by value, stored, or bound — `auto f = ranges::ssize;`
+// is what a function template cannot do — and only an object is immune to
+// being found by ADL and hijacked by a user-declared ssize in an associated
+// namespace, which is the whole reason [range.access] specifies CPOs.
+struct SSize {
+    template <typename R>
+        requires requires(R &r) { Size{}(r); }
+    constexpr auto operator()(R &r) const
+    {
+        auto n = Size{}(r);
+        return static_cast<
+            common_type_t<ptrdiff_t, make_signed_t<decltype(n)>>>(n);
+    }
+};
+
 } // namespace __cpo
 
 inline namespace __cpo_objects {
 inline constexpr __cpo::Begin begin{};
 inline constexpr __cpo::End end{};
 inline constexpr __cpo::Size size{};
+inline constexpr __cpo::SSize ssize{};
 inline constexpr __cpo::Empty empty{};
 inline constexpr __cpo::Data data{};
 } // namespace __cpo_objects
-
-template <typename R>
-constexpr auto ssize(R &&r)
-{
-    auto n = ranges::size(r);
-    return static_cast<common_type_t<ptrdiff_t, make_signed_t<decltype(n)>>>(
-        n);
-}
 
 // ── associated types ([range.access], [range.req]) ──────────────────────
 

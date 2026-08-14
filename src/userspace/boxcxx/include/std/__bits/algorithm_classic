@@ -284,6 +284,32 @@ constexpr pair<It1, It2> mismatch(It1 first1, It1 last1, It2 first2)
     return mismatch(first1, last1, first2, __algo_impl::EqualTo{});
 }
 
+// The four-iterator forms N3346 added, and the reason it added them: the three
+// -iterator shape never consults the second range's end, so a short second
+// range walks off it. Their absence was not a quiet gap either — a call
+// written with four iterators bound the fourth argument to the Pred parameter
+// above and failed inside the body with "'pred' cannot be used as a function".
+//
+// No constraint is needed to tell the two apart for `mismatch(p, p, p, p)`,
+// where both are exact matches: partial ordering settles it. Deducing the
+// (It1, It1, It2, Pred) form from this one succeeds (Pred := It2), while
+// deducing this one from that form makes It2 answer both It2 and Pred at once
+// and fails — so this overload is the more specialized and wins outright.
+template <typename It1, typename It2, typename Pred>
+constexpr pair<It1, It2> mismatch(It1 first1, It1 last1, It2 first2, It2 last2,
+                                  Pred pred)
+{
+    for (; first1 != last1 && first2 != last2 && pred(*first1, *first2);
+         ++first1, ++first2) {
+    }
+    return {first1, first2};
+}
+template <typename It1, typename It2>
+constexpr pair<It1, It2> mismatch(It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return mismatch(first1, last1, first2, last2, __algo_impl::EqualTo{});
+}
+
 template <typename It1, typename It2, typename Pred>
 constexpr bool equal(It1 first1, It1 last1, It2 first2, Pred pred)
 {

@@ -29,6 +29,13 @@
 #ifndef __cpp_lib_ranges_to_container
 #  define __cpp_lib_ranges_to_container 202202L
 #endif
+#ifndef __cpp_lib_ranges_as_const
+// P2278R4. Claimable since Ф31e-b added the paper's last four names:
+// ranges::cbegin / ranges::cend (in <iterator>, beside make_const_iterator)
+// and view_interface::cbegin / cend. N4950's value is taken, not the 202311L
+// libstdc++ reports -- that is the later P2836R1 DR, which is not built here.
+#  define __cpp_lib_ranges_as_const 202207L
+#endif
 #ifndef __cpp_lib_ranges_join_with
 #  define __cpp_lib_ranges_join_with 202202L
 #endif

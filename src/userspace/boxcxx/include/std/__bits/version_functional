@@ -27,6 +27,12 @@
 #ifndef __cpp_lib_not_fn
 #  define __cpp_lib_not_fn 201603L
 #endif
+#ifndef __cpp_lib_transparent_operators
+// P0074R0, co-owned with <memory>: the nineteen void specializations of the
+// operator functors live here, owner_less<void> lives there. Claimable since
+// Ф31e-b gave owner_less<void> its is_transparent member.
+#  define __cpp_lib_transparent_operators 201510L
+#endif
 
 #ifndef __cpp_lib_invoke
 #  define __cpp_lib_invoke 201411L

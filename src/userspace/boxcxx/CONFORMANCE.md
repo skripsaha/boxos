@@ -34,7 +34,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 128 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 157 phases, 4 525 runtime checks, 1 270 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 158 phases, 4 543 runtime checks, 1 308 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -57,8 +57,8 @@ the library itself; there is no "no-exceptions" configuration.
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
-| `views::take_while`, `ranges::cbegin` | no such name | Seven range-access CPOs and both `*_while` adaptors are missing (§2 `<ranges>`). |
-| `std::mismatch(a, ae, b, be)` | confusing error inside the body | The four-iterator overloads do not exist; the fourth argument binds to `Pred` (§2 `<algorithm>`). |
+| `views::take_while`, `views::drop_while` | no such name | Both `*_while` adaptors are still missing (§2 `<ranges>`). The seven range-access CPOs they used to be listed with were added in Ф31e-b-1. |
+| `std::sqrt(4)`, `std::pow(2, 3)` | ambiguous, does not compile | `<cmath>` has no promoting overloads for all-integer arguments (§2 `<cmath>`). Pass a floating-point value: `std::sqrt(4.0)`. |
 | a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
 
 ---
@@ -180,15 +180,13 @@ nothing has been found since.
 
 ## `<algorithm>`
 
-- `–` **`mismatch` has no four-iterator overloads.** Only the three-iterator forms
-  exist, which is exactly the unsafe shape N3346 added the four-iterator forms to
-  replace: the second range's end is never consulted.
-  A four-iterator call is *not* silently accepted — but the diagnostic is poor,
-  because the fourth argument binds to the `Pred` template parameter of the
-  three-iterator overload and the failure appears inside the body
-  (`algorithm_classic:277: 'pred' cannot be used as a function`) rather than as
-  "no matching function". `equal` and `is_permutation` do have their four-iterator
-  forms; `mismatch` is the one that was missed.
+- `✓` Closed in Ф31e-b-1: `mismatch` had no four-iterator overloads — the unsafe
+  shape N3346 added them to replace, where the second range's end is never
+  consulted. The call was not silently accepted, but the diagnostic was poor: the
+  fourth argument bound to the `Pred` parameter of the three-iterator overload and
+  the failure appeared inside the body. Which overload four same-type iterators
+  select is settled by partial ordering, not by a constraint. This closed
+  `__cpp_lib_robust_nonmodifying_seq_ops`.
 - `~` `stable_sort` and `inplace_merge` are not `constexpr`. This is correct for
   C++23; P2562 (C++26) would change it.
 - `!` **`stable_partition` is *declared* `constexpr` but can never be constant-
@@ -202,12 +200,10 @@ nothing has been found since.
 
 ## `<array>`
 
-- `–` **`array<T,0>` is missing its whole element and reverse surface**:
-  `operator[]`, `front`, `back`, `rbegin`, `rend`, and also `crbegin` / `crend`,
-  all of which the non-zero specialization has. The standard requires them to be
-  declared for the zero-size case too (calling them is undefined; declaring them is
-  not optional). What it does have: `at`, `data`, `begin`/`end`, `cbegin`/`cend`,
-  `empty`, `size`, `max_size`, `fill`, `swap`.
+- `✓` Closed in Ф31e-b-1: `array<T,0>` was missing its whole element and reverse
+  surface — `operator[]`, `front`, `back`, `rbegin`, `rend`, `crbegin`, `crend` —
+  all of which the non-zero specialization has. Calling them is undefined;
+  declaring them is not optional, and generic code over both sizes needs them.
   (`✓` Closed in Ф31e-a: `get<I>` on a `const array&&` now returns `const T&&` as
   [array.tuple] specifies, instead of binding to the `const array&` overload and
   handing a forwarding layer an lvalue.)
@@ -286,8 +282,21 @@ nothing has been found since.
 
 ## `<cmath>`
 
-- `–` **`std::lerp` does not exist.** A C++20 addition, simply absent;
-  `std::midpoint` is present.
+- `✓` Closed in Ф31e-b-1: `std::lerp` did not exist. It is now P0811R3's exact
+  shape — the only one that keeps exactness at both ends, boundedness inside
+  `[0,1]` and monotonicity at once — which with `midpoint` closes
+  `__cpp_lib_interpolate`. A NaN `t` is not propagated and yields `b`;
+  [c.math.lerp]/2 permits that and both reference libraries do the same.
+- `✓` Closed in Ф31e-b-1: the **three-argument `hypot(x, y, z)`** was absent, which
+  this document had failed to record — `<version>` had it, §2 did not. Present now
+  at all three widths, with power-of-two scaling, closing `__cpp_lib_hypot`.
+- `!` **The "sufficient additional overloads" of [cmath.syn]/2 do not exist**, so a
+  call whose arguments are *all* integers is ambiguous rather than promoted:
+  `std::sqrt(4)`, `std::pow(2, 3)`, `std::atan2(1, 1)` and `std::hypot(3, 4)` are
+  all rejected. Mixed calls are fine — `std::fmax(1, 2.0)` picks the `double`
+  overload outright — so the gap only bites the all-integer form, which is also the
+  most idiomatic one. Epic-wide: it affects every function in the header, not the
+  ones listed here.
 - `~` `nan("payload")` ignores the payload string and returns a plain quiet NaN.
 - `?` `std::log10` is not exact on one of the 23 exactly-representable powers of
   ten (measured on BoxOS). `box::log(x, 10)` returns 22 of the 23 exactly by
@@ -295,10 +304,14 @@ nothing has been found since.
 
 ## `<compare>`
 
-- `–` `compare_three_way_result` is declared with two required parameters; the
-  standard declares `template<class T, class U = T>`, so the common
-  `compare_three_way_result<T>` and `compare_three_way_result_t<T>` spellings do
-  not compile.
+- `✓` Closed in Ф31e-b-1: `compare_three_way_result` was declared with two required
+  parameters where the standard declares `template<class T, class U = T>`, so
+  `compare_three_way_result<T>` did not compile. **This document had the extent of
+  it wrong**: it also claimed `compare_three_way_result_t<T>` failed, and that was
+  never true — the alias always carried its own default, and `<version>`'s note
+  said so correctly. Measured before the fix, not recalled.
+  `__cpp_lib_three_way_comparison` is still not claimable: its 201907L value is
+  P1614R2, and `map`/`multimap`/`set`/`multiset` still have no `operator<=>`.
 
 ## `<flat_map>` and `<flat_set>`
 
@@ -415,8 +428,11 @@ nothing has been found since.
 
 ## `<memory>`
 
-- `–` `owner_less<void>` has no `is_transparent` member, so it does not work as a
-  transparent comparator.
+- `✓` Closed in Ф31e-b-1: `owner_less<void>` had no `is_transparent` member, so
+  its four heterogeneous call operators were unreachable through an associative
+  container — `map<shared_ptr<T>, …, owner_less<>>::find(weak_ptr)` did not
+  compile, which is the pairing P0074R0 exists for. Closed
+  `__cpp_lib_transparent_operators`.
 - `!` **`atomic<shared_ptr<T>>` and `atomic<weak_ptr<T>>` have no working
   `notify_one` / `notify_all` — they are no-ops — and `wait()` is a bare
   busy-spin** rather than the kernel park that every other atomic uses. A thread
@@ -480,9 +496,13 @@ nothing has been found since.
 
 ## `<ranges>`
 
-- `–` **Seven of the twelve range-access CPOs are missing**: `ranges::cbegin`,
-  `cend`, `rbegin`, `rend`, `crbegin`, `crend`, `cdata`. `begin`, `end`, `size`,
-  `data`, `empty` are present.
+- `✓` Closed in Ф31e-b-1: seven of the thirteen range-access CPOs were missing —
+  `ranges::cbegin`, `cend`, `rbegin`, `rend`, `crbegin`, `crend`, `cdata`. They
+  live in `<iterator>`, beside `make_const_iterator` and `make_reverse_iterator`,
+  because `<__bits/ranges_core>` deliberately cannot include `<iterator>` (that
+  direction is a real cycle). `constant_range` moved there with them. Note that
+  `cbegin` *wraps*: per P2278R4 it yields a constant iterator even for a non-const
+  range, which a plain `begin()` would not.
 - `–` `views::take_while` and `views::drop_while` do not exist — two core C++20
   adaptors.
 - `–` `ranges::is_permutation` does not exist (the non-ranges `std::is_permutation`
@@ -502,13 +522,12 @@ nothing has been found since.
   standard gives `transform_view` a conditional `begin() const`; boxcxx has a
   single non-const `begin()`, so `range<const transform_view<…>>` is false and
   iterating a `const transform_view` fails with "discards qualifiers".
-- `–` `ranges::ssize` exists, but as an overloaded function template rather than a
-  customization-point object, so unlike the other range-access entities it cannot
-  be passed around as a value.
-- `–` The free `cbegin`/`cend`/`rbegin`/`rend`/`crbegin`/`crend` of
-  [iterator.range] carry no `noexcept`. The standard mandates a conditional
-  `noexcept` for `cbegin`/`cend` specifically; libstdc++ provides it, boxcxx does
-  not.
+- `✓` Closed in Ф31e-b-1: `ranges::ssize` existed as an overloaded function
+  template rather than a customization-point object, so unlike its twelve siblings
+  it could not be passed around as a value or protected from ADL hijacking.
+- `✓` Closed in Ф31e-b-1: the free `cbegin`/`cend` of [iterator.range] carried no
+  `noexcept`, where /7 and /9 mandate a conditional one. The other four of that
+  family are not given one by the standard and still do not have one.
 
 ## `<string>`
 
@@ -809,8 +828,14 @@ structurally dormant there and can only be exercised on real silicon:
 Ф31e-a closed the six that answered wrongly in silence — the `<ostream>`
 inserters, `is_swappable` over arrays, `get` on a const array rvalue, the
 odd-traits `basic_string` formatter, `volatile` slipping past `formattable`, and
-`vector<bool>`'s output-iterator and allocator-swap gaps. Each is struck through
-in §2 with what it used to do, and pinned by cxxtest phase144. What is left:
+`vector<bool>`'s output-iterator and allocator-swap gaps. Ф31e-b-1 then closed
+eight pieces of absent surface — `mismatch`'s four-iterator forms, `array<T,0>`'s
+element and reverse members, `lerp`, three-argument `hypot`, the seven missing
+range-access CPOs, `ssize` as a real CPO, `view_interface::cbegin`/`cend`,
+`owner_less<void>`'s `is_transparent`, and `compare_three_way_result`'s default
+argument — which between them made six feature-test macros honest. Each is marked
+`✓` in §2 with what it used to do, and pinned by cxxtest phases 144 and 145.
+What is left:
 
 The one with real teeth:
 
@@ -821,8 +846,14 @@ The one with real teeth:
 
 The rest:
 
-- `<cmath>`: `std::lerp` is absent; `<array>`: `array<T,0>` is missing its element
-  and reverse surface. Both are small, self-contained additions.
+- `<cmath>`: **no promoting overloads for all-integer arguments** — `std::sqrt(4)`
+  is ambiguous. Epic-wide across the header, and the largest single thing left in
+  §2 (§2 `<cmath>`).
+- `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
+  constant-evaluated (§2).
+- `<ranges>`: `views::take_while` and `views::drop_while`, `ranges::is_permutation`,
+  a const-iterable `transform_view`, and the whole `ranges::` specialized-memory
+  family are still absent — the remainder of Ф31e-b.
 - `<cmath>`: `std::log10` is inexact on 1 of the 23 exact powers of ten. Measured
   on BoxOS; `box::log(x, 10)` returns 22 of 23 exactly by using `log10` directly.
 - `<iterator>`: `incrementable_traits<common_iterator>` is not specialized. The
