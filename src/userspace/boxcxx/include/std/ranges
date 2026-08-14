@@ -159,4 +159,124 @@ using range_const_reference_t = iter_const_reference_t<iterator_t<R>>;
 } // namespace ranges
 } // namespace std
 
+// ── basic_istream_view / views::istream ([range.istream]) ───────────────
+// The one view whose source is a stream rather than a range: each ++ pulls
+// the next value with operator>>, so a whole file of numbers becomes a
+// pipeline stage. This library used to record it as unbuildable on BoxOS
+// "because there are no global istream objects" — which was never the
+// obstacle. It names no global: it binds whatever basic_istream& it is
+// handed, and Ф30e put <istream> and <sstream> in the tree.
+//
+// Only <iosfwd> is included, and that is forced rather than chosen. An edge
+// from <ranges> to <istream> is a GENUINE CYCLE in this tree, measured, not
+// feared: <istream> → <ostream> → <ios>, and ios_base keeps its iword/pword
+// and callback tables in std::vector, while <vector> → <algorithm> →
+// <__bits/ranges_algo> → <ranges>. Including <istream> here therefore
+// re-enters <ranges> with its guard already set and reaches <ios> with
+// std::vector still mid-definition. (libc++ can afford the edge because its
+// ios_base uses raw arrays for those three tables.)
+//
+// The consequence is one documented deviation, in CONFORMANCE §2 <ranges>:
+// stream-extractable asks whether `is >> t` is valid, which needs the
+// COMPLETE basic_istream, so a translation unit that includes only <ranges>
+// finds the constraint unsatisfied rather than the type. Any program that
+// can actually call it has a stream, and therefore has <istream> or
+// <sstream> included already.
+#include <iosfwd>
+
+namespace std {
+namespace ranges {
+
+template <class Val, class CharT, class Traits>
+concept __stream_extractable =
+    requires(basic_istream<CharT, Traits> &is, Val &t) { is >> t; };
+
+template <movable Val, class CharT, class Traits = char_traits<CharT>>
+    requires default_initializable<Val> &&
+             __stream_extractable<Val, CharT, Traits>
+class basic_istream_view
+    : public view_interface<basic_istream_view<Val, CharT, Traits>> {
+public:
+    constexpr explicit basic_istream_view(basic_istream<CharT, Traits> &stream)
+        : __stream(addressof(stream))
+    {
+    }
+
+    // begin() EXTRACTS. [range.istream.view]/1 specifies it that way, and it
+    // is why this view is single-pass and why calling begin() twice consumes
+    // two values — the standard's own shape, not a shortcut.
+    constexpr auto begin()
+    {
+        *__stream >> __value;
+        return __iterator{*this};
+    }
+    constexpr default_sentinel_t end() const noexcept { return default_sentinel; }
+
+private:
+    struct __iterator {
+        using iterator_concept = input_iterator_tag;
+        using difference_type  = ptrdiff_t;
+        using value_type       = Val;
+
+        constexpr explicit __iterator(basic_istream_view &parent) noexcept
+            : __parent(addressof(parent))
+        {
+        }
+        __iterator(const __iterator &)            = delete;
+        __iterator(__iterator &&)                 = default;
+        __iterator &operator=(const __iterator &) = delete;
+        __iterator &operator=(__iterator &&)      = default;
+
+        __iterator &operator++()
+        {
+            *__parent->__stream >> __parent->__value;
+            return *this;
+        }
+        void operator++(int) { ++*this; }
+
+        Val &operator*() const { return __parent->__value; }
+
+        friend bool operator==(const __iterator &x, default_sentinel_t)
+        {
+            return !*x.__parent->__stream;
+        }
+
+    private:
+        basic_istream_view *__parent;
+    };
+
+    basic_istream<CharT, Traits> *__stream;
+    Val                           __value = Val();
+};
+
+template <class Val>
+using istream_view = basic_istream_view<Val, char>;
+
+namespace views {
+
+// Not a range adaptor closure: it consumes a STREAM, so there is nothing for
+// `|` to pipe into it, and deriving it from the closure base would let
+// `vec | views::istream<int>` look plausible.
+template <class Val>
+struct __IstreamFn {
+    template <class E>
+        requires requires(E &&e) {
+            basic_istream_view<Val, typename remove_cvref_t<E>::char_type,
+                               typename remove_cvref_t<E>::traits_type>(e);
+        }
+    constexpr auto operator()(E &&e) const
+    {
+        return basic_istream_view<Val, typename remove_cvref_t<E>::char_type,
+                                  typename remove_cvref_t<E>::traits_type>(e);
+    }
+};
+
+template <class Val>
+inline constexpr __IstreamFn<Val> istream{};
+
+} // namespace views
+
+} // namespace ranges
+} // namespace std
+
 #endif // BOXCXX_RANGES

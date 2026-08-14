@@ -145,6 +145,19 @@ template <typename I>
     requires requires(I &i) { ranges::iter_move(i); }
 using iter_rvalue_reference_t = decltype(ranges::iter_move(declval<I &>()));
 
+// [iterator.synopsis]: the one type a generic algorithm can bind BOTH a
+// dereference result and a stored value to. For a proxy iterator the
+// reference is a prvalue and the value is a distinct type, so this is the
+// only alias that names something the two have in common.
+template <typename I>
+    requires requires {
+        typename iter_reference_t<I>;
+        typename iter_value_t<I>;
+        typename common_reference_t<iter_reference_t<I>, iter_value_t<I> &>;
+    }
+using iter_common_reference_t =
+    common_reference_t<iter_reference_t<I>, iter_value_t<I> &>;
+
 // ── iterator concepts ([iterator.concepts]) ─────────────────────────────
 
 namespace __iter_impl {

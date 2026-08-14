@@ -179,26 +179,35 @@
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
 //                          algorithms] — and 23 of the entities it promises
-//                          were absent. Ф31e-b closed thirteen of them: all
-//                          thirteen [range.access] names now exist as CPOs
-//                          (b-1 added the seven c- and r-prefixed ones and
-//                          made ssize stop being a plain function template),
-//                          and b-2 added views::take_while/take_while_view,
-//                          views::drop_while/drop_while_view and
-//                          ranges::is_permutation. What remains:
-//                          views::istream/basic_istream_view/istream_view;
-//                          range_rvalue_reference_t;
-//                          range_common_reference_t; subrange's two range
-//                          deduction guides subrange(R&&) and
-//                          subrange(R&&, n); and the entire ranges::
-//                          specialized-memory family —
-//                          uninitialized_default_construct,
-//                          uninitialized_value_construct,
-//                          uninitialized_copy, uninitialized_move,
-//                          uninitialized_fill, each with its _n form, plus
-//                          destroy, destroy_n, destroy_at and construct_at
-//                          (14 names; the std:: forms of all of them do
-//                          exist in <memory>).
+//                          were absent. **All 23 now exist**, closed across
+//                          Ф31e-b and Ф31e-e: the thirteen [range.access]
+//                          CPOs and ssize-as-a-CPO (b-1); take_while,
+//                          drop_while and ranges::is_permutation (b-2); and
+//                          in e, the fourteen-name ranges:: specialized-
+//                          memory family, range_rvalue_reference_t,
+//                          range_common_reference_t, subrange's range
+//                          constructors AND the two guides that were useless
+//                          without them, and views::istream /
+//                          basic_istream_view / istream_view. Ф31e-e also
+//                          added P2387R3's range_adaptor_closure, which the
+//                          202202L step of this macro requires.
+//                          **The macro is still not defined, for a reason
+//                          that is now entirely different and much narrower.**
+//                          Its C++23 value is not one number the field agrees
+//                          on — LWG 3931 exists because FOUR papers bumped
+//                          this one macro (P2387R3, P2494R2, P2602R2,
+//                          P2609R3); the C++23 working drafts reached 202302L,
+//                          libc++ 22 reports 202211L under -std=c++23, and
+//                          libstdc++ gates P2494R2 on >= 202207L. Of those
+//                          four, only P2387R3 is implemented and verified
+//                          here. The other three are whole-clause
+//                          requirements relaxations, and a whole-clause
+//                          guarantee cannot be established by inspection —
+//                          the same bar that keeps
+//                          algorithm_iterator_requirements above undefined.
+//                          Defining it at a value this library cannot stand
+//                          behind would be exactly the overstatement this
+//                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
 // sample                   only ranges::sample exists; the classic

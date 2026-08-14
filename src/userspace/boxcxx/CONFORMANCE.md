@@ -34,7 +34,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 141 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 160 phases, 4 601 runtime checks, 1 327 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 161 phases, 4 627 runtime checks, 1 339 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -149,9 +149,10 @@ stating plainly:
 
 - Some macros stay undefined even though the everyday use of the feature works.
   `__cpp_lib_ranges` is the widest case: it stands for the whole of [ranges] plus
-  [specialized.algorithms], and is held back by the `ranges::` uninitialized-memory
-  family, `views::istream`, two range type aliases and `subrange`'s two range
-  deduction guides (§2 `<ranges>`).
+  [specialized.algorithms]. Since Ф31e-e **every entity it promises exists**; what
+  holds it back now is that its C++23 value is contested (LWG 3931) and three of
+  the four papers behind that value are whole-clause requirements relaxations
+  (§2 `<ranges>`).
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
@@ -502,6 +503,10 @@ nothing has been found since.
   rather than on an `atomic<>`. They are atomic only with respect to each other,
   never with respect to `atomic<shared_ptr>`. The C++26 phase deletes them.
 
+- The `ranges::` half of [specialized.algorithms] — fourteen names that this
+  header's `std::` half has had since Ф7 — arrived in Ф31e-e and is recorded
+  under `<ranges>`, with what it does that the `std::` forms cannot.
+
 ## `<memory_resource>`
 
 - `?` `unsynchronized_pool_resource::options()` and `synchronized_pool_resource::options()`
@@ -587,13 +592,65 @@ nothing has been found since.
   concept asks for.
 - `✓` Closed in Ф31e-b-2: `ranges::is_permutation` did not exist, though the
   non-ranges `std::is_permutation` did.
-- `–` The entire `ranges::` uninitialized-memory family does not exist.
-- `–` `ranges::basic_istream_view` / `views::istream` do not exist. **The reason
-  this entry used to give was wrong** and is corrected here: it said they are
-  specified against `basic_istream`, "whose global objects BoxOS does not have".
-  `views::istream` takes *any* `basic_istream&` — it never names `std::cin` — and
-  Ф30e built `<istream>` and `<sstream>`, so `views::istream(istringstream)` is
-  buildable today. They are simply not written yet.
+- `✓` Closed in Ф31e-e: **the entire `ranges::` uninitialized-memory family was
+  absent** — fourteen names, while the `std::` forms of all of them had been in
+  `<memory>` since Ф7. They are not spelling variants of those: the range
+  overloads return `borrowed_iterator_t`, so calling one on an expiring container
+  yields `dangling` at compile time instead of an iterator into freed storage;
+  `uninitialized_copy` and `uninitialized_move` take a sentinel for the
+  **output** too, so a short destination is a bounded early return rather than a
+  heap overrun, which the `std::` forms cannot express; and `uninitialized_move`
+  moves through `ranges::iter_move`, so a proxy iterator's own ADL `iter_move`
+  participates. They live in `<__bits/ranges_uninitialized>`, and `in_out_result`
+  moved to `<__bits/ranges_core>` to get there without putting the whole of
+  `<algorithm>` underneath every container that includes `<memory>`.
+- `✓` Closed in Ф31e-e: `subrange` had **no range constructors** — only the two
+  guides were recorded as missing, and a deduction guide with no constructor to
+  deduce for is not a gap, it is two gaps. `subrange(v)`, the spelling every
+  algorithm returning a `borrowed_subrange_t` hands back, did not compile. The
+  iterator-pair constructors also took `I` exactly, where [range.subrange]
+  requires *convertible-to-non-slicing*: `subrange<Base*>(derived_ptr,
+  derived_ptr)` was accepted and would have strided by `sizeof(Base)` over an
+  array of `Derived`. It is now rejected, while a qualification conversion
+  (`int*` → `const int*`) still works.
+- `✓` Closed in Ф31e-e: `std::get` did not reach `subrange`. [ranges.syn] hoists
+  `ranges::get` into namespace `std`; structured bindings and an ADL-qualified
+  `get(s)` found it either way, so only the spelling generic tuple-like code
+  actually uses was broken.
+- `✓` Closed in Ф31e-e: `range_rvalue_reference_t`, `range_common_reference_t`
+  and the `iter_common_reference_t` they rest on did not exist, and
+  P2387R3's `ranges::range_adaptor_closure` — the public hook a program outside
+  this library needs to write an adaptor that composes with `|` — did not either.
+- `~` **`zip_view` and its family are `tuple`-always where the standard is
+  *tuple-or-pair*.** `views::zip(a, b)` yields `tuple<int&, int&>`; the standard
+  specifies `pair<int&, int&>` at exactly two ranges. A deliberate Ф29d decision,
+  recorded here for the first time in Ф31e-e — structured bindings and
+  `get<N>` behave identically, but code that names the reference type does not
+  port.
+- `~` **`filter_view` accepts a predicate the standard rejects.** [range.filter]
+  constrains it on `indirect_unary_predicate<Pred, iterator_t<V>>`, which
+  requires `copy_constructible<Pred>`; boxcxx uses `predicate<Pred&,
+  range_reference_t<V>>`, which does not. A move-only predicate is therefore
+  accepted here and rejected by libc++ 22 (measured). More permissive, so no
+  correct program breaks — but a program written against boxcxx may not port.
+  `take_while_view` is *not* affected: it carries the standard's
+  `indirect_unary_predicate<const Pred, …>` and rejects a move-only predicate,
+  as libc++ does.
+- `✓` Closed in Ф31e-e: `ranges::basic_istream_view` / `views::istream` /
+  `istream_view` did not exist, and **the reason this entry used to give for that
+  was wrong**: it said they are specified against `basic_istream`, "whose global
+  objects BoxOS does not have". `views::istream` names no global — it binds
+  whatever `basic_istream&` it is handed — and Ф30e had already put `<istream>`
+  and `<sstream>` in the tree.
+- `~` One residual on that: `<ranges>` includes only `<iosfwd>`, so a translation
+  unit that includes `<ranges>` **alone** finds `istream_view<int>`'s constraint
+  unsatisfied rather than the type. An edge from `<ranges>` to `<istream>` is a
+  genuine cycle here, measured rather than assumed: `<istream>` → `<ostream>` →
+  `<ios>`, and `ios_base` keeps its `iword`/`pword` and callback tables in
+  `std::vector`, while `<vector>` → `<algorithm>` → `<__bits/ranges_algo>` →
+  `<ranges>`. libc++ can afford the edge because its `ios_base` uses raw arrays
+  for those three tables. Any program that can actually call `views::istream` has
+  a stream, and so has `<istream>` or `<sstream>` included already.
 - `?` `split_view` and `lazy_split_view` report `iterator_category ==
   input_iterator_tag`, which is what the standard itself specifies (their
   `operator*` yields a prvalue). The concept layer is unaffected —
@@ -939,14 +996,33 @@ this document were **wrong** and were corrected rather than closed: `<barrier>`'
 gap was wider than the `atomic_float` entry said. `scoped_lock<Mutex>::mutex_type`
 went with them, for a seventh.
 
+Ф31e-e then closed the last of the missing `[ranges]` entities (phase 149): the
+fourteen-name `ranges::` uninitialized-memory family, `subrange`'s range
+constructors — which the previous entry had recorded as only two missing
+deduction guides, when a guide with no constructor to deduce for is two gaps —
+`range_rvalue_reference_t`, `range_common_reference_t`,
+`range_adaptor_closure`, `std::get` over `subrange`, and `views::istream`. It did
+**not** close `__cpp_lib_ranges`, and that is the honest outcome rather than a
+shortfall: every entity exists, but the macro's C++23 value is contested (LWG
+3931) and three of the four papers behind it are whole-clause relaxations this
+library cannot claim by inspection. Two previously unrecorded deviations
+surfaced while measuring: `zip`'s tuple-always shape, and `filter_view` accepting
+a move-only predicate the standard rejects. Both are in §2.
+
 What is left:
 
 - `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
   constant-evaluated (§2).
-- `<ranges>`: `views::istream` and its view types, `range_rvalue_reference_t`,
-  `range_common_reference_t`, `subrange`'s two range deduction guides, and the
-  whole `ranges::` specialized-memory family (14 names) are still absent. They are
-  what keeps `__cpp_lib_ranges` unclaimable.
+- `<ranges>`: **every entity `__cpp_lib_ranges` promises now exists** (Ф31e-e),
+  and the macro is still not defined — for a reason that changed completely. Its
+  C++23 value is not one number the field agrees on: LWG 3931 exists because
+  *four* papers bumped this one macro, the C++23 working drafts reached 202302L,
+  libc++ 22 reports 202211L under `-std=c++23`, and libstdc++ gates P2494R2 on
+  `>= 202207L`. Of the four, only P2387R3 (`range_adaptor_closure`) is
+  implemented and verified here; P2494R2, P2602R2 and P2609R3 are whole-clause
+  requirements relaxations that cannot be established by inspection — the same
+  bar that keeps `__cpp_lib_algorithm_iterator_requirements` undefined. Closing
+  it is a verification task, not a missing-code one.
 - `<cmath>`: `std::log10` is inexact on 1 of the 23 exact powers of ten. Measured
   on BoxOS; `box::log(x, 10)` returns 22 of 23 exactly by using `log10` directly.
 - `<iterator>`: `incrementable_traits<common_iterator>` is not specialized. The
@@ -1017,7 +1093,12 @@ A claim about a *defect* is not written here from reading the new code either.
 Each one in §2 marked `✓` was re-checked against the pre-fix headers — extracted
 from git, put ahead of the current include path so only the header under test is
 the old one — and had to fail to compile, or compile and give the wrong answer,
-before the entry describing it was written. Ф31e-d ran twelve such probes.
+before the entry describing it was written. Ф31e-d ran twelve such probes and
+Ф31e-e eleven. Two of the twenty-three came back the second way rather than the
+first, which is the reason the method is worth its cost: `atomic<weak_ptr>`'s
+three-argument `compare_exchange` compiled and silently used the wrong failure
+order, and `subrange<Base*>` accepted a `Derived*` pair and would have strided by
+the wrong element size.
 
 ## The trap that shaped this document
 

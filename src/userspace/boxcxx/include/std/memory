@@ -12,6 +12,7 @@
 #include <__bits/allocator_core>
 #include <__bits/iterator_core>
 #include <__bits/pointer>
+#include <__bits/ranges_uninitialized>
 #include <__bits/version_memory>
 #include <atomic>
 #include <compare>
