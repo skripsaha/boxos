@@ -13,6 +13,11 @@
 // reference), not just the bleeding-edge eel.is/c++draft snapshot, which
 // mixes in C++26-only DR bumps boxcxx does not implement.
 //
+// __cpp_lib_ranges_reserve_hint (P2846R6) IS here and is a C++26 value: the
+// CPO, the approximately_sized_range concept, sized_range's rebasing onto it,
+// reserve_hint on all seventeen views the paper touches, and ranges::to using
+// it in place of ranges::size are all implemented (Ф32-c).
+//
 // __cpp_lib_ranges itself is NOT here: it is the widest macro in
 // [version.syn], covering the whole of [ranges] plus the specialized-memory
 // algorithms, and boxcxx is missing 23 of the entities it promises. See
@@ -62,6 +67,10 @@
 #endif
 #ifndef __cpp_lib_ranges_as_rvalue
 #  define __cpp_lib_ranges_as_rvalue 202207L
+#endif
+
+#ifndef __cpp_lib_ranges_reserve_hint
+#  define __cpp_lib_ranges_reserve_hint 202502L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_RANGES
