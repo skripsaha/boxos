@@ -5,10 +5,23 @@
 // [support.limits.general] per-header reason as <__bits/version_iostreams>
 // -- see that file's comment.
 //
-// Deliberately absent (see <version>'s list): constexpr_string,
-// string_resize_and_overwrite, string_view, char8_t, erase_if.
+// string_view is claimed on crbegin/crend, the last two members it was
+// missing; string_resize_and_overwrite is P1072R10; erase_if needed only
+// the basic_string predicate overload, the last of the thirteen.
+//
+// Deliberately absent (see <version>'s list): constexpr_string, char8_t.
 #ifndef BOXCXX_BITS_VERSION_STRING
 #define BOXCXX_BITS_VERSION_STRING
+
+#ifndef __cpp_lib_string_view
+#  define __cpp_lib_string_view 202106L
+#endif
+#ifndef __cpp_lib_string_resize_and_overwrite
+#  define __cpp_lib_string_resize_and_overwrite 202110L
+#endif
+#ifndef __cpp_lib_erase_if
+#  define __cpp_lib_erase_if 202002L
+#endif
 
 #ifndef __cpp_lib_constexpr_string_view
 #  define __cpp_lib_constexpr_string_view 201811L

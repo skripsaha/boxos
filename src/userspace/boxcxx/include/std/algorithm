@@ -20,4 +20,31 @@
 #include <__bits/ranges_algo_sort>  // partition/sort/heap/permutation     (Ф29b-2)
 #include <__bits/ranges_algo_set>   // merge + set operations              (Ф29b-2)
 
+// ── [alg.random.sample] / [alg.random.shuffle], classic spelling ────────
+// The ranges:: forms have been here since Ф29b-2 and the classic ones never
+// were, so `std::sample(...)` and `std::shuffle(...)` — the spelling in
+// every pre-ranges algorithm text — did not compile. They live HERE rather
+// than in <__bits/algorithm_classic> because that leaf is included first, and
+// these delegate to the ranges:: engines instead of carrying a second copy of
+// the selection- and reservoir-sampling logic. std::sample closed
+// __cpp_lib_sample; std::shuffle has no macro of its own and its absence was
+// recorded nowhere.
+namespace std {
+
+template <class PopIt, class SampleIt, class Distance, class URBG>
+SampleIt sample(PopIt first, PopIt last, SampleIt out, Distance n, URBG &&g)
+{
+    return ranges::sample(first, last, out,
+                          static_cast<iter_difference_t<PopIt>>(n),
+                          std::forward<URBG>(g));
+}
+
+template <class RandomIt, class URBG>
+void shuffle(RandomIt first, RandomIt last, URBG &&g)
+{
+    ranges::shuffle(first, last, std::forward<URBG>(g));
+}
+
+} // namespace std
+
 #endif // BOXCXX_ALGORITHM

@@ -61,6 +61,7 @@
 #include <__bits/version_optional>        // <optional>
 #include <__bits/version_ranges>          // <ranges>
 #include <__bits/version_source_location> // <source_location>
+#include <__bits/version_span>            // <span>
 #include <__bits/version_string>          // <string>/<string_view>
 #include <__bits/version_sync>            // <latch>/<semaphore>/<shared_mutex>
 #include <__bits/version_thread>          // <thread>/<stop_token>
@@ -144,10 +145,6 @@
 // constexpr_string         basic_string is not constexpr at all (it needs
 //                          the compiler-blessed constexpr allocator path).
 // constexpr_vector         vector is not constexpr at all, same reason.
-// erase_if                 present for all twelve containers, and
-//                          std::erase(basic_string&, const U&) is present
-//                          too; the single missing overload is
-//                          std::erase_if(basic_string&, Pred).
 // execution                no <execution> header.
 // filesystem               no <filesystem> header.
 // format                   <format> is char-only: no wchar_t, no
@@ -164,11 +161,6 @@
 //                          absent.
 // mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
-// nonmember_container_access
-//                          size/ssize/empty/data cover containers and
-//                          arrays, but the two initializer_list overloads
-//                          (empty(initializer_list), data(initializer_list))
-//                          are absent.
 // parallel_algorithm       no <execution>, so no ExecutionPolicy overloads.
 // print                    print/println/vprint_unicode/vprint_nonunicode
 //                          exist for the terminal, but every <ostream>
@@ -208,31 +200,17 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// sample                   only ranges::sample exists; the classic
-//                          std::sample is absent.
 // shared_ptr_arrays        the two bounded-array allocate_shared overloads
 //                          are absent (only the unbounded T[] forms exist).
 // smart_ptr_for_overwrite  make_unique_for_overwrite and make_shared_for_
 //                          overwrite are complete, but allocate_shared_for
 //                          _overwrite is absent in all three forms.
-// span                     span has no crbegin/crend; the two
-//                          iterator-pair constructors are not
-//                          explicit(extent != dynamic_extent) and take
-//                          pointers rather than an iterator/sentinel pair;
-//                          and the range deduction guide is absent.
 // spanstream               no <spanstream> header.
 // stacktrace               no <stacktrace> header.
 // start_lifetime_as        start_lifetime_as / start_lifetime_as_array
 //                          absent.
 // stdatomic_h              no <stdatomic.h> header.
-// string_resize_and_overwrite
-//                          basic_string::resize_and_overwrite absent.
-// string_view              basic_string_view has no crbegin/crend.
 // syncbuf                  no <syncbuf> header.
-// transformation_trait_aliases
-//                          the C++14 alias set is missing aligned_storage_t
-//                          and aligned_union_t (deprecated in C++23, but
-//                          still required).
 // tuple_like               P2165R4's tuple-like is EXPOSITION-ONLY in C++23,
 //                          so there is no std::tuple_like to be missing —
 //                          the reason is entirely the converting machinery

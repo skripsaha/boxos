@@ -12,6 +12,10 @@
 #ifndef BOXCXX_BITS_VERSION_ALGORITHM
 #define BOXCXX_BITS_VERSION_ALGORITHM
 
+#ifndef __cpp_lib_sample
+#  define __cpp_lib_sample 201603L
+#endif
+
 // __cpp_lib_constexpr_algorithms is co-owned by <algorithm> and <utility>,
 // so it is DEFINED in <__bits/version_utility> (one definition site for
 // every co-owned macro) and reaches <algorithm> through this include.

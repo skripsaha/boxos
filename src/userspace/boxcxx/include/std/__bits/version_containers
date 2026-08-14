@@ -23,10 +23,14 @@
 // copied instead of moved, silently, which is the entire reason that overload
 // exists. Ф31e-f completed both sets.
 //
-// Deliberately absent (see <version>'s list): erase_if,
-// nonmember_container_access, constexpr_vector, constexpr_string.
+// Deliberately absent (see <version>'s list): constexpr_vector,
+// constexpr_string.
 #ifndef BOXCXX_BITS_VERSION_CONTAINERS
 #define BOXCXX_BITS_VERSION_CONTAINERS
+
+#ifndef __cpp_lib_erase_if
+#  define __cpp_lib_erase_if 202002L
+#endif
 
 #ifndef __cpp_lib_adaptor_iterator_pair_constructor
 #  define __cpp_lib_adaptor_iterator_pair_constructor 202106L

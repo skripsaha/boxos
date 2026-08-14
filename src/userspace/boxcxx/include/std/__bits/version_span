@@ -1,0 +1,21 @@
+// boxcxx — <__bits/version_span>
+//
+// The one feature-test macro [version.syn] gives <span>: P0122R7's span,
+// at its C++20 value with P2116R0's deduction guides folded in. Split into a
+// leaf for the same [support.limits.general] per-header reason as every other
+// version_* file -- see <__bits/version_any> for the full explanation.
+//
+// It was withheld on three things this document also got partly wrong. The
+// claim that span had no crbegin/crend was stale -- both were there. What
+// was genuinely missing: the iterator constructors took POINTERS rather than
+// an iterator and a sentinel, they were not explicit(extent !=
+// dynamic_extent), and the range deduction guide did not exist, so
+// `std::span(v)` over a vector could not deduce at all. Ф31e-g closed those.
+#ifndef BOXCXX_BITS_VERSION_SPAN
+#define BOXCXX_BITS_VERSION_SPAN
+
+#ifndef __cpp_lib_span
+#  define __cpp_lib_span 202002L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_SPAN
