@@ -163,6 +163,37 @@ public:
     {
         insert(il.begin(), il.end());
     }
+    // LWG 2713 (Status: Ready) -- the same three sources with an allocator but
+    // NO bucket count. The ordered containers have had all three since C++11 /
+    // C++23; the unordered ones were simply forgotten, and the deduction guides
+    // for them were standardised anyway, so [unord.map.syn] promises guides for
+    // constructors that did not exist.
+    //
+    // The initializer_list form is not merely absent -- without it,
+    // `unordered_map<K,V> m(il, a)` still COMPILES and does the wrong thing: il
+    // implicitly builds a whole temporary container through the (init-list,
+    // buckets=0, ...) ctor using a DEFAULT-constructed allocator, and that
+    // temporary then binds to (const unordered_map&, const Alloc&). One extra
+    // full construction plus a copy, and the first one allocated from the wrong
+    // resource. An allocator with no default constructor turns that silent path
+    // into a compile error, which is how the test pins it.
+    template <typename It>
+    unordered_map(It first, It last, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_map(initializer_list<value_type> il, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_map(from_range_t, R &&rg, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_map &operator=(const unordered_map &) = default;
     unordered_map &operator=(unordered_map &&) = default;
     unordered_map &operator=(initializer_list<value_type> il)
@@ -578,6 +609,25 @@ public:
     {
         insert(il.begin(), il.end());
     }
+    // LWG 2713 -- see unordered_map above for why the init-list form is a
+    // silently-wrong path rather than a missing one.
+    template <typename It>
+    unordered_multimap(It first, It last, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_multimap(initializer_list<value_type> il, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multimap(from_range_t, R &&rg, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_multimap &operator=(const unordered_multimap &) = default;
     unordered_multimap &operator=(unordered_multimap &&) = default;
     unordered_multimap &operator=(initializer_list<value_type> il)
@@ -960,6 +1010,73 @@ template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
 unordered_multimap(from_range_t, R &&, size_t, Hash, Alloc)
     -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>, Hash,
                           equal_to<__ht::DeductRangeKey<R>>, Alloc>;
+
+// Bucket-less allocator guides, the CTAD half of LWG 2713 -- the standard
+// listed these in [unord.map.syn] all along, for constructors that did not
+// exist until this phase added them. A guide with no constructor behind it is
+// two gaps, not one (the same shape as subrange's range guides in Ф31e-e).
+template <typename It, AllocatorLike Alloc>
+unordered_map(It, It, Alloc)
+    -> unordered_map<__ht::DeductKey<It>, __ht::DeductMapped<It>,
+                     hash<__ht::DeductKey<It>>, equal_to<__ht::DeductKey<It>>, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_map(from_range_t, R &&, Alloc)
+    -> unordered_map<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>,
+                     hash<__ht::DeductRangeKey<R>>, equal_to<__ht::DeductRangeKey<R>>, Alloc>;
+
+template <typename It, AllocatorLike Alloc>
+unordered_multimap(It, It, Alloc)
+    -> unordered_multimap<__ht::DeductKey<It>, __ht::DeductMapped<It>,
+                          hash<__ht::DeductKey<It>>, equal_to<__ht::DeductKey<It>>, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_multimap(from_range_t, R &&, Alloc)
+    -> unordered_multimap<__ht::DeductRangeKey<R>, __ht::DeductRangeMapped<R>,
+                          hash<__ht::DeductRangeKey<R>>, equal_to<__ht::DeductRangeKey<R>>, Alloc>;
+
+// Initializer-list guides ([unord.map.deduct] / [unord.multimap.deduct]).
+// Same const-Key reason as <map>'s: the constructors take
+// initializer_list<pair<const Key, T>>, so no implicit guide can ever deduce
+// Key and T from a braced list of pair<int,int>, and
+// `std::unordered_map m{std::pair{1, 2}}` did not compile without these.
+template <typename Key, typename T, NotAllocatorLike Hash = hash<Key>,
+          NotAllocatorLike KeyEq = equal_to<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+unordered_map(initializer_list<pair<Key, T>>, size_t = 0, Hash = Hash(), KeyEq = KeyEq(),
+              Alloc = Alloc())
+    -> unordered_map<Key, T, Hash, KeyEq, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+unordered_map(initializer_list<pair<Key, T>>, size_t, Alloc)
+    -> unordered_map<Key, T, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+unordered_map(initializer_list<pair<Key, T>>, Alloc)
+    -> unordered_map<Key, T, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, typename T, NotAllocatorLike Hash, AllocatorLike Alloc>
+unordered_map(initializer_list<pair<Key, T>>, size_t, Hash, Alloc)
+    -> unordered_map<Key, T, Hash, equal_to<Key>, Alloc>;
+
+template <typename Key, typename T, NotAllocatorLike Hash = hash<Key>,
+          NotAllocatorLike KeyEq = equal_to<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+unordered_multimap(initializer_list<pair<Key, T>>, size_t = 0, Hash = Hash(), KeyEq = KeyEq(),
+                   Alloc = Alloc())
+    -> unordered_multimap<Key, T, Hash, KeyEq, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+unordered_multimap(initializer_list<pair<Key, T>>, size_t, Alloc)
+    -> unordered_multimap<Key, T, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+unordered_multimap(initializer_list<pair<Key, T>>, Alloc)
+    -> unordered_multimap<Key, T, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, typename T, NotAllocatorLike Hash, AllocatorLike Alloc>
+unordered_multimap(initializer_list<pair<Key, T>>, size_t, Hash, Alloc)
+    -> unordered_multimap<Key, T, Hash, equal_to<Key>, Alloc>;
 
 } // namespace std
 

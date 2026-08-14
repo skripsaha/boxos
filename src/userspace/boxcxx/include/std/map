@@ -955,6 +955,35 @@ template <ranges::input_range R, AllocatorLike Alloc>
 multimap(from_range_t, R &&, Alloc)
     -> multimap<__rb::DeductRangeKey<R>, __rb::DeductRangeMapped<R>, less<__rb::DeductRangeKey<R>>, Alloc>;
 
+// Initializer-list guides ([map.deduct] / [multimap.deduct]). Unlike the two
+// families above these CANNOT be left to the implicit guides, and the reason
+// is a single `const`: the constructor takes initializer_list<value_type>,
+// i.e. initializer_list<pair<const Key, T>>, and a braced list of
+// pair<int,int> never deduces pair<const Key, T> from it. So `std::map
+// m{std::pair{1, 2}}` was a hard error -- while `std::set s{1, 2, 3}` always
+// worked, because set's value_type IS Key with no const wrapper. That is why
+// the standard spells these guides with a NON-const Key and why omitting them
+// is not the harmless symmetry it looks like.
+//
+// The Comp slot is NotAllocatorLike for the usual reason: it is what routes
+// `map m({...}, alloc)` to the allocator guide below instead of deducing the
+// allocator as a comparator.
+template <typename Key, typename T, NotAllocatorLike Comp = less<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+map(initializer_list<pair<Key, T>>, Comp = Comp(), Alloc = Alloc())
+    -> map<Key, T, Comp, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+map(initializer_list<pair<Key, T>>, Alloc) -> map<Key, T, less<Key>, Alloc>;
+
+template <typename Key, typename T, NotAllocatorLike Comp = less<Key>,
+          typename Alloc = allocator<pair<const Key, T>>>
+multimap(initializer_list<pair<Key, T>>, Comp = Comp(), Alloc = Alloc())
+    -> multimap<Key, T, Comp, Alloc>;
+
+template <typename Key, typename T, AllocatorLike Alloc>
+multimap(initializer_list<pair<Key, T>>, Alloc) -> multimap<Key, T, less<Key>, Alloc>;
+
 } // namespace std
 
 #endif // BOXCXX_MAP

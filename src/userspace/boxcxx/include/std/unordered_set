@@ -143,6 +143,30 @@ public:
     {
         insert(il.begin(), il.end());
     }
+    // LWG 2713 (Status: Ready) -- the same three sources with an allocator but
+    // no bucket count, which the ordered containers have had all along and
+    // [unord.set.syn] already writes deduction guides for. The init-list form
+    // is the load-bearing one: without it `unordered_set<K> s(il, a)` compiles
+    // anyway, building a whole temporary through the (init-list, buckets=0,
+    // ...) ctor with a DEFAULT-constructed allocator and then copying it into
+    // the alloc-extended copy ctor. See unordered_map for the full note.
+    template <typename It>
+    unordered_set(It first, It last, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_set(initializer_list<Key> il, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_set(from_range_t, R &&rg, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
+    }
     unordered_set &operator=(const unordered_set &) = default;
     unordered_set &operator=(unordered_set &&) = default;
     unordered_set &operator=(initializer_list<Key> il)
@@ -455,6 +479,25 @@ public:
         : __t(buckets, h, KeyEq(), a)
     {
         insert(il.begin(), il.end());
+    }
+    // LWG 2713 -- see unordered_set above for why the init-list form is a
+    // silently-wrong path rather than a missing one.
+    template <typename It>
+    unordered_multiset(It first, It last, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(first, last);
+    }
+    unordered_multiset(initializer_list<Key> il, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert(il.begin(), il.end());
+    }
+    template <ContainerCompatibleRange<value_type> R>
+    unordered_multiset(from_range_t, R &&rg, const Alloc &a)
+        : __t(0, Hash(), KeyEq(), a)
+    {
+        insert_range(std::forward<R>(rg));
     }
     unordered_multiset &operator=(const unordered_multiset &) = default;
     unordered_multiset &operator=(unordered_multiset &&) = default;
@@ -818,6 +861,66 @@ unordered_multiset(from_range_t, R &&, size_t, Alloc)
 template <ranges::input_range R, typename Hash, AllocatorLike Alloc>
 unordered_multiset(from_range_t, R &&, size_t, Hash, Alloc)
     -> unordered_multiset<ranges::range_value_t<R>, Hash, equal_to<ranges::range_value_t<R>>, Alloc>;
+
+// Bucket-less allocator guides, the CTAD half of LWG 2713 -- [unord.set.syn]
+// listed them for constructors that did not exist until this phase.
+template <typename It, AllocatorLike Alloc>
+unordered_set(It, It, Alloc)
+    -> unordered_set<iter_value_t<It>, hash<iter_value_t<It>>, equal_to<iter_value_t<It>>, Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_set(from_range_t, R &&, Alloc)
+    -> unordered_set<ranges::range_value_t<R>, hash<ranges::range_value_t<R>>,
+                     equal_to<ranges::range_value_t<R>>, Alloc>;
+
+template <typename It, AllocatorLike Alloc>
+unordered_multiset(It, It, Alloc)
+    -> unordered_multiset<iter_value_t<It>, hash<iter_value_t<It>>, equal_to<iter_value_t<It>>,
+                          Alloc>;
+
+template <ranges::input_range R, AllocatorLike Alloc>
+unordered_multiset(from_range_t, R &&, Alloc)
+    -> unordered_multiset<ranges::range_value_t<R>, hash<ranges::range_value_t<R>>,
+                          equal_to<ranges::range_value_t<R>>, Alloc>;
+
+// Initializer-list guides ([unord.set.deduct] / [unord.multiset.deduct]).
+// value_type IS Key here, so the implicit guides already worked; these exist
+// because the standard specifies them and because an explicit guide outranks
+// an implicit one, which keeps the allocator forms unambiguous the way <set>'s
+// new guides do.
+template <typename Key, NotAllocatorLike Hash = hash<Key>,
+          NotAllocatorLike KeyEq = equal_to<Key>, typename Alloc = allocator<Key>>
+unordered_set(initializer_list<Key>, size_t = 0, Hash = Hash(), KeyEq = KeyEq(), Alloc = Alloc())
+    -> unordered_set<Key, Hash, KeyEq, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+unordered_set(initializer_list<Key>, size_t, Alloc)
+    -> unordered_set<Key, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+unordered_set(initializer_list<Key>, Alloc) -> unordered_set<Key, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, NotAllocatorLike Hash, AllocatorLike Alloc>
+unordered_set(initializer_list<Key>, size_t, Hash, Alloc)
+    -> unordered_set<Key, Hash, equal_to<Key>, Alloc>;
+
+template <typename Key, NotAllocatorLike Hash = hash<Key>,
+          NotAllocatorLike KeyEq = equal_to<Key>, typename Alloc = allocator<Key>>
+unordered_multiset(initializer_list<Key>, size_t = 0, Hash = Hash(), KeyEq = KeyEq(),
+                   Alloc = Alloc())
+    -> unordered_multiset<Key, Hash, KeyEq, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+unordered_multiset(initializer_list<Key>, size_t, Alloc)
+    -> unordered_multiset<Key, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+unordered_multiset(initializer_list<Key>, Alloc)
+    -> unordered_multiset<Key, hash<Key>, equal_to<Key>, Alloc>;
+
+template <typename Key, NotAllocatorLike Hash, AllocatorLike Alloc>
+unordered_multiset(initializer_list<Key>, size_t, Hash, Alloc)
+    -> unordered_multiset<Key, Hash, equal_to<Key>, Alloc>;
 
 } // namespace std
 
