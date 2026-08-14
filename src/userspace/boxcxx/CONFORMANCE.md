@@ -23,6 +23,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | `~` | **Deviation by decision.** Deliberate, with the reason recorded. |
 | `–` | **Absent.** The header exists; this part of it does not. |
 | `?` | **Unspecified by the standard.** This records the choice boxcxx made, so you can rely on it here without believing it is portable. |
+| `✓` | **Closed.** It used to deviate and no longer does. Kept, with what it used to do, because that is what explains why code written against the old behaviour changed — and because a list that quietly deletes its own history is not an inventory. |
 
 ## What the library is, in numbers
 
@@ -33,7 +34,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 128 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 156 phases, 4 512 runtime checks, 1 242 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 157 phases, 4 525 runtime checks, 1 270 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -53,7 +54,7 @@ the library itself; there is no "no-exceptions" configuration.
 |---|---|---|
 | `#include <iostream>`, `std::cout` | no such header, no such name | BoxOS has no stdin/stdout/stderr. Use `std::print` / `std::println`, or `box::current` for the I/O spine. `<ostream>`, `<sstream>` and the rest of the stream machinery **do** exist (§1.1). |
 | `#include <fstream>` | no such header | Files are tag-addressed: `box::tagfs`, and `box::ferry` for `co_await` file I/O. |
-| `os << u8"text"` | compiles, prints a **pointer address** | The `char8_t`/`char16_t`/`char32_t` inserters are not deleted as the standard requires (§2 `<ostream>`) — a real bug, listed here so it does not bite you silently. |
+| `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
 | `views::take_while`, `ranges::cbegin` | no such name | Seven range-access CPOs and both `*_while` adaptors are missing (§2 `<ranges>`). |
@@ -207,11 +208,9 @@ nothing has been found since.
   declared for the zero-size case too (calling them is undefined; declaring them is
   not optional). What it does have: `at`, `data`, `begin`/`end`, `cbegin`/`cend`,
   `empty`, `size`, `max_size`, `fill`, `swap`.
-- `!` **`get<I>` has no `const array&&` overload.** `get<0>(std::move(ca))` on a
-  `const array` therefore binds to the `const array&` overload and yields
-  `const T&` where [array.tuple] specifies `const T&&`. It compiles and returns
-  the right object with the wrong value category, so a forwarding layer built on
-  top of it silently changes behaviour.
+  (`✓` Closed in Ф31e-a: `get<I>` on a `const array&&` now returns `const T&&` as
+  [array.tuple] specifies, instead of binding to the `const array&` overload and
+  handing a forwarding layer an lvalue.)
 
 ## `<atomic>`
 
@@ -332,23 +331,17 @@ nothing has been found since.
 
 ## `<format>`
 
-- `!` **A `basic_string` with non-default traits or allocator has no formatter of
-  its own and is formatted as a range.** [format.formatter.spec]/2.2 requires
-  *partial* specializations over `traits` and `Allocator`; boxcxx provides only the
-  full specializations for `string` and `string_view`. So
-  `basic_string<char, MyTraits, MyAlloc>` falls through to the range formatter and
-  prints `['a', 'b', 'c']` instead of `abc`, and `{:?}` on it is rejected with
-  "`'?'` is only allowed in combination with `s`". Width is *not* ignored — the
-  range formatter pads the whole bracketed string — which makes the wrong output
-  look deliberate. Measured: on libstdc++ 16.1 the same type is *not* routed
-  through the range formatter, because the partial specializations are there.
-- `!` **`format("{}", volatile_lvalue)` compiles**, although
-  `formattable<volatile int, char>` is correctly `false`. `MapKind` applies
-  `decay_t` before formattability is ever consulted, so the `volatile` is dropped
-  and the argument is stored as a plain `int`. **Both** libstdc++ 16.1 and libc++
-  22 reject the same code. The library's own guard for this
-  (`static_assert(FormattableWith<…>)`) is bypassed because the decayed type
-  matches a built-in kind and never reaches the custom-formatter branch.
+- `✓` Closed in Ф31e-a: a `basic_string` or `basic_string_view` with non-default
+  traits or allocator now has the *partial* specializations
+  [format.formatter.spec]/2.2 asks for, and formats as its text. It used to match
+  neither full specialization, fall through to the range formatter, and print
+  `['a', 'b', 'c']` — with width padding the bracketed form, which made the wrong
+  output look deliberate — while `{:?}` was rejected outright.
+- `✓` Closed in Ф31e-a: `format("{}", volatile_lvalue)` is rejected, as it is by both
+  reference libraries. `MapKind` applied `decay_t` before formattability was ever
+  consulted, so the `volatile` was dropped, the argument was stored as a plain
+  `int`, and the library's own `static_assert(FormattableWith<…>)` guard was
+  bypassed — `formattable<volatile int, char>` said `false` the whole time.
 - `+` **Field width is capped at 65535.** On the literal path this is a
   compile-time error ("width exceeds the field limit") caught by the consteval
   format-string check; on the dynamic path (`{:{}}`) it throws at run time. Neither
@@ -441,22 +434,23 @@ nothing has been found since.
 
 ## `<ostream>`
 
-- `!` **The `char8_t` / `char16_t` / `char32_t` inserters are not deleted.**
-  [ostream.inserters.character] requires `operator<<` to be *deleted* for these
-  types precisely so that the mistake is caught. In boxcxx they are simply absent,
-  so the call binds to something else and compiles:
-
-  | Written | Binds to | Prints |
-  |---|---|---|
-  | `os << u8"hi"` | `operator<<(const void*)` | the **pointer address** |
-  | `os << u"hi"`, `os << U"hi"` | `operator<<(const void*)` | the **pointer address** |
-  | `os << char8_t('x')` | `operator<<(int)` / `(unsigned)` | the **number** |
-
-  Verified in generated assembly (`_ZNSolsEPKv`, `_ZNSolsEi`) — this is a silent
-  wrong-output path, the worst kind on this list. The extraction side happens to
-  be safe, but only by accident: no `istream` extractor binds a reference across
-  distinct fundamental types, so `is >> char8_t_lvalue` fails to compile even
-  though nothing deletes it either.
+- `✓` Closed in Ф31e-a: the `wchar_t` / `char8_t` / `char16_t` / `char32_t`
+  inserters are now deleted per [ostream.inserters.character], in both the
+  character and the pointer form. Until then they were merely *absent*, which is
+  not the same thing — the call bound to something else and compiled:
+  `os << u8"hi"` and `os << L"hi"` reached `operator<<(const void*)` and printed
+  the **pointer address**, `os << char8_t('x')` promoted to `operator<<(int)` and
+  printed the **number**. Verified in generated assembly at the time
+  (`_ZNSolsEPKv`, `_ZNSolsEi`); the deletions are pinned by cxxtest phase144.
+- `~` The synopsis's six `basic_ostream<wchar_t, traits>` deletions are **not**
+  mirrored. Wide streams are a permanent exclusion (§1.2) and there is no
+  `char_traits<wchar_t>`, so `basic_ostream<wchar_t, …>` can never be formed and
+  those overloads could never be candidates. Declared for completeness they would
+  be unreachable text.
+- `?` The extraction side is safe, but only by accident: no `istream` extractor
+  binds a reference across distinct fundamental types, so `is >> char8_t_lvalue`
+  fails to compile even though nothing deletes it either. The standard does not
+  delete extractors, so there is nothing to add.
 
 ## `<print>`
 
@@ -530,23 +524,17 @@ nothing has been found since.
 
 ## `<type_traits>`
 
-- `!` **`is_swappable_v` is false for every array type**, and this is not merely an
-  inaccurate answer — it breaks a working operation. Verified in the tree:
-
-  | Expression | boxcxx | Standard |
-  |---|---|---|
-  | `is_swappable_v<int>` | true | true |
-  | `is_swappable_v<int[3]>` | **false** | true |
-  | `std::swap(int[3], int[3])` | **works** | works |
-  | `std::swap(int[2][2], int[2][2])` | **does not compile** | works |
-
-  The mechanism: `<type_traits>` declares the generic `swap(T&, T&)` itself and
-  detects swappability by unqualified lookup, so scalars and class types answer
-  correctly. The *array* overload lives in `<utility>`, which `<type_traits>` does
-  not include, and a built-in array has no associated namespace for ADL to reach —
-  so the trait never sees it. The array overload is in turn constrained on
-  `is_swappable<T>` of its **element** type: element `int` is swappable, so
-  `int[3]` works; element `int[2]` is not, so the nested case is rejected outright.
+- `✓` Closed in Ф31e-a: `is_swappable_v` was false for **every** array type, which was
+  not merely an inaccurate answer — it broke a working operation.
+  `is_swappable_v<int[3]>` said false while `std::swap(int[3], int[3])` worked, and
+  `std::swap(int[2][2], int[2][2])` did not compile at all. The mechanism:
+  `<type_traits>` declares the generic `swap(T&, T&)` itself and detects
+  swappability by unqualified lookup, so scalars and class types answered
+  correctly; the *array* overload lived only in `<utility>`, and a built-in array
+  has no associated namespace for ADL to reach, so the trait could never see it.
+  The nested case then fell over because the array overload is constrained on
+  `is_swappable` of its **element** type — element `int[2]` answered false. The
+  fix declares the array overload beside the scalar one, where the trait looks.
 
 ## `<utility>`
 
@@ -563,18 +551,24 @@ nothing has been found since.
 
 ## `<vector>`
 
-- `!` `vector<bool>::iterator` does not model `std::output_iterator<…, bool>`, so
-  generic algorithms constrained on an output iterator reject it. The precise
-  cause: `indirectly_writable` requires `const_cast<const iter_reference_t<Out>&&>(*o) = t`
-  to be valid, and the proxy's `operator=(bool)` is not const-qualified.
-  (`vector<bool>` **is** the packed specialization — `size_t` word storage with a
-  proxy reference — despite what the header's own banner said until this document
-  was written.)
-- `!` **`vector<bool>::swap` does not exchange allocators**, so `propagate_on_container_swap`
-  is ignored on this specialization while the primary template honours it. Shown by
-  differential probe: with a POCS allocator that is not copy-assignable,
-  `vector<int>::swap` fails to compile at the allocator assignment and
-  `vector<bool>::swap` compiles — because it never touches the allocator at all.
+- `✓` Closed in Ф31e-a: `vector<bool>::iterator` did not model
+  `std::output_iterator<…, bool>`, so every algorithm constrained on an output
+  iterator rejected the container. The precise cause: `indirectly_writable`
+  requires `const_cast<const iter_reference_t<Out>&&>(*o) = t` to be valid, and the
+  proxy had no const-qualified `operator=(bool)` — the one P2321R2 added for
+  exactly this. `__cpp_lib_ranges_zip` was already defined, so the paper was being
+  claimed with this piece of it missing; its other pieces (the views, and the
+  const-qualified `pair` assignment and swap) were in place.
+  (`vector<bool>` **is** the packed specialization — `size_t` word
+  storage with a proxy reference — despite what the header's own banner said until
+  this document was written.)
+- `✓` Closed in Ф31e-a: `vector<bool>::swap` did not exchange allocators, so
+  `propagate_on_container_swap` was ignored on this specialization while the
+  primary template honoured it, leaving each vector holding words allocated by the
+  other's allocator. Shown by differential probe, and re-run after the fix: with a
+  POCS allocator that is not copy-assignable, `vector<int>::swap` and
+  `vector<bool>::swap` now both fail to compile at the allocator assignment, where
+  before only `vector<int>` did.
 - `~` `vector` is not usable in a constant expression (P1004 unimplemented) — the
   same limitation as `<string>`, and with the same cause.
 
@@ -812,12 +806,14 @@ structurally dormant there and can only be exercised on real silicon:
 
 ## Library debts
 
-The two with real teeth, both `!` in §2:
+Ф31e-a closed the six that answered wrongly in silence — the `<ostream>`
+inserters, `is_swappable` over arrays, `get` on a const array rvalue, the
+odd-traits `basic_string` formatter, `volatile` slipping past `formattable`, and
+`vector<bool>`'s output-iterator and allocator-swap gaps. Each is struck through
+in §2 with what it used to do, and pinned by cxxtest phase144. What is left:
 
-- **`<ostream>`: the `char8_t` / `char16_t` / `char32_t` inserters are not
-  deleted**, so `os << u8"text"` compiles and prints a pointer address. The
-  standard deletes them precisely to stop this. Fixing it is small — the deleted
-  overloads — and it is the first thing to close.
+The one with real teeth:
+
 - **`<memory>`: `atomic<shared_ptr>` / `atomic<weak_ptr>` still spin.** Their
   `wait()` is a bare polling loop and `notify_one` / `notify_all` are no-ops, in a
   library where every other atomic parks in the kernel. On a single-core cabin this
@@ -825,8 +821,6 @@ The two with real teeth, both `!` in §2:
 
 The rest:
 
-- `<format>`: `basic_string` with non-default traits or allocator has no
-  formatter and prints as a range (§2).
 - `<cmath>`: `std::lerp` is absent; `<array>`: `array<T,0>` is missing its element
   and reverse surface. Both are small, self-contained additions.
 - `<cmath>`: `std::log10` is inexact on 1 of the 23 exact powers of ten. Measured

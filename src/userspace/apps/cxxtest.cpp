@@ -36287,6 +36287,202 @@ void Phase143()
            "numbers\n");
 }
 
+// ── Ф31e-a fixtures ──────────────────────────────────────────────────────
+// A string whose traits are not char_traits<char>. Traits govern comparison
+// and search, never the bytes, so this must format exactly like a
+// std::string — before Ф31e-a it matched no string formatter at all and fell
+// through to the range catch-all.
+struct OddTraits : std::char_traits<char> {};
+using OddString = std::basic_string<char, OddTraits>;
+using OddView   = std::basic_string_view<char, OddTraits>;
+
+// An allocator that propagates on swap and can be told apart afterwards.
+template <class T> struct IdAlloc {
+    using value_type                  = T;
+    using propagate_on_container_swap = std::true_type;
+    int id;
+    explicit IdAlloc(int i = 0) noexcept : id(i) {}
+    template <class U> IdAlloc(const IdAlloc<U> &o) noexcept : id(o.id) {}
+    T   *allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T *p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+    bool operator==(const IdAlloc &o) const noexcept { return id == o.id; }
+};
+
+// Distinguishes a const rvalue from a const lvalue — the difference
+// get<I>(const array&&) used to lose.
+struct ValueCategoryWitness {
+    char how;
+    ValueCategoryWitness(const int &) : how('l') {}
+    ValueCategoryWitness(const int &&) : how('r') {}
+};
+
+// Both probes are templates ON PURPOSE. A requires-expression only converts a
+// failure into `false` when the failure arises from substituting template
+// arguments ([expr.prim.req]/5); spelled with concrete types it is checked
+// directly and naming a deleted function is a hard error, which would make
+// these assertions unbuildable rather than red. Parameterising on the
+// character type puts the deleted overload back inside the immediate context
+// where it belongs — and asks the same question of every character type
+// uniformly, controls included.
+template <class Ch>
+constexpr bool OstreamTakesChar = requires(std::ostream &os, Ch c) { os << c; };
+template <class Ch>
+constexpr bool OstreamTakesStr = requires(std::ostream &os, const Ch *s) { os << s; };
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-a — the six places the library answered wrongly without saying so.
+// Every assertion here is mutation-proven: on the tree as it stood before
+// this phase each one either fails or refuses to build. The compile-time
+// half is written as requires-expressions rather than commented-out lines,
+// because a regression must be a red test, not a quiet return to printing
+// pointer addresses.
+//
+// A requires-expression is used here only to assert ABSENCE, which is the
+// one direction the Ф31d trap ("it compiles" proves nothing) does not
+// reach: a false cannot be manufactured by some other overload swallowing
+// the call, since being swallowed is exactly what used to make it true.
+// ─────────────────────────────────────────────────────────────────────────
+void Phase144()
+{
+    // ── <ostream>: deleted, not absent ───────────────────────────────────
+    // Absent meant `os << u8"hi"` bound to operator<<(const void*) and printed
+    // the pointer; `os << char8_t('x')` promoted to int and printed a number.
+    static_assert(!OstreamTakesChar<char8_t>);
+    static_assert(!OstreamTakesChar<char16_t>);
+    static_assert(!OstreamTakesChar<char32_t>);
+    static_assert(!OstreamTakesChar<wchar_t>);
+    static_assert(!OstreamTakesStr<char8_t>);
+    static_assert(!OstreamTakesStr<char16_t>);
+    static_assert(!OstreamTakesStr<char32_t>);
+    static_assert(!OstreamTakesStr<wchar_t>);
+    // Controls: the deletions must not shadow the inserters that work.
+    static_assert(OstreamTakesChar<char>);
+    static_assert(OstreamTakesChar<int>);
+    static_assert(OstreamTakesChar<double>);
+    static_assert(OstreamTakesStr<char>);
+    static_assert(OstreamTakesStr<void>);
+    {
+        std::ostringstream os;
+        os << "text" << ' ' << 42 << ' ' << true;
+        Check(os.str() == "text 42 1",
+              "phase144 (1) deleting the wide inserters leaves the narrow ones alone");
+    }
+
+    // ── <type_traits>: is_swappable can see arrays ───────────────────────
+    // The trait detects swappability by unqualified lookup from inside
+    // <type_traits>; a built-in array has no namespace for ADL to reach, so
+    // an array swap declared only in <utility> was invisible to it forever.
+    static_assert(std::is_swappable_v<int[3]>);
+    static_assert(std::is_swappable_v<int[2][2]>);
+    static_assert(std::is_nothrow_swappable_v<int[4]>);
+    static_assert(!std::is_swappable_v<const int[3]>);
+    {
+        int a[2][2] = {{1, 2}, {3, 4}};
+        int b[2][2] = {{5, 6}, {7, 8}};
+        std::swap(a, b);  // did not compile at all before Ф31e-a
+        Check(a[0][0] == 5 && a[1][1] == 8 && b[0][0] == 1 && b[1][1] == 4,
+              "phase144 (2) an array of arrays swaps, because its element is swappable too");
+    }
+
+    // ── <array>: get on a const rvalue keeps the value category ──────────
+    {
+        const std::array<int, 3> ca{1, 2, 3};
+        static_assert(
+            std::is_same_v<decltype(std::get<1>(std::move(ca))), const int &&>);
+        const ValueCategoryWitness w(std::get<0>(std::move(ca)));
+        Check(w.how == 'r',
+              "phase144 (3) get on a const array rvalue forwards as a const rvalue, not an lvalue");
+    }
+
+    // ── <format>: an odd-traits string is text, not a range of chars ─────
+    {
+        OddString s;
+        s += 'a';
+        s += 'b';
+        s += 'c';
+        const OddView v(s.data(), s.size());
+        Check(std::format("{}", s) == "abc",
+              "phase144 (4) a basic_string with foreign traits formats as its text");
+        Check(std::format("{}", v) == "abc",
+              "phase144 (5) so does a basic_string_view with foreign traits");
+        // Width used to pad the whole bracketed range, which is what made the
+        // wrong output look deliberate rather than broken.
+        Check(std::format("{:>5}", s) == "  abc",
+              "phase144 (6) width pads the text, not a bracketed list of characters");
+        Check(std::format("{:.2}", v) == "ab",
+              "phase144 (7) precision truncates the text");
+        // '?' was rejected outright: "'?' is only allowed in combination with s".
+        Check(std::format("{:?}", s) == "\"abc\"",
+              "phase144 (8) the debug format is available, as it is for any string");
+        // The ordinary spellings must still take the same road.
+        Check(std::format("{:>5}", std::string("abc")) == "  abc" &&
+                  std::format("{:>5}", std::string_view("abc")) == "  abc",
+              "phase144 (9) string and string_view still format through the same parser");
+    }
+
+    // ── <format>: volatile stops being smuggled through decay_t ──────────
+    // format("{}", volatile_lvalue) compiled while formattable said false,
+    // because decay_t dropped the volatile before formattability was ever
+    // consulted. The rejection itself is a hard error no requires-expression
+    // can observe, so what is pinned here is the mechanism that produces it:
+    // volatile now reaches the branch that carries the diagnostic.
+    static_assert(std::__format::MapKind<volatile int>() ==
+                  std::__format::ArgKind::Custom);
+    static_assert(std::__format::MapKind<volatile int &>() ==
+                  std::__format::ArgKind::Custom);
+    static_assert(std::__format::MapKind<volatile double>() ==
+                  std::__format::ArgKind::Custom);
+    static_assert(!std::formattable<volatile int, char>);
+    // Controls: the non-volatile kinds are untouched.
+    static_assert(std::__format::MapKind<int>() == std::__format::ArgKind::Int);
+    static_assert(std::__format::MapKind<const int &>() ==
+                  std::__format::ArgKind::Int);
+    static_assert(std::__format::MapKind<double>() ==
+                  std::__format::ArgKind::Double);
+    static_assert(std::__format::MapKind<char[4]>() ==
+                  std::__format::ArgKind::CString);
+
+    // ── <vector>: vector<bool> is a real output range ────────────────────
+    static_assert(std::output_iterator<std::vector<bool>::iterator, bool>);
+    static_assert(std::ranges::output_range<std::vector<bool>, bool>);
+    {
+        std::vector<bool> dst(4, false);
+        const bool        src[4] = {true, false, true, true};
+        // Constrained on output_iterator — rejected the container outright
+        // before the const-qualified proxy assignment existed.
+        std::ranges::copy(src, dst.begin());
+        Check(dst[0] && !dst[1] && dst[2] && dst[3],
+              "phase144 (10) an algorithm constrained on an output iterator can write into vector<bool>");
+        // The proxy is a handle: constness of the handle says nothing about
+        // the bit it names. This is the exact expression the concept tests.
+        const std::vector<bool>::reference r = dst[1];
+        r                                    = true;
+        Check(dst[1],
+              "phase144 (11) assigning through a const proxy reaches the bit");
+    }
+
+    // ── <vector>: vector<bool>::swap honours the allocator's wishes ──────
+    {
+        std::vector<bool, IdAlloc<bool>> p{IdAlloc<bool>(1)};
+        std::vector<bool, IdAlloc<bool>> q{IdAlloc<bool>(2)};
+        p.push_back(true);
+        q.push_back(false);
+        p.swap(q);
+        // Without this, each vector walked away holding words allocated by
+        // the other's allocator — the mismatch propagate_on_container_swap
+        // exists to prevent — while vector<int> had always got it right.
+        Check(p.get_allocator().id == 2 && q.get_allocator().id == 1,
+              "phase144 (12) vector<bool>::swap exchanges allocators when they propagate");
+        Check(!p[0] && q[0],
+              "phase144 (13) and the bits went with them");
+    }
+
+    printf("[CXX] PASS phase144: Ф31e-a — the wide inserters are deleted rather than absent, "
+           "is_swappable can see arrays, get keeps a const rvalue's category, an odd-traits "
+           "string formats as text, volatile no longer decays past formattable, and "
+           "vector<bool> both models an output range and swaps its allocator\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36452,6 +36648,7 @@ int main()
     Phase141();
     Phase142();
     Phase143();
+    Phase144();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

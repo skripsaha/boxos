@@ -204,7 +204,20 @@ inline constexpr bool IsStdInt =
 template <class T> constexpr ArgKind MapKind() noexcept
 {
     using U = decay_t<T>;  // arrays/functions decay; char[N] → const char*
-    if constexpr (is_same_v<U, bool>) return ArgKind::Bool;
+    // decay_t also strips cv, and dropping `volatile` here silently rescued an
+    // argument the library has already decided it will not format:
+    // formattable<volatile int, char> is false (the primary formatter stays
+    // disabled for cv-qualified arithmetic types, [format.formatter.spec]/2.1),
+    // yet format("{}", vi) compiled, because the decayed `int` matched a
+    // built-in kind and the FormattableWith guard downstream only covers the
+    // custom branch. Both reference libraries reject that call. Routing
+    // volatile to Custom sends it through that guard, where the honest
+    // diagnostic already lives — and costs nothing for a volatile class type
+    // with a real formatter, which was heading to Custom anyway. T can be a
+    // reference here: format() deduces Args&& and CheckScan is instantiated
+    // with exactly what it deduced.
+    if constexpr (is_volatile_v<remove_reference_t<T>>) return ArgKind::Custom;
+    else if constexpr (is_same_v<U, bool>) return ArgKind::Bool;
     else if constexpr (is_same_v<U, char>) return ArgKind::Char;
     else if constexpr (is_same_v<U, __int128>) return ArgKind::Int128;
     else if constexpr (is_same_v<U, unsigned __int128>) return ArgKind::UInt128;
@@ -1172,23 +1185,43 @@ struct StringSpecParser {
 
 } // namespace __format
 
-template <> struct formatter<string_view, char> : __format::StringSpecParser {
-    void format(string_view v, format_context &ctx) const
+// [format.formatter.spec]/2.2 asks for PARTIAL specializations over traits and
+// Allocator, not full ones for string/string_view. The difference is not
+// academic: with only the full specializations a basic_string<char, MyTraits,
+// MyAlloc> matches neither, falls through to the range catch-all in
+// <__bits/format_range>, and prints `['a', 'b', 'c']` — width honoured, so the
+// output looks deliberate rather than broken — while `{:?}` on it is rejected
+// outright with "'?' is only allowed in combination with 's'". Traits only
+// govern comparison and search, never the bytes, so both formatters read the
+// characters through a plain string_view and the odd-traits string formats
+// exactly like a std::string.
+// Partial ordering, not the constraint, is what keeps these ahead of the range
+// catch-all: `basic_string<char, Traits, Alloc>` can be deduced from an
+// arbitrary R while an arbitrary R cannot be deduced from it, so these are more
+// specialized outright and no ambiguity arises.
+template <class Traits, class Alloc>
+struct formatter<basic_string<char, Traits, Alloc>, char>
+    : __format::StringSpecParser {
+    void format(const basic_string<char, Traits, Alloc> &v,
+                format_context &ctx) const
     {
-        const int width = __format::EffectiveWidth(ctx, spec_);
-        const int prec  = __format::EffectivePrecision(ctx, spec_);
+        const int         width = __format::EffectiveWidth(ctx, spec_);
+        const int         prec  = __format::EffectivePrecision(ctx, spec_);
+        const string_view sv(v.data(), v.size());
         if (spec_.type == '?') {
             string escaped;
-            __format::EscapeInto(escaped, v);
+            __format::EscapeInto(escaped, sv);
             __format::FormatString(ctx, spec_, width, prec,
                                    string_view(escaped.data(), escaped.size()));
         } else {
-            __format::FormatString(ctx, spec_, width, prec, v);
+            __format::FormatString(ctx, spec_, width, prec, sv);
         }
     }
 };
-template <> struct formatter<string, char> : __format::StringSpecParser {
-    void format(const string &v, format_context &ctx) const
+template <class Traits>
+struct formatter<basic_string_view<char, Traits>, char>
+    : __format::StringSpecParser {
+    void format(basic_string_view<char, Traits> v, format_context &ctx) const
     {
         const int         width = __format::EffectiveWidth(ctx, spec_);
         const int         prec  = __format::EffectivePrecision(ctx, spec_);

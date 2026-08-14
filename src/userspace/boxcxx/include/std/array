@@ -207,6 +207,16 @@ constexpr T &&get(array<T, N> &&a) noexcept
     static_assert(I < N);
     return std::move(a.__elems[I]);
 }
+// [array.tuple]: without this fourth overload get<I>(move(const_array)) binds
+// to the `const array&` one above and yields const T& — the right object with
+// the wrong value category, which a forwarding layer then reads as "lvalue,
+// must copy". It compiles either way, so nothing points at the loss.
+template <size_t I, typename T, size_t N>
+constexpr const T &&get(const array<T, N> &&a) noexcept
+{
+    static_assert(I < N);
+    return std::move(a.__elems[I]);
+}
 
 // ── to_array ([array.creation]) ─────────────────────────────────────────
 
