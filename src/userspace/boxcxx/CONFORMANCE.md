@@ -40,9 +40,9 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 167 (164 C++23 + 3 C++26) |
+| Feature-test macros defined | 171 (164 C++23 + 7 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 174 phases, 4 758 runtime checks, 1 467 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 175 phases, 4 775 runtime checks, 1 488 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -137,13 +137,13 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **167** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **171** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are three so far.
+  section; there are ten so far.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
   cross-product of macros and headers, in both directions, with no failures. This
@@ -204,6 +204,25 @@ constructors) — the library simply stayed silent about them.
 | `__cpp_lib_constexpr_algorithms` | 202306 | P2562R1 | Ф32-b |
 | `__cpp_lib_ranges_reserve_hint` | 202502 | P2846R6 | Ф32-c |
 | `__cpp_lib_ranges_concat` | 202403 | P2542R8 | Ф32-d |
+| `__cpp_lib_span` | 202311 | P2821R5 | Ф32-e |
+| `__cpp_lib_to_chars` | 202306 | P2497R0 | Ф32-e |
+| `__cpp_lib_variant` | 202306 | P2637R3 | Ф32-e |
+| `__cpp_lib_reference_wrapper` | 202403 | P2944R3 | Ф32-e |
+| `__cpp_lib_saturation_arithmetic` | 202311 | P0543R3 | Ф32-e |
+| `__cpp_lib_is_sufficiently_aligned` | 202411 | P2897R7 | Ф32-e |
+| `__cpp_lib_string_subview` | 202506 | P3044R2 | Ф32-e |
+
+Two of those carry a value the current working draft has already moved past,
+and deliberately: `__cpp_lib_to_chars` is at P2497R0's 202306 rather than the
+draft's 202606, and `__cpp_lib_saturation_arithmetic` at P0543R3's 202311 rather
+than 202603. A macro names the newest feature actually present, so a later
+paper that is not implemented does not get to raise it.
+
+`<ratio>`'s C++26 addition (P2734R0's quetta / ronna / ronto / quecto) is
+**not** implemented and its macro is not claimed, because on this target there
+is nothing to implement: `intmax_t` is 64 bits, 10^30 does not fit in it, and
+the paper defines those four only when `intmax_t` can represent them.
+libstdc++ 16.1 does not define them either.
 
 # 2. Per-header deviations
 

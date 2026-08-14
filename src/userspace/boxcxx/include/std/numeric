@@ -444,6 +444,99 @@ constexpr T *midpoint(T *a, T *b)
     return a + diff / 2;
 }
 
+// ── saturation arithmetic ([numeric.sat], P0543R3) ──────────────────────
+//
+// Integer overflow is undefined behaviour, so the only portable way to add two
+// numbers and clamp was to work out in advance whether the addition WOULD
+// overflow -- arithmetic on the operands rather than on the result. These do it
+// with the compiler's own overflow builtins, which know the answer directly.
+namespace __sat {
+
+template <class T>
+concept SatInt = is_integral_v<T> && !is_same_v<remove_cv_t<T>, bool> &&
+                 !is_same_v<remove_cv_t<T>, char> && !is_same_v<remove_cv_t<T>, char8_t> &&
+                 !is_same_v<remove_cv_t<T>, char16_t> && !is_same_v<remove_cv_t<T>, char32_t> &&
+                 !is_same_v<remove_cv_t<T>, wchar_t>;
+
+// The value a saturating operation lands on when it overflows: the maximum for
+// a positive result, the minimum for a negative one. For an unsigned type
+// "negative" can only mean a borrow, so the floor is 0.
+template <class T>
+constexpr T SatLimit(bool negative) noexcept
+{
+    if constexpr (is_signed_v<T>)
+        return negative ? numeric_limits<T>::min() : numeric_limits<T>::max();
+    else
+        return negative ? T(0) : numeric_limits<T>::max();
+}
+
+} // namespace __sat
+
+template <__sat::SatInt T>
+constexpr T add_sat(T x, T y) noexcept
+{
+    T r{};
+    if (!__builtin_add_overflow(x, y, &r)) return r;
+    // Overflow direction is decided by the operands, not by the wrapped
+    // result: two values that overflow in the same direction share a sign
+    // (for unsigned, only an upward overflow is possible).
+    return __sat::SatLimit<T>(is_signed_v<T> && y < T(0));
+}
+
+template <__sat::SatInt T>
+constexpr T sub_sat(T x, T y) noexcept
+{
+    T r{};
+    if (!__builtin_sub_overflow(x, y, &r)) return r;
+    if constexpr (is_signed_v<T>)
+        return __sat::SatLimit<T>(y > T(0));
+    else
+        return T(0);  // an unsigned subtraction can only ever underflow
+}
+
+template <__sat::SatInt T>
+constexpr T mul_sat(T x, T y) noexcept
+{
+    T r{};
+    if (!__builtin_mul_overflow(x, y, &r)) return r;
+    const bool negative = is_signed_v<T> && ((x < T(0)) != (y < T(0)));
+    return __sat::SatLimit<T>(negative);
+}
+
+template <__sat::SatInt T>
+constexpr T div_sat(T x, T y) noexcept
+{
+    // Division overflows in exactly one place -- min / -1 -- and it is a hard
+    // trap on x86, not a wrapped value, so it has to be caught before the
+    // divide rather than after it.
+    if constexpr (is_signed_v<T>) {
+        if (x == numeric_limits<T>::min() && y == T(-1)) return numeric_limits<T>::max();
+    }
+    return static_cast<T>(x / y);
+}
+
+template <__sat::SatInt T, __sat::SatInt U>
+constexpr T saturate_cast(U x) noexcept
+{
+    // Compare across signedness without either operand being converted out
+    // from under the comparison, which is the whole reason this is not a plain
+    // pair of `if`s.
+    if constexpr (is_signed_v<U> == is_signed_v<T>) {
+        if (x < static_cast<U>(numeric_limits<T>::min())) return numeric_limits<T>::min();
+        if (x > static_cast<U>(numeric_limits<T>::max())) return numeric_limits<T>::max();
+    } else if constexpr (is_signed_v<U>) {
+        if (x < U(0)) return numeric_limits<T>::min();
+        using UU = make_unsigned_t<U>;
+        if (static_cast<UU>(x) > static_cast<UU>(numeric_limits<T>::max()))
+            return numeric_limits<T>::max();
+    } else {
+        using UT = make_unsigned_t<T>;
+        if (x > static_cast<U>(static_cast<UT>(numeric_limits<T>::max())))
+            return numeric_limits<T>::max();
+    }
+    return static_cast<T>(x);
+}
+
 } // namespace std
 
 #endif // BOXCXX_NUMERIC

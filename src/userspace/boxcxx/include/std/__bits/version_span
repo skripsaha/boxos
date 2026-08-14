@@ -15,7 +15,10 @@
 #define BOXCXX_BITS_VERSION_SPAN
 
 #ifndef __cpp_lib_span
-#  define __cpp_lib_span 202002L
+// P2821R5's span::at has been in the tree since Ф31e-g-1 -- the member was
+// there and the macro was not, which is the one direction of mismatch this
+// file exists to prevent. Verified against the member, then raised (Ф32-e).
+#  define __cpp_lib_span 202311L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_SPAN

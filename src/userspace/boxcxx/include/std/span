@@ -158,6 +158,10 @@ public:
     // ── element access ──────────────────────────────────────────────────
 
     constexpr reference operator[](size_type i) const { return __data[i]; }
+    // P2821R5. span was the one contiguous sequence with no checked access at
+    // all: operator[] out of range is undefined behaviour, and there was no
+    // alternative to reach for. at() throws out_of_range instead, exactly as
+    // every other container's does.
     constexpr reference at(size_type i) const
     {
         if (i >= size()) boxcxx::ThrowOutOfRange("span::at");

@@ -30,6 +30,11 @@ struct to_chars_result {
     errc  ec;
     friend bool operator==(const to_chars_result &,
                            const to_chars_result &) = default;
+    // P2497R0: the obvious `if (auto r = to_chars(...))` did not work, and the
+    // spelling it forced instead -- comparing ec against a default-constructed
+    // errc -- reads like an error check for a value that has no error.
+    // Explicit, so a result cannot silently become an int.
+    constexpr explicit operator bool() const noexcept { return ec == errc{}; }
 };
 
 struct from_chars_result {
@@ -37,6 +42,7 @@ struct from_chars_result {
     errc        ec;
     friend bool operator==(const from_chars_result &,
                            const from_chars_result &) = default;
+    constexpr explicit operator bool() const noexcept { return ec == errc{}; }
 };
 
 // Floating-point format selector — consumed by the FP overloads in a later

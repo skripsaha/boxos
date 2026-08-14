@@ -6,7 +6,8 @@
 #define BOXCXX_BITS_VERSION_VARIANT
 
 #ifndef __cpp_lib_variant
-#  define __cpp_lib_variant 202106L
+// 202306L = P2637R3's member variant::visit (Ф32-e).
+#  define __cpp_lib_variant 202306L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_VARIANT

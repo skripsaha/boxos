@@ -54,4 +54,11 @@
 #  define __cpp_lib_boyer_moore_searcher 201603L
 #endif
 
+// P2944R3 (C++26, Ф32-e): reference_wrapper compares as its referent does,
+// through hidden friends constrained on the underlying comparison existing --
+// so a wrapper around a type with no operator== does not acquire one.
+#ifndef __cpp_lib_reference_wrapper
+#  define __cpp_lib_reference_wrapper 202403L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_FUNCTIONAL

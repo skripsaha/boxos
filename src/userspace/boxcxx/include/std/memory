@@ -48,6 +48,17 @@ inline void *align(size_t alignment, size_t size, void *&ptr, size_t &space)
     return ptr;
 }
 
+// is_sufficiently_aligned ([ptr.align], P2897R7). assume_aligned TELLS the
+// compiler an alignment holds and is undefined behaviour when it does not;
+// this ASKS. They are the two halves of the same fact and only one of them
+// existed.
+template <size_t N, class T>
+[[nodiscard]] bool is_sufficiently_aligned(T *ptr)
+{
+    return (reinterpret_cast<uintptr_t>(ptr) % N) == 0;
+}
+
+
 // [ptr.align]/4: a promise to the optimiser, not a check. The constant-
 // evaluation branch is mandatory, not an optimisation:
 // __builtin_assume_aligned is not a constant expression, so without it

@@ -810,6 +810,17 @@ public:
         return basic_string(v.data(), v.size(), __alloc);
     }
 
+    // P3044R2. substr COPIES; there was no spelling for "a view of part of
+    // this string" short of naming basic_string_view and doing the offset
+    // arithmetic by hand -- which is exactly where an off-by-one lives. Note
+    // the lifetime: this is a view INTO the string, so it dies with it, and
+    // there is deliberately no rvalue overload that would hand back a view of
+    // a temporary.
+    constexpr __view subview(size_type pos = 0, size_type count = npos) const
+    {
+        return __view(*this).substr(pos, count);
+    }
+
 private:
     // ── representation ──────────────────────────────────────────────────
 
