@@ -16,7 +16,9 @@
 // C++26 feature is not implemented keeps its C++23 value rather than the
 // later, DR-applied one a reference library may ship (__cpp_lib_out_ptr
 // stays 202106L, not P2833's 202311L; __cpp_lib_bind_back stays 202202L,
-// not P2714's 202306L).
+// not P2714's 202306L). __cpp_lib_constexpr_algorithms used to be in that
+// list and no longer is: P2562R1 is implemented as of Ф32-b, so the macro
+// carries its C++26 value.
 //
 // On top of that baseline boxcxx implements named C++26 features, and from
 // Ф32 on it CLAIMS THEIR MACROS — unconditionally, with no __cplusplus

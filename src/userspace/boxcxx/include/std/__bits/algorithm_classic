@@ -1183,8 +1183,10 @@ constexpr Out merge(In1 first1, In1 last1, In2 first2, In2 last2, Out out)
 namespace __algo_impl {
 
 // In-place rotate merge — O((n+m)·log(n+m)), stable, no extra memory.
+// Constexpr since P2562R1: it allocates nothing, and everything it reaches
+// (rotate, lower_bound, upper_bound) already was.
 template <typename It, typename Comp>
-void RotateMerge(It first, It middle, It last, Comp comp)
+constexpr void RotateMerge(It first, It middle, It last, Comp comp)
 {
     auto n1 = middle - first;
     auto n2 = last - middle;
@@ -1247,8 +1249,11 @@ void BufferedMerge(It first, It middle, It last, T *buf, Comp comp)
     for (T *p = buf; p != buf_end; ++p) p->~T();
 }
 
+// buf == nullptr selects the allocation-free rotate merge, which is what makes
+// this usable in a constant expression: BufferedMerge below is never reached
+// there, so its placement-new never has to be one.
 template <typename It, typename T, typename Comp>
-void StableSortImpl(It first, It last, T *buf, Comp comp)
+constexpr void StableSortImpl(It first, It last, T *buf, Comp comp)
 {
     auto n = last - first;
     if (n <= kInsertionThreshold) {
@@ -1268,12 +1273,23 @@ void StableSortImpl(It first, It last, T *buf, Comp comp)
 
 } // namespace __algo_impl
 
+// Constexpr since P2562R1. During constant evaluation there is no additional
+// memory to be had -- ::operator new is not a constant expression -- so the
+// merge runs in place. That is not a shortcut around the paper: [stable.sort]
+// specifies exactly this, N log^2(N) comparisons "if no additional memory is
+// available", and the buffer-free path was already there for a failed
+// allocation. Stability and the result are identical either way; only the
+// comparison count differs.
 template <typename It, typename Comp>
-void stable_sort(It first, It last, Comp comp)
+constexpr void stable_sort(It first, It last, Comp comp)
 {
     using T = typename iterator_traits<It>::value_type;
     auto n  = last - first;
     if (n <= 1) return;
+    if (is_constant_evaluated()) {
+        __algo_impl::StableSortImpl(first, last, static_cast<T *>(nullptr), comp);
+        return;
+    }
     // Raw temp storage for the left halves (≤ n/2 + 1 elements);
     // BufferedMerge constructs/destroys objects in it per merge step.
     // Allocation failure degrades to the in-place rotate merge —
@@ -1291,18 +1307,20 @@ void stable_sort(It first, It last, Comp comp)
     __algo_impl::StableSortImpl(first, last, buf, comp);
 }
 template <typename It>
-void stable_sort(It first, It last)
+constexpr void stable_sort(It first, It last)
 {
     stable_sort(first, last, __algo_impl::Less{});
 }
 
+// Constexpr since P2562R1, and here it costs nothing: inplace_merge has always
+// been the rotate merge, with no buffer to make constant-evaluable.
 template <typename It, typename Comp>
-void inplace_merge(It first, It middle, It last, Comp comp)
+constexpr void inplace_merge(It first, It middle, It last, Comp comp)
 {
     __algo_impl::RotateMerge(first, middle, last, comp);
 }
 template <typename It>
-void inplace_merge(It first, It middle, It last)
+constexpr void inplace_merge(It first, It middle, It last)
 {
     inplace_merge(first, middle, last, __algo_impl::Less{});
 }
@@ -1472,21 +1490,24 @@ constexpr auto lexicographical_compare_three_way(In1 first1, In1 last1,
 
 // ── stable_partition ─────────────────────────────────────────────────────
 
-// NOT constexpr, and the annotation it used to carry was a lie: the buffered
-// path below calls ::operator new(nothrow), which is not a constant
-// expression, so no call could ever be constant-evaluated. C++23 does not ask
-// for a constexpr stable_partition either -- P0202's original exclusion list
-// names it, and P2562R1, which removes the exclusion, is C++26. ranges::
-// stable_partition already said so; this is the classic side agreeing.
+// Constexpr since P2562R1, which removes stable_partition from P0202's
+// original exclusion list. Ф31e-g-3 took the annotation OFF because it was a
+// lie at the time -- the buffered path calls ::operator new(nothrow), so no
+// call could ever have been constant-evaluated. It comes back now with the
+// thing that makes it true: in a constant expression there is no buffer to
+// allocate, so the divide-and-conquer rotate below runs instead. Same result,
+// same stability, O(n log n) rather than O(n).
 template <class It, class Pred>
-It stable_partition(It first, It last, Pred pred)
+constexpr It stable_partition(It first, It last, Pred pred)
 {
     using T = typename iterator_traits<It>::value_type;
     auto n  = std::distance(first, last);
     if (n == 0) return first;
 
-    T *buf = static_cast<T *>(
-        ::operator new(static_cast<size_t>(n) * sizeof(T), nothrow));
+    T *buf = is_constant_evaluated()
+                 ? nullptr
+                 : static_cast<T *>(
+                       ::operator new(static_cast<size_t>(n) * sizeof(T), nothrow));
     if (buf) {
         It     out = first;
         size_t nb  = 0;

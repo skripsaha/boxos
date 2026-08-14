@@ -93,10 +93,10 @@ struct InplaceMerge {
     template <bidirectional_iterator I, sentinel_for<I> S,
               class Comp = ranges::less, class Proj = identity>
         requires sortable<I, Comp, Proj>
-    // Not constexpr: C++23 ranges::inplace_merge is not constexpr (P2562 is
-    // C++26) and it delegates to the non-constexpr classic std::inplace_merge.
-    I operator()(I first, I middle, S last, Comp comp = {},
-                 Proj proj = {}) const
+    // Constexpr since P2562R1: the classic std::inplace_merge is the rotate
+    // merge and never allocated in the first place.
+    constexpr I operator()(I first, I middle, S last, Comp comp = {},
+                           Proj proj = {}) const
     {
         I last_it = ranges::next(first, last);
         std::inplace_merge(std::move(first), std::move(middle), last_it,
@@ -106,8 +106,8 @@ struct InplaceMerge {
     template <bidirectional_range R, class Comp = ranges::less,
               class Proj = identity>
         requires sortable<iterator_t<R>, Comp, Proj>
-    borrowed_iterator_t<R> operator()(R &&r, iterator_t<R> middle,
-                                      Comp comp = {}, Proj proj = {}) const
+    constexpr borrowed_iterator_t<R> operator()(R &&r, iterator_t<R> middle,
+                                                Comp comp = {}, Proj proj = {}) const
     {
         return (*this)(ranges::begin(r), std::move(middle), ranges::end(r),
                        std::move(comp), std::move(proj));

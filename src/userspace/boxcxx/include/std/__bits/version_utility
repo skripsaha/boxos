@@ -53,17 +53,21 @@
 #  define __cpp_lib_unreachable 202202L
 #endif
 
-// Original C++20 value (P0202), unchanged through C++23 -- NOT the later
-// C++26 202306L bump (P2562 "constexpr Stable Sorting"). boxcxx's
-// stable_sort/inplace_merge are deliberately still non-constexpr (buffer-
-// based, see <__bits/algorithm_classic>), exactly matching P0202's own
-// original exclusion list (stable_sort/inplace_merge need a temp buffer;
-// shuffle/sample need a constexpr uniform_random_bit_generator, neither of
-// which C++20 provided) -- not a boxcxx gap. stable_partition, also listed
-// in P0202's original exclusion set, IS constexpr in boxcxx already
-// (algorithm_classic's merge-based implementation needs no buffer).
+// C++26 value (P2562R1 "constexpr Stable Sorting"), claimed in Ф32-b. P0202
+// gave C++20 the 201806L value and excluded three algorithms because they
+// need a temporary buffer that C++20 could not allocate in a constant
+// expression: stable_sort, stable_partition and inplace_merge. P2562R1
+// removes that exclusion, and all six entry points -- the three classic ones
+// and ranges::stable_sort / ranges::stable_partition / ranges::inplace_merge
+// -- are constexpr here now. inplace_merge never needed the buffer at all
+// (it has always been the rotate merge); the other two take their existing
+// buffer-free path during constant evaluation, which is what [stable.sort]
+// and [alg.partitions] already specify for "no additional memory available".
+// The rest of P0202's exclusion list -- shuffle and sample, which want a
+// constexpr uniform_random_bit_generator -- is not part of P2562R1 and is
+// not part of this macro.
 #ifndef __cpp_lib_constexpr_algorithms
-#  define __cpp_lib_constexpr_algorithms 201806L
+#  define __cpp_lib_constexpr_algorithms 202306L
 #endif
 // P2321R2 "zip". The <ranges> half (zip/zip_transform/adjacent/pairwise and
 // their _transform forms) shipped in Ф29d; the <tuple>/<utility> half is

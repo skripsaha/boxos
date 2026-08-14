@@ -17732,8 +17732,9 @@ void Phase100()
                       "phase100 __cpp_lib_ranges_find_last pin");
         static_assert(__cpp_lib_ranges_starts_ends_with >= 202106L,
                       "phase100 __cpp_lib_ranges_starts_ends_with pin");
-        static_assert(__cpp_lib_constexpr_algorithms >= 201806L,
-                      "phase100 __cpp_lib_constexpr_algorithms pin");
+        static_assert(__cpp_lib_constexpr_algorithms == 202306L,
+                      "phase100 __cpp_lib_constexpr_algorithms pin -- P2562R1 "
+                      "value since Ф32-b, was 201806L");
     }
 
     // ── BUILTIN-PTR-CMP: ranges::less/equal_to/greater/... route raw
@@ -38680,6 +38681,128 @@ void Phase155()
            "up to a tick early, so the sleep re-parks against steady_clock "
            "until the deadline it was given actually passes\n");
 }
+
+// ── Ф32-b ───────────────────────────────────────────────────────────────
+// P2562R1 "constexpr Stable Sorting" lifts P0202's original exclusion of the
+// three algorithms that wanted a temporary buffer. Every check below is a
+// consteval call: if any of these six entry points were still non-constexpr
+// the file would not compile, which is a sharper pin than any runtime assert.
+consteval bool P156StableSort()
+{
+    std::array<int, 9> a{5, 3, 9, 1, 7, 2, 8, 4, 6};
+    std::stable_sort(a.begin(), a.end());
+    return std::is_sorted(a.begin(), a.end()) && a[0] == 1 && a[8] == 9;
+}
+consteval bool P156InplaceMerge()
+{
+    std::array<int, 6> a{1, 3, 5, 2, 4, 6};
+    std::inplace_merge(a.begin(), a.begin() + 3, a.end());
+    return std::is_sorted(a.begin(), a.end()) && a[0] == 1 && a[5] == 6;
+}
+consteval bool P156StablePartition()
+{
+    std::array<int, 7> a{1, 2, 3, 4, 5, 6, 7};
+    auto               m = std::stable_partition(a.begin(), a.end(), [](int x) { return x % 2 == 0; });
+    // Stability is the whole point: evens keep 2,4,6 order and odds 1,3,5,7.
+    return (m - a.begin()) == 3 && a[0] == 2 && a[1] == 4 && a[2] == 6 && a[3] == 1 &&
+           a[4] == 3 && a[5] == 5 && a[6] == 7;
+}
+consteval bool P156RangesStableSort()
+{
+    std::array<int, 5> a{4, 2, 5, 1, 3};
+    std::ranges::stable_sort(a);
+    return a[0] == 1 && a[4] == 5;
+}
+consteval bool P156RangesInplaceMerge()
+{
+    std::array<int, 4> a{1, 3, 2, 4};
+    std::ranges::inplace_merge(a, a.begin() + 2);
+    return std::ranges::is_sorted(a);
+}
+consteval bool P156RangesStablePartition()
+{
+    std::array<int, 5> a{1, 2, 3, 4, 5};
+    auto               r = std::ranges::stable_partition(a, [](int x) { return x > 3; });
+    return (r.begin() - a.begin()) == 2 && a[0] == 4 && a[1] == 5 && a[2] == 1;
+}
+// Stability under a comparator that ignores the tie-breaking field -- the
+// property a merge sort has and a quicksort does not.
+struct P156Rec {
+    int key;
+    int seq;
+};
+consteval bool P156StableUnderTies()
+{
+    std::array<P156Rec, 6> a{{{2, 0}, {1, 1}, {2, 2}, {1, 3}, {2, 4}, {1, 5}}};
+    std::stable_sort(a.begin(), a.end(), [](const P156Rec &x, const P156Rec &y) { return x.key < y.key; });
+    return a[0].seq == 1 && a[1].seq == 3 && a[2].seq == 5 && a[3].seq == 0 &&
+           a[4].seq == 2 && a[5].seq == 4;
+}
+
+void Phase156()
+{
+    using namespace std;
+
+    static_assert(P156StableSort(), "phase156 (1) std::stable_sort in a constant expression");
+    static_assert(P156InplaceMerge(), "phase156 (2) std::inplace_merge in a constant expression");
+    static_assert(P156StablePartition(),
+                  "phase156 (3) std::stable_partition in a constant expression, stably");
+    static_assert(P156RangesStableSort(), "phase156 (4) ranges::stable_sort");
+    static_assert(P156RangesInplaceMerge(), "phase156 (5) ranges::inplace_merge");
+    static_assert(P156RangesStablePartition(), "phase156 (6) ranges::stable_partition");
+    static_assert(P156StableUnderTies(),
+                  "phase156 (7) the constant-evaluated path is genuinely stable, not just sorted");
+    static_assert(__cpp_lib_constexpr_algorithms == 202306L,
+                  "phase156 (8) P2562R1 is complete, so the macro carries its C++26 value");
+
+    // The runtime path is the OTHER one -- outside constant evaluation
+    // stable_sort still takes its buffer -- so it needs its own coverage, and
+    // it has to agree with the constant-evaluated result element for element.
+    {
+        vector<int> v{5, 3, 9, 1, 7, 2, 8, 4, 6};
+        stable_sort(v.begin(), v.end());
+        Check(is_sorted(v.begin(), v.end()) && v.front() == 1 && v.back() == 9,
+              "phase156 (9) the buffered runtime stable_sort still sorts");
+
+        vector<P156Rec> r{{2, 0}, {1, 1}, {2, 2}, {1, 3}, {2, 4}, {1, 5}};
+        stable_sort(r.begin(), r.end(),
+                    [](const P156Rec &x, const P156Rec &y) { return x.key < y.key; });
+        Check(r[0].seq == 1 && r[1].seq == 3 && r[2].seq == 5 && r[3].seq == 0 &&
+                  r[4].seq == 2 && r[5].seq == 4,
+              "phase156 (10) ...and is stable, the same order the consteval path gave");
+
+        vector<int> m{1, 3, 5, 2, 4, 6};
+        inplace_merge(m.begin(), m.begin() + 3, m.end());
+        Check(is_sorted(m.begin(), m.end()), "phase156 (11) runtime inplace_merge");
+
+        vector<int> p{1, 2, 3, 4, 5, 6, 7};
+        auto        mid = stable_partition(p.begin(), p.end(), [](int x) { return x % 2 == 0; });
+        Check((mid - p.begin()) == 3 && p[0] == 2 && p[1] == 4 && p[2] == 6 && p[3] == 1,
+              "phase156 (12) runtime stable_partition takes its buffered path and stays stable");
+    }
+    // A stable_sort large enough to recurse past the insertion-sort threshold
+    // in constant evaluation, so the rotate merge itself is exercised rather
+    // than just InsertionSort.
+    {
+        constexpr auto big = [] {
+            std::array<int, 64> a{};
+            for (int i = 0; i < 64; ++i) a[static_cast<size_t>(i)] = (i * 37) % 64;
+            std::stable_sort(a.begin(), a.end());
+            return a;
+        }();
+        bool ok = true;
+        for (int i = 0; i < 64; ++i) ok = ok && big[static_cast<size_t>(i)] == i;
+        Check(ok, "phase156 (13) a 64-element constant-evaluated stable_sort really merges");
+    }
+
+    printf("[CXX] PASS phase156: Ф32-b — P2562R1, all six stable-sorting entry "
+           "points constant-evaluable (stable_sort / stable_partition / "
+           "inplace_merge and their ranges:: forms). In a constant expression "
+           "there is no buffer to allocate, so they take the in-place rotate "
+           "path [stable.sort] already specifies for that case; the buffered "
+           "runtime path is unchanged and pinned beside it\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38857,6 +38980,7 @@ int main()
     Phase153();
     Phase154();
     Phase155();
+    Phase156();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
