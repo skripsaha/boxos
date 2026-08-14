@@ -1,0 +1,918 @@
+# boxcxx — C++23 conformance
+
+`boxcxx` is BoxOS's own implementation of the C++ standard library and of the
+Itanium C++ ABI runtime. It is not a port of libstdc++ or of libc++: every
+header under `include/std/` was written for this kernel, and the runtime
+(exceptions, RTTI, unwinding, TLS) is implemented in `src/`.
+
+This document is the honest inventory of where boxcxx stands against the
+standard. It records what is missing, what deviates and why, where boxcxx is
+deliberately stricter, and — because it matters when you are deciding whom to
+trust — the places where boxcxx is right and the reference implementations are
+wrong.
+
+**Working reference:** ISO/IEC 14882 C++23, document N4950. Where a rule comes
+from a later draft (C++26) and was adopted anyway, that is stated at the entry.
+
+## How to read the per-header entries
+
+| Mark | Meaning |
+|---|---|
+| `!` | **Silently wrong.** boxcxx compiles and runs, but the result is one the standard forbids. These are the entries that can cost you a bug. |
+| `+` | **Stricter than the standard.** boxcxx rejects or bounds something the standard permits. Portable code is unaffected; code that relied on the slack is not. |
+| `~` | **Deviation by decision.** Deliberate, with the reason recorded. |
+| `–` | **Absent.** The header exists; this part of it does not. |
+| `?` | **Unspecified by the standard.** This records the choice boxcxx made, so you can rely on it here without believing it is portable. |
+
+## What the library is, in numbers
+
+| | |
+|---|---|
+| C++23 headers provided | **74**; 31 absent (§1) |
+| Internal implementation leaves (`include/std/__bits/`) | 95 |
+| Header source | ~81 000 lines |
+| Feature-test macros defined | 128 |
+| BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 156 phases, 4 512 runtime checks, 1 242 `static_assert`s |
+| Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
+
+Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
+`-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
+-fcf-protection=full`. Exceptions and RTTI are fully supported and are used by
+the library itself; there is no "no-exceptions" configuration.
+
+> **One measured fact worth knowing before you read anything about performance:**
+> `src/userspace/apps/Makefile` carries no `-O` flag at all. Every BoxOS
+> application, including the conformance suite, is compiled at `-O0`. The
+> library archive `libboxcxx.a` is built at `-O2`, but inline code from the
+> headers lands in the application's translation unit at `-O0`.
+
+## If something surprised you, start here
+
+| You wrote | What happens | Why / what to use |
+|---|---|---|
+| `#include <iostream>`, `std::cout` | no such header, no such name | BoxOS has no stdin/stdout/stderr. Use `std::print` / `std::println`, or `box::current` for the I/O spine. `<ostream>`, `<sstream>` and the rest of the stream machinery **do** exist (§1.1). |
+| `#include <fstream>` | no such header | Files are tag-addressed: `box::tagfs`, and `box::ferry` for `co_await` file I/O. |
+| `os << u8"text"` | compiles, prints a **pointer address** | The `char8_t`/`char16_t`/`char32_t` inserters are not deleted as the standard requires (§2 `<ostream>`) — a real bug, listed here so it does not bite you silently. |
+| `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
+| `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
+| `views::take_while`, `ranges::cbegin` | no such name | Seven range-access CPOs and both `*_while` adaptors are missing (§2 `<ranges>`). |
+| `std::mismatch(a, ae, b, be)` | confusing error inside the body | The four-iterator overloads do not exist; the fourth argument binds to `Pred` (§2 `<algorithm>`). |
+| a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
+
+---
+
+# 1. What is absent entirely
+
+## 1.1 Headers that do not exist (31)
+
+74 standard headers are provided and 31 are absent, which accounts for the whole
+C++23 header list apart from the deprecated `<codecvt>`.
+
+### C library wrappers — 18
+
+`<cassert>` `<cctype>` `<cerrno>` `<cfenv>` `<cfloat>` `<cinttypes>`
+`<climits>` `<clocale>` `<csetjmp>` `<csignal>` `<cstdarg>` `<cstdio>`
+`<cstdlib>` `<cstring>` `<cuchar>` `<cwchar>` `<cwctype>` `<stdatomic.h>`
+
+BoxOS has no libc. Userspace links `boxlib`, the native BoxOS library, whose
+vocabulary is Manifests, Crates, Touch and TagFS rather than POSIX. A `<cstdio>`
+would have to invent a `FILE*` that nothing below it implements.
+
+`<stdatomic.h>` belongs to this group rather than to the atomics: C++23 specifies
+it as a compatibility header that makes `_Atomic(T)` mean `std::atomic<T>`. boxcxx
+does not provide it, and the compiler's C version is not usable from C++
+(`_Atomic` is not a C++ type specifier). `<atomic>` itself is fully implemented.
+
+Two of the C wrappers **are** provided — `<cstddef>` and `<cstdint>` — because
+they are pure type and macro headers with no runtime behind them. Independently,
+the compiler's own freestanding C headers remain available and are used by the
+library itself: `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`,
+`<float.h>` come from GCC, not from a libc, and resolve normally.
+
+### Excluded by decision — 5
+
+| Header | Why |
+|---|---|
+| `<iostream>` | BoxOS does not have the Unix stdin/stdout/stderr model. Its replacement is the Current I/O spine (`box::current`), and formatted console output is `std::print` / `std::println`. The in-memory stream machinery **does** exist — see the next paragraph. |
+| `<fstream>` | Files are reached through TagFS (`box::tagfs`, `box::ferry`), not through a path-opened byte stream. |
+| `<filesystem>` | There is no hierarchical path namespace to model. TagFS is tag-addressed: a file is found by the tags it carries, not by where it sits. |
+| `<regex>` | Excluded by plan. |
+| `<valarray>` | Excluded by plan. |
+
+`<iostream>` being absent does **not** mean the streams are absent.
+`<iosfwd>` `<ios>` `<streambuf>` `<ostream>` `<istream>` `<sstream>` `<iomanip>`
+`<locale>` are all implemented; what is missing is the three global objects and
+the header that declares them.
+
+### C++23 features not implemented — 8
+
+| Header | Status |
+|---|---|
+| `<mdspan>` | Not implemented. |
+| `<spanstream>` | Not implemented. |
+| `<syncstream>` | Not implemented (its contract is written against `<iostream>`). |
+| `<typeindex>` | Not implemented — there is no `std::type_index`. |
+| `<stacktrace>` | Deferred against a named blocker: symbolization needs the running image's `.symtab`, which is cross-layer kernel/boxlib work. The unwinder half already exists — `_Unwind_Backtrace` works today. |
+| `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
+| `<scoped_allocator>` | Not implemented. |
+| `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+## 1.2 Excluded by decision inside headers that do exist
+
+- **Wide characters.** There are no wide streams, no `wformat_context`, and no
+  wide-character facets. `wchar_t` itself works as a type; nothing in the
+  library is instantiated for it.
+- **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
+  machinery needs. The `L` format specifier is accepted and ignored.
+- **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
+  `zoned_time`, and no leap-second table.
+
+## 1.3 Feature-test macros
+
+boxcxx defines **128** `__cpp_lib_*` macros. Two properties were verified across
+the whole set, not sampled:
+
+- **Every one carries its N4950 value.** No macro is defined at a later
+  revision's value, and no macro is defined that N4950 does not name.
+- **Every one is visible both from `<version>` and from the header that owns the
+  feature**, as [support.limits.general] requires — checked over the full
+  128 × 74 cross-product of macros and headers, in both directions, with no
+  failures. This is the part that breaks most easily, because a macro added to a
+  shared leaf tends to become visible from every header that includes it and from
+  no other.
+
+**58 of the C++23 macros are not defined.** The governing rule is that a macro is
+defined only when the feature behind it is *complete* — established by reading the
+implementation, not by checking that the headline function exists. That has two
+consequences worth stating plainly:
+
+- Some macros stay undefined even though the everyday use of the feature works.
+  `__cpp_lib_ranges` is the widest case: it is held back by roughly two dozen
+  missing pieces, among them `views::take_while`, `views::drop_while` and seven of
+  the range-access CPOs (§2 `<ranges>`).
+- In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
+  only partly has.
+
+Of the 58, five belong to headers that do not exist at all (`execution`,
+`filesystem`, `mdspan`, `stacktrace`, `stdatomic.h`); two are cross-cutting
+(`deduction_guides`, `modules`); the rest belong to headers that exist. The
+in-tree suite pins the absences as well as the values, so a macro cannot quietly
+appear.
+
+**On pinning C++23 rather than "latest".** Under `-std=c++23` the reference
+libraries each report at least one post-N4950 value; boxcxx reports what C++23
+specifies:
+
+| Macro | boxcxx | libstdc++ 16.1 | libc++ 22 |
+|---|---|---|---|
+| `__cpp_lib_out_ptr` | **202106** | 202311 (P2833R2, post-N4950) | 202106 |
+| `__cpp_lib_flat_map` | **202207** | 202207 | 202511 (a later DR) |
+| `__cpp_lib_shift` | **202202** | 202202 | 201806 |
+
+# 2. Per-header deviations
+
+Only headers with something to record appear below. A header's absence from this
+section means no deviation is *known* — which is not the same as a proof of
+conformance. It means the phase that built it closed its audit findings and
+nothing has been found since.
+
+## `<algorithm>`
+
+- `–` **`mismatch` has no four-iterator overloads.** Only the three-iterator forms
+  exist, which is exactly the unsafe shape N3346 added the four-iterator forms to
+  replace: the second range's end is never consulted.
+  A four-iterator call is *not* silently accepted — but the diagnostic is poor,
+  because the fourth argument binds to the `Pred` template parameter of the
+  three-iterator overload and the failure appears inside the body
+  (`algorithm_classic:277: 'pred' cannot be used as a function`) rather than as
+  "no matching function". `equal` and `is_permutation` do have their four-iterator
+  forms; `mismatch` is the one that was missed.
+- `~` `stable_sort` and `inplace_merge` are not `constexpr`. This is correct for
+  C++23; P2562 (C++26) would change it.
+- `!` **`stable_partition` is *declared* `constexpr` but can never be constant-
+  evaluated.** It is annotated ahead of C++23 (libstdc++ gates the same function
+  behind C++26), yet any call with a non-empty range reaches
+  `::operator new(size_t, nothrow_t)`, which boxcxx's `<new>` does not mark
+  `constexpr`. The result is a specifier that promises something the function
+  cannot do — worse than its two honestly-unannotated siblings, because the error
+  appears only at the point of use.
+- `~` The parallel overloads do not exist — `<execution>` does not exist (§1.1).
+
+## `<array>`
+
+- `–` **`array<T,0>` is missing its whole element and reverse surface**:
+  `operator[]`, `front`, `back`, `rbegin`, `rend`, and also `crbegin` / `crend`,
+  all of which the non-zero specialization has. The standard requires them to be
+  declared for the zero-size case too (calling them is undefined; declaring them is
+  not optional). What it does have: `at`, `data`, `begin`/`end`, `cbegin`/`cend`,
+  `empty`, `size`, `max_size`, `fill`, `swap`.
+- `!` **`get<I>` has no `const array&&` overload.** `get<0>(std::move(ca))` on a
+  `const array` therefore binds to the `const array&` overload and yields
+  `const T&` where [array.tuple] specifies `const T&&`. It compiles and returns
+  the right object with the wrong value category, so a forwarding layer built on
+  top of it silently changes behaviour.
+
+## `<atomic>`
+
+- `?` **A 16-byte atomic load writes to memory.** `atomic<T>::is_always_lock_free`
+  is `true` for a 16-byte `T`, and the operations lower to `__atomic_*_16` calls
+  which boxcxx implements itself (`src/runtime/atomic_support.cpp`) with
+  `lock cmpxchg16b`. The load is a self-comparing `cmpxchg16b` — a locked
+  read-modify-write — so a 16-byte atomic placed in a read-only mapping will
+  fault. This is the classic libatomic caveat, and it is the price of the trait
+  being true; the operations do link and work, because the tree supplies the
+  entry points rather than relying on an external libatomic.
+- `~` Atomics that are not lock-free (any size outside 1/2/4/8/16) go through a
+  **cabin-private lock pool**. Cross-cabin shared memory therefore supports only
+  the lock-free sizes; the header states this contract.
+
+## `<barrier>`
+
+- `+` `arrive()` is marked `[[nodiscard]]`. The synopsis does not mandate it, and
+  discarding the arrival token is legal, so conforming code that discards it will
+  warn — and fail under `-Werror`.
+- `~` Precondition violations are loud rather than undefined: `arrive(n)` with
+  `n <= 0` or `n` greater than the phase's expected count calls `Panic`. Note the
+  asymmetry — the *constructor* does not validate its `expected` argument.
+
+## `<bitset>`
+
+- `~` `to_string()` is annotated `constexpr` and is correct at run time, but it
+  cannot be constant-evaluated, because it builds a `basic_string` and that is not
+  a literal type here (see `<string>`). Removing the annotation would be *less*
+  conformant; it folds automatically once `<string>` becomes constexpr. The rest
+  of P2417 is genuinely constant-evaluable.
+
+## `<charconv>`
+
+- `~` `__int128` and `unsigned __int128` are deliberately unsupported. The standard
+  requires the standard integer types and `char`; adding the extended ones would
+  drag in the `make_unsigned<__int128>` question for no gain. `long double` **is**
+  supported in both directions, at genuine 80-bit width.
+- `~` `from_chars` does not skip whitespace, does not accept `+`, and does not
+  accept a `0x` prefix — strictly per [charconv]. The `strtod`-style preamble lives
+  in `stof`/`stod` instead.
+
+## `<chrono>`
+
+- `–` No time zones: `tzdb`, `time_zone`, `zoned_time` and `leap_second` do not
+  exist, and there is no leap-second table.
+- `~` `utc_clock`, `tai_clock`, `gps_clock`, `file_clock` and `local_t` exist as
+  **type surface only** — `rep`, `period`, `duration`, `time_point` — with no
+  `now()`. Calling `utc_clock::now()` is a compile error, which is the honest
+  answer without a leap-second database. `tai` and `gps` are exact fixed offsets
+  and need no table.
+- `!` **`utc_time` is `sys_time` with the same count.** Without a leap-second table
+  UTC differs from true UTC by the number of inserted leap seconds, and `%S` will
+  never show the 60th second. The deviation is localized: for every specifier,
+  `utc(c)` renders identically to `sys(c)`.
+- `~` `clock_cast` is identity-only. A cross-clock cast (`system_clock` →
+  `utc_clock`) does not compile — correct in the absence of
+  `clock_time_conversion`, and better than silently converting wrongly.
+- `~` `to_time_t` / `from_time_t` work in `long long` epoch seconds. There is no
+  `std::time_t` and no `<ctime>`; the name `time_t` already belongs to a 20-byte
+  BoxOS structure in `box/time.h`.
+- `?` `file_clock`'s epoch is the Unix epoch (the standard leaves it
+  implementation-defined; libstdc++ uses 1601), so a `file_time` renders like a
+  `sys_time`.
+- `?` `%I`, `%r` and `%p` for durations longer than 12 hours apply **no** reduction:
+  `%I` of `hours{300}` is 288. The standard does not define these specifiers beyond
+  a day. Both reference libraries now reduce modulo 12/24 and print `12:00:00 PM`
+  for the same input; boxcxx does not. All three are defensible; this records ours.
+- `?` For calendar values where `ok()` is false the standard leaves the rendering
+  unspecified, and the three implementations genuinely differ.
+  `year_month_weekday` resolves all date fields through `sys_days` while taking the
+  validity of `%b`/`%a` from the stored month and weekday.
+
+## `<cmath>`
+
+- `–` **`std::lerp` does not exist.** A C++20 addition, simply absent;
+  `std::midpoint` is present.
+- `~` `nan("payload")` ignores the payload string and returns a plain quiet NaN.
+- `?` `std::log10` is not exact on one of the 23 exactly-representable powers of
+  ten (measured on BoxOS). `box::log(x, 10)` returns 22 of the 23 exactly by
+  calling `log10` directly rather than dividing logarithms.
+
+## `<compare>`
+
+- `–` `compare_three_way_result` is declared with two required parameters; the
+  standard declares `template<class T, class U = T>`, so the common
+  `compare_three_way_result<T>` and `compare_three_way_result_t<T>` spellings do
+  not compile.
+
+## `<flat_map>` and `<flat_set>`
+
+- `~` `flat_set::iterator` **is** `KeyContainer::const_iterator` — for
+  `flat_set<int>` that is literally `const int*`. The standard permits this
+  (libstdc++ does the same; libc++ wraps it), and it means `flat_set` models
+  `contiguous_range` and `ranges::data` hands back a `const Key*`. On bare metal
+  that is worth having: the key block can go straight into a copy or a DMA
+  descriptor.
+- `~` `flat_map`'s iterator is a lockstep proxy over the two containers, so
+  `iterator_traits<…>::iterator_category` is `input_iterator_tag`, `value_type` is
+  `pair<K,T>`, and `pointer` is an arrow proxy. Both answers follow from the
+  reference being a prvalue; libc++ reports `random_access_iterator_tag` for the
+  same iterator, which its own reference type cannot support.
+- `–` `insert_range` **copies** — it never moves out of the source range, even from
+  a genuine rvalue range — and it does not accept tuple-like ranges such as
+  `views::zip`. The first is what [flat.map.modifiers]/12 says
+  (`for (const auto& e : rg)`); the second is the standard's own inconsistency,
+  discussed in §4. The classic `insert(first, last)` **does** move.
+- `~` `flat_set::emplace` carries `requires is_constructible_v<value_type, Args...>`,
+  which [flat.set.defn] does not ask for. All three implementations reject
+  `emplace(1,2,3)`; the real difference is that boxcxx and libstdc++ make the
+  rejection SFINAE-detectable while libc++ reports the call as viable.
+- `~` `flat_set::swap` is unconditionally `noexcept` with no `static_assert` gate on
+  the container's swappability. [flat.set.defn] declares it unconditionally, so this
+  is the synopsis followed exactly, accepting that a throwing container swap ends in
+  `terminate` — the consequence [except.spec]/5 selects, not a diagnostic the
+  library is free to invent. libstdc++ 15.2 adds such an assert and thereby rejects
+  valid programs.
+
+## `<format>`
+
+- `!` **A `basic_string` with non-default traits or allocator has no formatter of
+  its own and is formatted as a range.** [format.formatter.spec]/2.2 requires
+  *partial* specializations over `traits` and `Allocator`; boxcxx provides only the
+  full specializations for `string` and `string_view`. So
+  `basic_string<char, MyTraits, MyAlloc>` falls through to the range formatter and
+  prints `['a', 'b', 'c']` instead of `abc`, and `{:?}` on it is rejected with
+  "`'?'` is only allowed in combination with `s`". Width is *not* ignored — the
+  range formatter pads the whole bracketed string — which makes the wrong output
+  look deliberate. Measured: on libstdc++ 16.1 the same type is *not* routed
+  through the range formatter, because the partial specializations are there.
+- `!` **`format("{}", volatile_lvalue)` compiles**, although
+  `formattable<volatile int, char>` is correctly `false`. `MapKind` applies
+  `decay_t` before formattability is ever consulted, so the `volatile` is dropped
+  and the argument is stored as a plain `int`. **Both** libstdc++ 16.1 and libc++
+  22 reject the same code. The library's own guard for this
+  (`static_assert(FormattableWith<…>)`) is bypassed because the decayed type
+  matches a built-in kind and never reaches the custom-formatter branch.
+- `+` **Field width is capped at 65535.** On the literal path this is a
+  compile-time error ("width exceeds the field limit") caught by the consteval
+  format-string check; on the dynamic path (`{:{}}`) it throws at run time. Neither
+  reference library bounds the dynamic path. Deliberate: on bare metal an
+  attacker-supplied format string asking for a two-gigabyte field is a denial of
+  service.
+- `?` The cap is **per field, not a total budget**. A nine-character spec such as
+  `"{::65535}"` applied to a large range still multiplies the output, and both
+  reference libraries produce the same volume byte for byte. A total budget was
+  considered and rejected: it would break a legitimate `format()` of a large
+  container. The threat closed here is the hostile *format string*; the size of the
+  argument is chosen by the program.
+- `~` `enable_nonlocking_formatter_optimization` is provided. It is a **C++26**
+  feature (P3107R5) — N4950 does not mention it — adopted early by decision. See
+  §3 for the carve-outs; note also that libstdc++ 16.1 reports `true` for
+  `sys_time` where boxcxx and libc++ 22 both report `false`.
+- `~` P2510R3 (**C++26**) is implemented: the `0` flag is accepted for pointers,
+  and is ignored when an explicit alignment is present.
+- `~` `formatter<__int128>` and `formatter<unsigned __int128>` exist (both
+  reference libraries have them too), but `__int128` is **rejected as a width or
+  precision argument**: [format.string.std]/10 requires a *standard* signed or
+  unsigned integer type, and the extended types are not standard integer types.
+  The rejection happens in the consteval check, before any run-time throw.
+- `~` Width is measured in **code units**. There is no grapheme clustering and no
+  East-Asian width estimation; for the ASCII console this is exact.
+- `~` `L` (locale) is parsed and ignored for arithmetic types, and explicitly
+  rejected for strings and pointers. There is only the `"C"` locale.
+- `~` The `set` and `map` range formatters expose `set_brackets` and
+  `set_separator`, which the standard gives only to the sequence specialization.
+  Both reference libraries reject those calls. A harmless extension, but generic
+  code written strictly against the promised surface would not expect them.
+- `–` No wide formatting: `wformat_context`, `wformat_args` and
+  `format(wstring_view, …)` do not exist.
+- `?` For a type with no formatter, the intended `static_assert` message does fire
+  — but four noisier errors precede it (a deleted constructor, a missing `parse`,
+  and two consteval failures).
+
+## `<generator>`
+
+- `~` The generator's iterator declares the full legacy member set
+  (`iterator_category`, `reference`, `pointer`) where [coro.generator.iterator]
+  lists only `iterator_concept`, `value_type` and `difference_type`. The
+  observable consequence is that `iterator_traits<generator<T>::iterator>` is
+  **non-empty** here and empty in libstdc++ 16.1 (measured). `input_range` holds
+  in both.
+
+## `<iterator>`
+
+- `~` **`counted_iterator` has an `operator->` that the standard does not give
+  it**, together with a forwarding `iterator_traits` specialization. The
+  consequence is that `contiguous_iterator<counted_iterator<int*>>` **holds** in
+  boxcxx, where the standard's `counted_iterator` can never be contiguous. A
+  deliberate extension, not an oversight — but it means a concept check can answer
+  differently here than elsewhere.
+- `~` `iterator_traits` is specialized for `reverse_iterator<It>` and for
+  `basic_const_iterator<I>`. The standard specifies neither specialization; they
+  exist to supply the `iterator_concept` and `pointer` that those class bodies
+  omit.
+- `~` The `join_view`, `filter_view` and `transform_view` iterators declare
+  `pointer` and `reference` members that their synopses do not list.
+- `–` `pointer_traits` is not SFINAE-friendly: instantiating it for a type that is
+  not pointer-like is a hard error rather than an empty specialization, and the
+  error escapes even a `requires`-expression, so it cannot be detected.
+
+## `<locale>`
+
+- `–` Only the `"C"` locale exists, and it has no facets: there is no facet base,
+  no `use_facet` / `has_facet`, and no `ctype` / `num_get` / `num_put` / … The
+  named constructor accepts any name and ignores it; `name()` always returns
+  `"C"`. The header exists to satisfy the stream machinery's references to it.
+
+## `<memory>`
+
+- `–` `owner_less<void>` has no `is_transparent` member, so it does not work as a
+  transparent comparator.
+- `!` **`atomic<shared_ptr<T>>` and `atomic<weak_ptr<T>>` have no working
+  `notify_one` / `notify_all` — they are no-ops — and `wait()` is a bare
+  busy-spin** rather than the kernel park that every other atomic uses. A thread
+  waiting on one of these will burn a core until the value changes, and a
+  notification will not shorten that. The rest of `<atomic>` is event-driven; this
+  one corner is not.
+
+## `<memory_resource>`
+
+- `?` `unsynchronized_pool_resource::options()` and `synchronized_pool_resource::options()`
+  return the **effective** options, not the ones handed to the constructor.
+  `largest_required_pool_block` is not a request this engine can honour — its
+  size-class table stops at 2048 bytes — so echoing the caller's number back would
+  describe pooling that does not happen. [mem.res.pool.mem] permits both.
+
+## `<ostream>`
+
+- `!` **The `char8_t` / `char16_t` / `char32_t` inserters are not deleted.**
+  [ostream.inserters.character] requires `operator<<` to be *deleted* for these
+  types precisely so that the mistake is caught. In boxcxx they are simply absent,
+  so the call binds to something else and compiles:
+
+  | Written | Binds to | Prints |
+  |---|---|---|
+  | `os << u8"hi"` | `operator<<(const void*)` | the **pointer address** |
+  | `os << u"hi"`, `os << U"hi"` | `operator<<(const void*)` | the **pointer address** |
+  | `os << char8_t('x')` | `operator<<(int)` / `(unsigned)` | the **number** |
+
+  Verified in generated assembly (`_ZNSolsEPKv`, `_ZNSolsEi`) — this is a silent
+  wrong-output path, the worst kind on this list. The extraction side happens to
+  be safe, but only by accident: no `istream` extractor binds a reference across
+  distinct fundamental types, so `is >> char8_t_lvalue` fails to compile even
+  though nothing deletes it either.
+
+## `<print>`
+
+- `–` There are no `FILE*` overloads of `print`, `println`, `vprint_unicode` or
+  `vprint_nonunicode`. BoxOS has no `FILE` type anywhere for them to be declared
+  against; the console forms simply omit the stream argument.
+- `~` `vprint_unicode` forwards directly to `vprint_nonunicode` — there is no
+  separate well-formed-UTF-8 transcoding step. The console replaces multi-byte
+  UTF-8 with `?` (a kernel font limitation shared with `printf`), so non-ASCII
+  output is lossy at the device, not in the formatter.
+- `~` `println()` with no arguments exists. That is a C++26 addition, taken early
+  and harmless.
+
+## `<random>`
+
+- `–` No `operator<<` / `operator>>` on engines or distributions. Text
+  serialization of a generator's state is specified in terms of streams that BoxOS
+  does not have.
+- `?` The distributions are **not reproducible against another implementation**.
+  The standard makes the engines deterministic and leaves the distributions
+  implementation-defined; boxcxx picks its own algorithms (Marsaglia polar,
+  Marsaglia–Tsang, Hörmann PTRS, BINV), so `normal_distribution` here and in
+  libstdc++ agree in distribution, not in sequence. The engines *are* bit-exact.
+- `~` `random_device::entropy()` reports 32.0 when RDRAND backs it and 0.0 when it
+  falls back to a TSC-seeded splitmix. **Without RDRAND, `random_device` is not
+  cryptographically strong**, and reports so.
+
+## `<ranges>`
+
+- `–` **Seven of the twelve range-access CPOs are missing**: `ranges::cbegin`,
+  `cend`, `rbegin`, `rend`, `crbegin`, `crend`, `cdata`. `begin`, `end`, `size`,
+  `data`, `empty` are present.
+- `–` `views::take_while` and `views::drop_while` do not exist — two core C++20
+  adaptors.
+- `–` `ranges::is_permutation` does not exist (the non-ranges `std::is_permutation`
+  does).
+- `–` The entire `ranges::` uninitialized-memory family does not exist.
+- `–` `ranges::basic_istream_view` / `views::istream` do not exist (they are
+  specified against `basic_istream`, whose global objects BoxOS does not have).
+- `?` `split_view` and `lazy_split_view` report `iterator_category ==
+  input_iterator_tag`, which is what the standard itself specifies (their
+  `operator*` yields a prvalue). The concept layer is unaffected —
+  `forward_iterator` holds and both are `forward_range`, so algorithm dispatch and
+  `range-for` behave as forward ranges. Only code that reads the legacy
+  `iterator_category` sees "input".
+- `~` `filter_view` is not const-iterable. So is the standard's — `filter_view`
+  caches `begin()` and has no `begin() const` there either.
+- `–` **`transform_view` is not const-iterable, and that one is a gap.** The
+  standard gives `transform_view` a conditional `begin() const`; boxcxx has a
+  single non-const `begin()`, so `range<const transform_view<…>>` is false and
+  iterating a `const transform_view` fails with "discards qualifiers".
+- `–` `ranges::ssize` exists, but as an overloaded function template rather than a
+  customization-point object, so unlike the other range-access entities it cannot
+  be passed around as a value.
+- `–` The free `cbegin`/`cend`/`rbegin`/`rend`/`crbegin`/`crend` of
+  [iterator.range] carry no `noexcept`. The standard mandates a conditional
+  `noexcept` for `cbegin`/`cend` specifically; libstdc++ provides it, boxcxx does
+  not.
+
+## `<string>`
+
+- `!` **`basic_string` is not a literal type — no part of it works in a constant
+  expression** (P0980 is unimplemented; `size()` itself is not `constexpr`). A
+  `constexpr` function that builds a `std::string` fails at the point of constant
+  evaluation, not at definition. This is what keeps `bitset::to_string()` and
+  several other correctly-annotated functions from folding.
+- `–` `pmr::basic_string`, `pmr::u8string` and `pmr::forward_list` do not exist.
+  Fifteen other `pmr::` aliases do — but they are declared in `<memory_resource>`,
+  not in the header that owns the container, so a translation unit that includes
+  only `<string>` cannot see `pmr::string`.
+
+## `<type_traits>`
+
+- `!` **`is_swappable_v` is false for every array type**, and this is not merely an
+  inaccurate answer — it breaks a working operation. Verified in the tree:
+
+  | Expression | boxcxx | Standard |
+  |---|---|---|
+  | `is_swappable_v<int>` | true | true |
+  | `is_swappable_v<int[3]>` | **false** | true |
+  | `std::swap(int[3], int[3])` | **works** | works |
+  | `std::swap(int[2][2], int[2][2])` | **does not compile** | works |
+
+  The mechanism: `<type_traits>` declares the generic `swap(T&, T&)` itself and
+  detects swappability by unqualified lookup, so scalars and class types answer
+  correctly. The *array* overload lives in `<utility>`, which `<type_traits>` does
+  not include, and a built-in array has no associated namespace for ADL to reach —
+  so the trait never sees it. The array overload is in turn constrained on
+  `is_swappable<T>` of its **element** type: element `int` is swappable, so
+  `int[3]` works; element `int[2]` is not, so the nested case is rejected outright.
+
+## `<utility>`
+
+- `~` `in_range<char>(1)` compiles. [utility.intcmp]/5 makes the integer-comparison
+  functions ill-formed for `char`, `bool` and the character types; both reference
+  libraries diagnose it.
+
+## `<variant>`
+
+- `?` `visit` is an O(N) constant-evaluated index match, not an O(1) function-pointer
+  table — so a visit over *k* variants costs O(Nᵏ). The standard mandates no
+  complexity here. It was chosen for constexpr cleanliness and small alternative
+  counts; a variant with dozens of alternatives on a hot path would want the table.
+
+## `<vector>`
+
+- `!` `vector<bool>::iterator` does not model `std::output_iterator<…, bool>`, so
+  generic algorithms constrained on an output iterator reject it. The precise
+  cause: `indirectly_writable` requires `const_cast<const iter_reference_t<Out>&&>(*o) = t`
+  to be valid, and the proxy's `operator=(bool)` is not const-qualified.
+  (`vector<bool>` **is** the packed specialization — `size_t` word storage with a
+  proxy reference — despite what the header's own banner said until this document
+  was written.)
+- `!` **`vector<bool>::swap` does not exchange allocators**, so `propagate_on_container_swap`
+  is ignored on this specialization while the primary template honours it. Shown by
+  differential probe: with a POCS allocator that is not copy-assignable,
+  `vector<int>::swap` fails to compile at the allocator assignment and
+  `vector<bool>::swap` compiles — because it never touches the allocator at all.
+- `~` `vector` is not usable in a constant expression (P1004 unimplemented) — the
+  same limitation as `<string>`, and with the same cause.
+
+# 3. Where boxcxx is stronger than the reference implementations
+
+A conformance document that only listed shortfalls would be dishonest in the other
+direction. These are places where boxcxx follows the standard and a reference
+implementation does not.
+
+**Everything in this section was re-measured on 2026-08-14** against the
+toolchains installed today: **libstdc++ 16.1.0** (`__GLIBCXX__ 20260430`) and
+**libc++ 22.1.6** (`_LIBCPP_VERSION 220106`). Where an older measurement has since
+been fixed upstream, it is not claimed here — several were dropped for exactly
+that reason, and §4 says which.
+
+## Exception safety of the flat containers — the sharpest one
+
+When an element operation throws part-way through an insertion, all three
+libraries must leave a container that still satisfies its own invariant
+([flat.set.overview]/6, [flat.map.overview]/5.1). Reproduced today:
+
+| | `flat_set`, throw during the shift | `flat_map`, throw in a single-element insert |
+|---|---|---|
+| **libc++ 22** | leaves **duplicates** — `[10 20 20 30 …]`, 9 violations in 20 throw points | leaves **`keys=5, values=6`** — 12 violations in 24 throw points |
+| **libstdc++ 16.1** | clears — 0 violations, but also discards data when nothing was touched | clears — same |
+| **boxcxx** | untouched if the throw preceded any growth; invariant restored otherwise | same, for both containers |
+
+The libc++ `flat_map` case is the serious one: because the two backing containers
+desynchronize, every value after the insertion point shifts by one. The map keeps
+working and answers lookups with the wrong values.
+
+## `<format>`
+
+- **`enable_nonlocking_formatter_optimization` carve-outs.** The blanket rule in
+  [format.formatter.spec]/3 has exceptions written in *other* subclauses.
+  [time.format]/8 gives `duration<Rep,Period>` the trait of its `Rep` — so
+  `chrono::seconds` is **true** — and [format.tuple] makes the tuple case the
+  conjunction of its elements — so `pair<int,int>` is **true**. libc++ 22 answers
+  false to both. libstdc++ 16.1, which gained the trait after this work was done,
+  answers exactly as boxcxx does on all three carve-outs including `thread::id` —
+  an independent confirmation of the reading. The three implementations are not in
+  full agreement, though: on `sys_time` libstdc++ 16.1 answers **true** while
+  boxcxx and libc++ both answer false. That cell is recorded as a divergence, not
+  claimed as a win.
+- **`{:m}` on a range of pairs.** Table 115 says the element is formatted as if
+  `m` were specified for its tuple type. boxcxx and libstdc++ give
+  `{1: 2, 3: 4}`; libc++ gives `{(1, 2), (3, 4)}`.
+- **`{:#.0f}` of `1e308`.** libstdc++ 16.1 still misplaces the decimal point
+  (the output ends `…311833.6` — a digit after the point at precision 0).
+  boxcxx matches C's `printf("%#.0f")` and the standard.
+- **Precision on a floating-point-rep duration.** `{:.3}` of
+  `duration<double>{1/3}`: boxcxx applies it (`0.333s`), libstdc++ 16.1 ignores it
+  (`0.333333s`) — contradicting its own stream path, where
+  `ostringstream.precision(3) <<` does produce `0.333s` — and libc++ truncates the
+  formatted string instead.
+
+## The flat containers
+
+| Point | boxcxx | libstdc++ 16.1 | libc++ 22 |
+|---|---|---|---|
+| Four iterator-pair deduction guides for `flat_set`/`flat_multiset` | present | **absent** | present |
+| `explicit` on the container constructor | present | **lost** (copy-initialization compiles) | present |
+| Heterogeneous `insert(K&&)` must **not** exist on `flat_multiset` ([flat.multiset.defn] has no such member) | correctly absent | **leaks in** — `flat_multiset<string,less<>>::insert(string_view)` compiles and inserts | correctly absent |
+| Heterogeneous `try_emplace` / `insert_or_assign` ([flat.map.modifiers]/21) | works | **does not compile** — the body spells `keys.insert(key_it, move(k))`, handing a `string_view` to `vector<string>::insert` | works |
+| Construction from an already-sorted range must be linear ([flat.set.cons]/2), N = 1000 | **1 998** comparisons | **11 620** (N log N) | 3 005 |
+| `erase_if` must call `pred(as_const(e))` ([flat.set.erasure]/2) | const | **mutable** | const |
+
+## Elsewhere
+
+- **`span::crbegin` / `crend`.** [span.overview] declares them, with inline bodies.
+  libc++ 22 does not provide them.
+- **P2165R4.** `is_constructible_v<tuple<int,int>, array<int,2>>` is true in boxcxx
+  and libstdc++; libc++ 22 fails to compile it.
+- **`<complex>` Annex G directed special values.** G.6.2.1 specifies
+  `acosh(±0 + iNaN)` as `NaN ± i(π/2)` — the imaginary part is *given*, and the
+  adjacent "finite nonzero x + iNaN → NaN + iNaN" bullet explicitly excludes zero.
+  **Both** libstdc++ 16.1 and libc++ 22 return `(NaN, NaN)`. boxcxx implements the
+  carve-out.
+- **Bounded field width.** boxcxx caps a format field at 65535 on the literal path
+  (a compile-time error, verified) and on the dynamic path (a run-time throw,
+  pinned by the in-tree suite). Neither reference library bounds the dynamic path;
+  libc++ bounds nothing. On bare metal a hostile format string asking for a
+  two-gigabyte field is a denial of service, so this is deliberate strictness —
+  recorded in §2 under `<format>` as a `+`.
+
+---
+
+# 4. Defects found in the standard and in the reference implementations
+
+## In N4950 itself
+
+**[flat.multiset.defn] — both iterator-pair deduction guides are unusable as
+published.** They are written
+
+```
+template<class InputIterator, class Compare = less<iter-value-type<InputIterator>>>
+  flat_multiset(InputIterator, InputIterator, Compare = Compare())
+    -> flat_multiset<iter-value-type<InputIterator>, iter-value-type<InputIterator>, Compare>;
+```
+
+so the second template argument — the *container* — is deduced as the key type and
+the comparator lands in the container slot: instantiating the deduced type is a
+hard error. The corresponding `flat_set` guides are written correctly with two
+arguments. There is no LWG issue; the current working draft carries the corrected
+form and libc++ implements the corrected form, so this is editorial. boxcxx
+implements the corrected two-argument form.
+
+**[flat.map.modifiers]/12 is internally inconsistent.** The constraint on
+`insert_range` admits any range whose reference type is convertible to
+`value_type`, which includes tuple-like ranges such as `views::zip(keys, values)`;
+but the Effects clause reads `e.first` and `e.second`, which such a range does not
+have.
+
+boxcxx follows the letter, and **is alone in doing so**: measured today,
+`flat_map(from_range, views::zip(k, v))` builds and runs on both libstdc++ 16.1 and
+libc++ 22, and fails on boxcxx at `flat_map:746` with
+"`tuple<int&, char&>` has no member named `first`". Both libraries chose to make
+the motivating example work; boxcxx implements the clause as written.
+
+This is recorded here rather than quietly "fixed", because twice during this epic a
+proposal to change it *because the other library does it* was withdrawn after
+reading the normative text. It is nevertheless a usability gap on our side, and the
+honest summary is: the standard is inconsistent, and boxcxx picked the half that
+loses a useful construction.
+
+**[tuple.rel] as written makes `tuple<int>{1} == tuple<int>{1}` ambiguous** once
+the C++23 tuple-like `operator==` is added, because the new overload is no worse
+than the homogeneous one and the text carries no exclusion. libstdc++ suppresses
+it with a tuple-specific guard wider than *different-from*; boxcxx does the same.
+This was found by a failing test, not by reading.
+
+## In libstdc++
+
+Present in 16.1.0 (`__GLIBCXX__ 20260430`), all reproduced today: the six rows of
+the flat-container table in §3, `{:#.0f}` of `1e308`, and the ignored precision on
+floating-point-rep durations.
+
+**Fixed since the epic measured them against 15.2 — no superiority is claimed:**
+`{:<010p}` zero-padding despite an explicit align; `{:%F}` of `year{-43}`
+disagreeing with its own `%Y`; `iterator_traits<flat_map::iterator>::value_type`
+being `pair<const K,T>`; `%H` of `hours{300}` truncating to 8 bits; the absence of
+`ranges::starts_with` / `ends_with` / `shift_left` / `shift_right`; and the
+`<bitset>` string constructor not validating the whole string.
+
+## In libc++ 22.1.6
+
+The two flat-container invariant violations above (both reproduced today), the
+`{:m}` tuple-element rule, the missing `span::crbegin`/`crend`, the
+`enable_nonlocking_formatter_optimization` carve-outs, P2165R4, and — from the
+escape-sequence work — three cases in `write_escaped.h` where a character is
+treated as "previously escaped" (`U+0020`, a non-delimiter quote, and an
+ill-formed run) and is then printed raw.
+
+# 5. `box::` — the BoxOS-native surface
+
+Everything above is about the ISO library. `include/box/cxx/` is the other half of
+boxcxx: 32 headers that give BoxOS's own concepts a C++ face. They are not
+replacements for standard facilities and they do not shadow them — they exist
+because the kernel has ideas Unix does not, and a standard library has no words
+for them.
+
+| Area | Headers | What they add |
+|---|---|---|
+| I/O spine | `current.h`, `console.h`, `keyboard.h`, `line.h` | The BoxOS replacement for stdin/stdout/stderr: typed channels, colour, event-driven keys. |
+| Events | `touch.h`, `reflex.h`, `system_touch.h` | Tag-multicast event subscription (REST / REACT / INTERRUPT) — the kernel wakes you; nothing polls. |
+| Execution | `strand.h`, `executor.h`, `ferry.h`, `timing.h`, `timeouts.h` | In-cabin execution contexts, a cooperative executor, `co_await`-able async file I/O. |
+| Memory | `heap.h`, `bay.h`, `bay_memory_resource.h`, `memtag.h`, `pku.h`, `hw.h` | Tagged allocation and accounting, cross-cabin shared memory, tagged-RAM introspection, protection keys, LAM/TME. |
+| Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts and snapshots, anchor events. |
+| Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |
+| System | `process.h`, `child.h`, `system.h`, `manifest.h`, `cpu.h` | Process and cabin identity, child supervision, firmware/EFI introspection, the expert syscall builder. |
+| Data | `flat_hash_map.h`, `flat_hash_set.h`, `math.h`, `error.h` | A robin-hood table, an angle-and-base maths layer, the native error model. |
+
+Two of these are close enough to standard facilities that their differences matter.
+
+## `box::flat_hash_map` / `box::flat_hash_set`
+
+An open-addressed robin-hood table in one allocation, offered *alongside*
+`std::unordered_map`, not as a replacement. Measured on BoxOS with
+`box::heap::tag` at N = 2000: **1 block, 24 bytes per element**, against
+`std::unordered_map`'s **2001 blocks, ~40 bytes per element** — a node map
+allocates once per element, this allocates once.
+
+Every difference below is deliberate, and each is verified in the tree:
+
+- `–` No bucket interface, no `node_handle`, and therefore **no `merge`** (the
+  standard defines `merge` in terms of `extract`).
+- `–` No `multi` variants: robin-hood displacement and duplicate keys cannot both
+  hold the table's invariant.
+- `~` `value_type` is `pair<Key, T>`, not `pair<const Key, T>` — it follows
+  `std::flat_map`, because a const key cannot be relocated. `*it` is a proxy, so
+  `for (auto& [k, v] : m)` does not compile; use `auto` or `auto&&`. This is the
+  same shape as the already-shipped `std::flat_map`.
+- `~` Zero reference and iterator stability: any mutation may relocate.
+- `~` `max_load_factor()` is the constant `0.875f`, not a setter.
+- `~` `max_size()` is capped at 2³¹ slots — the spare control bit that makes probe
+  distance overflow-proof costs one bit of the hash word.
+- `~` A throw while relocating restores the invariant by clearing, following the
+  `std::flat_set` doctrine already in the tree.
+- `+` `m.fallible()` returns a facet whose allocating operations answer with
+  `box::result` carrying the kernel's actual reason, instead of throwing.
+
+The one thing to know before writing a loop: a hand-written erase-during-traversal
+can see an element twice if a probe run crosses the seam of the array.
+`box::erase_if` does not have this problem (its scan starts from an empty slot),
+and bulk removal goes through it.
+
+## `box::error` / `box::result`
+
+BoxOS error codes are not `errno`. `box::error` carries the kernel's native code,
+`box::result<T>` is the fallible return type, and neither maps onto
+`std::error_code`'s POSIX categories. `<system_error>` exists and is conformant;
+it is simply not what BoxOS itself speaks.
+
+---
+
+# 6. Open debts
+
+These are known, recorded, and not yet closed. They are listed because a
+conformance document that only lists finished work is an advertisement.
+
+## The one that covers everything
+
+**No run on physical hardware.** The entire C++ epic has been verified under
+emulation only — QEMU and Bochs, BIOS and UEFI, 1 and 16 cores, `-cpu max`.
+Every gate in this document means "green in that matrix". Several paths are
+structurally dormant there and can only be exercised on real silicon:
+
+| Path | Why it sleeps under emulation |
+|---|---|
+| CET shadow-stack `INCSSP` in the unwinder | TCG does not enforce IBT/SHSTK |
+| PKU access faults | QEMU publishes `CR4.PKE` but does not trap |
+| `WAITPKG` `UMONITOR`/`UMWAIT` | not exposed by TCG on this host |
+| LAM tagged-pointer masking, TME | not present under TCG |
+| x87 transcendentals at genuine 80-bit width | QEMU narrows them to host double; Bochs and real hardware do not |
+
+## Library debts
+
+The two with real teeth, both `!` in §2:
+
+- **`<ostream>`: the `char8_t` / `char16_t` / `char32_t` inserters are not
+  deleted**, so `os << u8"text"` compiles and prints a pointer address. The
+  standard deletes them precisely to stop this. Fixing it is small — the deleted
+  overloads — and it is the first thing to close.
+- **`<memory>`: `atomic<shared_ptr>` / `atomic<weak_ptr>` still spin.** Their
+  `wait()` is a bare polling loop and `notify_one` / `notify_all` are no-ops, in a
+  library where every other atomic parks in the kernel. On a single-core cabin this
+  burns the core until the value changes.
+
+The rest:
+
+- `<format>`: `basic_string` with non-default traits or allocator has no
+  formatter and prints as a range (§2).
+- `<cmath>`: `std::lerp` is absent; `<array>`: `array<T,0>` is missing its element
+  and reverse surface. Both are small, self-contained additions.
+- `<cmath>`: `std::log10` is inexact on 1 of the 23 exact powers of ten. Measured
+  on BoxOS; `box::log(x, 10)` returns 22 of 23 exactly by using `log10` directly.
+- `<iterator>`: `incrementable_traits<common_iterator>` is not specialized. The
+  non-standard `iterator_traits` specializations for `reverse_iterator` and
+  `basic_const_iterator` (§2) are still load-bearing — they supply members the
+  class bodies omit — so removing them is a design change, not a cleanup.
+- Containers: the iterator-pair constructors carry no input-iterator SFINAE guard
+  (diagnostics quality only), and the move constructors of `map`, `set` and the
+  `unordered_*` family are hard-coded `noexcept` even when the comparator or hasher
+  has a throwing move — so such a move terminates instead of propagating. Both
+  reference libraries condition it. (`basic_string`'s unconditional `noexcept` is
+  **not** a deviation: [string.cons] mandates it.)
+- `box::heap::counters()` cannot see allocations of 8192 bytes or less — they come
+  from the per-strand pool, and only the global-heap path increments the counters.
+  **A test of the form "this does not allocate" is therefore not writable in
+  BoxOS** for small blocks; such a claim must be pinned by reading the code and
+  said out loud, which is what the diagnostic formatters do.
+- `box::error`'s formatter allocates a `std::string`, unlike the five diagnostic
+  formatters which render into a stack buffer.
+
+## Substrate debts that surfaced through C++ work
+
+- **`prefault_huge_locked` (`boxlib/src/memory.c`) issues a Manifest call while
+  holding `heap_lock`.** The drain path inside can reach `malloc`, which wants the
+  same lock. Pre-existing, not introduced by the C++ layer, and only reachable
+  under contention; the real fix is an allocation-free drain path.
+- One user-mode page fault was observed on a loaded 16-core BIOS run and has
+  never reproduced in isolation. It is recorded rather than explained.
+
+## Deliberately deferred to a future C++26 phase
+
+`constexpr` `stable_sort` / `stable_partition` / `inplace_merge` (P2562),
+`reserve_hint` (P2846), `views::concat` (P2542), LWG 2713, and the feature-test
+macro bumps to their C++26 values.
+
+# 7. How the claims in this document were verified
+
+Every statement here about **boxcxx** was checked against the tree as it stands,
+not against notes from when the feature was written. The probe compiler is the
+same cross compiler the library ships with:
+
+```
+x86_64-elf-g++ -std=gnu++23 -nostdinc++ -fexceptions -frtti -ffreestanding \
+  -fno-builtin -I include/std -I include -I ../boxlib/include -I ../../include \
+  -fsyntax-only <probe.cpp>
+```
+
+Every statement about **libstdc++** or **libc++** was re-measured on 2026-08-14
+against the toolchains installed on the build host — libstdc++ 16.1.0
+(`__GLIBCXX__ 20260430`) and libc++ 22.1.6 (`_LIBCPP_VERSION 220106`) — by
+compiling and running the same program against each. Claims that no longer
+reproduce were removed, and §4 lists what was removed and why. Where a number
+was measured against an older toolchain that is no longer installed, the version
+is named at the claim.
+
+Runtime behaviour of boxcxx cannot be observed by a syntax-only compile and is not
+asserted here on that basis. It is pinned instead by the in-tree suite —
+`src/userspace/apps/cxxtest.cpp`, 156 phases, 4 512 runtime checks and 1 242
+`static_assert`s — which runs on BIOS and UEFI × 1 and 16 cores with `-cpu max`
+before every commit.
+
+## The trap that shaped this document
+
+**A presence probe of the form `requires { some_call(...); }` reports success when
+a *different* overload swallows the call, or when the constraint is satisfied and
+the *body* is ill-formed.** Three claims flipped during this pass because of it,
+one of them in a reference library:
+
+- `std::mismatch(p, p, p, p)` compiles in boxcxx — the fourth `int*` binds to the
+  `Pred` parameter of the three-iterator overload. The four-iterator overload does
+  not exist.
+- `std::get<0>(std::move(const_array))` compiles — it binds to the
+  `const array&` overload and returns `const T&` instead of `const T&&`.
+- `flat_map<string,int,less<>>::try_emplace(string_view, …)` satisfies its
+  constraint on libstdc++ 16.1, so a `requires` probe called it supported; a real
+  call fails inside `flat_map:537`.
+
+**Presence is therefore asserted here only from a result type, a real
+instantiation, or observed behaviour — never from "it compiles".**
+
+## What is not verified
+
+Physical hardware. Every result in this document comes from emulation (QEMU and
+Bochs) or from host compilation. The paths listed in §6 that emulation cannot
+exercise — CET shadow stacks, PKU faults, `UMWAIT`, LAM, TME, and genuine 80-bit
+x87 transcendentals — are unverified in the strict sense, and are marked as such
+rather than assumed to work.
