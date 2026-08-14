@@ -40,9 +40,9 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 165 (164 C++23 + 1 C++26) |
+| Feature-test macros defined | 167 (164 C++23 + 3 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 170 phases, 4 711 runtime checks, 1 446 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 174 phases, 4 758 runtime checks, 1 467 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -137,13 +137,13 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **165** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **167** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there is exactly one so far.
+  section; there are three so far.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
   cross-product of macros and headers, in both directions, with no failures. This
@@ -201,6 +201,9 @@ constructors) — the library simply stayed silent about them.
 | C++26 macro claimed | Value | Paper | Since |
 |---|---|---|---|
 | `__cpp_lib_sstream_from_string_view` | 202306 | P2495R3 | Ф32-a |
+| `__cpp_lib_constexpr_algorithms` | 202306 | P2562R1 | Ф32-b |
+| `__cpp_lib_ranges_reserve_hint` | 202502 | P2846R6 | Ф32-c |
+| `__cpp_lib_ranges_concat` | 202403 | P2542R8 | Ф32-d |
 
 # 2. Per-header deviations
 
@@ -235,6 +238,20 @@ nothing has been found since.
   engines rather than carrying a second copy of the selection- and
   reservoir-sampling logic. Closed `__cpp_lib_sample`.
 - `~` The parallel overloads do not exist — `<execution>` does not exist (§1.1).
+
+### P2562R1 — constexpr stable sorting (Ф32-b)
+
+- `✓` `stable_sort`, `stable_partition`, `inplace_merge` and their three
+  `ranges::` forms are constant-evaluable. In a constant expression there is no
+  buffer to allocate — `::operator new` is not one — so they take the in-place
+  rotate merge, which is exactly the path [stable.sort] and [alg.partitions]
+  already specify for "no additional memory available"; only the comparison
+  count differs, never the result or the stability. `inplace_merge` never
+  needed a buffer in the first place. Ф31e-g-3 had removed `stable_partition`'s
+  `constexpr` because it was a lie at the time; it is back, now true. This
+  raised `__cpp_lib_constexpr_algorithms` to its C++26 value. P0202's other two
+  exclusions, `shuffle` and `sample`, are not part of P2562R1 and are still not
+  constexpr.
 
 ## `<array>`
 
@@ -871,6 +888,40 @@ nothing has been found since.
 - `✓` Closed in Ф31e-b-1: the free `cbegin`/`cend` of [iterator.range] carried no
   `noexcept`, where /7 and /9 mandate a conditional one. The other four of that
   family are not given one by the standard and still do not have one.
+
+### P2846R6 — reserve_hint (Ф32-c)
+
+- `✓` `ranges::reserve_hint`, `approximately_sized_range`, and `sized_range`
+  rebased to refine it rather than `range`. Seventeen views carry the member —
+  every one the paper touches — and `ranges::to` reserves off the hint instead
+  of off `ranges::size`, which is the point: a range that can say "about this
+  many" but never exactly how many could previously not be reserved for at all.
+  `take_view`'s is the one unconstrained member (LEWG asked for it: `r | take(n)`
+  is likely to yield n elements even when r offers no hint).
+- `+` `ranges::reserve_hint` takes a forwarding reference, so
+  `ranges::reserve_hint(v | views::take(3))` on a pipeline temporary is
+  well-formed. **The older range-access CPOs in this library do not**: `Begin`,
+  `End`, `Size`, `Data`, `Empty` and their c-/r- variants all take a plain `R&`,
+  so `std::ranges::size(v | views::take(2))` — which both reference libraries
+  accept — does not compile here. That is a pre-existing gap in [range.access],
+  not something P2846R6 introduced, and it is recorded in §6 rather than fixed
+  in this phase.
+
+### P2542R8 — concat_view (Ф32-d)
+
+- `✓` `concat_view` and `views::concat`. The position is a `variant` over the
+  adapted iterators, because it genuinely is a sum type; `satisfy()` walks past
+  however many empty ranges follow a boundary, which is the case that separates
+  a working implementation from one that only looks right. The element type is
+  the common reference of all the adapted ranges, gated by the `Concatable`
+  chain that was already in the tree — it was built for `join_with` (LWG 4074)
+  and this is its second consumer. `views::concat(r)` on a single range is
+  `views::all(r)`, not a one-element `concat_view`.
+- `~` The standard's wording indexes its parameter pack with C++26's `T...[I]`.
+  boxcxx compiles at `-std=gnu++23`, where that is an extension, so every
+  dispatch is an `if constexpr` recursion over `I` with `tuple_element_t` in
+  place of pack indexing. Same semantics, no dependency on a C++26 language
+  feature.
 
 ## `<span>`
 

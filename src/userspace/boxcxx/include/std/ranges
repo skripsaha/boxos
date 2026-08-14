@@ -139,6 +139,10 @@ using borrowed_subrange_t =
 #include <__bits/ranges_slide>  // slide_view (reuses ToUnsignedLike)
 #include <__bits/ranges_stride> // stride_view (reuses DivCeil, ToUnsignedLike)
 
+// concat_view (P2542R8, C++26) comes after ranges_join_with, whose Concatable
+// chain it reuses, and after ranges_views for MaybeConst/SimpleView.
+#include <__bits/ranges_concat>
+
 // ranges::to (Ф29f-2): conversion from a range to a container. Tail
 // position — needs views::transform for its range-of-ranges recursive case.
 #include <__bits/ranges_to>

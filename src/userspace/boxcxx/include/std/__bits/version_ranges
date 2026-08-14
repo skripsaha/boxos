@@ -73,4 +73,11 @@
 #  define __cpp_lib_ranges_reserve_hint 202502L
 #endif
 
+// __cpp_lib_ranges_concat (P2542R8, C++26), Ф32-d. concat_view, views::concat
+// and the deduction guide are all here; the Concatable gate they need was
+// already in the tree, built for join_with (LWG 4074).
+#ifndef __cpp_lib_ranges_concat
+#  define __cpp_lib_ranges_concat 202403L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_RANGES
