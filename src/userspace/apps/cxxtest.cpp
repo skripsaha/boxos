@@ -329,9 +329,16 @@
 #ifndef __cpp_lib_list_remove_return_type
 #  error "__cpp_lib_list_remove_return_type is not visible from <list> alone"
 #endif
+#include <compare>
+#ifndef __cpp_lib_three_way_comparison
+#  error "__cpp_lib_three_way_comparison is not visible from <compare> alone"
+#endif
 #include <map>
 #ifndef __cpp_lib_associative_heterogeneous_erasure
 #  error "__cpp_lib_associative_heterogeneous_erasure is not visible from <map> alone"
+#endif
+#ifndef __cpp_lib_map_try_emplace
+#  error "__cpp_lib_map_try_emplace is not visible from <map> alone"
 #endif
 #ifndef __cpp_lib_generic_associative_lookup
 #  error "__cpp_lib_generic_associative_lookup is not visible from <map> alone"
@@ -342,6 +349,9 @@
 #include <unordered_map>
 #ifndef __cpp_lib_generic_unordered_lookup
 #  error "__cpp_lib_generic_unordered_lookup is not visible from <unordered_map> alone"
+#endif
+#ifndef __cpp_lib_unordered_map_try_emplace
+#  error "__cpp_lib_unordered_map_try_emplace is not visible from <unordered_map> alone"
 #endif
 #include <stack>
 #ifndef __cpp_lib_adaptor_iterator_pair_constructor
@@ -29350,6 +29360,11 @@ void Phase131()
                   "phase131 incomplete_container_elements");
     static_assert(__cpp_lib_list_remove_return_type == 201806L,
                   "phase131 list_remove_return_type");
+    static_assert(__cpp_lib_map_try_emplace == 201411L, "phase131 map_try_emplace");
+    static_assert(__cpp_lib_unordered_map_try_emplace == 201411L,
+                  "phase131 unordered_map_try_emplace");
+    static_assert(__cpp_lib_three_way_comparison == 201907L,
+                  "phase131 three_way_comparison");
     static_assert(__cpp_lib_node_extract == 201606L, "phase131 node_extract");
 
     static_assert(__cpp_lib_barrier == 201907L, "phase131 barrier");
@@ -29379,8 +29394,10 @@ void Phase131()
 #  error "phase131: __cpp_lib_assume_aligned must stay undefined"
 #endif
 // (atomic_flag_test, atomic_float, atomic_ref, atomic_shared_ptr,
-//  atomic_wait and barrier were guarded here until Ф31e-d closed all six;
-//  their positive assertions are in list (A) above.)
+//  atomic_wait and barrier were guarded here until Ф31e-d closed all six,
+//  scoped_lock with them; map_try_emplace, unordered_map_try_emplace and
+//  three_way_comparison until Ф31e-f. Their positive assertions are in list
+//  (A) above.)
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
 #endif
@@ -29445,9 +29462,6 @@ static_assert(__cpp_lib_interpolate == 201902L, "phase131: __cpp_lib_interpolate
 #  error "phase131: __cpp_lib_is_pointer_interconvertible must stay undefined"
 #endif
 static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappable — closed by Ф31e");
-#ifdef __cpp_lib_map_try_emplace
-#  error "phase131: __cpp_lib_map_try_emplace must stay undefined"
-#endif
 #ifdef __cpp_lib_mdspan
 #  error "phase131: __cpp_lib_mdspan must stay undefined"
 #endif
@@ -29513,18 +29527,12 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #ifdef __cpp_lib_syncbuf
 #  error "phase131: __cpp_lib_syncbuf must stay undefined"
 #endif
-#ifdef __cpp_lib_three_way_comparison
-#  error "phase131: __cpp_lib_three_way_comparison must stay undefined"
-#endif
 #ifdef __cpp_lib_transformation_trait_aliases
 #  error "phase131: __cpp_lib_transformation_trait_aliases must stay undefined"
 #endif
 static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_transparent_operators — closed by Ф31e");
 #ifdef __cpp_lib_tuple_like
 #  error "phase131: __cpp_lib_tuple_like must stay undefined"
-#endif
-#ifdef __cpp_lib_unordered_map_try_emplace
-#  error "phase131: __cpp_lib_unordered_map_try_emplace must stay undefined"
 #endif
 
     // ── (C) <utility> ───────────────────────────────────────────────────
@@ -37556,6 +37564,163 @@ void Phase149()
            "and views::istream\n");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-f — the ordered associative containers get operator<=> (and with it
+// the four relational operators the language synthesizes from it), and
+// try_emplace / insert_or_assign get the overloads they were missing.
+// ─────────────────────────────────────────────────────────────────────────
+
+// A key that reports having been moved from: the rvalue-key overload of
+// insert_or_assign exists precisely so this reads "moved", and unordered_map
+// had only the const& one, so it copied and said nothing.
+struct P150Key {
+    int          v;
+    mutable bool moved_from = false;
+    P150Key(int x) : v(x) {}
+    P150Key(const P150Key &o) : v(o.v) {}
+    P150Key(P150Key &&o) noexcept : v(o.v) { o.moved_from = true; }
+    bool operator<(const P150Key &o) const { return v < o.v; }
+    bool operator==(const P150Key &o) const { return v == o.v; }
+};
+struct P150Hash {
+    std::size_t operator()(const P150Key &k) const
+    {
+        return static_cast<std::size_t>(k.v);
+    }
+};
+// A key with ONLY operator< — synth-three-way must fall back to it and the
+// result must be weak_ordering, not strong.
+struct P150OnlyLess {
+    int  v;
+    bool operator<(const P150OnlyLess &o) const { return v < o.v; }
+};
+// Dependent, so the absence is a substitution failure rather than a hard error.
+template <class T>
+constexpr bool P150HasSpaceship = requires(const T &a, const T &b) { a <=> b; };
+
+void Phase150()
+{
+    // ── operator<=> on the four ordered associative containers ────────────
+    {
+        using M = std::map<int, int>;
+        using S = std::set<int>;
+        static_assert(std::is_same_v<decltype(std::declval<M>() <=>
+                                              std::declval<M>()),
+                                     std::strong_ordering>);
+        static_assert(std::is_same_v<decltype(std::declval<S>() <=>
+                                              std::declval<S>()),
+                                     std::strong_ordering>);
+        // The four relationals are SYNTHESIZED from <=>; none of them existed
+        // before, so `m1 < m2` did not compile on a map while it did on a
+        // vector.
+        static_assert(std::is_same_v<decltype(std::declval<M>() <
+                                              std::declval<M>()),
+                                     bool>);
+
+        M a{{1, 1}, {2, 2}}, b{{1, 1}, {2, 3}}, prefix{{1, 1}};
+        Check((a <=> a) == 0 && a == a, "phase150 (1) an equal map compares equivalent");
+        Check(a < b && b > a && a <= b && b >= a,
+              "phase150 (2) a differing mapped value orders the maps");
+        // A prefix is less: the shorter range runs out first.
+        Check(prefix < a && a > prefix,
+              "phase150 (3) a prefix map compares less than its extension");
+
+        S s1{1, 2}, s2{1, 3}, s3{1};
+        Check((s1 <=> s1) == 0 && s3 < s1 && s1 < s2 && s2 > s1,
+              "phase150 (4) set orders lexicographically over its keys");
+
+        std::multimap<int, int> m1{{1, 1}, {1, 2}}, m2{{1, 1}, {1, 3}};
+        std::multiset<int>      n1{1, 1, 2}, n2{1, 1, 3};
+        Check(m1 < m2 && n1 < n2 && (m1 <=> m1) == 0 && (n1 <=> n1) == 0,
+              "phase150 (5) multimap and multiset too, duplicates and all");
+
+        // Ordering CATEGORY, not just the answer: a key with only < has to
+        // come back weak_ordering through synth-three-way.
+        using WS = std::set<P150OnlyLess, std::less<>>;
+        static_assert(std::is_same_v<decltype(std::declval<WS>() <=>
+                                              std::declval<WS>()),
+                                     std::weak_ordering>);
+        Check(true, "phase150 (6) a key with only operator< yields "
+                    "weak_ordering, not strong");
+
+        // The unordered containers must NOT have gained one — [unord.map.syn]
+        // gives them == only.
+        static_assert(!P150HasSpaceship<std::unordered_map<int, int>>);
+        static_assert(!P150HasSpaceship<std::unordered_set<int>>);
+        Check(true, "phase150 (7) and the unordered containers still have no "
+                    "operator<=>, as their synopsis says");
+    }
+
+    // ── map: the two hint overloads of each ───────────────────────────────
+    {
+        std::map<int, std::string> m;
+        using It = std::map<int, std::string>::iterator;
+        static_assert(std::is_same_v<decltype(m.try_emplace(m.cbegin(), 1, "x")), It>);
+        static_assert(
+            std::is_same_v<decltype(m.insert_or_assign(m.cbegin(), 1, "x")), It>);
+
+        auto i1 = m.try_emplace(m.cbegin(), 1, "one");
+        Check(i1->first == 1 && i1->second == "one" && m.size() == 1,
+              "phase150 (8) map try_emplace(hint, k, args...) inserts");
+        auto i2 = m.try_emplace(m.cbegin(), 1, "OTHER");
+        Check(i2->second == "one" && m.size() == 1,
+              "phase150 (9) and leaves an existing key alone");
+        auto i3 = m.insert_or_assign(m.cbegin(), 1, std::string("two"));
+        Check(i3->second == "two" && m.size() == 1,
+              "phase150 (10) map insert_or_assign(hint, ...) overwrites");
+        auto i4 = m.insert_or_assign(m.cbegin(), 2, std::string("new"));
+        Check(i4->second == "new" && m.size() == 2,
+              "phase150 (11) and inserts when the key is absent");
+        int k = 3;
+        auto i5 = m.try_emplace(m.cend(), std::move(k), "three");
+        Check(i5->first == 3 && m.size() == 3,
+              "phase150 (12) the rvalue-key hint overload resolves too");
+        // A deliberately WRONG hint must still land the element correctly —
+        // the hint is advisory ([associative.reqmts]).
+        auto i6 = m.try_emplace(m.cbegin(), 99, "far");
+        Check(i6->first == 99 && m.size() == 4 && m.rbegin()->first == 99,
+              "phase150 (13) a bad hint does not misplace the element");
+    }
+
+    // ── unordered_map: two hint overloads plus the missing rvalue key ─────
+    {
+        std::unordered_map<int, std::string> u;
+        using UIt = std::unordered_map<int, std::string>::iterator;
+        static_assert(std::is_same_v<decltype(u.try_emplace(u.cbegin(), 1, "x")), UIt>);
+        static_assert(
+            std::is_same_v<decltype(u.insert_or_assign(u.cbegin(), 1, "x")), UIt>);
+
+        auto j1 = u.try_emplace(u.cbegin(), 1, "one");
+        Check(j1->second == "one" && u.size() == 1,
+              "phase150 (14) unordered_map try_emplace(hint, ...)");
+        auto j2 = u.insert_or_assign(u.cbegin(), 1, std::string("two"));
+        Check(j2->second == "two" && u.size() == 1,
+              "phase150 (15) unordered_map insert_or_assign(hint, ...)");
+        auto j3 = u.insert_or_assign(2, std::string("new"));
+        Check(j3.second && u.at(2) == "new",
+              "phase150 (16) the hintless form still returns a pair");
+
+        // The one that was silently wrong: with only the const& overload, an
+        // rvalue key was COPIED. Now it must be moved.
+        std::unordered_map<P150Key, int, P150Hash> uk;
+        P150Key key(5);
+        auto    j4 = uk.insert_or_assign(std::move(key), 1);
+        Check(j4.second && key.moved_from,
+              "phase150 (17) an rvalue key is MOVED into unordered_map, not "
+              "copied");
+        P150Key key2(6);
+        (void)uk.try_emplace(uk.cbegin(), std::move(key2), 2);
+        Check(key2.moved_from && uk.size() == 2,
+              "phase150 (18) and the rvalue-key hint overload moves as well");
+    }
+
+    printf("[CXX] PASS phase150: Ф31e-f — map/multimap/set/multiset gained operator<=> "
+           "and with it the four relational operators the language synthesizes, "
+           "synth-three-way falls back to < for a key that has only that, and "
+           "try_emplace/insert_or_assign are 4-of-4 on both map and unordered_map "
+           "(whose rvalue key was being copied in silence)\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -37727,6 +37892,7 @@ int main()
     Phase147();
     Phase148();
     Phase149();
+    Phase150();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

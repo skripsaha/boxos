@@ -40,6 +40,7 @@
 #include <__bits/version_charconv>        // <charconv>
 #include <__bits/version_chrono>          // <chrono>
 #include <__bits/version_cmath>           // <cmath>
+#include <__bits/version_compare>         // <compare>
 #include <__bits/version_complex>         // <complex>
 #include <__bits/version_containers>      // container family (+ <memory>)
 #include <__bits/version_cstddef>         // <cstddef>
@@ -161,9 +162,6 @@
 //                          is_pointer_interconvertible_base_of is present,
 //                          but is_pointer_interconvertible_with_class is
 //                          absent.
-// map_try_emplace          map::try_emplace and map::insert_or_assign each
-//                          have 2 of their 4 overloads; both const_iterator
-//                          hint forms are absent.
 // mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
 // nonmember_container_access
@@ -231,23 +229,6 @@
 //                          basic_string::resize_and_overwrite absent.
 // string_view              basic_string_view has no crbegin/crend.
 // syncbuf                  no <syncbuf> header.
-// three_way_comparison     gap (1) — the CLASS compare_three_way_result<int>
-//                          being ill-formed for want of the `class U = T`
-//                          default on its primary — was closed in Ф31e-b.
-//                          What still blocks: this macro's 201907L value is
-//                          P1614R2,
-//                          which is the library-wide operator<=>, and the
-//                          four ordered associative containers — map,
-//                          multimap, set, multiset — have no operator<=> at
-//                          all. Every other <=> P1614R2 asks for is here
-//                          (string, string_view, vector, array, deque, list,
-//                          forward_list, queue, stack, pair, tuple,
-//                          optional, variant, the smart pointers, chrono,
-//                          error_code, thread::id) as is the rest of [cmp]:
-//                          the three ordering types, is_eq/is_lt/...,
-//                          common_comparison_category, three_way_comparable
-//                          (_with), compare_three_way, strong/weak/partial_
-//                          order and the three _fallback forms.
 // transformation_trait_aliases
 //                          the C++14 alias set is missing aligned_storage_t
 //                          and aligned_union_t (deprecated in C++23, but
@@ -259,8 +240,5 @@
 //                          t(array<int,2>{}) does not compile, and neither
 //                          does the pair form. Assignment and comparison
 //                          from a tuple-like are missing with them.
-// unordered_map_try_emplace
-//                          unordered_map::try_emplace has 2 of 4 overloads
-//                          and insert_or_assign only 1 of 4.
 
 #endif // BOXCXX_VERSION

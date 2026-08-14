@@ -264,12 +264,45 @@ public:
             piecewise_construct, forward_as_tuple(std::move(key)),
             forward_as_tuple(std::forward<Args>(args)...));
     }
+    // [unord.map.modifiers] declares four overloads of each. try_emplace had
+    // two and insert_or_assign had ONE — so `m.insert_or_assign(std::move(k),
+    // v)` copied the key instead of moving it, silently, which is the whole
+    // reason the rvalue overload exists. The hint is advisory in an unordered
+    // container (the bucket is found by hash), so it is accepted and ignored.
+    template <typename... Args>
+    iterator try_emplace(const_iterator, const Key &key, Args &&...args)
+    {
+        return try_emplace(key, std::forward<Args>(args)...).first;
+    }
+    template <typename... Args>
+    iterator try_emplace(const_iterator, Key &&key, Args &&...args)
+    {
+        return try_emplace(std::move(key), std::forward<Args>(args)...).first;
+    }
+
     template <typename M>
     pair<iterator, bool> insert_or_assign(const Key &key, M &&obj)
     {
         auto [it, inserted] = try_emplace(key, std::forward<M>(obj));
         if (!inserted) it->second = std::forward<M>(obj);
         return {it, inserted};
+    }
+    template <typename M>
+    pair<iterator, bool> insert_or_assign(Key &&key, M &&obj)
+    {
+        auto [it, inserted] = try_emplace(std::move(key), std::forward<M>(obj));
+        if (!inserted) it->second = std::forward<M>(obj);
+        return {it, inserted};
+    }
+    template <typename M>
+    iterator insert_or_assign(const_iterator, const Key &key, M &&obj)
+    {
+        return insert_or_assign(key, std::forward<M>(obj)).first;
+    }
+    template <typename M>
+    iterator insert_or_assign(const_iterator, Key &&key, M &&obj)
+    {
+        return insert_or_assign(std::move(key), std::forward<M>(obj)).first;
     }
 
     iterator erase(const_iterator where) { return __t.Erase(where); }

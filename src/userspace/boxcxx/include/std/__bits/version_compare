@@ -1,0 +1,25 @@
+// boxcxx — <__bits/version_compare>
+//
+// The one feature-test macro [version.syn] gives <compare>: P1614R2's
+// library-wide operator<=>. Split into a leaf for the same
+// [support.limits.general] per-header reason as every other version_* file --
+// see <__bits/version_any> for the full explanation.
+//
+// It was withheld through two distinct gaps, both now closed. Ф31e-b fixed
+// the first: compare_three_way_result was declared with two required
+// parameters where the standard gives the second a default, so the CLASS
+// compare_three_way_result<int> did not compile. Ф31e-f fixed the second and
+// larger one: map, multimap, set and multiset had no operator<=> -- and since
+// [associative.map.syn] declares only == and <=>, with <, >, <= and >=
+// synthesized from the latter, those four containers had no relational
+// operators at all. Every other <=> P1614R2 asks for was already here, and
+// that was re-measured across all 26 of them before this macro was defined
+// rather than taken from the note that said so.
+#ifndef BOXCXX_BITS_VERSION_COMPARE
+#define BOXCXX_BITS_VERSION_COMPARE
+
+#ifndef __cpp_lib_three_way_comparison
+#  define __cpp_lib_three_way_comparison 201907L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_COMPARE

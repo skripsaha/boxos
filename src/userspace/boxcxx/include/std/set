@@ -609,6 +609,20 @@ bool SetEqual(const S &a, const S &b)
     return true;
 }
 
+template <typename S, typename Elem>
+auto SetThreeWay(const S &a, const S &b) -> __cmp::synth_three_way_result_t<Elem>
+{
+    using Cat = __cmp::synth_three_way_result_t<Elem>;
+    auto ia = a.begin(), ea = a.end();
+    auto ib = b.begin(), eb = b.end();
+    for (; ia != ea && ib != eb; ++ia, ++ib)
+        if (auto c = __cmp::SynthThreeWay{}(*ia, *ib); c != 0) return c;
+    // A shorter range that is a prefix of the longer one compares less.
+    return ia != ea   ? Cat::greater
+           : ib != eb ? Cat::less
+                      : Cat::equivalent;
+}
+
 } // namespace __rb
 
 template <typename K, typename C, typename A>
@@ -620,6 +634,24 @@ template <typename K, typename C, typename A>
 bool operator==(const multiset<K, C, A> &a, const multiset<K, C, A> &b)
 {
     return __rb::SetEqual(a, b);
+}
+
+// [associative.set.syn] declares == and <=> only; <, >, <= and >= are
+// synthesized from <=>, so this one operator supplies all four. None of the
+// five existed before Ф31e-f — `s1 < s2` did not compile on a set while it
+// did on a vector. Lexicographic over the elements, through synth-three-way
+// so a key with only < still yields weak_ordering.
+template <typename K, typename C, typename A>
+auto operator<=>(const set<K, C, A> &a, const set<K, C, A> &b)
+    -> __cmp::synth_three_way_result_t<K>
+{
+    return __rb::SetThreeWay<set<K, C, A>, K>(a, b);
+}
+template <typename K, typename C, typename A>
+auto operator<=>(const multiset<K, C, A> &a, const multiset<K, C, A> &b)
+    -> __cmp::synth_three_way_result_t<K>
+{
+    return __rb::SetThreeWay<multiset<K, C, A>, K>(a, b);
 }
 template <typename K, typename C, typename A>
 void swap(set<K, C, A> &a, set<K, C, A> &b) noexcept(noexcept(a.swap(b)))

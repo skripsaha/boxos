@@ -257,6 +257,25 @@ public:
             forward_as_tuple(std::forward<Args>(args)...));
     }
 
+    // The hint forms of both. [map.modifiers] declares four overloads of each
+    // and boxcxx had two, so a caller with a position in hand had nowhere to
+    // put it and fell back to the hintless form — or, worse, wrote
+    // try_emplace(hint, k, v) and got a diagnostic from inside the body.
+    // The hint is advisory: the tree's insert already finds the position, so
+    // it is accepted and the result is identical, which is what
+    // [associative.reqmts] permits. The return type is an iterator, not a
+    // pair — the hint forms drop the inserted/found flag.
+    template <typename... Args>
+    iterator try_emplace(const_iterator, const Key &key, Args &&...args)
+    {
+        return try_emplace(key, std::forward<Args>(args)...).first;
+    }
+    template <typename... Args>
+    iterator try_emplace(const_iterator, Key &&key, Args &&...args)
+    {
+        return try_emplace(std::move(key), std::forward<Args>(args)...).first;
+    }
+
     template <typename M>
     pair<iterator, bool> insert_or_assign(const Key &key, M &&obj)
     {
@@ -270,6 +289,16 @@ public:
         auto [it, inserted] = try_emplace(std::move(key), std::forward<M>(obj));
         if (!inserted) it->second = std::forward<M>(obj);
         return {it, inserted};
+    }
+    template <typename M>
+    iterator insert_or_assign(const_iterator, const Key &key, M &&obj)
+    {
+        return insert_or_assign(key, std::forward<M>(obj)).first;
+    }
+    template <typename M>
+    iterator insert_or_assign(const_iterator, Key &&key, M &&obj)
+    {
+        return insert_or_assign(std::move(key), std::forward<M>(obj)).first;
     }
 
     iterator erase(const_iterator where) { return __t.Erase(where); }
@@ -786,6 +815,25 @@ bool MapEqual(const M &a, const M &b)
     return true;
 }
 
+// [associative.map.syn] gives the ordered maps == and <=> and nothing else:
+// <, >, <= and >= are SYNTHESIZED from <=> by the language, so one operator
+// supplies all four. Until Ф31e-f neither <=> nor any of the four existed,
+// which is why `m1 < m2` did not compile on a map while it did on a vector.
+// The comparison is lexicographic over the elements, through synth-three-way
+// so that a value_type with only < still yields weak_ordering.
+template <typename M, typename Elem>
+auto MapThreeWay(const M &a, const M &b) -> __cmp::synth_three_way_result_t<Elem>
+{
+    using Cat = __cmp::synth_three_way_result_t<Elem>;
+    auto ia = a.begin(), ea = a.end();
+    auto ib = b.begin(), eb = b.end();
+    for (; ia != ea && ib != eb; ++ia, ++ib)
+        if (auto c = __cmp::SynthThreeWay{}(*ia, *ib); c != 0) return c;
+    return ia != ea   ? Cat::greater
+           : ib != eb ? Cat::less
+                      : Cat::equivalent;
+}
+
 } // namespace __rb
 
 template <typename K, typename T, typename C, typename A>
@@ -797,6 +845,19 @@ template <typename K, typename T, typename C, typename A>
 bool operator==(const multimap<K, T, C, A> &a, const multimap<K, T, C, A> &b)
 {
     return __rb::MapEqual(a, b);
+}
+
+template <typename K, typename T, typename C, typename A>
+auto operator<=>(const map<K, T, C, A> &a, const map<K, T, C, A> &b)
+    -> __cmp::synth_three_way_result_t<pair<const K, T>>
+{
+    return __rb::MapThreeWay<map<K, T, C, A>, pair<const K, T>>(a, b);
+}
+template <typename K, typename T, typename C, typename A>
+auto operator<=>(const multimap<K, T, C, A> &a, const multimap<K, T, C, A> &b)
+    -> __cmp::synth_three_way_result_t<pair<const K, T>>
+{
+    return __rb::MapThreeWay<multimap<K, T, C, A>, pair<const K, T>>(a, b);
 }
 
 template <typename K, typename T, typename C, typename A>
