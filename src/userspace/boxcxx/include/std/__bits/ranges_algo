@@ -400,6 +400,83 @@ struct Equal {
 };
 inline constexpr Equal equal{};
 
+// [alg.is.permutation]. The std:: form has always been here; this is the
+// ranges:: one, which is the last algorithm [alg.is.permutation] names that
+// was missing a constrained overload.
+struct IsPermutation {
+    template <forward_iterator I1, sentinel_for<I1> S1, forward_iterator I2,
+              sentinel_for<I2> S2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_equivalence_relation<projected<I1, Proj1>,
+                                            projected<I2, Proj2>> Pred =
+                  ranges::equal_to>
+    constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2,
+                              Pred pred = {}, Proj1 proj1 = {},
+                              Proj2 proj2 = {}) const
+    {
+        // Sized ranges of different length can never be permutations, and
+        // saying so first turns the quadratic scan below into nothing.
+        if constexpr (sized_sentinel_for<S1, I1> && sized_sentinel_for<S2, I2>) {
+            if ((last1 - first1) != (last2 - first2)) return false;
+        }
+        // Strip the common prefix: it contributes equally to both counts, so
+        // it cannot affect the answer, and dropping it is what keeps the
+        // common "identical sequences" case linear.
+        for (; first1 != last1 && first2 != last2; ++first1, ++first2)
+            if (!std::invoke(pred, std::invoke(proj1, *first1),
+                             std::invoke(proj2, *first2)))
+                break;
+        if (first1 == last1 && first2 == last2) return true;
+        // Unequal lengths beyond the prefix -- reachable only when neither
+        // sentinel is sized, so the length check above did not run.
+        {
+            auto a = first1;
+            auto b = first2;
+            for (; a != last1 && b != last2; ++a, ++b) {
+            }
+            if (a != last1 || b != last2) return false;
+        }
+        // Count-and-compare over the remainder. Elements already counted are
+        // skipped by looking for an earlier equivalent one, which is what
+        // makes the result independent of how often a value repeats.
+        for (auto i = first1; i != last1; ++i) {
+            bool seen = false;
+            for (auto j = first1; j != i; ++j)
+                if (std::invoke(pred, std::invoke(proj1, *j),
+                                std::invoke(proj1, *i))) {
+                    seen = true;
+                    break;
+                }
+            if (seen) continue;
+            iter_difference_t<I1> n1 = 0;
+            for (auto j = i; j != last1; ++j)
+                if (std::invoke(pred, std::invoke(proj1, *i),
+                                std::invoke(proj1, *j)))
+                    ++n1;
+            iter_difference_t<I2> n2 = 0;
+            for (auto j = first2; j != last2; ++j)
+                if (std::invoke(pred, std::invoke(proj1, *i),
+                                std::invoke(proj2, *j)))
+                    ++n2;
+            if (n1 != n2) return false;
+        }
+        return true;
+    }
+    template <forward_range R1, forward_range R2, class Proj1 = identity,
+              class Proj2 = identity,
+              indirect_equivalence_relation<
+                  projected<iterator_t<R1>, Proj1>,
+                  projected<iterator_t<R2>, Proj2>> Pred = ranges::equal_to>
+    constexpr bool operator()(R1 &&r1, R2 &&r2, Pred pred = {},
+                              Proj1 proj1 = {}, Proj2 proj2 = {}) const
+    {
+        return (*this)(ranges::begin(r1), ranges::end(r1), ranges::begin(r2),
+                       ranges::end(r2), std::move(pred), std::move(proj1),
+                       std::move(proj2));
+    }
+};
+inline constexpr IsPermutation is_permutation{};
+
 struct Find {
     template <input_iterator I, sentinel_for<I> S, class Proj = identity,
               class T = projected_value_t<I, Proj>>

@@ -204,18 +204,19 @@
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
 //                          algorithms] — and 23 of the entities it promises
-//                          are absent. Ф31e-b closed eight of them — all
+//                          were absent. Ф31e-b closed thirteen of them: all
 //                          thirteen [range.access] names now exist as CPOs
-//                          (the seven c- and r-prefixed ones were added, and
-//                          ssize stopped being a plain function template).
-//                          What remains: views::take_while/take_while_view;
-//                          views::drop_while/drop_while_view;
+//                          (b-1 added the seven c- and r-prefixed ones and
+//                          made ssize stop being a plain function template),
+//                          and b-2 added views::take_while/take_while_view,
+//                          views::drop_while/drop_while_view and
+//                          ranges::is_permutation. What remains:
 //                          views::istream/basic_istream_view/istream_view;
 //                          range_rvalue_reference_t;
 //                          range_common_reference_t; subrange's two range
 //                          deduction guides subrange(R&&) and
-//                          subrange(R&&, n); ranges::is_permutation; and the
-//                          entire ranges:: specialized-memory family —
+//                          subrange(R&&, n); and the entire ranges::
+//                          specialized-memory family —
 //                          uninitialized_default_construct,
 //                          uninitialized_value_construct,
 //                          uninitialized_copy, uninitialized_move,

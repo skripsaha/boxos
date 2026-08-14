@@ -7,9 +7,13 @@
 // boxcxx simplifications (documented, safe for the closed type set):
 //   • view_interface<D> derives from view_base, so every view_interface
 //     subclass satisfies the existing enable_view = derived_from<view_base>.
-//   • filter_view / transform_view are non-const-iterable (no const begin)
-//     and recompute begin() each call (no non-propagating cache); correct
-//     for the materialize-then-iterate (range-for) pattern.
+//   • filter_view is non-const-iterable (no const begin) and recomputes
+//     begin() each call (no non-propagating cache); correct for the
+//     materialize-then-iterate (range-for) pattern, and the standard's own
+//     filter_view has no begin() const either. transform_view USED to share
+//     that shape and no longer does — Ф31e-b-2 gave it the conditional const
+//     access [range.transform.view] specifies, because unlike filter it
+//     caches nothing a const walk could disturb.
 #ifndef BOXCXX_BITS_RANGES_VIEWS
 #define BOXCXX_BITS_RANGES_VIEWS
 
@@ -106,6 +110,15 @@ private:
 template <bool Const, typename T>
 using MaybeConst = conditional_t<Const, const T, T>;
 
+// [ranges.syn]'s exposition-only simple-view: a view whose const and non-const
+// iterations are indistinguishable. Views that gate a non-const begin()/end()
+// on `!simple-view<V>` do so to keep the pair from being an ambiguous
+// overload set when both would do exactly the same thing.
+template <typename R>
+concept SimpleView = view<R> && range<const R> &&
+                     same_as<iterator_t<R>, iterator_t<const R>> &&
+                     same_as<sentinel_t<R>, sentinel_t<const R>>;
+
 // FUN trick: binds only to lvalues that convert to R& (ref_view ctor).
 template <typename R>
 void RefFun(R &);
@@ -173,6 +186,36 @@ public:
         requires range<const DD> && contiguous_iterator<iterator_t<const DD>>
     {
         return to_address(ranges::begin(__derived()));
+    }
+
+    // [view.interface.members]: the const-access pair P2278R4 adds. They are
+    // the last two names that paper asks for -- ranges::cbegin/cend, defined
+    // in <iterator>, are the other two -- and they are what lets a view be
+    // read through a constant iterator without the caller having to know
+    // whether the view's own const overlay happens to be a range.
+    template <typename DD = D>
+    constexpr auto cbegin()
+        requires input_range<DD>
+    {
+        return ranges::cbegin(__derived());
+    }
+    template <typename DD = D>
+    constexpr auto cbegin() const
+        requires input_range<const DD>
+    {
+        return ranges::cbegin(__derived());
+    }
+    template <typename DD = D>
+    constexpr auto cend()
+        requires input_range<DD>
+    {
+        return ranges::cend(__derived());
+    }
+    template <typename DD = D>
+    constexpr auto cend() const
+        requires input_range<const DD>
+    {
+        return ranges::cend(__derived());
     }
 
     template <typename DD = D>
@@ -789,6 +832,216 @@ inline constexpr Drop drop{};
 
 } // namespace views
 
+// ── take_while_view ([range.take.while]) ────────────────────────────────
+// The cheapest view in the family: begin() is the base's begin, and the whole
+// of the work lives in a sentinel that asks the predicate. Nothing is cached
+// and nothing is precomputed, so both const and non-const access are free —
+// the Const parameter here is only about which V and which Pred are seen.
+template <view V, typename Pred>
+    requires input_range<V> && is_object_v<Pred> &&
+             indirect_unary_predicate<const Pred, iterator_t<V>>
+class take_while_view : public view_interface<take_while_view<V, Pred>> {
+    V __base = V();
+    __views_detail::MovableBox<Pred> __pred;
+
+    template <bool Const>
+    struct Sentinel {
+        using Base = __views_detail::MaybeConst<Const, V>;
+
+        sentinel_t<Base> __end  = sentinel_t<Base>();
+        const Pred      *__pred = nullptr;
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(sentinel_t<Base> end, const Pred *p)
+            : __end(std::move(end)), __pred(p)
+        {
+        }
+        constexpr Sentinel(Sentinel<!Const> s)   // see transform_view's note
+            requires Const && convertible_to<sentinel_t<V>, sentinel_t<Base>>
+            : __end(std::move(s.__end)), __pred(s.__pred)
+        {
+        }
+        constexpr sentinel_t<Base> base() const { return __end; }
+
+        // The two ways to stop: the base ran out, or the predicate said so.
+        // Testing the base end FIRST is not a style choice -- dereferencing to
+        // ask the predicate at the end position would read past the range.
+        // Templated on the ITERATOR, not on the standard's OtherConst flag.
+        // The two admit the same set — any iterator this sentinel can bound —
+        // but OtherConst appears only inside iterator_t<maybe-const<...>>,
+        // which is a non-deduced context, so that spelling can never actually
+        // be selected. Deducing I also keeps the cross-const pairing working:
+        // a caller holding begin() from the non-const overload and end() from
+        // the const one must still be able to compare them.
+        template <typename I>
+            requires sentinel_for<sentinel_t<Base>, I> &&
+                     indirect_unary_predicate<const Pred, I>
+        friend constexpr bool operator==(const I &i, const Sentinel &s)
+        {
+            return i == s.__end || !static_cast<bool>(std::invoke(*s.__pred, *i));
+        }
+
+        friend Sentinel<true>;
+    };
+
+public:
+    take_while_view()
+        requires default_initializable<V> && default_initializable<Pred>
+    = default;
+    constexpr take_while_view(V base, Pred pred)
+        : __base(std::move(base)), __pred(std::move(pred))
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+    constexpr const Pred &pred() const { return *__pred; }
+
+    constexpr auto begin()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return ranges::begin(__base);
+    }
+    constexpr auto begin() const
+        requires range<const V> &&
+                 indirect_unary_predicate<const Pred, iterator_t<const V>>
+    {
+        return ranges::begin(__base);
+    }
+    constexpr auto end()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return Sentinel<false>(ranges::end(__base),
+                               __builtin_addressof(*__pred));
+    }
+    constexpr auto end() const
+        requires range<const V> &&
+                 indirect_unary_predicate<const Pred, iterator_t<const V>>
+    {
+        return Sentinel<true>(ranges::end(__base),
+                              __builtin_addressof(*__pred));
+    }
+};
+
+template <class R, class Pred>
+take_while_view(R &&, Pred) -> take_while_view<views::all_t<R>, Pred>;
+
+namespace views {
+
+struct TakeWhile {
+    template <viewable_range R, typename Pred>
+    constexpr auto operator()(R &&r, Pred &&p) const
+    {
+        return take_while_view<all_t<R>, remove_cvref_t<Pred>>(
+            all(std::forward<R>(r)), std::forward<Pred>(p));
+    }
+    template <typename Pred>
+        requires(!viewable_range<remove_cvref_t<Pred>>)
+    constexpr auto operator()(Pred &&p) const
+    {
+        return RangeAdaptorPartial<TakeWhile, remove_cvref_t<Pred>>(
+            TakeWhile{}, std::forward<Pred>(p));
+    }
+};
+
+inline constexpr TakeWhile take_while{};
+
+} // namespace views
+
+// ── drop_while_view ([range.drop.while]) ────────────────────────────────
+// The mirror of take_while, and much the more expensive one: begin() has to
+// FIND the first element the predicate rejects, which is O(n). [range.drop.
+// while]/2 makes caching that result mandatory rather than optional -- without
+// it begin() is O(n) on every call and the view stops meeting the amortized
+// constant-time begin() that the range concept requires. The cache is
+// deliberately NOT const-accessible and there is no begin() const: the
+// standard gives drop_while_view none either, for exactly this reason.
+template <view V, typename Pred>
+    requires input_range<V> && is_object_v<Pred> &&
+             indirect_unary_predicate<const Pred, iterator_t<V>>
+class drop_while_view : public view_interface<drop_while_view<V, Pred>> {
+    V __base = V();
+    __views_detail::MovableBox<Pred> __pred;
+    iterator_t<V> __cached  = iterator_t<V>();
+    bool          __hasCache = false;
+
+public:
+    drop_while_view()
+        requires default_initializable<V> && default_initializable<Pred>
+    = default;
+    constexpr drop_while_view(V base, Pred pred)
+        : __base(std::move(base)), __pred(std::move(pred))
+    {
+    }
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+    constexpr const Pred &pred() const { return *__pred; }
+
+    constexpr auto begin()
+    {
+        if constexpr (forward_range<V>) {
+            if (!__hasCache) {
+                __cached   = __Find();
+                __hasCache = true;
+            }
+            return __cached;
+        } else {
+            // An input range cannot be walked twice, so there is nothing to
+            // cache: begin() is single-pass by construction and the standard's
+            // caching requirement has no bite.
+            return __Find();
+        }
+    }
+    constexpr auto end() { return ranges::end(__base); }
+
+private:
+    constexpr iterator_t<V> __Find()
+    {
+        auto it = ranges::begin(__base);
+        auto e  = ranges::end(__base);
+        while (it != e && static_cast<bool>(std::invoke(*__pred, *it))) ++it;
+        return it;
+    }
+};
+
+template <class R, class Pred>
+drop_while_view(R &&, Pred) -> drop_while_view<views::all_t<R>, Pred>;
+
+template <typename T, typename Pred>
+inline constexpr bool enable_borrowed_range<drop_while_view<T, Pred>> =
+    enable_borrowed_range<T>;
+
+namespace views {
+
+struct DropWhile {
+    template <viewable_range R, typename Pred>
+    constexpr auto operator()(R &&r, Pred &&p) const
+    {
+        return drop_while_view<all_t<R>, remove_cvref_t<Pred>>(
+            all(std::forward<R>(r)), std::forward<Pred>(p));
+    }
+    template <typename Pred>
+        requires(!viewable_range<remove_cvref_t<Pred>>)
+    constexpr auto operator()(Pred &&p) const
+    {
+        return RangeAdaptorPartial<DropWhile, remove_cvref_t<Pred>>(
+            DropWhile{}, std::forward<Pred>(p));
+    }
+};
+
+inline constexpr DropWhile drop_while{};
+
+} // namespace views
+
 // ── filter_view ([range.filter]) ────────────────────────────────────────
 
 template <input_range V, typename Pred>
@@ -950,6 +1203,20 @@ inline constexpr Filter filter{};
 } // namespace views
 
 // ── transform_view ([range.transform]) ──────────────────────────────────
+// Const-iterable, which is what separates this from filter_view: filter
+// caches its begin() and so genuinely cannot offer a const one, while
+// transform holds nothing that a const walk would disturb. The standard says
+// so too — [range.transform.view] gives begin()/end() a const overload gated
+// on `range<const V> && regular_invocable<const F&, range_reference_t<const
+// V>>` — and without it `range<const transform_view<…>>` is false, so a const
+// transform_view cannot be iterated at all and every algorithm taking one by
+// const reference fails with "discards qualifiers".
+//
+// That gate is why Iterator and Sentinel take a Const parameter rather than
+// simply being made const-callable: on the const side both the underlying
+// iterator AND the invocation of F change type, so there are genuinely two
+// iterators here, and the standard names them iterator<false>/iterator<true>.
+// Same shape elements_view already uses.
 
 template <input_range V, typename F>
     requires view<V> && is_object_v<F> &&
@@ -962,8 +1229,208 @@ class transform_view : public view_interface<transform_view<V, F>> {
     V __base = V();
     __views_detail::MovableBox<F> __fn;
 
-    struct Iterator;
-    struct Sentinel;
+    template <bool Const> struct Sentinel;
+
+    template <bool Const>
+    struct Iterator
+        : __views_detail::MaybeCategory<
+              __views_detail::MaybeConst<Const, V>, contiguous_iterator_tag,
+              random_access_iterator_tag, void,
+              !is_lvalue_reference_v<invoke_result_t<
+                  __views_detail::MaybeConst<Const, F> &,
+                  range_reference_t<__views_detail::MaybeConst<Const, V>>>>> {
+        using Base   = __views_detail::MaybeConst<Const, V>;
+        using Fn     = __views_detail::MaybeConst<Const, F>;
+        using Parent = __views_detail::MaybeConst<Const, transform_view>;
+
+        using iterator_concept =
+            conditional_t<random_access_range<Base>, random_access_iterator_tag,
+                          conditional_t<bidirectional_range<Base>,
+                                        bidirectional_iterator_tag,
+                                        conditional_t<forward_range<Base>,
+                                                      forward_iterator_tag,
+                                                      input_iterator_tag>>>;
+        using value_type =
+            remove_cvref_t<invoke_result_t<Fn &, range_reference_t<Base>>>;
+        using difference_type = range_difference_t<Base>;
+        using reference       = invoke_result_t<Fn &, range_reference_t<Base>>;
+        using pointer         = void;
+        // iterator_category comes from the MaybeCategory base — present only
+        // if Base is a forward_range ([range.transform.iterator]).
+
+        Parent          *__parent = nullptr;
+        iterator_t<Base> __cur    = iterator_t<Base>();
+
+        Iterator()
+            requires default_initializable<iterator_t<Base>>
+        = default;
+        constexpr Iterator(Parent &p, iterator_t<Base> c)
+            : __parent(__builtin_addressof(p)), __cur(std::move(c))
+        {
+        }
+        // [range.transform.iterator]: the non-const iterator converts to the
+        // const one, so `for (auto it = v.begin(); it != cv.end(); ...)` and
+        // every mixed comparison below have something to convert through.
+        // Spelled Iterator<!Const>, not Iterator<false>: at Const == false the
+        // latter names THIS class and declares a by-value copy constructor,
+        // which is ill-formed on sight — the requires-clause never gets a
+        // chance to disable it. At Const == true the two spellings agree,
+        // which is the instantiation that matters.
+        constexpr Iterator(Iterator<!Const> i)
+            requires Const && convertible_to<iterator_t<V>, iterator_t<Base>>
+            : __parent(i.__parent), __cur(std::move(i.__cur))
+        {
+        }
+
+        constexpr const iterator_t<Base> &base() const & noexcept
+        {
+            return __cur;
+        }
+        constexpr iterator_t<Base> base() && { return std::move(__cur); }
+
+        constexpr reference operator*() const
+        {
+            return std::invoke(*__parent->__fn, *__cur);
+        }
+
+        constexpr Iterator &operator++()
+        {
+            ++__cur;
+            return *this;
+        }
+        constexpr void operator++(int) { ++__cur; }
+        constexpr Iterator operator++(int)
+            requires forward_range<Base>
+        {
+            auto t = *this;
+            ++__cur;
+            return t;
+        }
+        constexpr Iterator &operator--()
+            requires bidirectional_range<Base>
+        {
+            --__cur;
+            return *this;
+        }
+        constexpr Iterator operator--(int)
+            requires bidirectional_range<Base>
+        {
+            auto t = *this;
+            --__cur;
+            return t;
+        }
+
+        constexpr Iterator &operator+=(difference_type n)
+            requires random_access_range<Base>
+        {
+            __cur += n;
+            return *this;
+        }
+        constexpr Iterator &operator-=(difference_type n)
+            requires random_access_range<Base>
+        {
+            __cur -= n;
+            return *this;
+        }
+        constexpr reference operator[](difference_type n) const
+            requires random_access_range<Base>
+        {
+            return std::invoke(*__parent->__fn, __cur[n]);
+        }
+
+        friend constexpr Iterator operator+(Iterator i, difference_type n)
+            requires random_access_range<Base>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator+(difference_type n, Iterator i)
+            requires random_access_range<Base>
+        {
+            i += n;
+            return i;
+        }
+        friend constexpr Iterator operator-(Iterator i, difference_type n)
+            requires random_access_range<Base>
+        {
+            i -= n;
+            return i;
+        }
+        friend constexpr difference_type operator-(const Iterator &a,
+                                                   const Iterator &b)
+            requires sized_sentinel_for<iterator_t<Base>, iterator_t<Base>>
+        {
+            return a.__cur - b.__cur;
+        }
+
+        friend constexpr bool operator==(const Iterator &a, const Iterator &b)
+            requires equality_comparable<iterator_t<Base>>
+        {
+            return a.__cur == b.__cur;
+        }
+        friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
+            requires random_access_range<Base> &&
+                     three_way_comparable<iterator_t<Base>>
+        {
+            return a.__cur <=> b.__cur;
+        }
+
+        friend Iterator<true>;
+    };
+
+    template <bool Const>
+    struct Sentinel {
+        using Base   = __views_detail::MaybeConst<Const, V>;
+        using Parent = __views_detail::MaybeConst<Const, transform_view>;
+
+        sentinel_t<Base> __end = sentinel_t<Base>();
+
+        Sentinel() = default;
+        constexpr explicit Sentinel(Parent &p) : __end(ranges::end(p.__base))
+        {
+        }
+        constexpr Sentinel(Sentinel<!Const> s)   // see Iterator's note above
+            requires Const && convertible_to<sentinel_t<V>, sentinel_t<Base>>
+            : __end(std::move(s.__end))
+        {
+        }
+        constexpr sentinel_t<Base> base() const { return __end; }
+
+        // OtherConst, not Const: a const sentinel must still answer a
+        // non-const iterator, which is the pairing end() const produces for a
+        // caller that began with begin().
+        template <bool OtherConst>
+            requires sentinel_for<
+                sentinel_t<Base>,
+                iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr bool operator==(const Iterator<OtherConst> &i,
+                                         const Sentinel &s)
+        {
+            return i.__cur == s.__end;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                sentinel_t<Base>,
+                iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr range_difference_t<
+            __views_detail::MaybeConst<OtherConst, V>>
+        operator-(const Iterator<OtherConst> &i, const Sentinel &s)
+        {
+            return i.__cur - s.__end;
+        }
+        template <bool OtherConst>
+            requires sized_sentinel_for<
+                sentinel_t<Base>,
+                iterator_t<__views_detail::MaybeConst<OtherConst, V>>>
+        friend constexpr range_difference_t<
+            __views_detail::MaybeConst<OtherConst, V>>
+        operator-(const Sentinel &s, const Iterator<OtherConst> &i)
+        {
+            return s.__end - i.__cur;
+        }
+
+        friend Sentinel<true>;
+    };
 
 public:
     transform_view()
@@ -981,13 +1448,37 @@ public:
     }
     constexpr V base() && { return std::move(__base); }
 
-    constexpr Iterator begin() { return Iterator{*this, ranges::begin(__base)}; }
+    constexpr Iterator<false> begin()
+    {
+        return Iterator<false>{*this, ranges::begin(__base)};
+    }
+    // Spelled out rather than hoisted into a constexpr bool: `&&` in an
+    // ordinary constant expression still SUBSTITUTES its right operand, so
+    // range_reference_t<const V> would be formed even for a base whose const
+    // overlay is not a range — a hard error, not a false. In a requires-clause
+    // the conjunction is one of constraints, and the right atom is never
+    // substituted when the left is unsatisfied.
+    constexpr Iterator<true> begin() const
+        requires range<const V> &&
+                 regular_invocable<const F &, range_reference_t<const V>>
+    {
+        return Iterator<true>{*this, ranges::begin(__base)};
+    }
     constexpr auto end()
     {
         if constexpr (common_range<V>)
-            return Iterator{*this, ranges::end(__base)};
+            return Iterator<false>{*this, ranges::end(__base)};
         else
-            return Sentinel{*this};
+            return Sentinel<false>{*this};
+    }
+    constexpr auto end() const
+        requires range<const V> &&
+                 regular_invocable<const F &, range_reference_t<const V>>
+    {
+        if constexpr (common_range<const V>)
+            return Iterator<true>{*this, ranges::end(__base)};
+        else
+            return Sentinel<true>{*this};
     }
 
     constexpr auto size()
@@ -999,168 +1490,6 @@ public:
         requires sized_range<const V>
     {
         return ranges::size(__base);
-    }
-};
-
-template <input_range V, typename F>
-    requires view<V> && is_object_v<F> &&
-             regular_invocable<F &, range_reference_t<V>> &&
-             requires {
-                 typename remove_cvref_t<invoke_result_t<F &,
-                                                         range_reference_t<V>>>;
-             }
-struct transform_view<V, F>::Iterator
-    : __views_detail::MaybeCategory<
-          V, contiguous_iterator_tag, random_access_iterator_tag, void,
-          !is_lvalue_reference_v<invoke_result_t<F &, range_reference_t<V>>>> {
-    using iterator_concept =
-        conditional_t<random_access_range<V>, random_access_iterator_tag,
-                      conditional_t<bidirectional_range<V>,
-                                    bidirectional_iterator_tag,
-                                    conditional_t<forward_range<V>,
-                                                  forward_iterator_tag,
-                                                  input_iterator_tag>>>;
-    using value_type =
-        remove_cvref_t<invoke_result_t<F &, range_reference_t<V>>>;
-    using difference_type = range_difference_t<V>;
-    using reference       = invoke_result_t<F &, range_reference_t<V>>;
-    using pointer         = void;
-    // iterator_category comes from the MaybeCategory base — present only if
-    // V is a forward_range ([range.transform.iterator]).
-
-    transform_view *__parent = nullptr;
-    iterator_t<V> __cur      = iterator_t<V>();
-
-    Iterator()
-        requires default_initializable<iterator_t<V>>
-    = default;
-    constexpr Iterator(transform_view &p, iterator_t<V> c)
-        : __parent(__builtin_addressof(p)), __cur(std::move(c))
-    {
-    }
-
-    constexpr const iterator_t<V> &base() const & noexcept { return __cur; }
-    constexpr iterator_t<V> base() && { return std::move(__cur); }
-
-    constexpr reference operator*() const
-    {
-        return std::invoke(*__parent->__fn, *__cur);
-    }
-
-    constexpr Iterator &operator++()
-    {
-        ++__cur;
-        return *this;
-    }
-    constexpr void operator++(int) { ++__cur; }
-    constexpr Iterator operator++(int)
-        requires forward_range<V>
-    {
-        auto t = *this;
-        ++__cur;
-        return t;
-    }
-    constexpr Iterator &operator--()
-        requires bidirectional_range<V>
-    {
-        --__cur;
-        return *this;
-    }
-    constexpr Iterator operator--(int)
-        requires bidirectional_range<V>
-    {
-        auto t = *this;
-        --__cur;
-        return t;
-    }
-
-    constexpr Iterator &operator+=(difference_type n)
-        requires random_access_range<V>
-    {
-        __cur += n;
-        return *this;
-    }
-    constexpr Iterator &operator-=(difference_type n)
-        requires random_access_range<V>
-    {
-        __cur -= n;
-        return *this;
-    }
-    constexpr reference operator[](difference_type n) const
-        requires random_access_range<V>
-    {
-        return std::invoke(*__parent->__fn, __cur[n]);
-    }
-
-    friend constexpr Iterator operator+(Iterator i, difference_type n)
-        requires random_access_range<V>
-    {
-        i += n;
-        return i;
-    }
-    friend constexpr Iterator operator+(difference_type n, Iterator i)
-        requires random_access_range<V>
-    {
-        i += n;
-        return i;
-    }
-    friend constexpr Iterator operator-(Iterator i, difference_type n)
-        requires random_access_range<V>
-    {
-        i -= n;
-        return i;
-    }
-    friend constexpr difference_type operator-(const Iterator &a,
-                                               const Iterator &b)
-        requires sized_sentinel_for<iterator_t<V>, iterator_t<V>>
-    {
-        return a.__cur - b.__cur;
-    }
-
-    friend constexpr bool operator==(const Iterator &a, const Iterator &b)
-        requires equality_comparable<iterator_t<V>>
-    {
-        return a.__cur == b.__cur;
-    }
-    friend constexpr auto operator<=>(const Iterator &a, const Iterator &b)
-        requires random_access_range<V> && three_way_comparable<iterator_t<V>>
-    {
-        return a.__cur <=> b.__cur;
-    }
-};
-
-template <input_range V, typename F>
-    requires view<V> && is_object_v<F> &&
-             regular_invocable<F &, range_reference_t<V>> &&
-             requires {
-                 typename remove_cvref_t<invoke_result_t<F &,
-                                                         range_reference_t<V>>>;
-             }
-struct transform_view<V, F>::Sentinel {
-    sentinel_t<V> __end = sentinel_t<V>();
-
-    Sentinel() = default;
-    constexpr explicit Sentinel(transform_view &p)
-        : __end(ranges::end(p.__base))
-    {
-    }
-    constexpr sentinel_t<V> base() const { return __end; }
-
-    friend constexpr bool operator==(const Iterator &i, const Sentinel &s)
-    {
-        return i.__cur == s.__end;
-    }
-    friend constexpr range_difference_t<V> operator-(const Iterator &i,
-                                                     const Sentinel &s)
-        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
-    {
-        return i.__cur - s.__end;
-    }
-    friend constexpr range_difference_t<V> operator-(const Sentinel &s,
-                                                     const Iterator &i)
-        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
-    {
-        return s.__end - i.__cur;
     }
 };
 
