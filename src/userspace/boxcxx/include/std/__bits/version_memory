@@ -18,11 +18,21 @@
 // __cpp_lib_atomic_value_initialization) and <__bits/version_containers>
 // (for the jointly-owned __cpp_lib_allocator_traits_is_always_equal).
 //
+// atomic_shared_ptr is P0718R2 -- atomic<shared_ptr<T>> and
+// atomic<weak_ptr<T>>, both of which now park in the kernel and honour
+// notify_one/notify_all instead of polling (Ф31e-d). It names only those two
+// specializations; Annex D's free shared_ptr atomic functions, which the same
+// step added, are not part of it.
+//
 // Deliberately absent (see <version>'s list): allocate_at_least,
-// assume_aligned, atomic_shared_ptr, constexpr_memory, shared_ptr_arrays,
-// smart_ptr_for_overwrite, start_lifetime_as, transparent_operators.
+// assume_aligned, constexpr_memory, shared_ptr_arrays,
+// smart_ptr_for_overwrite, start_lifetime_as.
 #ifndef BOXCXX_BITS_VERSION_MEMORY
 #define BOXCXX_BITS_VERSION_MEMORY
+
+#ifndef __cpp_lib_atomic_shared_ptr
+#  define __cpp_lib_atomic_shared_ptr 201711L
+#endif
 
 #ifndef __cpp_lib_addressof_constexpr
 #  define __cpp_lib_addressof_constexpr 201603L

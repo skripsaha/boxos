@@ -5,19 +5,45 @@
 // <memory> (atomic<T>, atomic<T*> and atomic<shared_ptr<T>> all
 // value-initialize); <memory> includes this leaf directly.
 //
-// Deliberately absent (see <version>'s list): atomic_flag_test,
-// atomic_float, atomic_ref, atomic_wait, atomic_shared_ptr.
+// atomic_wait and atomic_flag_test are both P1135R6, split across two
+// macros: the first is the whole wait/notify family (members and free
+// functions, atomic and atomic_flag alike), the second is atomic_flag::test.
+// Ф31e-d closed the six free-function overloads they were missing --
+// atomic_flag_test / _test_explicit / wait for a volatile atomic_flag*, both
+// forms of atomic_flag_wait_explicit, and volatile atomic_flag_notify_one /
+// _notify_all.
+//
+// atomic_float is P0020R6. What it lacked was not the arithmetic but the
+// volatile half of it: fetch_add/fetch_sub and operator+=/-= existed only in
+// their non-volatile forms. atomic_ref is P0019R8, which had no
+// difference_type on the unified primary and none of the five
+// compound-assignment operators.
+//
+// Deliberately absent (see <version>'s list): none -- every macro this
+// header owns is now defined.
 #ifndef BOXCXX_BITS_VERSION_ATOMIC
 #define BOXCXX_BITS_VERSION_ATOMIC
 
+#ifndef __cpp_lib_atomic_flag_test
+#  define __cpp_lib_atomic_flag_test 201907L
+#endif
+#ifndef __cpp_lib_atomic_float
+#  define __cpp_lib_atomic_float 201711L
+#endif
 #ifndef __cpp_lib_atomic_is_always_lock_free
 #  define __cpp_lib_atomic_is_always_lock_free 201603L
 #endif
 #ifndef __cpp_lib_atomic_lock_free_type_aliases
 #  define __cpp_lib_atomic_lock_free_type_aliases 201907L
 #endif
+#ifndef __cpp_lib_atomic_ref
+#  define __cpp_lib_atomic_ref 201806L
+#endif
 #ifndef __cpp_lib_atomic_value_initialization
 #  define __cpp_lib_atomic_value_initialization 201911L
+#endif
+#ifndef __cpp_lib_atomic_wait
+#  define __cpp_lib_atomic_wait 201907L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_ATOMIC

@@ -6,10 +6,21 @@
 // [support.limits.general] per-header reason as <__bits/version_iostreams>
 // -- see that file's comment.
 //
-// __cpp_lib_barrier is NOT defined -- see <version>'s list.
+// <barrier> includes this leaf too, for __cpp_lib_barrier. That macro was
+// withheld on a residual arrive_and_drop race that measurement had already
+// disproved: arrive_and_drop arrives at the CURRENT phase, so its arrival is
+// one the drain needs, and every successful arrive() CAS is acq_rel on the
+// packed state word -- whoever reads the count to zero reads a value at or
+// after ours in that word's modification order and therefore sees the
+// expected-count decrement sequenced before it. The claim was retired in
+// Ф31e-d; cxxtest phase139 drives four strands through staggered
+// arrive_and_drop rounds against a live completion.
 #ifndef BOXCXX_BITS_VERSION_SYNC
 #define BOXCXX_BITS_VERSION_SYNC
 
+#ifndef __cpp_lib_barrier
+#  define __cpp_lib_barrier 201907L
+#endif
 #ifndef __cpp_lib_latch
 #  define __cpp_lib_latch 201907L
 #endif

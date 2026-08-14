@@ -35,6 +35,7 @@
 
 #include <__bits/chrono_clock>
 #include <__bits/chrono_duration>
+#include <__bits/version_mutex>
 #include <atomic>
 #include <functional>
 #include <system_error>
@@ -496,8 +497,25 @@ void lock(L1 &l1, L2 &l2, Ls &...rest)
 
 // ── scoped_lock ─────────────────────────────────────────────────────────
 
+// [thread.lock.scoped] gives scoped_lock a `mutex_type` typedef, but only
+// when it holds exactly one mutex — "Only if sizeof...(MutexTypes) == 1", a
+// conditional member rather than a partial specialization. Supplying it from
+// a base keeps the single lock implementation the file already has, instead
+// of duplicating the constructor/destructor pair to get one typedef. Until
+// Ф31e-d the typedef was simply missing, so generic code spelling
+// `typename Lock::mutex_type` -- the whole reason it is specified -- did not
+// compile for scoped_lock, while it did for lock_guard and unique_lock.
+namespace __mutex_impl {
 template <typename... Mutexes>
-class scoped_lock {
+struct ScopedMutexType {};
+template <typename Mutex>
+struct ScopedMutexType<Mutex> {
+    using mutex_type = Mutex;
+};
+} // namespace __mutex_impl
+
+template <typename... Mutexes>
+class scoped_lock : public __mutex_impl::ScopedMutexType<Mutexes...> {
 public:
     explicit scoped_lock(Mutexes &...ms) : __ms(ms...)
     {
