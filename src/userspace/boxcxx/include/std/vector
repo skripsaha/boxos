@@ -4,9 +4,14 @@
 // constructed in the fresh block BEFORE anything moves; relocation uses
 // move_if_noexcept), full allocator_traits propagation semantics.
 //
-// Known deviation (tracked in the epic leftovers): vector<bool> is NOT
-// the packed specialization — it instantiates the primary template with
-// byte-backed storage. Ranges-taking members join with Ф7B.
+// vector<bool> IS the packed specialization (below, `Word = size_t` bit
+// storage with a proxy reference). The note that used to stand here — "NOT
+// the packed specialization, byte-backed storage" — described the state
+// before it was written, and has been false since.
+//
+// Its one recorded deviation is narrower: vector<bool>::swap does not
+// exchange allocators, so POCS is ignored on this specialization while the
+// primary template honours it.
 #ifndef BOXCXX_VECTOR
 #define BOXCXX_VECTOR
 
