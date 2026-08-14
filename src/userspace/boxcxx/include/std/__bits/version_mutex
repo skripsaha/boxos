@@ -1,0 +1,20 @@
+// boxcxx — <__bits/version_mutex>
+//
+// The one feature-test macro [version.syn] gives <mutex>: P0156R2's
+// scoped_lock. Split into a leaf for the same [support.limits.general]
+// per-header reason as every other version_* file -- see
+// <__bits/version_any> for the full explanation.
+//
+// It was withheld because scoped_lock had no `mutex_type`: the variadic
+// primary covered the one-mutex case through `if constexpr`, which locks
+// correctly but cannot carry a conditional typedef. Ф31e-d supplied it from
+// a base, which is what [thread.lock.scoped] describes -- a member present
+// "only if sizeof...(MutexTypes) == 1" -- rather than a second class body.
+#ifndef BOXCXX_BITS_VERSION_MUTEX
+#define BOXCXX_BITS_VERSION_MUTEX
+
+#ifndef __cpp_lib_scoped_lock
+#  define __cpp_lib_scoped_lock 201703L
+#endif
+
+#endif // BOXCXX_BITS_VERSION_MUTEX

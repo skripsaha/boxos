@@ -32,9 +32,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 128 |
+| Feature-test macros defined | 141 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 160 phases, 4 567 runtime checks, 1 317 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 160 phases, 4 601 runtime checks, 1 327 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,35 +129,38 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **128** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **141** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every one carries its N4950 value.** No macro is defined at a later
   revision's value, and no macro is defined that N4950 does not name.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
-  128 × 74 cross-product of macros and headers, in both directions, with no
-  failures. This is the part that breaks most easily, because a macro added to a
-  shared leaf tends to become visible from every header that includes it and from
-  no other.
+  cross-product of macros and headers, in both directions, with no failures. This
+  is the part that breaks most easily, because a macro added to a shared leaf
+  tends to become visible from every header that includes it and from no other.
 
-**58 of the C++23 macros are not defined.** The governing rule is that a macro is
-defined only when the feature behind it is *complete* — established by reading the
-implementation, not by checking that the headline function exists. That has two
-consequences worth stating plainly:
+**44 of the C++23 macros are not defined**, and `<version>` lists every one by
+name with its specific reason — that list, not this section, is the authoritative
+backlog. The governing rule is that a macro is defined only when the feature
+behind it is *complete*, established by reading the implementation rather than by
+checking that the headline function exists. That has two consequences worth
+stating plainly:
 
 - Some macros stay undefined even though the everyday use of the feature works.
-  `__cpp_lib_ranges` is the widest case: it is held back by roughly two dozen
-  missing pieces, among them `views::take_while`, `views::drop_while` and seven of
-  the range-access CPOs (§2 `<ranges>`).
+  `__cpp_lib_ranges` is the widest case: it stands for the whole of [ranges] plus
+  [specialized.algorithms], and is held back by the `ranges::` uninitialized-memory
+  family, `views::istream`, two range type aliases and `subrange`'s two range
+  deduction guides (§2 `<ranges>`).
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 58, five belong to headers that do not exist at all (`execution`,
-`filesystem`, `mdspan`, `stacktrace`, `stdatomic.h`); two are cross-cutting
-(`deduction_guides`, `modules`); the rest belong to headers that exist. The
-in-tree suite pins the absences as well as the values, so a macro cannot quietly
-appear.
+Of the 44, nine belong to features whose owning header does not exist at all
+(`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
+`syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
+them); the rest belong to headers that exist. The in-tree suite pins the absences
+as well as the values, so a macro cannot quietly appear — and when one is closed,
+the guard fires and forces the pin to be flipped in the same commit.
 
 **On pinning C++23 rather than "latest".** Under `-std=c++23` the reference
 libraries each report at least one post-N4950 value; boxcxx reports what C++23
@@ -208,6 +211,23 @@ nothing has been found since.
 
 ## `<atomic>`
 
+- `✓` Closed in Ф31e-d: **the volatile half of the arithmetic surface did not
+  exist.** [atomics.types.int], [atomics.types.float] and [atomics.types.pointer]
+  each declare every compound assignment and every `++`/`--` twice, volatile and
+  not, and only the non-volatile ones were here — so `volatile atomic<int> c;
+  ++c;` did not compile, and neither did `volatile atomic<double>::fetch_add`.
+  The absence was in neither this document nor `<version>`, which recorded only
+  the floating-point half of it. This closed `__cpp_lib_atomic_float`.
+- `✓` Closed in Ф31e-d: `atomic_ref`'s unified primary had no `difference_type`
+  and none of the five compound-assignment operators, though `fetch_add`/`++` were
+  there — so `atomic_ref<int>::difference_type` was ill-formed and `r += 1` did
+  not compile, on the one type in the header written for a caller-owned cell.
+  Closed `__cpp_lib_atomic_ref`.
+- `✓` Closed in Ф31e-d: six of the ten `atomic_flag` free functions were absent —
+  `atomic_flag_test`, `_test_explicit` and `_wait` for a `volatile atomic_flag*`,
+  both forms of `atomic_flag_wait_explicit`, and volatile `atomic_flag_notify_one`
+  / `_notify_all`. The member functions behind them carried both cv-forms the
+  whole time. Closed `__cpp_lib_atomic_flag_test` and `__cpp_lib_atomic_wait`.
 - `?` **A 16-byte atomic load writes to memory.** `atomic<T>::is_always_lock_free`
   is `true` for a 16-byte `T`, and the operations lower to `__atomic_*_16` calls
   which boxcxx implements itself (`src/runtime/atomic_support.cpp`) with
@@ -222,9 +242,22 @@ nothing has been found since.
 
 ## `<barrier>`
 
-- `+` `arrive()` is marked `[[nodiscard]]`. The synopsis does not mandate it, and
-  discarding the arrival token is legal, so conforming code that discards it will
-  warn — and fail under `-Werror`.
+- `✓` Corrected in Ф31e-d: this entry used to claim `arrive()`'s `[[nodiscard]]`
+  as a boxcxx extension — "the synopsis does not mandate it". **It does.**
+  [thread.barrier.class] declares `[[nodiscard]] arrival_token arrive(ptrdiff_t
+  update = 1);`, and libc++ 22 carries the attribute for the same reason. The
+  claim was recalled, not measured; the code was right and the document was
+  wrong.
+- `✓` Closed in Ф31e-d: `__cpp_lib_barrier` was withheld on a residual
+  `arrive_and_drop` race against a concurrent phase completion. That race was
+  disproved during Ф31 and the reasoning in the header was rewritten then, but the
+  macro was never released. `arrive_and_drop` arrives at the **current** phase, so
+  its arrival is one the drain needs; every successful `arrive()` CAS is
+  `acq_rel` on the packed state word, so whoever reads the count down to zero
+  reads a value at or after ours in that word's modification order and therefore
+  sees the expected-count decrement sequenced before it. cxxtest phase139 drives
+  four strands through staggered `arrive_and_drop` rounds against a live
+  completion function.
 - `~` Precondition violations are loud rather than undefined: `arrive(n)` with
   `n <= 0` or `n` greater than the phase's expected count calls `Panic`. Note the
   asymmetry — the *constructor* does not validate its `expected` argument.
@@ -438,12 +471,36 @@ nothing has been found since.
   container — `map<shared_ptr<T>, …, owner_less<>>::find(weak_ptr)` did not
   compile, which is the pairing P0074R0 exists for. Closed
   `__cpp_lib_transparent_operators`.
-- `!` **`atomic<shared_ptr<T>>` and `atomic<weak_ptr<T>>` have no working
-  `notify_one` / `notify_all` — they are no-ops — and `wait()` is a bare
-  busy-spin** rather than the kernel park that every other atomic uses. A thread
-  waiting on one of these will burn a core until the value changes, and a
-  notification will not shorten that. The rest of `<atomic>` is event-driven; this
-  one corner is not.
+- `✓` Closed in Ф31e-d, and it was the sharpest debt left in the library:
+  **`atomic<shared_ptr<T>>` and `atomic<weak_ptr<T>>` had no working `notify_one`
+  / `notify_all` — both were empty bodies — and `wait()` was a bare
+  `while (equivalent) ;`.** A strand waiting on one burned its core until the
+  value changed, and a notification could not shorten that, in a library where
+  every other atomic parks in the kernel. They now carry one control word — a
+  lock bit, a parked bit and a mutation counter — so `wait()` snapshots the word
+  before it re-reads the value and parks on the same substrate as `atomic<T>`,
+  the two notifies bump the version pool and wake, and the strands contending for
+  the pointer park rather than spinning a descheduled holder's quantum away. The
+  counter is what makes the park safe: a store landing between a waiter's read
+  and its park changes the word the park pre-checks, so the wakeup is declined
+  rather than lost.
+- `✓` Closed in Ф31e-d: the **single-`memory_order` `compare_exchange_weak` /
+  `_strong`** were unusable on both, for opposite reasons. `atomic<shared_ptr>`
+  declared them beside two-order forms whose second order was *also* defaulted,
+  so every three-argument call was ambiguous; `atomic<weak_ptr>` never declared
+  them, so the same call silently landed on the two-order overload with `seq_cst`
+  as the failure order. `value_type` was missing from both. [util.smartptr.atomic
+  .shared] defaults the single-order form and *only* that one, which is what
+  makes the three-argument call unambiguous.
+- `✓` Closed in Ф31e-d: Annex D's free `shared_ptr` atomic functions
+  (`atomic_load`, `atomic_store`, `atomic_exchange`, the four
+  `atomic_compare_exchange_*` and their `_explicit` forms, plus
+  `atomic_is_lock_free`) were absent entirely. They are `[depr.util.smartptr
+  .shared.atomic]` — deprecated in C++20, **removed in C++26** — but normative in
+  the revision this library targets, so they are here, taking their exclusion
+  from an address-hashed pool because they act on a `shared_ptr` the program owns
+  rather than on an `atomic<>`. They are atomic only with respect to each other,
+  never with respect to `atomic<shared_ptr>`. The C++26 phase deletes them.
 
 ## `<memory_resource>`
 
@@ -452,6 +509,17 @@ nothing has been found since.
   `largest_required_pool_block` is not a request this engine can honour — its
   size-class table stops at 2048 bytes — so echoing the caller's number back would
   describe pooling that does not happen. [mem.res.pool.mem] permits both.
+
+## `<mutex>`
+
+- `✓` Closed in Ф31e-d: `scoped_lock` had no `mutex_type`. [thread.lock.scoped]
+  gives it one "only if `sizeof...(MutexTypes) == 1`", and boxcxx covered the
+  one-mutex case inside the variadic primary with `if constexpr` — which locks
+  correctly but cannot carry a conditional typedef. So generic code spelling
+  `typename Lock::mutex_type`, the only reason the member is specified, compiled
+  against `lock_guard` and `unique_lock` and not against `scoped_lock`. Supplied
+  now from a conditional base rather than a second class body, which is what the
+  standard's wording describes. Closed `__cpp_lib_scoped_lock`.
 
 ## `<ostream>`
 
@@ -471,7 +539,11 @@ nothing has been found since.
 - `?` The extraction side is safe, but only by accident: no `istream` extractor
   binds a reference across distinct fundamental types, so `is >> char8_t_lvalue`
   fails to compile even though nothing deletes it either. The standard does not
-  delete extractors, so there is nothing to add.
+  delete extractors, so there is nothing to add. Re-measured in Ф31e-d against
+  libc++ 22, whose `<istream>` names `char8_t` nowhere while its `<ostream>` does
+  — `<version>`'s own note had claimed [istream] required deletions, and it was
+  corrected there. What now keeps `__cpp_lib_char8_t` undefined is **only**
+  `pmr::u8string`, which waits on `pmr::basic_string` (see `<string>`).
 
 ## `<print>`
 
@@ -516,8 +588,12 @@ nothing has been found since.
 - `✓` Closed in Ф31e-b-2: `ranges::is_permutation` did not exist, though the
   non-ranges `std::is_permutation` did.
 - `–` The entire `ranges::` uninitialized-memory family does not exist.
-- `–` `ranges::basic_istream_view` / `views::istream` do not exist (they are
-  specified against `basic_istream`, whose global objects BoxOS does not have).
+- `–` `ranges::basic_istream_view` / `views::istream` do not exist. **The reason
+  this entry used to give was wrong** and is corrected here: it said they are
+  specified against `basic_istream`, "whose global objects BoxOS does not have".
+  `views::istream` takes *any* `basic_istream&` — it never names `std::cin` — and
+  Ф30e built `<istream>` and `<sstream>`, so `views::istream(istringstream)` is
+  buildable today. They are simply not written yet.
 - `?` `split_view` and `lazy_split_view` report `iterator_category ==
   input_iterator_tag`, which is what the standard itself specifies (their
   `operator*` yields a prvalue). The concept layer is unaffected —
@@ -849,16 +925,21 @@ argument — which between them made six feature-test macros honest. Each is mar
 Ф31e-b-2 then added `views::take_while`, `views::drop_while`,
 `ranges::is_permutation` and a const-iterable `transform_view` (phase 146), and
 Ф31e-c gave the whole header its [cmath.syn]/2 promoting overloads (phase 147).
+
+Ф31e-d then took the concurrency corner (phase 148), which held the last debt in
+this document marked as having real teeth: `atomic<shared_ptr>` and
+`atomic<weak_ptr>` polled against empty notifies, and now park and wake on the
+same substrate as every other atomic. It closed six feature-test macros with
+them — the two smart-pointer atomics' own, `atomic_ref`'s missing
+`difference_type` and compound assignments, the volatile half of the arithmetic
+surface, six absent `atomic_flag` free functions, and `__cpp_lib_barrier`, which
+had been withheld on a race that measurement had already disproved. Two claims in
+this document were **wrong** and were corrected rather than closed: `<barrier>`'s
+`[[nodiscard]]` is mandated by the synopsis, not an extension, and the volatile
+gap was wider than the `atomic_float` entry said. `scoped_lock<Mutex>::mutex_type`
+went with them, for a seventh.
+
 What is left:
-
-The one with real teeth:
-
-- **`<memory>`: `atomic<shared_ptr>` / `atomic<weak_ptr>` still spin.** Their
-  `wait()` is a bare polling loop and `notify_one` / `notify_all` are no-ops, in a
-  library where every other atomic parks in the kernel. On a single-core cabin this
-  burns the core until the value changes.
-
-The rest:
 
 - `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
   constant-evaluated (§2).
@@ -923,9 +1004,20 @@ is named at the claim.
 
 Runtime behaviour of boxcxx cannot be observed by a syntax-only compile and is not
 asserted here on that basis. It is pinned instead by the in-tree suite —
-`src/userspace/apps/cxxtest.cpp`, 156 phases, 4 512 runtime checks and 1 242
-`static_assert`s — which runs on BIOS and UEFI × 1 and 16 cores with `-cpu max`
-before every commit.
+`src/userspace/apps/cxxtest.cpp` — which runs on BIOS and UEFI × 1 and 16 cores
+with `-cpu max` before every commit. Its size is quoted in §"What the library is,
+in numbers" and counted this way, so the figures are reproducible rather than
+recalled: **phases** are the `Phase*()` entry points `main` invokes, plus phase 2,
+which is proven by its translation unit linking at all rather than by a call;
+**runtime checks** are `Check(` call sites; **`static_assert`s** are occurrences
+of the keyword. Two of the three figures had drifted before Ф31e-d and were
+re-measured there.
+
+A claim about a *defect* is not written here from reading the new code either.
+Each one in §2 marked `✓` was re-checked against the pre-fix headers — extracted
+from git, put ahead of the current include path so only the header under test is
+the old one — and had to fail to compile, or compile and give the wrong answer,
+before the entry describing it was written. Ф31e-d ran twelve such probes.
 
 ## The trap that shaped this document
 

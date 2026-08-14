@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <type_traits>
 #include <utility>
+#include <__bits/version_sync>
 
 namespace boxcxx {
 [[noreturn]] void Panic(const char *msg);

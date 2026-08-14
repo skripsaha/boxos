@@ -226,14 +226,26 @@
 #  error "__cpp_lib_chrono_udls is not visible from <chrono> alone"
 #endif
 #include <atomic>
+#ifndef __cpp_lib_atomic_flag_test
+#  error "__cpp_lib_atomic_flag_test is not visible from <atomic> alone"
+#endif
+#ifndef __cpp_lib_atomic_float
+#  error "__cpp_lib_atomic_float is not visible from <atomic> alone"
+#endif
 #ifndef __cpp_lib_atomic_is_always_lock_free
 #  error "__cpp_lib_atomic_is_always_lock_free is not visible from <atomic> alone"
 #endif
 #ifndef __cpp_lib_atomic_lock_free_type_aliases
 #  error "__cpp_lib_atomic_lock_free_type_aliases is not visible from <atomic> alone"
 #endif
+#ifndef __cpp_lib_atomic_ref
+#  error "__cpp_lib_atomic_ref is not visible from <atomic> alone"
+#endif
 #ifndef __cpp_lib_atomic_value_initialization
 #  error "__cpp_lib_atomic_value_initialization is not visible from <atomic> alone"
+#endif
+#ifndef __cpp_lib_atomic_wait
+#  error "__cpp_lib_atomic_wait is not visible from <atomic> alone"
 #endif
 #include <string_view>
 #ifndef __cpp_lib_constexpr_string_view
@@ -258,6 +270,9 @@
 #include <memory>
 #ifndef __cpp_lib_addressof_constexpr
 #  error "__cpp_lib_addressof_constexpr is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_atomic_shared_ptr
+#  error "__cpp_lib_atomic_shared_ptr is not visible from <memory> alone"
 #endif
 #ifndef __cpp_lib_constexpr_dynamic_alloc
 #  error "__cpp_lib_constexpr_dynamic_alloc is not visible from <memory> alone"
@@ -331,6 +346,14 @@
 #include <stack>
 #ifndef __cpp_lib_adaptor_iterator_pair_constructor
 #  error "__cpp_lib_adaptor_iterator_pair_constructor is not visible from <stack> alone"
+#endif
+#include <barrier>
+#ifndef __cpp_lib_barrier
+#  error "__cpp_lib_barrier is not visible from <barrier> alone"
+#endif
+#include <mutex>
+#ifndef __cpp_lib_scoped_lock
+#  error "__cpp_lib_scoped_lock is not visible from <mutex> alone"
 #endif
 #include <latch>
 #ifndef __cpp_lib_latch
@@ -29271,14 +29294,19 @@ void Phase131()
     static_assert(__cpp_lib_unwrap_ref == 201811L, "phase131 unwrap_ref");
     static_assert(__cpp_lib_void_t == 201411L, "phase131 void_t");
 
+    static_assert(__cpp_lib_atomic_flag_test == 201907L, "phase131 atomic_flag_test");
+    static_assert(__cpp_lib_atomic_float == 201711L, "phase131 atomic_float");
     static_assert(__cpp_lib_atomic_is_always_lock_free == 201603L,
                   "phase131 atomic_is_always_lock_free");
     static_assert(__cpp_lib_atomic_lock_free_type_aliases == 201907L,
                   "phase131 atomic_lock_free_type_aliases");
+    static_assert(__cpp_lib_atomic_ref == 201806L, "phase131 atomic_ref");
     static_assert(__cpp_lib_atomic_value_initialization == 201911L,
                   "phase131 atomic_value_initialization");
+    static_assert(__cpp_lib_atomic_wait == 201907L, "phase131 atomic_wait");
 
     static_assert(__cpp_lib_addressof_constexpr == 201603L, "phase131 addressof_constexpr");
+    static_assert(__cpp_lib_atomic_shared_ptr == 201711L, "phase131 atomic_shared_ptr");
     static_assert(__cpp_lib_constexpr_dynamic_alloc == 201907L,
                   "phase131 constexpr_dynamic_alloc");
     static_assert(__cpp_lib_enable_shared_from_this == 201603L,
@@ -29324,6 +29352,8 @@ void Phase131()
                   "phase131 list_remove_return_type");
     static_assert(__cpp_lib_node_extract == 201606L, "phase131 node_extract");
 
+    static_assert(__cpp_lib_barrier == 201907L, "phase131 barrier");
+    static_assert(__cpp_lib_scoped_lock == 201703L, "phase131 scoped_lock");
     static_assert(__cpp_lib_jthread == 201911L, "phase131 jthread");
     static_assert(__cpp_lib_latch == 201907L, "phase131 latch");
     static_assert(__cpp_lib_semaphore == 201907L, "phase131 semaphore");
@@ -29348,24 +29378,9 @@ void Phase131()
 #ifdef __cpp_lib_assume_aligned
 #  error "phase131: __cpp_lib_assume_aligned must stay undefined"
 #endif
-#ifdef __cpp_lib_atomic_flag_test
-#  error "phase131: __cpp_lib_atomic_flag_test must stay undefined"
-#endif
-#ifdef __cpp_lib_atomic_float
-#  error "phase131: __cpp_lib_atomic_float must stay undefined"
-#endif
-#ifdef __cpp_lib_atomic_ref
-#  error "phase131: __cpp_lib_atomic_ref must stay undefined"
-#endif
-#ifdef __cpp_lib_atomic_shared_ptr
-#  error "phase131: __cpp_lib_atomic_shared_ptr must stay undefined"
-#endif
-#ifdef __cpp_lib_atomic_wait
-#  error "phase131: __cpp_lib_atomic_wait must stay undefined"
-#endif
-#ifdef __cpp_lib_barrier
-#  error "phase131: __cpp_lib_barrier must stay undefined"
-#endif
+// (atomic_flag_test, atomic_float, atomic_ref, atomic_shared_ptr,
+//  atomic_wait and barrier were guarded here until Ф31e-d closed all six;
+//  their positive assertions are in list (A) above.)
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
 #endif
@@ -29466,9 +29481,8 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #ifdef __cpp_lib_sample
 #  error "phase131: __cpp_lib_sample must stay undefined"
 #endif
-#ifdef __cpp_lib_scoped_lock
-#  error "phase131: __cpp_lib_scoped_lock must stay undefined"
-#endif
+// (scoped_lock joined them in Ф31e-d, once scoped_lock<Mutex> gained the
+//  mutex_type [thread.lock.scoped] asks for.)
 #ifdef __cpp_lib_shared_ptr_arrays
 #  error "phase131: __cpp_lib_shared_ptr_arrays must stay undefined"
 #endif
@@ -36911,6 +36925,365 @@ void Phase147()
            "rule\n");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-d — the concurrency corner. atomic<shared_ptr>/atomic<weak_ptr> park
+// in the kernel instead of polling and their notify_* actually wake; the
+// three-argument compare_exchange forms resolve; atomic_ref grew its
+// difference_type and compound assignments; the volatile halves of
+// atomic<T>/atomic<T*> and six atomic_flag free functions exist.
+//
+// Overload-resolution claims are carried by static_asserts on the RESULT
+// TYPE or by a real instantiation, never by "the call compiles" — the trap
+// CONFORMANCE §7 records.
+// ─────────────────────────────────────────────────────────────────────────
+
+// A type whose atomic_ref must NOT gain a difference_type.
+struct P148Cell {
+    int a, b;
+};
+template <class T>
+constexpr bool P148HasDiff =
+    requires { typename std::atomic_ref<T>::difference_type; };
+
+// [thread.lock.scoped]: mutex_type exists only for exactly one mutex. The
+// probe has to be dependent — a requires-expression naming a non-dependent
+// X::m is diagnosed eagerly instead of yielding false.
+template <class... Ms>
+constexpr bool P148HasMutexType =
+    requires { typename std::scoped_lock<Ms...>::mutex_type; };
+
+constexpr int kP148Hops = 64;
+
+std::shared_ptr<int>              g_p148_a;
+std::shared_ptr<int>              g_p148_b;
+std::atomic<std::shared_ptr<int>> g_p148_ap;
+std::atomic<int>                  g_p148_worker_hops{0};
+volatile uint64_t                 g_p148_remaining = 0;
+
+static bool p148_join()
+{
+    uint32_t cycles = 0;
+    uint64_t cur;
+    while ((cur = __atomic_load_n(&g_p148_remaining, __ATOMIC_ACQUIRE)) != 0) {
+        if (++cycles > 200u) return false;
+        addr_park(&g_p148_remaining, cur, 200);
+    }
+    return true;
+}
+
+// The far side of a lock-step rendezvous carried entirely by
+// atomic<shared_ptr>: block while the cell still holds A, hand it back to A,
+// wake the other side. Neither half can lose a wakeup — wait() re-reads the
+// value under the control word before it parks, so a store that lands in the
+// gap is seen rather than slept through.
+static void p148_pp_worker(void *)
+{
+    for (int i = 0; i < kP148Hops; i++) {
+        g_p148_ap.wait(g_p148_a);
+        g_p148_ap.store(g_p148_a);
+        g_p148_ap.notify_all();
+        g_p148_worker_hops.fetch_add(1, std::memory_order_relaxed);
+    }
+    __atomic_fetch_sub(&g_p148_remaining, 1u, __ATOMIC_RELEASE);
+    addr_wake(&g_p148_remaining, 0);
+    strand_exit();
+}
+
+void Phase148()
+{
+    using namespace std::chrono;
+
+    // ── atomic<shared_ptr>: the surface that was missing ─────────────────
+    {
+        using AS = std::atomic<std::shared_ptr<int>>;
+        using AW = std::atomic<std::weak_ptr<int>>;
+        static_assert(std::is_same_v<AS::value_type, std::shared_ptr<int>>);
+        static_assert(std::is_same_v<AW::value_type, std::weak_ptr<int>>);
+        static_assert(!AS::is_always_lock_free && !AW::is_always_lock_free);
+
+        auto one = std::make_shared<int>(1);
+        auto two = std::make_shared<int>(2);
+        AS   ap(one);
+        Check(!ap.is_lock_free() && ap.load() == one && *ap.load() == 1,
+              "phase148 (1) atomic<shared_ptr> loads what it was built with");
+
+        std::shared_ptr<int> prev = ap.exchange(two);
+        Check(prev == one && ap.load() == two,
+              "phase148 (2) exchange hands back the old pointer");
+        ap.store(one);
+        ap = two;
+        Check(ap.load() == two, "phase148 (3) store and operator= agree");
+
+        // The three-argument form: both two-order overloads used to carry
+        // defaults, so this call was ambiguous and could not be written.
+        std::shared_ptr<int> expected = two;
+        static_assert(std::is_same_v<
+                      decltype(ap.compare_exchange_strong(
+                          expected, one, std::memory_order_acq_rel)),
+                      bool>);
+        Check(ap.compare_exchange_strong(expected, one,
+                                         std::memory_order_acq_rel) &&
+                  ap.load() == one,
+              "phase148 (4) the single-order compare_exchange installs desired");
+        expected = two; // now stale — the cell holds `one`
+        Check(!ap.compare_exchange_weak(expected, two) && expected == one,
+              "phase148 (5) a failed exchange writes the current value back");
+        expected = one;
+        Check(ap.compare_exchange_weak(expected, two, std::memory_order_release,
+                                       std::memory_order_relaxed) &&
+                  ap.load() == two,
+              "phase148 (6) and the two-order form still resolves");
+
+        // Equivalence is OWNERSHIP, not the address. Two control blocks over
+        // one object compare equal by get() and must still not match.
+        int                  raw = 7;
+        auto                 nop = [](int *) {};
+        std::shared_ptr<int> cb1(&raw, nop), cb2(&raw, nop);
+        Check(cb1.get() == cb2.get() && (cb1.owner_before(cb2) ||
+                                         cb2.owner_before(cb1)),
+              "phase148 (7) two control blocks, one address");
+        ap.store(cb1);
+        std::shared_ptr<int> want = cb2;
+        // `want == cb1` would be satisfied by cb2 as well — both store &raw —
+        // so the ownership relation is what this has to assert.
+        Check(!ap.compare_exchange_strong(want, two) &&
+                  !want.owner_before(cb1) && !cb1.owner_before(want),
+              "phase148 (8) a same-address, different-owner expected fails, and "
+              "the value written back is the owner that was stored");
+        want = cb1;
+        Check(ap.compare_exchange_strong(want, two),
+              "phase148 (9) and the genuinely equivalent one succeeds");
+
+        // wait() must return at once when the value already differs, and the
+        // two notifies must be callable with nobody parked.
+        ap.store(one);
+        ap.wait(two);
+        ap.notify_one();
+        ap.notify_all();
+        Check(ap.load() == one,
+              "phase148 (10) wait returns immediately on a value that differs");
+    }
+
+    // ── atomic<weak_ptr>: wait() and the single-order forms were absent ───
+    {
+        auto                 owner = std::make_shared<int>(11);
+        std::weak_ptr<int>   w1(owner), w2;
+        std::atomic<std::weak_ptr<int>> aw(w1);
+        Check(!aw.load().expired() && *aw.load().lock() == 11,
+              "phase148 (11) atomic<weak_ptr> round-trips a live weak_ptr");
+        std::weak_ptr<int> expected = w1;
+        Check(aw.compare_exchange_strong(expected, w2,
+                                         std::memory_order_acq_rel) &&
+                  aw.load().expired(),
+              "phase148 (12) weak_ptr single-order compare_exchange");
+        expected = w1;
+        Check(!aw.compare_exchange_weak(expected, w1) && expected.expired(),
+              "phase148 (13) a failed one writes the current weak_ptr back");
+        std::weak_ptr<int> got = aw.exchange(w1);
+        Check(got.expired() && !aw.load().expired(),
+              "phase148 (14) weak_ptr exchange");
+        aw.wait(w2); // stored value is w1, so this must not block
+        aw.notify_one();
+        aw.notify_all();
+        Check(!aw.load().expired(), "phase148 (15) weak_ptr wait returns");
+    }
+
+    // ── Annex D free functions ([depr.util.smartptr.shared.atomic]) ───────
+    {
+        std::shared_ptr<int> p = std::make_shared<int>(20);
+        std::shared_ptr<int> q = std::make_shared<int>(21);
+        static_assert(std::is_same_v<decltype(std::atomic_load(&p)),
+                                     std::shared_ptr<int>>);
+        Check(!std::atomic_is_lock_free(&p) && *std::atomic_load(&p) == 20,
+              "phase148 (16) the Annex D free load");
+        std::atomic_store(&p, q);
+        Check(*std::atomic_load_explicit(&p, std::memory_order_acquire) == 21,
+              "phase148 (17) free store, and the _explicit load");
+        std::shared_ptr<int> old = std::atomic_exchange(&p, std::shared_ptr<int>());
+        Check(old == q && !p, "phase148 (18) free exchange");
+        p                        = q;
+        std::shared_ptr<int> exp = q;
+        Check(std::atomic_compare_exchange_strong(&p, &exp,
+                                                  std::shared_ptr<int>()) &&
+                  !p,
+              "phase148 (19) free compare_exchange succeeds on a match");
+        exp = q;
+        Check(!std::atomic_compare_exchange_weak_explicit(
+                  &p, &exp, q, std::memory_order_acq_rel,
+                  std::memory_order_acquire) &&
+                  !exp,
+              "phase148 (20) and writes the current value back on a miss");
+    }
+
+    // ── atomic_ref: difference_type + the five compound assignments ───────
+    {
+        static_assert(std::is_same_v<std::atomic_ref<int>::difference_type, int>);
+        static_assert(
+            std::is_same_v<std::atomic_ref<double>::difference_type, double>);
+        static_assert(std::is_same_v<std::atomic_ref<int *>::difference_type,
+                                     std::ptrdiff_t>);
+        static_assert(P148HasDiff<int> && P148HasDiff<double> &&
+                      P148HasDiff<int *>);
+        static_assert(!P148HasDiff<P148Cell>); // a class type gets none
+
+        int                  i = 8;
+        std::atomic_ref<int> r(i);
+        static_assert(std::is_same_v<decltype(r += 1), int>);
+        Check((r += 4) == 12,
+              "phase148 (21) atomic_ref operator+= returns the NEW value");
+        Check(i == 12 && (r -= 2) == 10 && (r &= 0xF) == 10 &&
+                  (r |= 0x20) == 42 && (r ^= 0x2) == 40,
+              "phase148 (22) and the whole compound-assignment set lands on the "
+              "referenced object");
+
+        double                  d = 1.5;
+        std::atomic_ref<double> rd(d);
+        Check((rd += 2.0) == 3.5 && (rd -= 0.5) == 3.0 && d == 3.0,
+              "phase148 (23) the floating overloads too");
+
+        int                    arr[4]{};
+        int                   *p = arr;
+        std::atomic_ref<int *> rp(p);
+        Check((rp += 2) == arr + 2 && (rp -= 1) == arr + 1,
+              "phase148 (24) and the pointer specialization scales by the "
+              "pointee");
+    }
+
+    // ── the volatile halves of atomic<T> and atomic<T*> ───────────────────
+    {
+        volatile std::atomic<int>    vi{0};
+        volatile std::atomic<double> vd{0.0};
+        int                          cells[4]{};
+        volatile std::atomic<int *>  vp{cells};
+
+        static_assert(std::is_same_v<decltype(vi += 1), int>);
+        static_assert(std::is_same_v<decltype(vd.fetch_add(1.0)), double>);
+        Check((vi += 5) == 5 && (vi -= 1) == 4 && (vi &= 6) == 4 &&
+                  (vi |= 1) == 5 && (vi ^= 4) == 1,
+              "phase148 (25) volatile atomic<int> compound assignment");
+        Check(++vi == 2 && vi++ == 2 && --vi == 2 && vi-- == 2 &&
+                  vi.load() == 1,
+              "phase148 (26) and its increment/decrement pairs");
+        Check(vd.fetch_add(1.5) == 0.0 && vd.fetch_sub(0.5) == 1.5 &&
+                  (vd += 1.0) == 2.0 && (vd -= 2.0) == 0.0,
+              "phase148 (27) volatile atomic<double> arithmetic");
+        Check((vp += 2) == cells + 2 && (vp -= 1) == cells + 1 &&
+                  ++vp == cells + 2 && vp-- == cells + 2,
+              "phase148 (28) volatile atomic<int*> pointer arithmetic");
+    }
+
+    // ── atomic_flag free functions, both cv-forms ─────────────────────────
+    {
+        std::atomic_flag          f;
+        volatile std::atomic_flag vf;
+        static_assert(std::is_same_v<decltype(std::atomic_flag_test(&f)), bool>);
+        static_assert(std::is_same_v<decltype(std::atomic_flag_test(&vf)), bool>);
+        Check(!std::atomic_flag_test(&f) && !std::atomic_flag_test(&vf),
+              "phase148 (29) atomic_flag_test through both cv-forms");
+        (void)std::atomic_flag_test_and_set(&f);
+        (void)std::atomic_flag_test_and_set(&vf);
+        Check(std::atomic_flag_test_explicit(&f, std::memory_order_acquire) &&
+                  std::atomic_flag_test_explicit(&vf, std::memory_order_acquire),
+              "phase148 (30) and the _explicit pair");
+        // Both wait forms return at once: the flag is set, the old value asked
+        // about is false.
+        std::atomic_flag_wait(&f, false);
+        std::atomic_flag_wait(&vf, false);
+        std::atomic_flag_wait_explicit(&f, false, std::memory_order_acquire);
+        std::atomic_flag_wait_explicit(&vf, false, std::memory_order_acquire);
+        std::atomic_flag_notify_one(&f);
+        std::atomic_flag_notify_one(&vf);
+        std::atomic_flag_notify_all(&f);
+        std::atomic_flag_notify_all(&vf);
+        std::atomic_flag_clear(&f);
+        std::atomic_flag_clear(&vf);
+        Check(!std::atomic_flag_test(&f) && !std::atomic_flag_test(&vf),
+              "phase148 (31) atomic_flag_wait_explicit and the volatile "
+              "notifies exist and return");
+    }
+
+    // ── scoped_lock's conditional mutex_type ([thread.lock.scoped]) ───────
+    {
+        static_assert(std::is_same_v<std::scoped_lock<std::mutex>::mutex_type,
+                                     std::mutex>);
+        static_assert(
+            std::is_same_v<std::scoped_lock<std::recursive_mutex>::mutex_type,
+                           std::recursive_mutex>);
+        // Present for exactly one mutex, and for no other arity.
+        static_assert(P148HasMutexType<std::mutex>);
+        static_assert(!P148HasMutexType<std::mutex, std::timed_mutex>);
+        static_assert(!P148HasMutexType<>);
+
+        std::mutex       m1;
+        std::timed_mutex m2;
+        int              guarded = 0;
+        {
+            std::scoped_lock<std::mutex> one(m1);
+            guarded = 1;
+        }
+        {
+            std::scoped_lock two(m1, m2); // still locks both, deadlock-free
+            guarded = 2;
+        }
+        Check(guarded == 2 && m1.try_lock() && m2.try_lock(),
+              "phase148 (35) scoped_lock still releases both arities");
+        m1.unlock();
+        m2.unlock();
+    }
+
+    // ── cross-strand rendezvous carried by atomic<shared_ptr> ─────────────
+    // The old wait() was a bare `while (equivalent) ;` and both notify_* were
+    // empty. This runs kP148Hops lock-step hops through the new one. Each hop
+    // that had to park and was not woken would cost the version-pool's 100ms
+    // backstop, so the whole chain would need >6s; finishing well inside the
+    // bound is what says the rendezvous is event-driven. (It cannot wedge —
+    // the backstop guarantees progress, so a dead wake FAILS the bound loudly
+    // instead of hanging the harness.)
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase148: strands need FSGSBASE — skipping the "
+               "cross-strand rendezvous\n");
+    } else {
+        g_p148_a = std::make_shared<int>(100);
+        g_p148_b = std::make_shared<int>(200);
+        g_p148_ap.store(g_p148_a);
+        g_p148_worker_hops.store(0, std::memory_order_relaxed);
+        g_p148_remaining = 1;
+        if (strand_spawn(p148_pp_worker, 0) == 0) {
+            g_p148_remaining = 0;
+            printf("[CXX] note phase148: strand_spawn unavailable — skipping "
+                   "the cross-strand rendezvous\n");
+        } else {
+            box::stopwatch sw;
+            for (int i = 0; i < kP148Hops; i++) {
+                g_p148_ap.store(g_p148_b);
+                g_p148_ap.notify_all();
+                g_p148_ap.wait(g_p148_b);
+            }
+            nanoseconds took = sw.elapsed();
+            Check(g_p148_worker_hops.load(std::memory_order_acquire) ==
+                          kP148Hops &&
+                      g_p148_ap.load() == g_p148_a,
+                  "phase148 (32) every hop of the atomic<shared_ptr> "
+                  "rendezvous landed");
+            system_info_t si{};
+            unsigned cores = (sysinfo(&si) == 0) ? si.cpu_app_cores : 0u;
+            auto bound = (cores >= 2) ? milliseconds(5000) : milliseconds(11000);
+            Check(took < bound,
+                  "phase148 (33) the rendezvous ran on notify, not on the "
+                  "100ms backstop");
+            Check(p148_join(), "phase148 (34) rendezvous worker joined");
+        }
+    }
+
+    printf("[CXX] PASS phase148: Ф31e-d — atomic<shared_ptr>/atomic<weak_ptr> park "
+           "and wake instead of spinning against empty notifies, their "
+           "single-order compare_exchange forms resolve, Annex D's free "
+           "functions exist, atomic_ref has difference_type and compound "
+           "assignment, scoped_lock<Mutex> has mutex_type, and the volatile "
+           "halves of atomic and atomic_flag are no longer missing\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -37080,6 +37453,7 @@ int main()
     Phase145();
     Phase146();
     Phase147();
+    Phase148();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

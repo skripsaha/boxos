@@ -473,8 +473,19 @@ struct atomic : __atomic_impl::DifferenceType<T> {
     }
 
     // ── floating extras (C++20 [atomics.types.float]) ───────────────────
+    // A read-modify-write on a floating value has no hardware instruction, so
+    // it is a CAS loop. Both cv-forms are required; the volatile one resolves
+    // to the volatile load/CAS through `this`.
 
     T fetch_add(T d, memory_order m = memory_order_seq_cst) noexcept
+        requires is_floating_point_v<T>
+    {
+        T old = load(memory_order_relaxed);
+        while (!compare_exchange_weak(old, old + d, m, memory_order_relaxed)) {
+        }
+        return old;
+    }
+    T fetch_add(T d, memory_order m = memory_order_seq_cst) volatile noexcept
         requires is_floating_point_v<T>
     {
         T old = load(memory_order_relaxed);
@@ -490,10 +501,27 @@ struct atomic : __atomic_impl::DifferenceType<T> {
         }
         return old;
     }
+    T fetch_sub(T d, memory_order m = memory_order_seq_cst) volatile noexcept
+        requires is_floating_point_v<T>
+    {
+        T old = load(memory_order_relaxed);
+        while (!compare_exchange_weak(old, old - d, m, memory_order_relaxed)) {
+        }
+        return old;
+    }
 
     // ── operator sugar (constrained the same way) ───────────────────────
+    // [atomics.types.int] and [atomics.types.float] list every one of these
+    // twice, volatile and not. The volatile halves were absent, so
+    // `volatile atomic<int> c; ++c;` did not compile at all — the shape a
+    // memory-mapped or Bay-shared counter takes.
 
     T operator++() noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_add_fetch(&__v, T(1), __ATOMIC_SEQ_CST);
+    }
+    T operator++() volatile noexcept
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return __atomic_add_fetch(&__v, T(1), __ATOMIC_SEQ_CST);
@@ -503,7 +531,17 @@ struct atomic : __atomic_impl::DifferenceType<T> {
     {
         return fetch_add(T(1));
     }
+    T operator++(int) volatile noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return fetch_add(T(1));
+    }
     T operator--() noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_sub_fetch(&__v, T(1), __ATOMIC_SEQ_CST);
+    }
+    T operator--() volatile noexcept
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return __atomic_sub_fetch(&__v, T(1), __ATOMIC_SEQ_CST);
@@ -513,7 +551,21 @@ struct atomic : __atomic_impl::DifferenceType<T> {
     {
         return fetch_sub(T(1));
     }
+    T operator--(int) volatile noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return fetch_sub(T(1));
+    }
     T operator+=(T d) noexcept
+        requires((is_integral_v<T> && !is_same_v<T, bool>) ||
+                 is_floating_point_v<T>)
+    {
+        if constexpr (is_floating_point_v<T>)
+            return fetch_add(d) + d;
+        else
+            return __atomic_add_fetch(&__v, d, __ATOMIC_SEQ_CST);
+    }
+    T operator+=(T d) volatile noexcept
         requires((is_integral_v<T> && !is_same_v<T, bool>) ||
                  is_floating_point_v<T>)
     {
@@ -531,7 +583,21 @@ struct atomic : __atomic_impl::DifferenceType<T> {
         else
             return __atomic_sub_fetch(&__v, d, __ATOMIC_SEQ_CST);
     }
+    T operator-=(T d) volatile noexcept
+        requires((is_integral_v<T> && !is_same_v<T, bool>) ||
+                 is_floating_point_v<T>)
+    {
+        if constexpr (is_floating_point_v<T>)
+            return fetch_sub(d) - d;
+        else
+            return __atomic_sub_fetch(&__v, d, __ATOMIC_SEQ_CST);
+    }
     T operator&=(T d) noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_and_fetch(&__v, d, __ATOMIC_SEQ_CST);
+    }
+    T operator&=(T d) volatile noexcept
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return __atomic_and_fetch(&__v, d, __ATOMIC_SEQ_CST);
@@ -541,7 +607,17 @@ struct atomic : __atomic_impl::DifferenceType<T> {
     {
         return __atomic_or_fetch(&__v, d, __ATOMIC_SEQ_CST);
     }
+    T operator|=(T d) volatile noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_or_fetch(&__v, d, __ATOMIC_SEQ_CST);
+    }
     T operator^=(T d) noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_xor_fetch(&__v, d, __ATOMIC_SEQ_CST);
+    }
+    T operator^=(T d) volatile noexcept
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return __atomic_xor_fetch(&__v, d, __ATOMIC_SEQ_CST);
@@ -713,12 +789,19 @@ struct atomic<T *> {
                                   __atomic_impl::Order(m));
     }
 
+    // [atomics.types.pointer] lists each of these twice as well.
     T *operator++() noexcept { return fetch_add(1) + 1; }
+    T *operator++() volatile noexcept { return fetch_add(1) + 1; }
     T *operator++(int) noexcept { return fetch_add(1); }
+    T *operator++(int) volatile noexcept { return fetch_add(1); }
     T *operator--() noexcept { return fetch_sub(1) - 1; }
+    T *operator--() volatile noexcept { return fetch_sub(1) - 1; }
     T *operator--(int) noexcept { return fetch_sub(1); }
+    T *operator--(int) volatile noexcept { return fetch_sub(1); }
     T *operator+=(ptrdiff_t d) noexcept { return fetch_add(d) + d; }
+    T *operator+=(ptrdiff_t d) volatile noexcept { return fetch_add(d) + d; }
     T *operator-=(ptrdiff_t d) noexcept { return fetch_sub(d) - d; }
+    T *operator-=(ptrdiff_t d) volatile noexcept { return fetch_sub(d) - d; }
 
 private:
     T *__v;
@@ -730,7 +813,7 @@ private:
 // referenced object is aligned to required_alignment for its lifetime.
 
 template <typename T>
-struct atomic_ref {
+struct atomic_ref : __atomic_impl::DifferenceType<T> {
     static_assert(is_trivially_copyable_v<T>,
                   "std::atomic_ref<T> requires a trivially copyable type");
 
@@ -862,6 +945,47 @@ struct atomic_ref {
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return fetch_sub(T(1));
+    }
+    // [atomics.ref.int] and [atomics.ref.float] give atomic_ref the same
+    // compound-assignment set as atomic. All five were absent, and with them
+    // difference_type (now inherited, exactly as atomic<T> inherits it), so
+    // atomic_ref<int>::difference_type was ill-formed and `r += 1` on a
+    // reference to a caller-owned cell -- the Bay shared-cell shape this type
+    // exists for -- did not compile.
+    T operator+=(T d) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_add_fetch(__p, d, __ATOMIC_SEQ_CST);
+    }
+    T operator+=(T d) const noexcept
+        requires is_floating_point_v<T>
+    {
+        return fetch_add(d) + d;
+    }
+    T operator-=(T d) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_sub_fetch(__p, d, __ATOMIC_SEQ_CST);
+    }
+    T operator-=(T d) const noexcept
+        requires is_floating_point_v<T>
+    {
+        return fetch_sub(d) - d;
+    }
+    T operator&=(T d) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_and_fetch(__p, d, __ATOMIC_SEQ_CST);
+    }
+    T operator|=(T d) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_or_fetch(__p, d, __ATOMIC_SEQ_CST);
+    }
+    T operator^=(T d) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_xor_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
 
 private:
@@ -1225,7 +1349,17 @@ inline void atomic_flag_clear_explicit(volatile atomic_flag *f,
 {
     f->clear(m);
 }
+// [atomics.flag] declares every one of the following twice, once for a
+// plain atomic_flag* and once for a volatile one, and atomic_flag_wait has
+// an _explicit sibling. Six of the ten were absent, so
+// `atomic_flag_test(&volatile_flag)` and every atomic_flag_wait_explicit
+// call failed to compile even though the member functions behind them --
+// which do carry both cv-forms -- were there the whole time.
 inline bool atomic_flag_test(const atomic_flag *f) noexcept
+{
+    return f->test();
+}
+inline bool atomic_flag_test(const volatile atomic_flag *f) noexcept
 {
     return f->test();
 }
@@ -1234,15 +1368,42 @@ inline bool atomic_flag_test_explicit(const atomic_flag *f,
 {
     return f->test(m);
 }
+inline bool atomic_flag_test_explicit(const volatile atomic_flag *f,
+                                      memory_order m) noexcept
+{
+    return f->test(m);
+}
 inline void atomic_flag_wait(const atomic_flag *f, bool old) noexcept
 {
     f->wait(old);
+}
+inline void atomic_flag_wait(const volatile atomic_flag *f, bool old) noexcept
+{
+    f->wait(old);
+}
+inline void atomic_flag_wait_explicit(const atomic_flag *f, bool old,
+                                      memory_order m) noexcept
+{
+    f->wait(old, m);
+}
+inline void atomic_flag_wait_explicit(const volatile atomic_flag *f, bool old,
+                                      memory_order m) noexcept
+{
+    f->wait(old, m);
 }
 inline void atomic_flag_notify_one(atomic_flag *f) noexcept
 {
     f->notify_one();
 }
+inline void atomic_flag_notify_one(volatile atomic_flag *f) noexcept
+{
+    f->notify_one();
+}
 inline void atomic_flag_notify_all(atomic_flag *f) noexcept
+{
+    f->notify_all();
+}
+inline void atomic_flag_notify_all(volatile atomic_flag *f) noexcept
 {
     f->notify_all();
 }

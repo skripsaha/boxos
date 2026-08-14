@@ -53,6 +53,7 @@
 #include <__bits/version_iterator>        // <iterator> (+ <array>)
 #include <__bits/version_memory>          // <memory>
 #include <__bits/version_memory_resource> // <memory_resource>
+#include <__bits/version_mutex>           // <mutex>
 #include <__bits/version_new>             // <new>
 #include <__bits/version_numbers>         // <numbers>
 #include <__bits/version_numeric>         // <numeric>
@@ -99,48 +100,22 @@
 //                          allocator_traits::allocate_at_least and
 //                          allocator::allocate_at_least are all absent.
 // assume_aligned           std::assume_aligned absent.
-// atomic_flag_test         atomic_flag::test exists (both cv-forms), but
-//                          the free atomic_flag_test / atomic_flag_test_
-//                          explicit lack their volatile atomic_flag*
-//                          overloads.
-// atomic_float             no volatile overloads of the floating-point
-//                          fetch_add/fetch_sub/operator+=/operator-=.
-// atomic_ref               boxcxx writes atomic_ref as one template with
-//                          requires-gated integral/floating extras plus a
-//                          T* partial specialization. The T* one is
-//                          complete; the unified primary has no
-//                          difference_type (so atomic_ref<int>::
-//                          difference_type and the floating-point one are
-//                          ill-formed, though atomic_ref<int*>::
-//                          difference_type works) and none of the compound-
-//                          assignment operators +=, -=, &=, |=, ^= (again
-//                          present only on T*). fetch_add/fetch_sub and
-//                          ++/-- ARE there for the integral case.
-// atomic_shared_ptr        atomic<shared_ptr<T>> is the complete half: it
-//                          has wait(), notify_one() and notify_all().
-//                          atomic<weak_ptr<T>> has the two notify_*, but no
-//                          wait() at all. The single-memory_order compare_
-//                          exchange_weak/strong are unusable on both, for
-//                          opposite reasons: shared_ptr declares them
-//                          alongside the two-order forms whose second order
-//                          is defaulted, so every three-argument call is
-//                          ambiguous and ill-formed; weak_ptr never declares
-//                          them, so the same call silently lands on the
-//                          two-order overload instead. The free shared_ptr
-//                          atomic functions (atomic_load, atomic_store,
-//                          atomic_exchange, atomic_compare_exchange_*, and
-//                          their _explicit forms) are absent entirely.
-// atomic_wait              atomic_flag_wait_explicit is absent entirely,
-//                          and the atomic_flag wait/notify free functions
-//                          lack their volatile overloads.
-// barrier                  <barrier>'s arrive_and_drop has a documented
-//                          residual race against a concurrent phase
-//                          completion, so the phase guarantees this macro
-//                          claims do not hold.
-// char8_t                  std::pmr::u8string is absent, and the deleted
-//                          char8_t/char16_t/char32_t stream inserters and
-//                          extractors required by [ostream]/[istream] are
-//                          missing (so `os << u8"x"` wrongly compiles).
+// char8_t                  std::pmr::u8string is absent -- and as of Ф31e-d
+//                          that is the ONLY thing left of this macro, so it
+//                          is now one alias away. The rest of what this
+//                          entry used to claim was measured and is wrong:
+//                          the deleted char8_t/char16_t/char32_t inserters
+//                          landed in Ф31e-a (`os << u8"x"` is rejected, not
+//                          "wrongly compiles"), and [istream] deletes no
+//                          extractors at all -- neither the synopsis nor
+//                          libc++ 22 has one, and nothing binds a reference
+//                          across distinct fundamental types anyway.
+//                          char8_t itself, u8string, u8string_view,
+//                          char_traits<char8_t>, atomic_char8_t and
+//                          hash<u8string> are all present and verified.
+//                          pmr::u8string waits on pmr::basic_string, which
+//                          does not exist either (see <string> in
+//                          CONFORMANCE §2).
 // chrono                   <chrono> excludes time zones by design: no
 //                          tzdb, time_zone, zoned_time or leap seconds.
 // common_reference         P2655R3's basic_common_reference specialization
@@ -228,11 +203,6 @@
 //                          C++20); the macro names exactly that template.
 // sample                   only ranges::sample exists; the classic
 //                          std::sample is absent.
-// scoped_lock              the single-mutex scoped_lock<Mutex> partial
-//                          specialization is absent (the variadic primary
-//                          handles it via if constexpr), so the required
-//                          scoped_lock<Mutex>::mutex_type typedef does not
-//                          exist.
 // shared_ptr_arrays        the two bounded-array allocate_shared overloads
 //                          are absent (only the unbounded T[] forms exist).
 // smart_ptr_for_overwrite  make_unique_for_overwrite and make_shared_for_

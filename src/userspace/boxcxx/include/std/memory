@@ -17,6 +17,7 @@
 #include <compare>
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <new>
 #include <type_traits>
@@ -1485,48 +1486,162 @@ struct hash<shared_ptr<T>> {
 };
 
 // ── atomic<shared_ptr> / atomic<weak_ptr> ([util.smartptr.atomic]) ───────
-// Spinlock-guarded (is_lock_free() == false), as in every mainstream
-// implementation: the control-block refcounts are already atomic, but the
-// {pointer, control-block} pair must move together. Two smart pointers are
-// "equivalent" iff they store the same pointer AND share ownership (neither
-// owner_before the other). notify_* are no-ops, matching boxcxx's address-
-// monitor atomic wait policy ([[cxx-honest-leftovers]]).
+//
+// A smart pointer is two words — the stored pointer and the control block —
+// and an atomic operation has to move both together, so this is the one
+// atomic family that is never lock-free (is_lock_free() == false, as in
+// every mainstream implementation; the control-block refcounts are already
+// atomic on their own).
+//
+// What used to be true here and no longer is: wait() was a bare polling loop
+// and both notify_* were empty bodies. A strand waiting on one of these
+// burned its core until the value changed, and a notification could not
+// shorten that — in a library where every other atomic parks in the kernel.
+//
+// The replacement is one control word that carries three things at once:
+//
+//     bit 0        HELD     an operation owns the smart pointer right now
+//     bit 1        PARKED   at least one strand is parked on this word
+//     bits 2..31   COUNT    bumped by every operation that CHANGES the value
+//
+// COUNT is what makes parking safe. A waiter snapshots the word BEFORE it
+// re-reads the value, so a mutation landing in the gap between the read and
+// the park changes the word the park pre-checks — the park is declined
+// rather than lost. PARKED is what keeps the fast path free: an uncontended
+// release is a single store, and only a release that finds PARKED set pays
+// for a wake syscall.
+//
+// The strands contending for the word park on it too, rather than spinning.
+// On a preemptive kernel a holder can be descheduled mid-operation, and a
+// pure spinlock would then burn every other strand's quantum — the shape
+// that makes a spinlock cost more than it saves.
+namespace __smartptr_atomic {
+
+inline constexpr uint32_t kHeld   = 1u;
+inline constexpr uint32_t kParked = 2u;
+inline constexpr uint32_t kCount  = 4u; // one COUNT unit (bits 2..31)
+
+// RAII owner of the control word. Held across one smart-pointer copy or swap
+// and its refcount update, and no longer than that.
+class Guard {
+public:
+    explicit Guard(uint32_t &ctl) noexcept : __ctl(&ctl)
+    {
+        unsigned spin = 0;
+        uint32_t c    = __atomic_load_n(__ctl, __ATOMIC_RELAXED);
+        for (;;) {
+            if (!(c & kHeld)) {
+                if (__atomic_compare_exchange_n(__ctl, &c, c | kHeld, false,
+                                                __ATOMIC_ACQUIRE,
+                                                __ATOMIC_RELAXED)) {
+                    // Keep COUNT, drop the two flag bits: the release below
+                    // writes this back, which is what clears them.
+                    __count = c & ~(kHeld | kParked);
+                    return;
+                }
+                continue; // the failed CAS reloaded c
+            }
+            // Contended. Announce the park BEFORE parking, so the holder's
+            // release knows a wake is owed; then park on the word itself.
+            if (!(c & kParked) &&
+                !__atomic_compare_exchange_n(__ctl, &c, c | kParked, false,
+                                             __ATOMIC_RELAXED,
+                                             __ATOMIC_RELAXED))
+                continue;
+            uint32_t observed = c | kParked;
+            __boxcxx_atomic_wait_cycle(__ctl, &observed, sizeof(observed),
+                                       ~0ull, &spin);
+            c = __atomic_load_n(__ctl, __ATOMIC_RELAXED);
+        }
+    }
+
+    Guard(const Guard &)            = delete;
+    Guard &operator=(const Guard &) = delete;
+
+    // The value changed under this guard, so the release publishes a new
+    // COUNT — the token a waiter's park pre-check compares against.
+    void Mutated() noexcept { __count += kCount; }
+
+    ~Guard()
+    {
+        // One exchange releases the word and publishes COUNT. COUNT cannot
+        // have moved under us — only the holder writes it — so no CAS loop is
+        // needed, and the returned previous value is how PARKED gets read and
+        // cleared in the same operation.
+        uint32_t prev = __atomic_exchange_n(__ctl, __count, __ATOMIC_RELEASE);
+        if (prev & kParked) __boxcxx_atomic_notify(__ctl, true);
+    }
+
+private:
+    uint32_t *__ctl;
+    uint32_t  __count;
+};
+
+// One park cycle for a smart-pointer waiter. `observed` is the control word
+// the caller snapshotted before it re-read the value. HELD is masked out of
+// the predicate: a plain load() takes the word too, and that churn must not
+// end somebody else's park.
+inline void ParkOn(const uint32_t &ctl, uint32_t observed,
+                   unsigned &spin) noexcept
+{
+    __boxcxx_atomic_wait_cycle(&ctl, &observed, sizeof(observed),
+                               ~static_cast<unsigned long long>(kHeld), &spin);
+}
+
+// Annex D's free functions operate on a raw shared_ptr the program owns, so
+// there is no control word inside the object to use. They share this
+// address-hashed table of them — the same shape as the runtime's own wait
+// pools. Two objects that collide merely serialize against each other, which
+// is the whole contract of a lock pool.
+inline uint32_t &FreeCtlFor(const void *p) noexcept
+{
+    constexpr size_t kPool = 64; // power of two
+    static uint32_t  table[kPool];
+    return table[(reinterpret_cast<uintptr_t>(p) >> 4) & (kPool - 1)];
+}
+
+// [util.smartptr.atomic.shared]'s "equivalent": the same stored pointer AND
+// shared ownership. Not a bitwise compare — two shared_ptrs can hold the same
+// address without sharing a control block.
+template <class T>
+inline bool Equivalent(const shared_ptr<T> &a, const shared_ptr<T> &b) noexcept
+{
+    return a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
+}
+// [util.smartptr.atomic.weak]: a weak_ptr has no observable stored pointer,
+// so ownership is the whole of it.
+template <class T>
+inline bool Equivalent(const weak_ptr<T> &a, const weak_ptr<T> &b) noexcept
+{
+    return !a.owner_before(b) && !b.owner_before(a);
+}
+
+} // namespace __smartptr_atomic
 
 template <class T>
 struct atomic<shared_ptr<T>> {
 private:
-    shared_ptr<T>         p_;
-    mutable unsigned char lock_ = 0;
-    void Acquire() const noexcept
-    {
-        while (__atomic_test_and_set(&lock_, __ATOMIC_ACQUIRE))
-            ;
-    }
-    void ReleaseLock() const noexcept
-    {
-        __atomic_clear(&lock_, __ATOMIC_RELEASE);
-    }
-    static bool Equiv(const shared_ptr<T> &a, const shared_ptr<T> &b) noexcept
-    {
-        return a.get() == b.get() && !a.owner_before(b) && !b.owner_before(a);
-    }
+    shared_ptr<T>    p_;
+    mutable uint32_t ctl_ = 0;
 
 public:
+    using value_type = shared_ptr<T>;
+
     static constexpr bool is_always_lock_free = false;
 
     constexpr atomic() noexcept = default;
     constexpr atomic(nullptr_t) noexcept {}
     atomic(shared_ptr<T> d) noexcept : p_(static_cast<shared_ptr<T> &&>(d)) {}
-    atomic(const atomic &)        = delete;
+    atomic(const atomic &)         = delete;
     void operator=(const atomic &) = delete;
 
     bool is_lock_free() const noexcept { return false; }
 
     void store(shared_ptr<T> d, memory_order = memory_order_seq_cst) noexcept
     {
-        Acquire();
+        __smartptr_atomic::Guard g(ctl_);
         p_.swap(d);
-        ReleaseLock();
+        g.Mutated();
     }
     void operator=(shared_ptr<T> d) noexcept
     {
@@ -1534,103 +1649,98 @@ public:
     }
     shared_ptr<T> load(memory_order = memory_order_seq_cst) const noexcept
     {
-        Acquire();
-        shared_ptr<T> r = p_;
-        ReleaseLock();
-        return r;
+        __smartptr_atomic::Guard g(ctl_);
+        return p_;
     }
     operator shared_ptr<T>() const noexcept { return load(); }
 
     shared_ptr<T> exchange(shared_ptr<T> d,
                            memory_order = memory_order_seq_cst) noexcept
     {
-        Acquire();
+        __smartptr_atomic::Guard g(ctl_);
         p_.swap(d);
-        ReleaseLock();
+        g.Mutated();
         return d;
     }
 
+    // [util.smartptr.atomic.shared] declares the two-order forms WITHOUT
+    // defaults and the single-order forms WITH one. Defaulting the two-order
+    // pair as well — which this used to do — made every three-argument call
+    // ambiguous between the two, so the single-order form was unreachable.
     bool compare_exchange_strong(shared_ptr<T> &expected, shared_ptr<T> desired,
-                                 memory_order = memory_order_seq_cst,
-                                 memory_order = memory_order_seq_cst) noexcept
+                                 memory_order, memory_order) noexcept
     {
         shared_ptr<T> old;
-        Acquire();
-        if (Equiv(p_, expected)) {
-            old.swap(p_);
-            p_.swap(desired);
-            ReleaseLock();
-            return true;
+        {
+            __smartptr_atomic::Guard g(ctl_);
+            if (__smartptr_atomic::Equivalent(p_, expected)) {
+                old.swap(p_);
+                p_.swap(desired);
+                g.Mutated();
+                return true;
+            }
+            old = p_;
         }
-        old = p_;
-        ReleaseLock();
         expected = static_cast<shared_ptr<T> &&>(old);
         return false;
     }
     bool compare_exchange_weak(shared_ptr<T> &e, shared_ptr<T> d,
-                               memory_order s = memory_order_seq_cst,
-                               memory_order f = memory_order_seq_cst) noexcept
+                               memory_order s, memory_order f) noexcept
     {
         return compare_exchange_strong(e, static_cast<shared_ptr<T> &&>(d), s,
                                        f);
     }
     bool compare_exchange_strong(shared_ptr<T> &e, shared_ptr<T> d,
-                                 memory_order o) noexcept
+                                 memory_order o = memory_order_seq_cst) noexcept
     {
         return compare_exchange_strong(e, static_cast<shared_ptr<T> &&>(d), o,
                                        o);
     }
     bool compare_exchange_weak(shared_ptr<T> &e, shared_ptr<T> d,
-                               memory_order o) noexcept
+                               memory_order o = memory_order_seq_cst) noexcept
     {
         return compare_exchange_strong(e, static_cast<shared_ptr<T> &&>(d), o,
                                        o);
     }
 
-    void wait(shared_ptr<T> old, memory_order = memory_order_seq_cst) const
-        noexcept
+    void wait(shared_ptr<T> old,
+              memory_order m = memory_order_seq_cst) const noexcept
     {
-        while (Equiv(load(), old))
-            ;
+        unsigned spin = 0;
+        for (;;) {
+            // The snapshot comes FIRST — see the control-word comment above.
+            uint32_t observed = __atomic_load_n(&ctl_, __ATOMIC_ACQUIRE);
+            if (!__smartptr_atomic::Equivalent(load(m), old)) return;
+            __smartptr_atomic::ParkOn(ctl_, observed, spin);
+        }
     }
-    void notify_one() noexcept {}
-    void notify_all() noexcept {}
+    void notify_one() noexcept { __boxcxx_atomic_notify(&ctl_, false); }
+    void notify_all() noexcept { __boxcxx_atomic_notify(&ctl_, true); }
 };
 
 template <class T>
 struct atomic<weak_ptr<T>> {
 private:
-    weak_ptr<T>           p_;
-    mutable unsigned char lock_ = 0;
-    void Acquire() const noexcept
-    {
-        while (__atomic_test_and_set(&lock_, __ATOMIC_ACQUIRE))
-            ;
-    }
-    void ReleaseLock() const noexcept
-    {
-        __atomic_clear(&lock_, __ATOMIC_RELEASE);
-    }
-    static bool Equiv(const weak_ptr<T> &a, const weak_ptr<T> &b) noexcept
-    {
-        return !a.owner_before(b) && !b.owner_before(a);
-    }
+    weak_ptr<T>      p_;
+    mutable uint32_t ctl_ = 0;
 
 public:
+    using value_type = weak_ptr<T>;
+
     static constexpr bool is_always_lock_free = false;
 
     constexpr atomic() noexcept = default;
     atomic(weak_ptr<T> d) noexcept : p_(static_cast<weak_ptr<T> &&>(d)) {}
-    atomic(const atomic &)        = delete;
+    atomic(const atomic &)         = delete;
     void operator=(const atomic &) = delete;
 
     bool is_lock_free() const noexcept { return false; }
 
     void store(weak_ptr<T> d, memory_order = memory_order_seq_cst) noexcept
     {
-        Acquire();
+        __smartptr_atomic::Guard g(ctl_);
         p_.swap(d);
-        ReleaseLock();
+        g.Mutated();
     }
     void operator=(weak_ptr<T> d) noexcept
     {
@@ -1638,47 +1748,167 @@ public:
     }
     weak_ptr<T> load(memory_order = memory_order_seq_cst) const noexcept
     {
-        Acquire();
-        weak_ptr<T> r = p_;
-        ReleaseLock();
-        return r;
+        __smartptr_atomic::Guard g(ctl_);
+        return p_;
     }
     operator weak_ptr<T>() const noexcept { return load(); }
 
     weak_ptr<T> exchange(weak_ptr<T> d,
                          memory_order = memory_order_seq_cst) noexcept
     {
-        Acquire();
+        __smartptr_atomic::Guard g(ctl_);
         p_.swap(d);
-        ReleaseLock();
+        g.Mutated();
         return d;
     }
     bool compare_exchange_strong(weak_ptr<T> &expected, weak_ptr<T> desired,
-                                 memory_order = memory_order_seq_cst,
-                                 memory_order = memory_order_seq_cst) noexcept
+                                 memory_order, memory_order) noexcept
     {
         weak_ptr<T> old;
-        Acquire();
-        if (Equiv(p_, expected)) {
-            old.swap(p_);
-            p_.swap(desired);
-            ReleaseLock();
-            return true;
+        {
+            __smartptr_atomic::Guard g(ctl_);
+            if (__smartptr_atomic::Equivalent(p_, expected)) {
+                old.swap(p_);
+                p_.swap(desired);
+                g.Mutated();
+                return true;
+            }
+            old = p_;
         }
-        old = p_;
-        ReleaseLock();
         expected = static_cast<weak_ptr<T> &&>(old);
         return false;
     }
-    bool compare_exchange_weak(weak_ptr<T> &e, weak_ptr<T> d,
-                               memory_order s = memory_order_seq_cst,
-                               memory_order f = memory_order_seq_cst) noexcept
+    bool compare_exchange_weak(weak_ptr<T> &e, weak_ptr<T> d, memory_order s,
+                               memory_order f) noexcept
     {
         return compare_exchange_strong(e, static_cast<weak_ptr<T> &&>(d), s, f);
     }
-    void notify_one() noexcept {}
-    void notify_all() noexcept {}
+    // Absent until now, and the omission was silent in the worse direction:
+    // a three-argument call landed on the two-order overload with the third
+    // argument as `success` and seq_cst left as `failure`, instead of failing
+    // to compile.
+    bool compare_exchange_strong(weak_ptr<T> &e, weak_ptr<T> d,
+                                 memory_order o = memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(e, static_cast<weak_ptr<T> &&>(d), o, o);
+    }
+    bool compare_exchange_weak(weak_ptr<T> &e, weak_ptr<T> d,
+                               memory_order o = memory_order_seq_cst) noexcept
+    {
+        return compare_exchange_strong(e, static_cast<weak_ptr<T> &&>(d), o, o);
+    }
+
+    void wait(weak_ptr<T> old,
+              memory_order m = memory_order_seq_cst) const noexcept
+    {
+        unsigned spin = 0;
+        for (;;) {
+            uint32_t observed = __atomic_load_n(&ctl_, __ATOMIC_ACQUIRE);
+            if (!__smartptr_atomic::Equivalent(load(m), old)) return;
+            __smartptr_atomic::ParkOn(ctl_, observed, spin);
+        }
+    }
+    void notify_one() noexcept { __boxcxx_atomic_notify(&ctl_, false); }
+    void notify_all() noexcept { __boxcxx_atomic_notify(&ctl_, true); }
 };
+
+// ── Annex D: the free shared_ptr atomic functions ───────────────────────
+// [depr.util.smartptr.shared.atomic]. Deprecated in C++20 and removed in
+// C++26, but normative in C++23, which is what this library targets — the
+// C++26 phase deletes them. They are NOT the atomic<shared_ptr> above with a
+// different spelling: they act on a shared_ptr the program owns and has not
+// wrapped, so they take their exclusion from the address-hashed pool rather
+// than from a control word inside the object, and only these functions
+// (never atomic<shared_ptr>) are atomic with respect to each other.
+// The standard declares them without noexcept; matched exactly.
+
+template <class T>
+bool atomic_is_lock_free(const shared_ptr<T> *)
+{
+    return false;
+}
+
+template <class T>
+shared_ptr<T> atomic_load(const shared_ptr<T> *p)
+{
+    __smartptr_atomic::Guard g(__smartptr_atomic::FreeCtlFor(p));
+    return *p;
+}
+template <class T>
+shared_ptr<T> atomic_load_explicit(const shared_ptr<T> *p, memory_order)
+{
+    return atomic_load(p);
+}
+
+template <class T>
+void atomic_store(shared_ptr<T> *p, shared_ptr<T> r)
+{
+    __smartptr_atomic::Guard g(__smartptr_atomic::FreeCtlFor(p));
+    p->swap(r);
+    g.Mutated();
+}
+template <class T>
+void atomic_store_explicit(shared_ptr<T> *p, shared_ptr<T> r, memory_order)
+{
+    atomic_store(p, static_cast<shared_ptr<T> &&>(r));
+}
+
+template <class T>
+shared_ptr<T> atomic_exchange(shared_ptr<T> *p, shared_ptr<T> r)
+{
+    __smartptr_atomic::Guard g(__smartptr_atomic::FreeCtlFor(p));
+    p->swap(r);
+    g.Mutated();
+    return r;
+}
+template <class T>
+shared_ptr<T> atomic_exchange_explicit(shared_ptr<T> *p, shared_ptr<T> r,
+                                       memory_order)
+{
+    return atomic_exchange(p, static_cast<shared_ptr<T> &&>(r));
+}
+
+template <class T>
+bool atomic_compare_exchange_strong(shared_ptr<T> *p, shared_ptr<T> *v,
+                                    shared_ptr<T> w)
+{
+    shared_ptr<T> old;
+    {
+        __smartptr_atomic::Guard g(__smartptr_atomic::FreeCtlFor(p));
+        if (__smartptr_atomic::Equivalent(*p, *v)) {
+            old.swap(*p);
+            p->swap(w);
+            g.Mutated();
+            return true;
+        }
+        old = *p;
+    }
+    *v = static_cast<shared_ptr<T> &&>(old);
+    return false;
+}
+template <class T>
+bool atomic_compare_exchange_weak(shared_ptr<T> *p, shared_ptr<T> *v,
+                                  shared_ptr<T> w)
+{
+    return atomic_compare_exchange_strong(p, v,
+                                          static_cast<shared_ptr<T> &&>(w));
+}
+template <class T>
+bool atomic_compare_exchange_strong_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
+                                             shared_ptr<T> w, memory_order,
+                                             memory_order)
+{
+    return atomic_compare_exchange_strong(p, v,
+                                          static_cast<shared_ptr<T> &&>(w));
+}
+template <class T>
+bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
+                                           shared_ptr<T> w, memory_order,
+                                           memory_order)
+{
+    return atomic_compare_exchange_strong(p, v,
+                                          static_cast<shared_ptr<T> &&>(w));
+}
 
 } // namespace std
 
