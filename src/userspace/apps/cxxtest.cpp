@@ -38803,6 +38803,90 @@ void Phase156()
            "runtime path is unchanged and pinned beside it\n");
 }
 
+// ── Ф32-c ───────────────────────────────────────────────────────────────
+// A range that can say "about this many" but cannot say how many: no size(),
+// no sized sentinel, just a reserve_hint(). This is the shape P2846R6 exists
+// for -- a lazily transcoding or normalising view knows roughly how much it
+// will produce and could never say exactly.
+struct P157Hinted {
+    std::forward_list<int> d{1, 2, 3, 4, 5, 6, 7, 8};
+    auto                   begin() { return d.begin(); }
+    auto                   end() { return d.end(); }
+    auto                   begin() const { return d.begin(); }
+    auto                   end() const { return d.end(); }
+    std::size_t            reserve_hint() const { return 8; }
+};
+
+void Phase157()
+{
+    using namespace std;
+    namespace r = std::ranges;
+    namespace v = std::views;
+
+    static_assert(r::approximately_sized_range<P157Hinted>,
+                  "phase157 (1) a range with only reserve_hint is approximately sized");
+    static_assert(!r::sized_range<P157Hinted>, "phase157 (2) ...and is still not sized");
+    static_assert(r::sized_range<vector<int>> && r::approximately_sized_range<vector<int>>,
+                  "phase157 (3) every sized_range is approximately sized -- the CPO falls "
+                  "back to size(), which is what lets sized_range refine the new concept");
+    static_assert(!r::approximately_sized_range<forward_list<int>>,
+                  "phase157 (4) a range with neither is neither");
+
+    P157Hinted h;
+    Check(r::reserve_hint(h) == 8u, "phase157 (5) ranges::reserve_hint reads the member");
+    {
+        vector<int> vec{1, 2, 3, 4};
+        Check(r::reserve_hint(vec) == 4u, "phase157 (6) ...and falls back to size()");
+        // The CPO takes a forwarding reference, so a pipeline temporary is a
+        // valid argument -- [range.prim.size.hint] reifies its operand.
+        Check(r::reserve_hint(vec | v::take(2)) == 2u,
+              "phase157 (7) ...including a materialised pipeline temporary");
+    }
+    // Every adaptor P2846R6 touches, over a range that only hints.
+    Check(r::reserve_hint(h | v::transform([](int x) { return x; })) == 8u,
+          "phase157 (8) transform passes the hint through unchanged");
+    Check(r::reserve_hint(h | v::take(3)) == 3u, "phase157 (9) take clamps to its count");
+    Check(r::reserve_hint(h | v::take(99)) == 8u, "phase157 (10) ...and to the hint when smaller");
+    Check(r::reserve_hint(h | v::drop(3)) == 5u, "phase157 (11) drop subtracts");
+    Check(r::reserve_hint(h | v::drop(99)) == 0u, "phase157 (12) ...clamped at zero");
+    Check(r::reserve_hint(h | v::stride(3)) == 3u, "phase157 (13) stride divides, rounding up");
+    Check(r::reserve_hint(h | v::chunk(3)) == 3u, "phase157 (14) chunk divides, rounding up");
+    Check(r::reserve_hint(h | v::slide(3)) == 6u, "phase157 (15) slide is n - window + 1");
+    Check(r::reserve_hint(h | v::adjacent<3>) == 6u, "phase157 (16) adjacent drops N-1");
+    Check(r::reserve_hint(h | v::as_const) == 8u, "phase157 (17) as_const forwards");
+    Check(r::reserve_hint(h | v::as_rvalue) == 8u, "phase157 (18) as_rvalue forwards");
+    Check(r::reserve_hint(h | v::enumerate) == 8u, "phase157 (19) enumerate forwards");
+    Check(r::reserve_hint(v::all(h)) == 8u, "phase157 (20) ref_view forwards");
+    // take_view is the ONE view whose reserve_hint is unconstrained: LEWG asked
+    // for it because `r | take(n)` is likely to yield n elements even when r
+    // offers no hint at all. A forward_list has no hint whatsoever.
+    {
+        forward_list<int> fl{1, 2, 3};
+        static_assert(!r::approximately_sized_range<forward_list<int>>,
+                      "phase157 (21) the source really has no hint");
+        Check(r::reserve_hint(fl | v::take(2)) == 2u,
+              "phase157 (22) ...yet take still answers, with its own count");
+    }
+    // The payoff: ranges::to reserves off the hint instead of refusing to
+    // reserve at all, and the result is unchanged.
+    {
+        auto out = h | v::transform([](int x) { return x * 2; }) | r::to<vector<int>>();
+        Check(out.size() == 8 && out.front() == 2 && out.back() == 16,
+              "phase157 (23) ranges::to over a hint-only range builds the right vector");
+        Check(out.capacity() >= 8,
+              "phase157 (24) ...and reserved for it -- before P2846R6 this range was not "
+              "sized, so ranges::to reserved nothing and grew by reallocation");
+    }
+    static_assert(__cpp_lib_ranges_reserve_hint == 202502L,
+                  "phase157 (25) P2846R6 is complete, so the macro is claimed");
+
+    printf("[CXX] PASS phase157: Ф32-c — P2846R6 reserve_hint: the CPO, the "
+           "approximately_sized_range concept that sized_range now refines, the "
+           "member on every one of the seventeen views the paper touches, and "
+           "ranges::to reserving off a hint from a range that can never say its "
+           "size\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38981,6 +39065,7 @@ int main()
     Phase154();
     Phase155();
     Phase156();
+    Phase157();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -343,6 +343,21 @@ public:
         auto n  = static_cast<decltype(sz)>(N - 1);
         return sz - (sz < n ? sz : n);
     }
+    // P2846R6: N-1 fewer windows than elements, clamped at zero.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        auto sz = ranges::reserve_hint(__base);
+        auto n  = static_cast<decltype(sz)>(N - 1);
+        return sz - (sz < n ? sz : n);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        auto sz = ranges::reserve_hint(__base);
+        auto n  = static_cast<decltype(sz)>(N - 1);
+        return sz - (sz < n ? sz : n);
+    }
 };
 
 template <typename T, size_t N>
@@ -623,6 +638,17 @@ public:
         requires sized_range<const adjacent_view<V, N>>
     {
         return __inner.size();
+    }
+    // P2846R6: the inner adjacent_view already did the arithmetic.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<adjacent_view<V, N>>
+    {
+        return __inner.reserve_hint();
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const adjacent_view<V, N>>
+    {
+        return __inner.reserve_hint();
     }
 };
 

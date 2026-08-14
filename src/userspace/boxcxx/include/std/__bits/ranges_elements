@@ -287,6 +287,18 @@ public:
     {
         return ranges::size(__base);
     }
+    // P2846R6: this view neither adds nor drops elements, so the hint is the
+    // adapted range's hint, exactly as size() is its size.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
+    }
 };
 
 template <typename T, size_t N>
@@ -545,6 +557,18 @@ public:
         requires sized_range<const V>
     {
         return ranges::size(__base);
+    }
+    // P2846R6: this view neither adds nor drops elements, so the hint is the
+    // adapted range's hint, exactly as size() is its size.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
     }
 };
 

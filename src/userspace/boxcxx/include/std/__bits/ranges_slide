@@ -141,6 +141,21 @@ public:
         if (sz < 0) sz = 0;
         return __views_detail::ToUnsignedLike(sz);
     }
+    // P2846R6: same window arithmetic as size(), fed by the hint.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        auto sz = static_cast<range_difference_t<V>>(ranges::reserve_hint(__base)) - __n + 1;
+        if (sz < 0) sz = 0;
+        return __views_detail::ToUnsignedLike(sz);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        auto sz = static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base)) - __n + 1;
+        if (sz < 0) sz = 0;
+        return __views_detail::ToUnsignedLike(sz);
+    }
 };
 
 template <typename R>

@@ -109,12 +109,18 @@ constexpr C ToConstructLadder(R &&r, Args &&...args)
                           ContainerInsertable<C, range_reference_t<R>>) {
         // (d) default-construct + reserve + insert
         C c(std::forward<Args>(args)...);
-        if constexpr (sized_range<R> && ReservableContainer<C>) {
-            // [LWG3743 fix] static_cast — ranges::size(r) may be an
-            // integer-class type not implicitly convertible to
-            // range_size_t<C>. [LWG3722 NAD] — no pre-existing-size
-            // accounting beyond this cast.
-            c.reserve(static_cast<range_size_t<C>>(ranges::size(r)));
+        if constexpr (approximately_sized_range<R> && ReservableContainer<C>) {
+            // P2846R6 replaced sized_range/ranges::size here with
+            // approximately_sized_range/ranges::reserve_hint. That is the whole
+            // point of the paper: a lazily transcoding or normalising view
+            // cannot say how many elements it will produce, but it can say
+            // "about this many", and reserving on that estimate beats
+            // reallocating from nothing. For a range that IS sized the hint IS
+            // the size, so nothing about the old behaviour changes.
+            // [LWG3743 fix] static_cast — the hint may be an integer-class type
+            // not implicitly convertible to range_size_t<C>. [LWG3722 NAD] — no
+            // pre-existing-size accounting beyond this cast.
+            c.reserve(static_cast<range_size_t<C>>(ranges::reserve_hint(r)));
         }
         // NOTE: a hand-written loop, not ranges::copy — ranges::copy
         // lives in __bits/ranges_algo_mut, which itself #includes <ranges>

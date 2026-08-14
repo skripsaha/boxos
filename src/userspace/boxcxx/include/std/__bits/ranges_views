@@ -490,6 +490,11 @@ public:
     {
         return ranges::size(*__r);
     }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<R>
+    {
+        return ranges::reserve_hint(*__r);
+    }
     constexpr auto data() const
         requires contiguous_range<R>
     {
@@ -555,6 +560,16 @@ public:
         requires sized_range<const R>
     {
         return ranges::size(__r);
+    }
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<R>
+    {
+        return ranges::reserve_hint(__r);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const R>
+    {
+        return ranges::reserve_hint(__r);
     }
     constexpr auto data()
         requires contiguous_range<R>
@@ -790,6 +805,30 @@ public:
         auto c = static_cast<decltype(n)>(__count);
         return n < c ? n : c;
     }
+    // P2846R6, and take_view is the one view whose reserve_hint is
+    // UNCONSTRAINED: `r | views::take(n)` is likely to yield n elements even
+    // when r offers no hint at all, so with no hint underneath the answer is
+    // n, and with one it is min(n, hint). LEWG asked for this explicitly.
+    constexpr auto reserve_hint()
+    {
+        using U = make_unsigned_t<range_difference_t<V>>;
+        if constexpr (approximately_sized_range<V>) {
+            auto n = static_cast<range_difference_t<V>>(ranges::reserve_hint(__base));
+            return static_cast<U>(n < __count ? n : __count);
+        } else {
+            return static_cast<U>(__count);
+        }
+    }
+    constexpr auto reserve_hint() const
+    {
+        using U = make_unsigned_t<range_difference_t<const V>>;
+        if constexpr (approximately_sized_range<const V>) {
+            auto n = static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base));
+            return static_cast<U>(n < __count ? n : __count);
+        } else {
+            return static_cast<U>(__count);
+        }
+    }
 };
 
 template <typename T>
@@ -882,6 +921,20 @@ public:
         auto n = ranges::size(__base);
         auto c = static_cast<decltype(n)>(__count);
         return n > c ? n - c : static_cast<decltype(n)>(0);
+    }
+    // P2846R6: the same arithmetic size() does, on the hint instead.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        const auto s = static_cast<range_difference_t<V>>(ranges::reserve_hint(__base));
+        return static_cast<make_unsigned_t<range_difference_t<V>>>(s < __count ? 0 : s - __count);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        const auto s = static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base));
+        return static_cast<make_unsigned_t<range_difference_t<const V>>>(
+            s < __count ? 0 : s - __count);
     }
 };
 
@@ -1571,6 +1624,18 @@ public:
     {
         return ranges::size(__base);
     }
+    // P2846R6: element-for-element with the adapted range, so the hint passes
+    // straight through.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
+    }
 };
 
 namespace views {
@@ -1663,6 +1728,18 @@ public:
         requires sized_range<const V>
     {
         return ranges::size(__base);
+    }
+    // P2846R6: element-for-element with the adapted range, so the hint passes
+    // straight through.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
     }
 };
 

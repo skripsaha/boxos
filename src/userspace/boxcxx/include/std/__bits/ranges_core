@@ -113,6 +113,53 @@ struct Size {
     }
 };
 
+// ranges::reserve_hint ([range.prim.size.hint], P2846R6): how many elements a
+// container should reserve for this range. A range can answer this without
+// being able to answer size() -- a lazily transcoding or normalising view knows
+// it will produce "about as many" elements as it consumes but cannot say
+// exactly how many, and before this there was no way for ranges::to to ask.
+//
+// size() comes FIRST in the resolution order, and that is what makes the two
+// concepts nest: every sized_range models approximately_sized_range without
+// writing a second member, so only views whose size is genuinely unknown need
+// one. Unqualified reserve_hint(r) in the last overload is the same ADL shape
+// Begin/End above use -- ranges::reserve_hint is declared below this namespace,
+// so ordinary lookup at definition context finds nothing and only ADL applies.
+struct ReserveHint {
+    // The parameter is a forwarding reference, not the plain R& the older CPOs
+    // in this file take: [range.prim.size.hint] reifies its argument into an
+    // lvalue, so `ranges::reserve_hint(v | views::take(3))` on a materialised
+    // temporary is well-formed, and a hint is asked for pipelines far more
+    // often than for named views.
+    template <typename R>
+        requires requires(remove_reference_t<R> &r) { Size{}(r); }
+    constexpr auto operator()(R &&r) const noexcept(noexcept(Size{}(r)))
+    {
+        return Size{}(r);
+    }
+    template <typename R>
+        requires(!requires(remove_reference_t<R> &r) { Size{}(r); }) &&
+                requires(remove_reference_t<R> &r) {
+                    { auto(r.reserve_hint()) } -> integral;
+                }
+    constexpr auto operator()(R &&r) const noexcept(noexcept(r.reserve_hint()))
+    {
+        return auto(r.reserve_hint());
+    }
+    template <typename R>
+        requires(!requires(remove_reference_t<R> &r) { Size{}(r); }) &&
+                (!requires(remove_reference_t<R> &r) {
+                    { auto(r.reserve_hint()) } -> integral;
+                }) &&
+                requires(remove_reference_t<R> &r) {
+                    { auto(reserve_hint(r)) } -> integral;
+                }
+    constexpr auto operator()(R &&r) const noexcept(noexcept(reserve_hint(r)))
+    {
+        return auto(reserve_hint(r));
+    }
+};
+
 struct Empty {
     template <typename R>
         requires requires(R &r) {
@@ -182,6 +229,7 @@ inline namespace __cpo_objects {
 inline constexpr __cpo::Begin begin{};
 inline constexpr __cpo::End end{};
 inline constexpr __cpo::Size size{};
+inline constexpr __cpo::ReserveHint reserve_hint{};
 inline constexpr __cpo::SSize ssize{};
 inline constexpr __cpo::Empty empty{};
 inline constexpr __cpo::Data data{};
@@ -227,8 +275,15 @@ concept borrowed_range =
     range<R> && (is_lvalue_reference_v<R> ||
                  enable_borrowed_range<remove_cvref_t<R>>);
 
+// P2846R6 rebases sized_range on approximately_sized_range rather than on
+// range: knowing the exact size is a refinement of knowing an approximate one,
+// not something beside it. Nothing is lost by the change -- reserve_hint falls
+// back to size, so anything that satisfied the old sized_range satisfies the
+// new one.
 template <typename R>
-concept sized_range = range<R> && requires(R &r) { ranges::size(r); };
+concept approximately_sized_range = range<R> && requires(R &r) { ranges::reserve_hint(r); };
+template <typename R>
+concept sized_range = approximately_sized_range<R> && requires(R &r) { ranges::size(r); };
 
 template <typename R>
 concept input_range = range<R> && input_iterator<iterator_t<R>>;

@@ -123,6 +123,19 @@ public:
     {
         return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __stride));
     }
+    // P2846R6: same ceiling division as size(), on the hint.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<V>>(ranges::reserve_hint(__base)), __stride));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base)), __stride));
+    }
 };
 
 template <typename R>

@@ -131,6 +131,21 @@ public:
     {
         return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
     }
+    // P2846R6: chunks of n, so the hint divides the same way the size does --
+    // the input and forward specializations both get it, [range.chunk.view.input]
+    // and [range.chunk.view.fwd].
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<V>>(ranges::reserve_hint(__base)), __n));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base)), __n));
+    }
 };
 
 template <typename R>
@@ -364,6 +379,21 @@ public:
         requires sized_range<const V>
     {
         return __views_detail::ToUnsignedLike(__views_detail::DivCeil(ranges::distance(__base), __n));
+    }
+    // P2846R6: chunks of n, so the hint divides the same way the size does --
+    // the input and forward specializations both get it, [range.chunk.view.input]
+    // and [range.chunk.view.fwd].
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<V>>(ranges::reserve_hint(__base)), __n));
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return __views_detail::ToUnsignedLike(__views_detail::DivCeil(
+            static_cast<range_difference_t<const V>>(ranges::reserve_hint(__base)), __n));
     }
 };
 
