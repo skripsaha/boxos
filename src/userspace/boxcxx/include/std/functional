@@ -8,6 +8,7 @@
 
 #include <__bits/callable_sbo>
 #include <__bits/version_functional>
+#include <compare>   // __cmp::SynthThreeWay — reference_wrapper's <=> (P2944R3)
 #include <concepts>
 #include <type_traits>
 #include <utility>
@@ -113,6 +114,43 @@ public:
         noexcept(is_nothrow_invocable_v<T &, Args...>)
     {
         return __bits::InvokeRt(get(), forward<Args>(args)...);
+    }
+
+    // P2944R3. A reference_wrapper compared equal only by converting to T&
+    // first, which meant two wrappers could not be compared at all when T's
+    // operators were hidden friends, and `rw == rw` picked nothing. These are
+    // hidden friends of the wrapper itself and are constrained on the
+    // underlying comparison actually existing, so a wrapper around a type with
+    // no operator== does not gain one.
+    friend constexpr bool operator==(reference_wrapper x, reference_wrapper y)
+        requires requires { { x.get() == y.get() } -> convertible_to<bool>; }
+    {
+        return x.get() == y.get();
+    }
+    friend constexpr bool operator==(reference_wrapper x, const T &y)
+        requires requires { { x.get() == y } -> convertible_to<bool>; }
+    {
+        return x.get() == y;
+    }
+    friend constexpr bool operator==(reference_wrapper x, reference_wrapper<const T> y)
+        requires(!is_const_v<T>) && requires { { x.get() == y.get() } -> convertible_to<bool>; }
+    {
+        return x.get() == y.get();
+    }
+    friend constexpr auto operator<=>(reference_wrapper x, reference_wrapper y)
+        requires requires { __cmp::SynthThreeWay{}(x.get(), y.get()); }
+    {
+        return __cmp::SynthThreeWay{}(x.get(), y.get());
+    }
+    friend constexpr auto operator<=>(reference_wrapper x, const T &y)
+        requires requires { __cmp::SynthThreeWay{}(x.get(), y); }
+    {
+        return __cmp::SynthThreeWay{}(x.get(), y);
+    }
+    friend constexpr auto operator<=>(reference_wrapper x, reference_wrapper<const T> y)
+        requires(!is_const_v<T>) && requires { __cmp::SynthThreeWay{}(x.get(), y.get()); }
+    {
+        return __cmp::SynthThreeWay{}(x.get(), y.get());
     }
 };
 

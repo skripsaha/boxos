@@ -11,7 +11,12 @@
 #  define __cpp_lib_constexpr_charconv 202207L
 #endif
 #ifndef __cpp_lib_to_chars
-#  define __cpp_lib_to_chars 201611L
+// 202306L = P2497R0's explicit operator bool on to_chars_result and
+// from_chars_result (Ф32-e). The current working draft has moved this macro
+// on again, to 202606L, for a later paper that is not implemented here; a
+// macro names the newest feature you actually have, so this stays at P2497's
+// value.
+#  define __cpp_lib_to_chars 202306L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_CHARCONV

@@ -156,6 +156,16 @@ public:
         return basic_string_view(__data + pos, Clamp(count, __size - pos));
     }
 
+    // P3044R2. On a view, subview is a synonym for substr -- the point of the
+    // paper is the one on basic_string, where substr COPIES and there was no
+    // way to spell "a view of part of this string" without naming
+    // basic_string_view and doing the arithmetic yourself. It is given on the
+    // view too so generic code can call subview on either.
+    constexpr basic_string_view subview(size_type pos = 0, size_type count = npos) const
+    {
+        return substr(pos, count);
+    }
+
     constexpr int compare(basic_string_view other) const noexcept
     {
         size_type n = __size < other.__size ? __size : other.__size;

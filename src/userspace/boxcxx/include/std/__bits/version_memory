@@ -93,4 +93,10 @@
 #  define __cpp_lib_to_address 201711L
 #endif
 
+// P2897R7 (C++26, Ф32-e): is_sufficiently_aligned, the question whose
+// assertion half (assume_aligned) was already here.
+#ifndef __cpp_lib_is_sufficiently_aligned
+#  define __cpp_lib_is_sufficiently_aligned 202411L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_MEMORY

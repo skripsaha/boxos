@@ -33,6 +33,15 @@ namespace std {
 template <class... Types>
 class variant;
 
+// The free visit is defined far below, after the visitation machinery, but
+// variant::visit (P2637R3) delegates to it from inside the class -- and
+// std::visit there is a qualified name, looked up where the member is defined,
+// not where it is instantiated. Hence these two declarations.
+template <class Vis, class... Vars>
+constexpr decltype(auto) visit(Vis &&vis, Vars &&...vars);
+template <class R, class Vis, class... Vars>
+constexpr R visit(Vis &&vis, Vars &&...vars);
+
 inline constexpr size_t variant_npos = static_cast<size_t>(-1);
 
 // ── variant_size / variant_alternative ───────────────────────────────────
@@ -618,6 +627,23 @@ public:
 
     // observers ----------------------------------------------------------
     constexpr size_t index() const noexcept { return this->Index(); }
+
+    // P2637R3 member visit. The free std::visit is variadic over several
+    // variants and so cannot be a member; the overwhelmingly common case is
+    // one variant, and writing it as std::visit(vis, v) puts the verb before
+    // the noun for no reason. Deducing this carries the value category and
+    // constness of the object straight into the visitor, which is what makes
+    // one member cover all four ref-qualified forms.
+    template <class Self, class Visitor>
+    constexpr decltype(auto) visit(this Self &&self, Visitor &&vis)
+    {
+        return std::visit(std::forward<Visitor>(vis), std::forward<Self>(self));
+    }
+    template <class R, class Self, class Visitor>
+    constexpr R visit(this Self &&self, Visitor &&vis)
+    {
+        return std::visit<R>(std::forward<Visitor>(vis), std::forward<Self>(self));
+    }
     constexpr bool   valueless_by_exception() const noexcept
     {
         return this->Valueless();

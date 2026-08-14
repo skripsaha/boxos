@@ -29360,7 +29360,7 @@ void Phase131()
     static_assert(__cpp_lib_polymorphic_allocator == 201902L, "phase131 polymorphic_allocator");
 
     static_assert(__cpp_lib_constexpr_charconv == 202207L, "phase131 constexpr_charconv");
-    static_assert(__cpp_lib_to_chars == 201611L, "phase131 to_chars");
+    static_assert(__cpp_lib_to_chars == 202306L, "phase131 to_chars -- P2497R0 since Ф32-e");
     static_assert(__cpp_lib_chrono_udls == 201304L, "phase131 chrono_udls");
     static_assert(__cpp_lib_math_special_functions == 201603L,
                   "phase131 math_special_functions");
@@ -29371,12 +29371,12 @@ void Phase131()
     static_assert(__cpp_lib_string_udls == 201304L, "phase131 string_udls");
 
     static_assert(__cpp_lib_optional == 202110L, "phase131 optional");
-    static_assert(__cpp_lib_variant == 202106L, "phase131 variant");
+    static_assert(__cpp_lib_variant == 202306L, "phase131 variant -- P2637R3 since Ф32-e");
     static_assert(__cpp_lib_expected == 202211L, "phase131 expected");
 
     static_assert(__cpp_lib_clamp == 201603L, "phase131 clamp");
     static_assert(__cpp_lib_sample == 201603L, "phase131 sample");
-    static_assert(__cpp_lib_span == 202002L, "phase131 span");
+    static_assert(__cpp_lib_span == 202311L, "phase131 span -- P2821R5 since Ф32-e");
     static_assert(__cpp_lib_erase_if == 202002L, "phase131 erase_if");
     static_assert(__cpp_lib_nonmember_container_access == 201411L,
                   "phase131 nonmember_container_access");
@@ -38991,6 +38991,127 @@ void Phase158()
            "the Concatable gate already existed for, and reserve_hint from its "
            "C++26 synopsis\n");
 }
+
+// ── Ф32-e ───────────────────────────────────────────────────────────────
+void Phase159()
+{
+    using namespace std;
+
+    // P2821R5 span::at. The member was already here since Ф31e-g-1; what was
+    // missing was the macro saying so, which is the one direction of mismatch
+    // <version> exists to prevent.
+    {
+        int          a[3]{1, 2, 3};
+        span<int>    sp(a);
+        Check(sp.at(2) == 3, "phase159 (1) span::at reads in range");
+        bool threw = false;
+        try {
+            (void)sp.at(9);
+        } catch (const out_of_range &) {
+            threw = true;
+        }
+        Check(threw, "phase159 (2) ...and throws out_of_range past the end, where "
+                     "operator[] is undefined behaviour");
+        static_assert(__cpp_lib_span == 202311L, "phase159 (3) P2821R5 claimed");
+    }
+    // P2497R0: `if (auto r = to_chars(...))`. The spelling it replaces --
+    // comparing ec against a default-constructed errc -- reads like an error
+    // check on a value with no error in it.
+    {
+        char  buf[8];
+        auto  r = to_chars(buf, buf + 8, 42);
+        Check(bool(r), "phase159 (4) a successful to_chars_result is true");
+        int  out = 0;
+        auto fr  = from_chars(buf, r.ptr, out);
+        Check(bool(fr) && out == 42, "phase159 (5) ...and so is from_chars_result");
+        auto full = to_chars(buf, buf, 123456);
+        Check(!full, "phase159 (6) a failed one is false");
+        static_assert(!is_convertible_v<to_chars_result, bool>,
+                      "phase159 (7) the conversion is explicit -- a result cannot "
+                      "silently decay to an int");
+        static_assert(__cpp_lib_to_chars == 202306L, "phase159 (8) P2497R0 claimed");
+    }
+    // P0543R3 saturation arithmetic. Every one of these is a consteval check:
+    // the point of the paper is that you no longer have to reason about
+    // whether an operation WOULD overflow before performing it.
+    {
+        static_assert(add_sat<signed char>(120, 120) == 127, "phase159 (9) add_sat clamps up");
+        static_assert(add_sat<signed char>(-120, -120) == -128, "phase159 (10) ...and down");
+        static_assert(add_sat<unsigned char>(200, 200) == 255, "phase159 (11) unsigned add");
+        static_assert(sub_sat<unsigned char>(3, 9) == 0,
+                      "phase159 (12) an unsigned subtraction can only ever underflow");
+        static_assert(sub_sat<signed char>(-120, 120) == -128, "phase159 (13) signed sub");
+        static_assert(mul_sat<signed char>(100, 100) == 127, "phase159 (14) mul_sat");
+        static_assert(mul_sat<signed char>(-100, 100) == -128,
+                      "phase159 (15) ...with the sign taken from the operands");
+        static_assert(div_sat<signed char>(-128, -1) == 127,
+                      "phase159 (16) div_sat catches min/-1, which on x86 traps rather "
+                      "than wrapping -- so it has to be caught BEFORE the divide");
+        static_assert(saturate_cast<signed char>(1000) == 127, "phase159 (17) saturate_cast down");
+        static_assert(saturate_cast<unsigned char>(-5) == 0,
+                      "phase159 (18) ...across signedness, without either operand being "
+                      "converted out from under the comparison");
+        static_assert(saturate_cast<int>(4000000000u) == numeric_limits<int>::max(),
+                      "phase159 (19) ...and from unsigned to signed");
+        static_assert(add_sat(1, 2) == 3, "phase159 (20) no clamping when it fits");
+        static_assert(__cpp_lib_saturation_arithmetic == 202311L, "phase159 (21) P0543R3 claimed");
+    }
+    // P2897R7: assume_aligned TELLS the compiler an alignment holds and is
+    // undefined behaviour when it does not. This ASKS.
+    {
+        alignas(64) int obj = 0;
+        Check(is_sufficiently_aligned<64>(&obj), "phase159 (22) is_sufficiently_aligned says yes");
+        alignas(64) char two[128]{};
+        Check(!is_sufficiently_aligned<64>(two + 1),
+              "phase159 (23) ...and no, for the half of the pair that never existed before");
+        static_assert(__cpp_lib_is_sufficiently_aligned == 202411L, "phase159 (24) P2897R7 claimed");
+    }
+    // P2944R3: a reference_wrapper compared only by converting to T& first.
+    {
+        int                    x = 1, y = 2;
+        reference_wrapper<int> rx(x), ry(y);
+        Check(rx == rx && !(rx == ry), "phase159 (25) reference_wrapper == reference_wrapper");
+        Check(rx == 1 && !(rx == 2), "phase159 (26) ...and against the referent's type");
+        Check(rx < ry && !(ry < rx), "phase159 (27) ordering, synthesised from < when needed");
+        static_assert(__cpp_lib_reference_wrapper == 202403L, "phase159 (28) P2944R3 claimed");
+    }
+    // P3044R2: substr COPIES. There was no way to spell "a view of part of
+    // this string" without naming basic_string_view and doing the offset
+    // arithmetic by hand.
+    {
+        string      str = "hello world";
+        string_view sv  = "hello world";
+        Check(str.subview(6) == "world", "phase159 (29) basic_string::subview");
+        Check(str.subview(0, 5) == "hello", "phase159 (30) ...with a count");
+        Check(sv.subview(6) == "world", "phase159 (31) basic_string_view::subview");
+        static_assert(is_same_v<decltype(str.subview(0)), string_view>,
+                      "phase159 (32) it really is a view -- no copy, and it dies with "
+                      "the string it points into");
+        Check(str.subview(6).data() == str.data() + 6,
+              "phase159 (33) ...pointing straight into the original buffer");
+        static_assert(__cpp_lib_string_subview == 202506L, "phase159 (34) P3044R2 claimed");
+    }
+    // P2637R3: the free std::visit is variadic over several variants and so
+    // cannot be a member; the common case is one, and std::visit(vis, v) puts
+    // the verb before the noun for no reason.
+    {
+        variant<int, double> v = 3;
+        Check(v.visit([](auto z) { return int(z); }) == 3, "phase159 (35) member variant::visit");
+        Check(v.visit<long>([](auto z) { return long(z); }) == 3L,
+              "phase159 (36) ...and its explicit-return-type form");
+        v = 2.5;
+        Check(v.visit([](auto z) { return double(z); }) == 2.5,
+              "phase159 (37) ...on the other alternative");
+        static_assert(__cpp_lib_variant == 202306L, "phase159 (38) P2637R3 claimed");
+    }
+
+    printf("[CXX] PASS phase159: Ф32-e — seven C++26 papers of small surface: "
+           "span::at's macro caught up with the member that was already there, "
+           "P2497 operator bool on the charconv results, P0543 saturation "
+           "arithmetic, P2897 is_sufficiently_aligned, P2944 reference_wrapper "
+           "comparisons, P3044 subview, and P2637 member variant::visit\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39171,6 +39292,7 @@ int main()
     Phase156();
     Phase157();
     Phase158();
+    Phase159();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

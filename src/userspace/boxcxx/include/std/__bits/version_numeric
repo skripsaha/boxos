@@ -22,4 +22,12 @@
 #  define __cpp_lib_ranges_iota 202202L
 #endif
 
+// P0543R3 (C++26, Ф32-e): add_sat / sub_sat / mul_sat / div_sat /
+// saturate_cast. 202311L is P0543R3's own value; the current working draft
+// carries 202603L for a later paper this does not implement, and a macro names
+// the newest feature actually present.
+#ifndef __cpp_lib_saturation_arithmetic
+#  define __cpp_lib_saturation_arithmetic 202311L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_NUMERIC

@@ -36,4 +36,9 @@
 #  define __cpp_lib_string_udls 201304L
 #endif
 
+// P3044R2 (C++26, Ф32-e): basic_string::subview and basic_string_view::subview.
+#ifndef __cpp_lib_string_subview
+#  define __cpp_lib_string_subview 202506L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_STRING
