@@ -98,26 +98,26 @@
 //     std::accumulate over views::iota, std::uninitialized_copy from
 //     views::iota), but a whole-clause guarantee cannot be established by
 //     inspection, so it is not claimed.
-// allocate_at_least        std::allocation_result, std::allocate_at_least,
-//                          allocator_traits::allocate_at_least and
-//                          allocator::allocate_at_least are all absent.
-// assume_aligned           std::assume_aligned absent.
-// char8_t                  std::pmr::u8string is absent -- and as of Ф31e-d
-//                          that is the ONLY thing left of this macro, so it
-//                          is now one alias away. The rest of what this
-//                          entry used to claim was measured and is wrong:
-//                          the deleted char8_t/char16_t/char32_t inserters
-//                          landed in Ф31e-a (`os << u8"x"` is rejected, not
-//                          "wrongly compiles"), and [istream] deletes no
-//                          extractors at all -- neither the synopsis nor
-//                          libc++ 22 has one, and nothing binds a reference
-//                          across distinct fundamental types anyway.
-//                          char8_t itself, u8string, u8string_view,
-//                          char_traits<char8_t>, atomic_char8_t and
-//                          hash<u8string> are all present and verified.
-//                          pmr::u8string waits on pmr::basic_string, which
-//                          does not exist either (see <string> in
-//                          CONFORMANCE §2).
+// char8_t                  [version.syn] names <locale> among this macro's
+//                          owning headers, and it means it: P0482R6 adds
+//                          codecvt<char16_t, char8_t, mbstate_t>,
+//                          codecvt<char32_t, char8_t, mbstate_t> and their
+//                          _byname forms to [locale.syn]. boxcxx's <locale>
+//                          has no facets AT ALL (a permanent, owner-approved
+//                          exclusion -- CONFORMANCE §1.2), and there is no
+//                          <filesystem> for path's char8_t members either,
+//                          so this macro can never be claimed here. That is
+//                          the whole reason, and it is NOT the one this
+//                          entry gave before -- it said pmr::u8string was
+//                          the last gap and the macro was "one alias away",
+//                          which was measured and is wrong. (pmr::u8string
+//                          is indeed still absent; see <string> in
+//                          CONFORMANCE §2.) Everything else P0482R6 asks
+//                          for -- char8_t, u8string, u8string_view,
+//                          char_traits<char8_t>, atomic_char8_t,
+//                          hash<u8string>, numeric_limits<char8_t> and the
+//                          deleted <ostream> inserters (Ф31e-a) -- is
+//                          present and verified.
 // chrono                   <chrono> excludes time zones by design: no
 //                          tzdb, time_zone, zoned_time or leap seconds.
 // common_reference         P2655R3's basic_common_reference specialization
@@ -137,11 +137,6 @@
 //                          basic_string, which is not constexpr).
 // constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
 //                          constexpr.
-// constexpr_memory         P2273's constexpr unique_ptr is nearly there —
-//                          make_unique round-trips inside a static_assert
-//                          — but default_delete's converting constructor
-//                          is not constexpr, so a converting unique_ptr
-//                          move is not a constant expression.
 // constexpr_string         basic_string is not constexpr at all (it needs
 //                          the compiler-blessed constexpr allocator path).
 // constexpr_vector         vector is not constexpr at all, same reason.
@@ -152,19 +147,28 @@
 // formatters               formatter<thread::id, wchar_t> is absent, and
 //                          there is no <stacktrace> / formatter<
 //                          stacktrace_entry> at all.
-// is_implicit_lifetime     std::is_implicit_lifetime absent.
-// is_layout_compatible     is_layout_compatible is present, but P0466R5's
-//                          is_corresponding_member is absent.
-// is_pointer_interconvertible
-//                          is_pointer_interconvertible_base_of is present,
-//                          but is_pointer_interconvertible_with_class is
-//                          absent.
+// is_implicit_lifetime     the trait cannot be written correctly without
+//                          compiler support, and x86_64-elf-g++ 15.2.0 has
+//                          no __builtin_is_implicit_lifetime (measured; nor
+//                          does libstdc++ 15 define the macro). A
+//                          library-only approximation gets a whole class of
+//                          type wrong in each direction: [class.prop]/9 asks
+//                          for "an aggregate whose destructor is not
+//                          user-provided", and no trait can tell a
+//                          destructor that is non-trivial because the USER
+//                          wrote it (struct S { int x; ~S(){} } -- NOT an
+//                          implicit-lifetime type) from one that is
+//                          non-trivial because a MEMBER made it so
+//                          (struct S { std::string s; } -- which IS one).
+//                          std::start_lifetime_as ships without enforcing
+//                          that half of its Mandates for the same reason,
+//                          and says so at the call site.
 // mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
 // parallel_algorithm       no <execution>, so no ExecutionPolicy overloads.
 // print                    print/println/vprint_unicode/vprint_nonunicode
 //                          exist for the terminal, but every <ostream>
-//                          overload of them is absent — and <ostream> is a
+//                          overload of them is absent -- and <ostream> is a
 //                          co-owner of this macro.
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
@@ -200,15 +204,8 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// shared_ptr_arrays        the two bounded-array allocate_shared overloads
-//                          are absent (only the unbounded T[] forms exist).
-// smart_ptr_for_overwrite  make_unique_for_overwrite and make_shared_for_
-//                          overwrite are complete, but allocate_shared_for
-//                          _overwrite is absent in all three forms.
 // spanstream               no <spanstream> header.
 // stacktrace               no <stacktrace> header.
-// start_lifetime_as        start_lifetime_as / start_lifetime_as_array
-//                          absent.
 // stdatomic_h              no <stdatomic.h> header.
 // syncbuf                  no <syncbuf> header.
 // tuple_like               P2165R4's tuple-like is EXPOSITION-ONLY in C++23,

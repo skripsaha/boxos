@@ -29,6 +29,113 @@
 
 namespace std {
 
+// ── [ptr.align] pointer alignment ────────────────────────────────────────
+// Carve an aligned sub-buffer out of raw storage, in place: on success ptr
+// moves forward to the first suitably aligned byte and space shrinks by
+// exactly the padding consumed, so the same buffer can be walked with
+// repeated calls of differing alignment. The two guards are written as
+// subtractions rather than `pad + size > space` because the sum can wrap
+// on a buffer near the top of the address space -- and on this kernel a
+// caller really can hand it one.
+inline void *align(size_t alignment, size_t size, void *&ptr, size_t &space)
+{
+    const uintptr_t p   = reinterpret_cast<uintptr_t>(ptr);
+    const uintptr_t a   = (p + (alignment - 1)) & ~static_cast<uintptr_t>(alignment - 1);
+    const size_t    pad = static_cast<size_t>(a - p);
+    if (space < pad || space - pad < size) return nullptr;
+    space -= pad;
+    ptr = reinterpret_cast<void *>(a);
+    return ptr;
+}
+
+// [ptr.align]/4: a promise to the optimiser, not a check. The constant-
+// evaluation branch is mandatory, not an optimisation:
+// __builtin_assume_aligned is not a constant expression, so without it
+// assume_aligned could never appear in a constexpr call chain -- and the
+// standard requires exactly that ("the return value is usable in constant
+// expressions" whenever the argument is).
+template <size_t N, class T>
+[[nodiscard]] constexpr T *assume_aligned(T *ptr)
+{
+    static_assert(N != 0 && (N & (N - 1)) == 0,
+                  "std::assume_aligned<N>: N must be a power of two");
+    if (is_constant_evaluated()) return ptr;
+    return static_cast<T *>(__builtin_assume_aligned(ptr, N));
+}
+
+// ── [obj.lifetime] explicit lifetime management ─────────────────────────
+// P2590R2. This is the sanctioned way to say "there are already bytes
+// there; treat them as an object of implicit-lifetime type T" -- exactly
+// what a driver does with a DMA descriptor a device wrote, or what this
+// kernel does when it maps a structure onto a firmware table. The cast
+// alone would be undefined behaviour: no T was ever created there.
+//
+// The implementation is a self-move through __builtin_memmove. That is
+// not a no-op dressed up: [intro.object]/13 makes memmove one of the
+// operations that IMPLICITLY CREATES objects in its destination region,
+// which is precisely the effect being asked for, and the compiler folds
+// the byte movement itself away because source and destination are the
+// same address. launder then keeps the returned pointer from being
+// constant-folded back onto whatever the front end thought was living
+// there before. __builtin_memmove (rather than a memmove declaration) is
+// deliberate: it survives -fno-builtin, which this tree compiles with.
+//
+// Not constexpr, per the standard: implicit object creation has no
+// constant-evaluation model.
+//
+// One Mandates goes unchecked: "T is an implicit-lifetime type". Checking
+// it needs __builtin_is_implicit_lifetime, which x86_64-elf-g++ 15.2.0
+// does not have -- the same missing builtin that keeps
+// __cpp_lib_is_implicit_lifetime undefined in <version>. The other half,
+// "not an incomplete type", the sizeof below enforces on its own.
+template <class T>
+T *start_lifetime_as(void *p) noexcept
+{
+    return launder(static_cast<T *>(__builtin_memmove(p, p, sizeof(T))));
+}
+template <class T>
+const T *start_lifetime_as(const void *p) noexcept
+{
+    return start_lifetime_as<T>(const_cast<void *>(p));
+}
+template <class T>
+volatile T *start_lifetime_as(volatile void *p) noexcept
+{
+    return start_lifetime_as<T>(const_cast<void *>(p));
+}
+template <class T>
+const volatile T *start_lifetime_as(const volatile void *p) noexcept
+{
+    return start_lifetime_as<T>(const_cast<void *>(p));
+}
+
+// n == 0 has no effects at all and returns p unchanged ([obj.lifetime]/6)
+// -- note that this is the one case where the returned pointer is not the
+// address of any created object, and the standard says so explicitly.
+template <class T>
+T *start_lifetime_as_array(void *p, size_t n) noexcept
+{
+    if (n == 0) return static_cast<T *>(p);
+    return launder(
+        static_cast<T *>(__builtin_memmove(p, p, n * sizeof(T))));
+}
+template <class T>
+const T *start_lifetime_as_array(const void *p, size_t n) noexcept
+{
+    return start_lifetime_as_array<T>(const_cast<void *>(p), n);
+}
+template <class T>
+volatile T *start_lifetime_as_array(volatile void *p, size_t n) noexcept
+{
+    return start_lifetime_as_array<T>(const_cast<void *>(p), n);
+}
+template <class T>
+const volatile T *start_lifetime_as_array(const volatile void *p,
+                                          size_t n) noexcept
+{
+    return start_lifetime_as_array<T>(const_cast<void *>(p), n);
+}
+
 // ── uninitialized-memory algorithms ([uninitialized]) ────────────────────
 
 template <class It, class Size>
@@ -188,9 +295,13 @@ constexpr It uninitialized_fill_n(It first, Size n, const T &x)
 template <class T>
 struct default_delete {
     constexpr default_delete() noexcept = default;
+    // constexpr, per P2273R3: without it a converting unique_ptr move
+    // (unique_ptr<Derived> -> unique_ptr<Base>) is not a constant
+    // expression, which is the one hole that kept
+    // __cpp_lib_constexpr_memory undefined.
     template <class U>
         requires is_convertible_v<U *, T *>
-    default_delete(const default_delete<U> &) noexcept
+    constexpr default_delete(const default_delete<U> &) noexcept
     {
     }
     constexpr void operator()(T *p) const
@@ -205,7 +316,7 @@ struct default_delete<T[]> {
     constexpr default_delete() noexcept = default;
     template <class U>
         requires is_convertible_v<U (*)[], T (*)[]>
-    default_delete(const default_delete<U[]> &) noexcept
+    constexpr default_delete(const default_delete<U[]> &) noexcept
     {
     }
     template <class U>
@@ -649,25 +760,82 @@ public:
     }
 };
 
+// Tag selecting default-initialisation (`::new (pv) U`, indeterminate
+// value) over value-initialisation. This is the entire point of the
+// *_for_overwrite factories, so it has to reach the control block: a
+// factory that quietly value-initialises has done the one thing the
+// caller asked it not to do.
+struct DefaultInitTag {};
+
+// The element/object allocator [util.smartptr.shared.create]/7 calls a2:
+// "a rebound copy of the allocator a ... such that its value_type is
+// remove_cv_t<U>". Made once per factory call, not once per element.
 template <class T, class Alloc>
+using ObjAlloc = typename allocator_traits<Alloc>::template rebind_alloc<
+    remove_cv_t<remove_extent_t<T>>>;
+
+// ViaAlloc distinguishes allocate_shared from make_shared. It is not a
+// micro-optimisation: [util.smartptr.shared.create]/7 spells out that
+// make_shared initialises via `::new (pv) U(...)` while allocate_shared
+// initialises via `allocator_traits<A2>::construct(a2, pv, ...)`, and /8
+// mirrors the split for destruction. The difference is observable and
+// load-bearing -- polymorphic_allocator::construct is what performs
+// uses-allocator construction, so an allocate_shared that placement-news
+// hands back a pmr container that silently kept the DEFAULT resource
+// instead of the one it was allocated from.
+//
+// The *_for_overwrite factories stay on the placement-new side even when
+// they take an allocator: /7's for_overwrite bullet names `::new (pv) U`
+// explicitly, and an object built that way must be destroyed the
+// symmetric way.
+//
+// The stored object is remove_cv_t<T>, never T: shared_ptr<const U> is
+// ordinary (make_shared<const U>(...)), and storage that is itself const
+// cannot be placement-new'd into at all.
+template <class T, class Alloc, bool ViaAlloc>
 class CountedInplace final : public CountedBase {
+    using Obj = remove_cv_t<T>;
+    using A2  = ObjAlloc<T, Alloc>;
+
     [[no_unique_address]] Alloc alloc_;
     union {
-        T obj_;
+        Obj obj_;
     };
 
 public:
     template <class... A>
     explicit CountedInplace(const Alloc &a, A &&...args) : alloc_(a)
     {
-        ::new (static_cast<void *>(__builtin_addressof(obj_)))
-            T(static_cast<A &&>(args)...);
+        if constexpr (ViaAlloc) {
+            A2 a2(alloc_);
+            allocator_traits<A2>::construct(a2, __builtin_addressof(obj_),
+                                            static_cast<A &&>(args)...);
+        } else {
+            ::new (static_cast<void *>(__builtin_addressof(obj_)))
+                Obj(static_cast<A &&>(args)...);
+        }
+    }
+    // Tag last, so it is an ordinary trailing argument of the factory's
+    // pack; a non-template constructor beats the variadic one above on an
+    // exact match, which is what keeps the two apart.
+    explicit CountedInplace(const Alloc &a, DefaultInitTag) : alloc_(a)
+    {
+        static_assert(!ViaAlloc,
+                      "*_for_overwrite initialises via ::new (pv) U by "
+                      "[util.smartptr.shared.create]/7, never through the "
+                      "allocator");
+        ::new (static_cast<void *>(__builtin_addressof(obj_))) Obj;
     }
     ~CountedInplace() {} // obj_ destroyed in Dispose; alloc_ trivially gone
-    T   *Get() noexcept { return __builtin_addressof(obj_); }
+    Obj *Get() noexcept { return __builtin_addressof(obj_); }
     void Dispose() noexcept override
     {
-        __builtin_addressof(obj_)->~T();
+        if constexpr (ViaAlloc) {
+            A2 a2(alloc_);
+            allocator_traits<A2>::destroy(a2, __builtin_addressof(obj_));
+        } else {
+            __builtin_addressof(obj_)->~Obj();
+        }
     }
     void DestroyBlock() noexcept override
     {
@@ -689,10 +857,11 @@ struct AdoptTag {};
 // goes through the allocator rebound to an over-aligned Chunk so both
 // make_shared (allocator<Elem>) and allocate_shared (custom) get the right
 // alignment.
-template <class T, class Alloc>
+template <class T, class Alloc, bool ViaAlloc>
 class CountedArray final : public CountedBase {
 public:
-    using Elem = remove_extent_t<T>;
+    using Elem = remove_cv_t<remove_extent_t<T>>;
+    using A2   = ObjAlloc<T, Alloc>;
     static constexpr size_t kAlign =
         alignof(CountedArray) > alignof(Elem) ? alignof(CountedArray)
                                               : alignof(Elem);
@@ -721,11 +890,21 @@ public:
     {
         return (bytes + sizeof(Chunk) - 1) / sizeof(Chunk);
     }
-    void Dispose() noexcept override
+    // Reverse order of construction, and the same route the elements were
+    // built by. Shared with MakeSharedArray's unwind path so a throw
+    // halfway through element k destroys exactly the k that exist.
+    void DestroyElems(size_t built) noexcept
     {
         Elem *e = Get();
-        for (size_t i = n_; i-- > 0;) e[i].~Elem();
+        if constexpr (ViaAlloc) {
+            A2 a2(alloc_);
+            for (size_t i = built; i-- > 0;)
+                allocator_traits<A2>::destroy(a2, e + i);
+        } else {
+            for (size_t i = built; i-- > 0;) e[i].~Elem();
+        }
     }
+    void Dispose() noexcept override { DestroyElems(n_); }
     void DestroyBlock() noexcept override
     {
         using CA =
@@ -738,10 +917,10 @@ public:
     }
 };
 
-template <class T, class Alloc, class Init>
+template <class T, bool ViaAlloc, class Alloc, class Init>
 shared_ptr<T> MakeSharedArray(const Alloc &alloc, size_t n, Init init)
 {
-    using Block = CountedArray<T, Alloc>;
+    using Block = CountedArray<T, Alloc, ViaAlloc>;
     using Elem  = typename Block::Elem;
     using CA = typename allocator_traits<Alloc>::template rebind_alloc<
         typename Block::Chunk>;
@@ -754,7 +933,7 @@ shared_ptr<T> MakeSharedArray(const Alloc &alloc, size_t n, Init init)
     try {
         for (; i < n; ++i) init(e + i);
     } catch (...) {
-        for (size_t j = i; j-- > 0;) e[j].~Elem();
+        b->DestroyElems(i);
         b->~Block();
         allocator_traits<CA>::deallocate(ca, raw, nch);
         throw;
@@ -1231,35 +1410,15 @@ public:
 
 // ── make_shared / allocate_shared ────────────────────────────────────────
 
-template <class T, class... A>
-    requires(!is_array_v<T>)
-shared_ptr<T> make_shared(A &&...args)
+// One body for all four non-array factories: they differ only in which
+// allocator supplies the block and in how the single object is
+// initialised, both of which the Block type and the constructor arguments
+// already encode.
+namespace __shared {
+template <class T, bool ViaAlloc, class Alloc, class... A>
+shared_ptr<T> MakeSharedObject(const Alloc &a, A &&...args)
 {
-    using Block = __shared::CountedInplace<T, allocator<T>>;
-    allocator<Block> ba;
-    Block           *b = ba.allocate(1);
-    try {
-        ::new (static_cast<void *>(b))
-            Block(allocator<T>(), static_cast<A &&>(args)...);
-    } catch (...) {
-        ba.deallocate(b, 1);
-        throw;
-    }
-    shared_ptr<T> sp(__shared::AdoptTag{}, b->Get(), b);
-    shared_ptr<T>::EnableShared(b->Get(), b->Get(), b);
-    return sp;
-}
-template <class T>
-    requires(!is_array_v<T>)
-shared_ptr<T> make_shared_for_overwrite()
-{
-    return make_shared<T>();
-}
-template <class T, class Alloc, class... A>
-    requires(!is_array_v<T>)
-shared_ptr<T> allocate_shared(const Alloc &a, A &&...args)
-{
-    using Block = __shared::CountedInplace<T, Alloc>;
+    using Block = CountedInplace<T, Alloc, ViaAlloc>;
     using BA = typename allocator_traits<Alloc>::template rebind_alloc<Block>;
     BA     ba(a);
     Block *b = allocator_traits<BA>::allocate(ba, 1);
@@ -1269,59 +1428,94 @@ shared_ptr<T> allocate_shared(const Alloc &a, A &&...args)
         allocator_traits<BA>::deallocate(ba, b, 1);
         throw;
     }
-    shared_ptr<T> sp(__shared::AdoptTag{}, b->Get(), b);
+    shared_ptr<T> sp(AdoptTag{}, b->Get(), b);
     shared_ptr<T>::EnableShared(b->Get(), b->Get(), b);
     return sp;
+}
+} // namespace __shared
+
+template <class T, class... A>
+    requires(!is_array_v<T>)
+shared_ptr<T> make_shared(A &&...args)
+{
+    return __shared::MakeSharedObject<T, false>(allocator<remove_cv_t<T>>(),
+                                                static_cast<A &&>(args)...);
+}
+template <class T>
+    requires(!is_array_v<T>)
+shared_ptr<T> make_shared_for_overwrite()
+{
+    // NOT make_shared<T>(): that value-initialises, which is precisely the
+    // zeroing this factory exists to skip.
+    return __shared::MakeSharedObject<T, false>(allocator<remove_cv_t<T>>(),
+                                                __shared::DefaultInitTag{});
+}
+template <class T, class Alloc, class... A>
+    requires(!is_array_v<T>)
+shared_ptr<T> allocate_shared(const Alloc &a, A &&...args)
+{
+    return __shared::MakeSharedObject<T, true>(a, static_cast<A &&>(args)...);
+}
+template <class T, class Alloc>
+    requires(!is_array_v<T>)
+shared_ptr<T> allocate_shared_for_overwrite(const Alloc &a)
+{
+    return __shared::MakeSharedObject<T, false>(a,
+                                                __shared::DefaultInitTag{});
 }
 
 // make_shared / allocate_shared — array forms -----------------------------
 
+// E is the STORAGE element type: cv stripped, because a const element can
+// neither be placement-new'd into nor be an allocator's value_type.
+// shared_ptr<const int[]> is still what comes back -- the conversion sits
+// on the pointer, not on the storage.
 template <class T>
     requires __shared::IsUnboundedArray<T>
 shared_ptr<T> make_shared(size_t n)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(allocator<E>(), n,
-                                        [](E *p) { construct_at(p); });
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(allocator<E>(), n,
+                                               [](E *p) { construct_at(p); });
 }
 template <class T>
     requires __shared::IsUnboundedArray<T>
 shared_ptr<T> make_shared(size_t n, const remove_extent_t<T> &u)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(allocator<E>(), n,
-                                        [&](E *p) { construct_at(p, u); });
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(allocator<E>(), n,
+                                               [&](E *p) { construct_at(p, u); });
 }
 template <class T>
     requires(is_array_v<T> && extent_v<T> != 0)
 shared_ptr<T> make_shared()
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(allocator<E>(), extent_v<T>,
-                                        [](E *p) { construct_at(p); });
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(allocator<E>(), extent_v<T>,
+                                               [](E *p) { construct_at(p); });
 }
 template <class T>
     requires(is_array_v<T> && extent_v<T> != 0)
 shared_ptr<T> make_shared(const remove_extent_t<T> &u)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(allocator<E>(), extent_v<T>,
-                                        [&](E *p) { construct_at(p, u); });
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(allocator<E>(), extent_v<T>,
+                                               [&](E *p) { construct_at(p, u); });
 }
 template <class T>
     requires __shared::IsUnboundedArray<T>
 shared_ptr<T> make_shared_for_overwrite(size_t n)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(
         allocator<E>(), n, [](E *p) { ::new (static_cast<void *>(p)) E; });
 }
 template <class T>
     requires(is_array_v<T> && extent_v<T> != 0)
 shared_ptr<T> make_shared_for_overwrite()
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(
         allocator<E>(), extent_v<T>,
         [](E *p) { ::new (static_cast<void *>(p)) E; });
 }
@@ -1329,17 +1523,59 @@ template <class T, class Alloc>
     requires __shared::IsUnboundedArray<T>
 shared_ptr<T> allocate_shared(const Alloc &a, size_t n)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(a, n, [](E *p) { construct_at(p); });
+    using E  = remove_cv_t<remove_extent_t<T>>;
+    using A2 = __shared::ObjAlloc<T, Alloc>;
+    A2 a2(a);
+    return __shared::MakeSharedArray<T, true>(
+        a, n, [&](E *p) { allocator_traits<A2>::construct(a2, p); });
 }
 template <class T, class Alloc>
     requires __shared::IsUnboundedArray<T>
 shared_ptr<T> allocate_shared(const Alloc &a, size_t n,
                               const remove_extent_t<T> &u)
 {
-    using E = remove_extent_t<T>;
-    return __shared::MakeSharedArray<T>(a, n,
-                                        [&](E *p) { construct_at(p, u); });
+    using E  = remove_cv_t<remove_extent_t<T>>;
+    using A2 = __shared::ObjAlloc<T, Alloc>;
+    A2 a2(a);
+    return __shared::MakeSharedArray<T, true>(
+        a, n, [&](E *p) { allocator_traits<A2>::construct(a2, p, u); });
+}
+template <class T, class Alloc>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> allocate_shared(const Alloc &a)
+{
+    using E  = remove_cv_t<remove_extent_t<T>>;
+    using A2 = __shared::ObjAlloc<T, Alloc>;
+    A2 a2(a);
+    return __shared::MakeSharedArray<T, true>(
+        a, extent_v<T>, [&](E *p) { allocator_traits<A2>::construct(a2, p); });
+}
+template <class T, class Alloc>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> allocate_shared(const Alloc &a, const remove_extent_t<T> &u)
+{
+    using E  = remove_cv_t<remove_extent_t<T>>;
+    using A2 = __shared::ObjAlloc<T, Alloc>;
+    A2 a2(a);
+    return __shared::MakeSharedArray<T, true>(
+        a, extent_v<T>,
+        [&](E *p) { allocator_traits<A2>::construct(a2, p, u); });
+}
+template <class T, class Alloc>
+    requires __shared::IsUnboundedArray<T>
+shared_ptr<T> allocate_shared_for_overwrite(const Alloc &a, size_t n)
+{
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(
+        a, n, [](E *p) { ::new (static_cast<void *>(p)) E; });
+}
+template <class T, class Alloc>
+    requires(is_array_v<T> && extent_v<T> != 0)
+shared_ptr<T> allocate_shared_for_overwrite(const Alloc &a)
+{
+    using E = remove_cv_t<remove_extent_t<T>>;
+    return __shared::MakeSharedArray<T, false>(
+        a, extent_v<T>, [](E *p) { ::new (static_cast<void *>(p)) E; });
 }
 
 // ── pointer casts ────────────────────────────────────────────────────────

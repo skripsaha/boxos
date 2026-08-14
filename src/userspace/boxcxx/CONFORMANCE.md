@@ -32,9 +32,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 151 |
+| Feature-test macros defined | 159 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 163 phases, 4 663 runtime checks, 1 372 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 164 phases, 4 688 runtime checks, 1 406 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,7 +129,7 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **151** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **159** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every one carries its N4950 value.** No macro is defined at a later
@@ -140,7 +140,7 @@ the whole set, not sampled:
   is the part that breaks most easily, because a macro added to a shared leaf
   tends to become visible from every header that includes it and from no other.
 
-**34 of the C++23 macros are not defined**, and `<version>` lists every one by
+**26 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -156,7 +156,7 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 34, nine belong to features whose owning header does not exist at all
+Of the 26, nine belong to features whose owning header does not exist at all
 (`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
 `syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
 them); the rest belong to headers that exist. The in-tree suite pins the absences
@@ -550,6 +550,52 @@ nothing has been found since.
   rather than on an `atomic<>`. They are atomic only with respect to each other,
   never with respect to `atomic<shared_ptr>`. The C++26 phase deletes them.
 
+- `✓` Closed in Ф31e-g-2, and it is the one in this section that was giving wrong
+  answers rather than no answer: **`allocate_shared` never asked the allocator to
+  construct anything.** [util.smartptr.shared.create]/7-8 draws a deliberate line
+  — `make_shared` initialises via `::new (pv) U(…)`, `allocate_shared` via
+  `allocator_traits<A2>::construct(a2, pv, …)`, and destroys the matching way —
+  and boxcxx placement-new'd on both sides. For `std::allocator` that is
+  indistinguishable, which is why it survived; for `polymorphic_allocator` it is
+  the whole feature. `allocate_shared<pmr::vector<int>>(polymorphic_allocator{r},
+  …)` handed back a vector that had quietly kept the **default** resource,
+  because uses-allocator construction lives in the allocator's `construct` and
+  nothing called it. Proved by a type whose constructor only the allocator can
+  reach: it did not compile before, and does now.
+- `✓` Closed in Ф31e-g-2: **`make_shared<const T>` did not compile.** The control
+  block stored the object as `T`, so a `const` element type made
+  `static_cast<void*>` of its address ill-formed — and `shared_ptr<const T>` from
+  `make_shared` is ordinary code. Storage is `remove_cv_t<T>` now, in the object
+  and the array block alike.
+- `✓` Closed in Ф31e-g-2: `make_shared_for_overwrite<T>()` was literally
+  `return make_shared<T>();` — it **value-initialised**, which is the one thing
+  the factory exists not to do. Default-initialisation via `::new (pv) U` now,
+  per /7's own for_overwrite bullet. Not observable from a runtime check without
+  reading an indeterminate value, so the suite does not pretend to test it; it is
+  a code-reading finding, and the allocator-routing counters next to it are what
+  pin the `allocate_` side.
+- `✓` Closed in Ф31e-g-2: the four missing array `allocate_shared` overloads
+  (bounded, with and without a fill value) and all three
+  `allocate_shared_for_overwrite` forms, closing `__cpp_lib_shared_ptr_arrays`
+  and `__cpp_lib_smart_ptr_for_overwrite`.
+- `✓` Closed in Ф31e-g-2: `allocation_result`, `allocator::allocate_at_least` and
+  `allocator_traits::allocate_at_least` (`__cpp_lib_allocate_at_least`);
+  `assume_aligned` (`__cpp_lib_assume_aligned`); `start_lifetime_as` and
+  `start_lifetime_as_array` in all four cv forms (`__cpp_lib_start_lifetime_as`);
+  and a constexpr converting constructor for `default_delete`, the single hole
+  that had kept `__cpp_lib_constexpr_memory` undefined. There is no free
+  `std::allocate_at_least` — C++23's [memory.syn] declares none, whatever
+  `<version>`'s old note said.
+- `✓` Closed in Ф31e-g-2 and in no tracker at all: **`std::align` did not
+  exist.** [ptr.align] is C++11, it is the standard way to carve an aligned
+  sub-buffer out of raw storage, and on a bare-metal target that is not a corner
+  case. Its two guards are subtractions rather than `pad + size > space`, because
+  that sum wraps on a buffer near the top of the address space.
+- `–` The default `allocator<T>::allocate_at_least` returns exactly `n`.
+  boxlib's `malloc_impl` does not report the bucket size it rounded up to, so
+  there is no larger number to honestly return. [allocator.members] asks only for
+  `count >= n`; libstdc++ and libc++ answer the same way.
+
 - The `ranges::` half of [specialized.algorithms] — fourteen names that this
   header's `std::` half has had since Ф7 — arrived in Ф31e-e and is recorded
   under `<ranges>`, with what it does that the `std::` forms cannot.
@@ -594,8 +640,13 @@ nothing has been found since.
   delete extractors, so there is nothing to add. Re-measured in Ф31e-d against
   libc++ 22, whose `<istream>` names `char8_t` nowhere while its `<ostream>` does
   — `<version>`'s own note had claimed [istream] required deletions, and it was
-  corrected there. What now keeps `__cpp_lib_char8_t` undefined is **only**
-  `pmr::u8string`, which waits on `pmr::basic_string` (see `<string>`).
+  corrected there. What keeps `__cpp_lib_char8_t` undefined is **not** anything
+  in this header, and Ф31e-g-2 corrected the claim that it was `pmr::u8string`:
+  [version.syn] names `<locale>` among the macro's owning headers because
+  P0482R6 adds `codecvt<char16_t, char8_t, mbstate_t>`,
+  `codecvt<char32_t, char8_t, mbstate_t>` and their `_byname` forms, and
+  boxcxx's `<locale>` has no facets at all (§1.2). That exclusion is permanent,
+  so this macro is too.
 
 ## `<print>`
 
@@ -757,6 +808,24 @@ nothing has been found since.
 
 ## `<type_traits>`
 
+- `✓` Closed in Ф31e-g-2: `is_layout_compatible` and
+  `is_pointer_interconvertible_base_of` were here, but the two [meta.member]
+  *functions* they are specified alongside — `is_corresponding_member` and
+  `is_pointer_interconvertible_with_class` — were not, and each was half of a
+  feature-test macro. They are functions rather than traits because the question
+  is about a pointer-to-member **value** (which may be null), not about a type.
+  Closed `__cpp_lib_is_layout_compatible` and
+  `__cpp_lib_is_pointer_interconvertible`.
+- `?` [meta.member]'s own example includes
+  `is_pointer_interconvertible_with_class<C>(&C::b)` and
+  `is_corresponding_member<C, C>(&C::a, &C::b)`, where `C` derives from `B`.
+  **Neither compiles here — and neither compiles against libstdc++ 15 or clang,
+  both measured.** With `S` fixed to `C` the parameter is `M C::*`, and template
+  argument deduction does not perform the base-to-derived pointer-to-member
+  conversion needed to match an `int B::*`; libstdc++'s declaration is the same
+  shape as this one, and clang rejects the identical construct with "could not
+  match 'C' against 'B'". The deduced forms, which are the surprising half the
+  example exists to show, work and are pinned by cxxtest phase152.
 - `✓` Closed in Ф31e-g: `aligned_storage_t` and `aligned_union_t` were the only
   members of the C++14 transformation-alias set absent — deprecated in C++23 and
   still required by it, which is precisely why nothing here had needed them. Note
@@ -1102,6 +1171,31 @@ asserting a size nothing checked — and its range deduction guide;
 `erase_if(basic_string&, Pred)`; the two `initializer_list` access functions;
 `aligned_storage_t` / `aligned_union_t`; and the classic `sample` and
 `shuffle`, the second of which was recorded nowhere. Seven more macros.
+
+Ф31e-g-2 took lifetime and allocation (phase 152) and found the sharpest defect
+of the whole sub-phase in code that had shipped and looked fine:
+**`allocate_shared` never called the allocator's `construct` or `destroy`.**
+[util.smartptr.shared.create]/7-8 draws the line deliberately — `make_shared`
+placement-news, `allocate_shared` goes through `allocator_traits<A2>` — and
+boxcxx placement-new'd on both sides, which is invisible for `std::allocator`
+and is the entire feature for `polymorphic_allocator`: a `pmr` container built
+that way silently keeps the *default* resource. `make_shared<const T>` did not
+compile at all, and `make_shared_for_overwrite` was `return make_shared<T>();`
+— value-initialising, the one thing the name promises not to do. With those:
+`allocation_result` and both `allocate_at_least` entry points, `assume_aligned`,
+`start_lifetime_as` / `start_lifetime_as_array`, the two [meta.member] functions
+(`is_corresponding_member`, `is_pointer_interconvertible_with_class`), the four
+missing array `allocate_shared` overloads, all three
+`allocate_shared_for_overwrite` forms, a constexpr `default_delete` converting
+constructor, and **`std::align`, which did not exist and was in no tracker** —
+a C++11 function, and on a bare-metal target not a corner case. Eight more
+macros. Two entries in this document were rewritten rather than closed:
+`__cpp_lib_char8_t` is blocked by `<locale>`'s facet exclusion (P0482R6 adds
+`codecvt<charN_t, char8_t, mbstate_t>`), not by `pmr::u8string` as recorded, and
+`__cpp_lib_is_implicit_lifetime` cannot be claimed at all — the trait needs
+`__builtin_is_implicit_lifetime`, which this toolchain does not have, and no
+library-only approximation can separate a user-provided destructor from a
+member-induced non-trivial one.
 
 What is left:
 

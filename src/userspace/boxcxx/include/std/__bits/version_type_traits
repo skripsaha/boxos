@@ -9,9 +9,15 @@
 // transformation_trait_aliases needed aligned_storage_t and
 // aligned_union_t -- deprecated in C++23 and still required by it.
 //
-// Deliberately absent (see <version>'s list): is_swappable,
-// is_layout_compatible, is_pointer_interconvertible, is_implicit_lifetime,
-// common_reference, transformation_trait_aliases, result_of_sfinae.
+// is_layout_compatible and is_pointer_interconvertible are each one trait
+// plus one [meta.member] FUNCTION; the function half was the missing half
+// of both, and neither macro is guarded on __has_builtin because
+// <type_traits> already names the underlying builtins unconditionally --
+// a toolchain without them cannot compile the header at all, so a guard
+// here would only pretend to be portable.
+//
+// Deliberately absent (see <version>'s list): is_implicit_lifetime,
+// result_of_sfinae.
 #ifndef BOXCXX_BITS_VERSION_TYPE_TRAITS
 #define BOXCXX_BITS_VERSION_TYPE_TRAITS
 
@@ -48,6 +54,12 @@
 #endif
 #ifndef __cpp_lib_is_invocable
 #  define __cpp_lib_is_invocable 201703L
+#endif
+#ifndef __cpp_lib_is_layout_compatible
+#  define __cpp_lib_is_layout_compatible 201907L
+#endif
+#ifndef __cpp_lib_is_pointer_interconvertible
+#  define __cpp_lib_is_pointer_interconvertible 201907L
 #endif
 #ifndef __cpp_lib_is_nothrow_convertible
 #  define __cpp_lib_is_nothrow_convertible 201806L
