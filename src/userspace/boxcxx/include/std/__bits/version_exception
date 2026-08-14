@@ -8,4 +8,10 @@
 #  define __cpp_lib_uncaught_exceptions 201411L
 #endif
 
+// P2927R3 (C++26, Ф32-f): exception_ptr_cast, which asks the runtime the same
+// question the personality routine asks instead of rethrowing to find out.
+#ifndef __cpp_lib_exception_ptr_cast
+#  define __cpp_lib_exception_ptr_cast 202506L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_EXCEPTION

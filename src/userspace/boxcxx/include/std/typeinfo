@@ -8,7 +8,7 @@
 #define BOXCXX_TYPEINFO
 
 #include <cstddef>
-#include <exception>
+#include <__bits/exception_base>  // std::exception — bad_cast/bad_typeid's base, without the cycle
 #include <__bits/version_typeinfo>
 
 namespace __cxxabiv1 {

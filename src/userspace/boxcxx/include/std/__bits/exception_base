@@ -1,0 +1,35 @@
+// boxcxx — <__bits/exception_base>
+//
+// std::exception and std::bad_exception, split out of <exception> for one
+// reason: <typeinfo> derives bad_cast and bad_typeid from std::exception, and
+// <exception> needs <typeinfo> for exception_ptr_cast (P2927R3). Including one
+// from the other in both directions is a real cycle, and the shape that breaks
+// it is the usual one -- the piece both sides need becomes its own leaf, and
+// each includes the leaf rather than the other.
+//
+// Nothing else moved: the terminate handlers, uncaught_exceptions,
+// exception_ptr and the whole propagation surface stay in <exception>.
+#ifndef BOXCXX_BITS_EXCEPTION_BASE
+#define BOXCXX_BITS_EXCEPTION_BASE
+
+namespace std {
+
+class exception {
+public:
+    exception() noexcept = default;
+    exception(const exception &) noexcept = default;
+    exception &operator=(const exception &) noexcept = default;
+    virtual ~exception();                       // key function → libboxcxx.a
+    virtual const char *what() const noexcept;
+};
+
+class bad_exception : public exception {
+public:
+    bad_exception() noexcept = default;
+    ~bad_exception() override;
+    const char *what() const noexcept override;
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_EXCEPTION_BASE

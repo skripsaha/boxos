@@ -21,15 +21,18 @@
 #endif
 
 #ifndef __cpp_lib_bind_front
-#  define __cpp_lib_bind_front 201907L
+// 202306L = P2714R1's NTTP form, bind_front<f>(args...) (Ф32-f).
+#  define __cpp_lib_bind_front 202306L
 #endif
 
 #ifndef __cpp_lib_bind_back
-#  define __cpp_lib_bind_back 202202L
+// 202306L = P2714R1's NTTP form, bind_back<f>(args...) (Ф32-f).
+#  define __cpp_lib_bind_back 202306L
 #endif
 
 #ifndef __cpp_lib_not_fn
-#  define __cpp_lib_not_fn 201603L
+// 202306L = P2714R1's NTTP form, not_fn<f>() (Ф32-f).
+#  define __cpp_lib_not_fn 202306L
 #endif
 #ifndef __cpp_lib_transparent_operators
 // P0074R0, co-owned with <memory>: the nineteen void specializations of the
