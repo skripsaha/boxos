@@ -6,6 +6,7 @@
 #ifndef BOXCXX_BITS_NOT_FN
 #define BOXCXX_BITS_NOT_FN
 
+#include <__bits/bind_partial>  // __bits::NttpCallable — shared with bind_front/bind_back (P2714R1)
 #include <type_traits>
 #include <utility>
 
@@ -84,6 +85,14 @@ constexpr __bits::NotFnWrapper<decay_t<F>> not_fn(F &&f)
     static_assert(is_move_constructible_v<FD>,
                   "not_fn: decay_t<F> must be move-constructible");
     return __bits::NotFnWrapper<FD>(forward<F>(f));
+}
+
+// P2714R1 NTTP form. Same reasoning as bind_front's: the callable is a
+// template argument, so it is wrapped in an empty type rather than stored.
+template <auto F>
+constexpr auto not_fn()
+{
+    return std::not_fn(__bits::NttpCallable<F>{});
 }
 
 } // namespace std

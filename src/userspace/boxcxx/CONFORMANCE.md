@@ -143,7 +143,7 @@ the whole set, not sampled:
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are ten so far.
+  section; there are thirteen so far.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
   cross-product of macros and headers, in both directions, with no failures. This
@@ -211,6 +211,10 @@ constructors) — the library simply stayed silent about them.
 | `__cpp_lib_saturation_arithmetic` | 202311 | P0543R3 | Ф32-e |
 | `__cpp_lib_is_sufficiently_aligned` | 202411 | P2897R7 | Ф32-e |
 | `__cpp_lib_string_subview` | 202506 | P3044R2 | Ф32-e |
+| `__cpp_lib_bind_front` | 202306 | P2714R1 | Ф32-f |
+| `__cpp_lib_bind_back` | 202306 | P2714R1 | Ф32-f |
+| `__cpp_lib_not_fn` | 202306 | P2714R1 | Ф32-f |
+| `__cpp_lib_exception_ptr_cast` | 202506 | P2927R3 | Ф32-f |
 
 Two of those carry a value the current working draft has already moved past,
 and deliberately: `__cpp_lib_to_chars` is at P2497R0's 202306 rather than the
@@ -941,6 +945,25 @@ nothing has been found since.
   dispatch is an `if constexpr` recursion over `I` with `tuple_element_t` in
   place of pack indexing. Same semantics, no dependency on a C++26 language
   feature.
+
+### P2714R1 / P2927R3 — callables by template argument, and looking inside an exception_ptr (Ф32-f)
+
+- `✓` `bind_front<f>`, `bind_back<f>` and `not_fn<f>` name the callable as a
+  template argument, so nothing of it is stored. boxcxx implements them by
+  wrapping the NTTP in an EMPTY type and reusing the existing binders rather
+  than duplicating them; the return type is unspecified by the standard either
+  way, and an empty callable costs a byte rather than a pointer.
+- `✓` `exception_ptr_cast`. Before it, the only way to look inside an
+  `exception_ptr` was to rethrow into a `try` block — an unwind, two handlers,
+  and impossible from a `noexcept` function. It asks the runtime the question
+  the personality routine asks (`type_info::__do_catch`), so a base-class
+  handler matches a derived exception and the returned pointer carries the
+  base adjustment; a `type_info` comparison could do neither.
+- `~` `std::exception` and `std::bad_exception` moved to
+  `<__bits/exception_base>`. `<typeinfo>` derives `bad_cast` from
+  `std::exception` and `<exception>` now needs `<typeinfo>`, which is a genuine
+  cycle; the piece both sides need became its own leaf. Nothing else moved and
+  both headers are unchanged from a user's point of view.
 
 ## `<span>`
 

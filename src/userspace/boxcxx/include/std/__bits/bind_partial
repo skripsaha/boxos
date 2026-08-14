@@ -134,6 +134,29 @@ public:
 
 } // namespace __bits
 
+namespace __bits {
+
+// P2714R1's NTTP forms name the callable as a template argument, so there is
+// nothing about it left to store at run time. This wraps that argument in an
+// EMPTY type and hands it to the existing binders, rather than duplicating
+// FrontBinder and BackBinder for the sake of one absent member: the return
+// type is unspecified by the standard either way, and an empty callable costs
+// a byte, not a pointer.
+template <auto F>
+struct NttpCallable {
+    static_assert(!(is_pointer_v<decltype(F)> || is_member_pointer_v<decltype(F)>) || F != nullptr,
+                  "bind_front/bind_back/not_fn: a null function or member pointer as the "
+                  "template argument is ill-formed ([func.bind.partial], [func.not.fn])");
+    template <class... A>
+    constexpr decltype(auto) operator()(A &&...a) const
+        noexcept(is_nothrow_invocable_v<decltype(F), A...>)
+    {
+        return InvokeRt(F, forward<A>(a)...);
+    }
+};
+
+} // namespace __bits
+
 template <class F, class... BoundArgs>
 constexpr __bits::FrontBinder<decay_t<F>, decay_t<BoundArgs>...>
 bind_front(F &&f, BoundArgs &&...boundArgs)
@@ -162,6 +185,19 @@ bind_back(F &&f, BoundArgs &&...boundArgs)
                   "bind_back: decay_t<F>/decay_t<BoundArgs> must be move-constructible");
     return __bits::BackBinder<decay_t<F>, decay_t<BoundArgs>...>(
         forward<F>(f), forward<BoundArgs>(boundArgs)...);
+}
+
+// P2714R1 NTTP forms.
+template <auto F, class... BoundArgs>
+constexpr auto bind_front(BoundArgs &&...boundArgs)
+{
+    return std::bind_front(__bits::NttpCallable<F>{}, forward<BoundArgs>(boundArgs)...);
+}
+
+template <auto F, class... BoundArgs>
+constexpr auto bind_back(BoundArgs &&...boundArgs)
+{
+    return std::bind_back(__bits::NttpCallable<F>{}, forward<BoundArgs>(boundArgs)...);
 }
 
 } // namespace std

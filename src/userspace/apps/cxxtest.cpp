@@ -39112,6 +39112,74 @@ void Phase159()
            "comparisons, P3044 subview, and P2637 member variant::visit\n");
 }
 
+// ── Ф32-f ───────────────────────────────────────────────────────────────
+static int P160Add(int a, int b) { return a + b; }
+static bool P160IsEven(int x) { return x % 2 == 0; }
+struct P160Err { int code; };
+struct P160Base { virtual ~P160Base() = default; };
+struct P160Derived : P160Base { int v = 7; };
+
+void Phase160()
+{
+    using namespace std;
+
+    // P2714R1: the callable as a TEMPLATE argument. It is then known at
+    // compile time and there is nothing about it left to store, which is the
+    // difference from the ordinary form -- not just a spelling.
+    {
+        auto add5 = bind_front<P160Add>(5);
+        Check(add5(3) == 8, "phase160 (1) bind_front<f> with the callable as an NTTP");
+        auto sub_from = bind_back<P160Add>(100);
+        Check(sub_from(1) == 101, "phase160 (2) bind_back<f>");
+        auto odd = not_fn<P160IsEven>();
+        Check(odd(3) && !odd(4), "phase160 (3) not_fn<f>, which takes no arguments at all");
+        // The ordinary forms still work and still store the callable.
+        auto add5v = bind_front(P160Add, 5);
+        Check(add5v(3) == 8, "phase160 (4) the value form is untouched");
+        static_assert(__cpp_lib_bind_front == 202306L, "phase160 (5) P2714R1 bind_front");
+        static_assert(__cpp_lib_bind_back == 202306L, "phase160 (6) P2714R1 bind_back");
+        static_assert(__cpp_lib_not_fn == 202306L, "phase160 (7) P2714R1 not_fn");
+        // A lambda is a valid NTTP callable too, being an empty structural type.
+        constexpr auto trip = [](int x) { return x * 3; };
+        auto           t    = bind_front<trip>();
+        Check(t(4) == 12, "phase160 (8) ...and a captureless lambda works as the NTTP");
+    }
+    // P2927R3: before this, the only way to look inside an exception_ptr was
+    // to rethrow it into a try block -- an unwind, two handlers, and flatly
+    // impossible from a noexcept function.
+    {
+        exception_ptr p = make_exception_ptr(P160Err{42});
+        const P160Err *e = exception_ptr_cast<P160Err>(p);
+        Check(e != nullptr && e->code == 42, "phase160 (9) exception_ptr_cast finds the type");
+        Check(exception_ptr_cast<int>(p) == nullptr,
+              "phase160 (10) ...and returns null for a type that is not in there");
+        exception_ptr q;
+        Check(exception_ptr_cast<P160Err>(q) == nullptr,
+              "phase160 (11) an empty exception_ptr casts to null, not to a crash");
+        // Base-class access is the part that needs the runtime rather than a
+        // pointer comparison: __do_catch performs the adjustment a handler
+        // would have performed.
+        exception_ptr d = make_exception_ptr(P160Derived{});
+        const P160Base *b = exception_ptr_cast<P160Base>(d);
+        Check(b != nullptr, "phase160 (12) ...and a base handler catches a derived exception");
+        Check(static_cast<const P160Derived *>(b)->v == 7,
+              "phase160 (13) ...with the pointer adjusted, which is why this cannot be a "
+              "type_info comparison");
+        // It really does not rethrow: the value survives being asked about.
+        Check(exception_ptr_cast<P160Err>(p) != nullptr && bool(p),
+              "phase160 (14) asking twice does not consume the exception");
+        static_assert(noexcept(exception_ptr_cast<P160Err>(p)),
+                      "phase160 (15) and the whole point is that it is noexcept");
+        static_assert(__cpp_lib_exception_ptr_cast == 202506L, "phase160 (16) P2927R3 claimed");
+    }
+
+    printf("[CXX] PASS phase160: Ф32-f — P2714R1's NTTP forms of bind_front, "
+           "bind_back and not_fn (callable as a template argument, so nothing "
+           "of it is stored), and P2927R3 exception_ptr_cast, which asks the "
+           "runtime the question the personality routine asks instead of "
+           "rethrowing to find out\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39293,6 +39361,7 @@ int main()
     Phase157();
     Phase158();
     Phase159();
+    Phase160();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

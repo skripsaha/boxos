@@ -5,27 +5,13 @@
 #ifndef BOXCXX_EXCEPTION
 #define BOXCXX_EXCEPTION
 
+#include <__bits/exception_base>  // std::exception / std::bad_exception (shared with <typeinfo>)
 #include <cstddef>
 #include <type_traits>
+#include <typeinfo>   // typeid / type_info — exception_ptr_cast (P2927R3)
 #include <__bits/version_exception>
 
 namespace std {
-
-class exception {
-public:
-    exception() noexcept = default;
-    exception(const exception &) noexcept = default;
-    exception &operator=(const exception &) noexcept = default;
-    virtual ~exception();                       // key function → libboxcxx.a
-    virtual const char *what() const noexcept;
-};
-
-class bad_exception : public exception {
-public:
-    bad_exception() noexcept = default;
-    ~bad_exception() override;
-    const char *what() const noexcept override;
-};
 
 using terminate_handler = void (*)();
 
@@ -89,6 +75,13 @@ public:
     {
         return a.ptr_ == b.ptr_;
     }
+
+private:
+    // Only exception_ptr_cast below reads this: the raw thrown-object pointer,
+    // which the runtime turns back into the Itanium exception header.
+    void *__object() const noexcept { return ptr_; }
+    template <class E>
+    friend const E *exception_ptr_cast(const exception_ptr &) noexcept;
 };
 
 inline exception_ptr current_exception() noexcept
@@ -101,6 +94,27 @@ inline exception_ptr current_exception() noexcept
 {
     __cxa_rethrow_primary_exception(p.ptr_);
     __builtin_unreachable();
+}
+
+// P2927R3. Looking inside an exception_ptr previously meant rethrowing it into
+// a try block: an unwind, a pair of catch handlers, and impossible from a
+// noexcept function. This asks the runtime the same question the personality
+// routine asks -- would a handler of type E catch this? -- and gets the
+// base-adjusted pointer back, or null.
+//
+// The returned pointer is valid for as long as the exception_ptr owns the
+// exception, and no longer; there is deliberately no rvalue overload that
+// would hand back a pointer into a temporary.
+extern "C" void *__boxcxx_exception_ptr_cast(void *, const type_info *) noexcept;
+
+template <class E>
+const E *exception_ptr_cast(const exception_ptr &p) noexcept
+{
+    static_assert(!is_const_v<E> && !is_volatile_v<E>,
+                  "exception_ptr_cast: E must be cv-unqualified [propagation]");
+    static_assert(!is_reference_v<E> && !is_array_v<E> && !is_function_v<E>,
+                  "exception_ptr_cast: E must be an object type that is not an array");
+    return static_cast<const E *>(__boxcxx_exception_ptr_cast(p.__object(), &typeid(E)));
 }
 
 template <class E>

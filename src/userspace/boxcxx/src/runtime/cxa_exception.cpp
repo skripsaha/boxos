@@ -282,6 +282,29 @@ extern "C" void *__cxa_current_primary_exception() noexcept
     return obj;
 }
 
+// P2927R3 std::exception_ptr_cast. Asking "is the exception in this
+// exception_ptr an E?" needed the same machinery the personality routine uses
+// to answer "does this handler catch it?" -- the thrown type_info from the
+// header, and type_info::__do_catch, which is what performs the base-class
+// adjustment. Without it the only way to look inside an exception_ptr was to
+// rethrow it into a try block, which cannot be done from a noexcept function
+// and costs an unwind either way.
+//
+// The header sits immediately before the thrown object, and
+// __cxa_current_primary_exception hands out the OBJECT pointer, so one step
+// back reaches it. Returns the (possibly base-adjusted) object pointer, or
+// null when the handler type would not catch it.
+extern "C" void *__boxcxx_exception_ptr_cast(void *obj, const std::type_info *want) noexcept
+{
+    if (!obj || !want) return nullptr;
+    CxaException         *header = static_cast<CxaException *>(obj) - 1;
+    const std::type_info *thrown = header->exceptionType;
+    if (!thrown) return nullptr;
+    void *adjusted = obj;
+    if (want->__do_catch(thrown, &adjusted, 1)) return adjusted;
+    return nullptr;
+}
+
 extern "C" [[noreturn]] void __cxa_rethrow_primary_exception(void *obj)
 {
     if (!obj) std::terminate(); // rethrowing a null exception_ptr
