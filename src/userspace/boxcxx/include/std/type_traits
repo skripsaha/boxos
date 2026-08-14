@@ -668,6 +668,55 @@ public:
 };
 template <class T> using decay_t = typename decay<T>::type;
 
+// ── aligned_storage / aligned_union ([meta.trans.other]) ────────────────
+// Deprecated in C++23 and still required by it — which is exactly why they
+// were missing: nothing new should use them, so nothing here did. They
+// remain the spelling that pre-C++17 code reaches for, and the two _t
+// aliases were the only members of the C++14 transformation-alias set absent.
+// aligned_union carries a `static constexpr size_t alignment_value` member
+// that the alias hides but a direct use still reads.
+namespace __bits {
+// [meta.trans.other]'s "default-alignment": the most stringent alignment any
+// object type of size <= Len could require — NOT alignof(max_align_t) flat.
+// Defaulting to the latter would over-align every small buffer, so
+// sizeof(aligned_storage_t<1>) would come back 16 instead of 1.
+constexpr size_t DefaultAlign(size_t len)
+{
+    size_t a = 1;
+    while (a * 2 <= len && a * 2 <= alignof(max_align_t)) a *= 2;
+    return a;
+}
+} // namespace __bits
+
+template <size_t Len, size_t Align = __bits::DefaultAlign(Len)>
+struct aligned_storage {
+    struct type {
+        alignas(Align) unsigned char __data[Len < 1 ? 1 : Len];
+    };
+};
+template <size_t Len, size_t Align = __bits::DefaultAlign(Len)>
+using aligned_storage_t = typename aligned_storage<Len, Align>::type;
+
+namespace __bits {
+constexpr size_t MaxOf(size_t a) { return a; }
+template <class... Rest>
+constexpr size_t MaxOf(size_t a, size_t b, Rest... rest)
+{
+    return MaxOf(a > b ? a : b, rest...);
+}
+} // namespace __bits
+
+template <size_t Len, class... Types>
+struct aligned_union {
+    static constexpr size_t alignment_value = __bits::MaxOf(alignof(Types)...);
+    struct type {
+        alignas(alignment_value) unsigned char
+            __data[__bits::MaxOf(Len, sizeof(Types)...)];
+    };
+};
+template <size_t Len, class... Types>
+using aligned_union_t = typename aligned_union<Len, Types...>::type;
+
 // ── make_signed / make_unsigned ─────────────────────────────────────────
 
 namespace __bits {

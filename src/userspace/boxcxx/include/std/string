@@ -621,6 +621,31 @@ public:
     }
     void resize(size_type n) { resize(n, C()); }
 
+    // P1072R10 ([string.capacity]): grow to n and let the caller fill the raw
+    // buffer, then TRUNCATE to what it says it wrote. The point is the one
+    // thing resize() cannot avoid — value-initializing n characters the
+    // caller is about to overwrite anyway. The operation is specified to move
+    // the buffer before calling op, and op must not throw or look at the
+    // string; a returned length above n is undefined, so it is caught here
+    // rather than silently trusted.
+    template <typename Op>
+    void resize_and_overwrite(size_type n, Op op)
+    {
+        reserve(n);
+        size_type old = __size;
+        if (n > old) SetSize(n); // the tail is raw, deliberately unwritten
+        size_type written = static_cast<size_type>(std::move(op)(data(), n));
+        // A returned length above n is undefined ([string.capacity]/32); the
+        // string would report characters that were never written. Caught, and
+        // loudly, because the alternative is a buffer that lies about its
+        // own length.
+        if (written > n)
+            boxcxx::ThrowLengthError("basic_string::resize_and_overwrite: the "
+                                     "callable reported writing more than it "
+                                     "was given");
+        SetSize(written);
+    }
+
     size_type copy(C *dst, size_type count, size_type pos = 0) const
     {
         return __view(*this).copy(dst, count, pos);
@@ -986,6 +1011,26 @@ typename basic_string<C, T, A>::size_type erase(basic_string<C, T, A> &s,
     typename basic_string<C, T, A>::size_type w       = 0;
     for (typename basic_string<C, T, A>::size_type r = 0; r < s.size(); ++r) {
         if (s[r] == value) {
+            ++removed;
+        } else {
+            s[w++] = s[r];
+        }
+    }
+    s.resize(w);
+    return removed;
+}
+
+// The predicate half of the same paper. It was the only one of the thirteen
+// uniform-erasure overloads missing, which is why __cpp_lib_erase_if stayed
+// undefined while erase_if worked on every container.
+template <typename C, typename T, typename A, typename Pred>
+typename basic_string<C, T, A>::size_type erase_if(basic_string<C, T, A> &s,
+                                                   Pred pred)
+{
+    typename basic_string<C, T, A>::size_type removed = 0;
+    typename basic_string<C, T, A>::size_type w       = 0;
+    for (typename basic_string<C, T, A>::size_type r = 0; r < s.size(); ++r) {
+        if (pred(s[r])) {
             ++removed;
         } else {
             s[w++] = s[r];

@@ -6,11 +6,18 @@
 // __has_builtin guard: both traits it names are compiler-builtin-backed
 // with no library fallback, so the macro must appear exactly when they do.
 //
+// transformation_trait_aliases needed aligned_storage_t and
+// aligned_union_t -- deprecated in C++23 and still required by it.
+//
 // Deliberately absent (see <version>'s list): is_swappable,
 // is_layout_compatible, is_pointer_interconvertible, is_implicit_lifetime,
 // common_reference, transformation_trait_aliases, result_of_sfinae.
 #ifndef BOXCXX_BITS_VERSION_TYPE_TRAITS
 #define BOXCXX_BITS_VERSION_TYPE_TRAITS
+
+#ifndef __cpp_lib_transformation_trait_aliases
+#  define __cpp_lib_transformation_trait_aliases 201304L
+#endif
 
 #ifndef __cpp_lib_bool_constant
 #  define __cpp_lib_bool_constant 201505L

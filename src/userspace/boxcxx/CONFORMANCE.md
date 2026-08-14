@@ -32,9 +32,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 144 |
+| Feature-test macros defined | 151 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 162 phases, 4 645 runtime checks, 1 352 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 163 phases, 4 663 runtime checks, 1 372 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,7 +129,7 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **144** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **151** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every one carries its N4950 value.** No macro is defined at a later
@@ -140,7 +140,7 @@ the whole set, not sampled:
   is the part that breaks most easily, because a macro added to a shared leaf
   tends to become visible from every header that includes it and from no other.
 
-**41 of the C++23 macros are not defined**, and `<version>` lists every one by
+**34 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -156,7 +156,7 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 41, nine belong to features whose owning header does not exist at all
+Of the 34, nine belong to features whose owning header does not exist at all
 (`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
 `syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
 them); the rest belong to headers that exist. The in-tree suite pins the absences
@@ -198,6 +198,12 @@ nothing has been found since.
   `constexpr`. The result is a specifier that promises something the function
   cannot do — worse than its two honestly-unannotated siblings, because the error
   appears only at the point of use.
+- `✓` Closed in Ф31e-g: **`std::sample` and `std::shuffle` did not exist** —
+  only the `ranges::` forms did, so the spelling in every pre-ranges algorithm
+  text failed to compile. `shuffle`'s absence was recorded nowhere; no
+  feature-test macro gates it. The classic forms delegate to the `ranges::`
+  engines rather than carrying a second copy of the selection- and
+  reservoir-sampling logic. Closed `__cpp_lib_sample`.
 - `~` The parallel overloads do not exist — `<execution>` does not exist (§1.1).
 
 ## `<array>`
@@ -445,6 +451,12 @@ nothing has been found since.
 
 ## `<iterator>`
 
+- `✓` Closed in Ф31e-g: `std::empty` and `std::data` had no `initializer_list`
+  overloads. The generic ones cannot cover it — `initializer_list` has
+  `begin`/`end`/`size` but no `empty()` and no `data()` member — so
+  `std::empty({1, 2, 3})` failed while working on every container and array.
+  They were the only two of the ten nonmember-access functions missing, and
+  closed `__cpp_lib_nonmember_container_access`.
 - `~` **`counted_iterator` has an `operator->` that the standard does not give
   it**, together with a forwarding `iterator_traits` specialization. The
   consequence is that `contiguous_iterator<counted_iterator<int*>>` **holds** in
@@ -708,8 +720,31 @@ nothing has been found since.
   `noexcept`, where /7 and /9 mandate a conditional one. The other four of that
   family are not given one by the standard and still do not have one.
 
+## `<span>`
+
+- `✓` Closed in Ф31e-g: the iterator constructors took **pointers**, not an
+  iterator and a sentinel, and were **not** `explicit(extent != dynamic_extent)`.
+  The second half was the one that mattered: a fixed-extent `span<int,3>` could
+  be built *implicitly* from a pair, so `take({a, a + n})` compiled while
+  asserting a size nothing checked. The range deduction guide was absent too, so
+  `std::span(v)` over a vector could not deduce at all. **This document's claim
+  that span had no `crbegin`/`crend` was wrong** — both were there. Closed
+  `__cpp_lib_span`.
+
 ## `<string>`
 
+- `✓` Closed in Ф31e-g: `resize_and_overwrite` (P1072R10) did not exist. It is
+  the one way to grow a string and fill the raw tail without first
+  value-initializing characters the caller is about to overwrite. A callable
+  reporting a length above the one it was given would make the string report
+  characters nobody wrote; [string.capacity] leaves that undefined, and boxcxx
+  throws `length_error` instead. Closed
+  `__cpp_lib_string_resize_and_overwrite`.
+- `✓` Closed in Ф31e-g: `std::erase_if(basic_string&, Pred)` was the single
+  missing one of the thirteen uniform-erasure overloads, which is why
+  `__cpp_lib_erase_if` stayed undefined while `erase_if` worked on every
+  container. `basic_string_view` gained `crbegin`/`crend` in the same step,
+  closing `__cpp_lib_string_view`.
 - `!` **`basic_string` is not a literal type — no part of it works in a constant
   expression** (P0980 is unimplemented; `size()` itself is not `constexpr`). A
   `constexpr` function that builds a `std::string` fails at the point of constant
@@ -722,6 +757,13 @@ nothing has been found since.
 
 ## `<type_traits>`
 
+- `✓` Closed in Ф31e-g: `aligned_storage_t` and `aligned_union_t` were the only
+  members of the C++14 transformation-alias set absent — deprecated in C++23 and
+  still required by it, which is precisely why nothing here had needed them. Note
+  the default `Align`: [meta.trans.other] makes it the most stringent alignment
+  any type of size ≤ `Len` could require, not `alignof(max_align_t)` flat, so
+  `sizeof(aligned_storage_t<1>)` is 1 and not 16. Closed
+  `__cpp_lib_transformation_trait_aliases`.
 - `✓` Closed in Ф31e-a: `is_swappable_v` was false for **every** array type, which was
   not merely an inaccurate answer — it broke a working operation.
   `is_swappable_v<int[3]>` said false while `std::swap(int[3], int[3])` worked, and
@@ -1051,6 +1093,15 @@ took all four with it and this document had recorded only the one. With them,
 `try_emplace` and `insert_or_assign` became 4-of-4 on both `map` and
 `unordered_map`, where the latter's single `insert_or_assign` overload had been
 **copying an rvalue key in silence**. Three more feature-test macros.
+
+Ф31e-g-1 then took the small missing surface (phase 151): `span`'s iterator
+constructors — which took pointers and, worse, were not `explicit` for a fixed
+extent, so a `span<int,3>` could be built implicitly from a pair while
+asserting a size nothing checked — and its range deduction guide;
+`string_view`'s `crbegin`/`crend`; `resize_and_overwrite`;
+`erase_if(basic_string&, Pred)`; the two `initializer_list` access functions;
+`aligned_storage_t` / `aligned_union_t`; and the classic `sample` and
+`shuffle`, the second of which was recorded nowhere. Seven more macros.
 
 What is left:
 

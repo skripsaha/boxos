@@ -41,6 +41,9 @@
 #ifndef __cpp_lib_bool_constant
 #  error "__cpp_lib_bool_constant is not visible from <type_traits> alone"
 #endif
+#ifndef __cpp_lib_transformation_trait_aliases
+#  error "__cpp_lib_transformation_trait_aliases is not visible from <type_traits> alone"
+#endif
 #ifndef __cpp_lib_bounded_array_traits
 #  error "__cpp_lib_bounded_array_traits is not visible from <type_traits> alone"
 #endif
@@ -247,7 +250,14 @@
 #ifndef __cpp_lib_atomic_wait
 #  error "__cpp_lib_atomic_wait is not visible from <atomic> alone"
 #endif
+#include <span>
+#ifndef __cpp_lib_span
+#  error "__cpp_lib_span is not visible from <span> alone"
+#endif
 #include <string_view>
+#ifndef __cpp_lib_string_view
+#  error "__cpp_lib_string_view is not visible from <string_view> alone"
+#endif
 #ifndef __cpp_lib_constexpr_string_view
 #  error "__cpp_lib_constexpr_string_view is not visible from <string_view> alone"
 #endif
@@ -258,6 +268,12 @@
 #  error "__cpp_lib_string_contains is not visible from <string_view> alone"
 #endif
 #include <string>
+#ifndef __cpp_lib_string_resize_and_overwrite
+#  error "__cpp_lib_string_resize_and_overwrite is not visible from <string> alone"
+#endif
+#ifndef __cpp_lib_erase_if
+#  error "__cpp_lib_erase_if is not visible from <string> alone"
+#endif
 #ifndef __cpp_lib_string_udls
 #  error "__cpp_lib_string_udls is not visible from <string> alone"
 #endif
@@ -315,6 +331,9 @@
 #  error "__cpp_lib_expected is not visible from <expected> alone"
 #endif
 #include <algorithm>
+#ifndef __cpp_lib_sample
+#  error "__cpp_lib_sample is not visible from <algorithm> alone"
+#endif
 #ifndef __cpp_lib_clamp
 #  error "__cpp_lib_clamp is not visible from <algorithm> alone"
 #endif
@@ -29344,6 +29363,16 @@ void Phase131()
     static_assert(__cpp_lib_expected == 202211L, "phase131 expected");
 
     static_assert(__cpp_lib_clamp == 201603L, "phase131 clamp");
+    static_assert(__cpp_lib_sample == 201603L, "phase131 sample");
+    static_assert(__cpp_lib_span == 202002L, "phase131 span");
+    static_assert(__cpp_lib_erase_if == 202002L, "phase131 erase_if");
+    static_assert(__cpp_lib_nonmember_container_access == 201411L,
+                  "phase131 nonmember_container_access");
+    static_assert(__cpp_lib_string_view == 202106L, "phase131 string_view");
+    static_assert(__cpp_lib_string_resize_and_overwrite == 202110L,
+                  "phase131 string_resize_and_overwrite");
+    static_assert(__cpp_lib_transformation_trait_aliases == 201304L,
+                  "phase131 transformation_trait_aliases");
     static_assert(__cpp_lib_shift == 202202L, "phase131 shift");
 
     static_assert(__cpp_lib_adaptor_iterator_pair_constructor == 202106L,
@@ -29396,8 +29425,10 @@ void Phase131()
 // (atomic_flag_test, atomic_float, atomic_ref, atomic_shared_ptr,
 //  atomic_wait and barrier were guarded here until Ф31e-d closed all six,
 //  scoped_lock with them; map_try_emplace, unordered_map_try_emplace and
-//  three_way_comparison until Ф31e-f. Their positive assertions are in list
-//  (A) above.)
+//  three_way_comparison until Ф31e-f; erase_if, nonmember_container_access,
+//  sample, span, string_resize_and_overwrite, string_view and
+//  transformation_trait_aliases until Ф31e-g. Their positive assertions are
+//  in list (A) above.)
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
 #endif
@@ -29427,9 +29458,6 @@ void Phase131()
 #endif
 #ifdef __cpp_lib_constexpr_vector
 #  error "phase131: __cpp_lib_constexpr_vector must stay undefined"
-#endif
-#ifdef __cpp_lib_erase_if
-#  error "phase131: __cpp_lib_erase_if must stay undefined"
 #endif
     // The seven below name a header boxcxx does not ship at all, so the
     // macro could only ever appear by accident -- these guards are what
@@ -29468,9 +29496,6 @@ static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappab
 #ifdef __cpp_lib_modules
 #  error "phase131: __cpp_lib_modules must stay undefined"
 #endif
-#ifdef __cpp_lib_nonmember_container_access
-#  error "phase131: __cpp_lib_nonmember_container_access must stay undefined"
-#endif
 #ifdef __cpp_lib_parallel_algorithm
 #  error "phase131: __cpp_lib_parallel_algorithm must stay undefined"
 #endif
@@ -29492,9 +29517,6 @@ static_assert(__cpp_lib_ranges_as_const == 202207L, "phase131: __cpp_lib_ranges_
 #  error "phase131: __cpp_lib_result_of_sfinae must stay undefined"
 #endif
 static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp_lib_robust_nonmodifying_seq_ops — closed by Ф31e");
-#ifdef __cpp_lib_sample
-#  error "phase131: __cpp_lib_sample must stay undefined"
-#endif
 // (scoped_lock joined them in Ф31e-d, once scoped_lock<Mutex> gained the
 //  mutex_type [thread.lock.scoped] asks for.)
 #ifdef __cpp_lib_shared_ptr_arrays
@@ -29502,9 +29524,6 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #endif
 #ifdef __cpp_lib_smart_ptr_for_overwrite
 #  error "phase131: __cpp_lib_smart_ptr_for_overwrite must stay undefined"
-#endif
-#ifdef __cpp_lib_span
-#  error "phase131: __cpp_lib_span must stay undefined"
 #endif
 #ifdef __cpp_lib_spanstream
 #  error "phase131: __cpp_lib_spanstream must stay undefined"
@@ -29518,17 +29537,8 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #ifdef __cpp_lib_stdatomic_h
 #  error "phase131: __cpp_lib_stdatomic_h must stay undefined"
 #endif
-#ifdef __cpp_lib_string_resize_and_overwrite
-#  error "phase131: __cpp_lib_string_resize_and_overwrite must stay undefined"
-#endif
-#ifdef __cpp_lib_string_view
-#  error "phase131: __cpp_lib_string_view must stay undefined"
-#endif
 #ifdef __cpp_lib_syncbuf
 #  error "phase131: __cpp_lib_syncbuf must stay undefined"
-#endif
-#ifdef __cpp_lib_transformation_trait_aliases
-#  error "phase131: __cpp_lib_transformation_trait_aliases must stay undefined"
 #endif
 static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_transparent_operators — closed by Ф31e");
 #ifdef __cpp_lib_tuple_like
@@ -37721,6 +37731,176 @@ void Phase150()
            "try_emplace/insert_or_assign are 4-of-4 on both map and unordered_map "
            "(whose rvalue key was being copied in silence)\n");
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-g-1 — the small missing surface: span's iterator constructors and
+// range guide, string_view's crbegin/crend, resize_and_overwrite,
+// erase_if(string, Pred), the two initializer_list access functions,
+// aligned_storage_t / aligned_union_t, and classic sample/shuffle.
+// ─────────────────────────────────────────────────────────────────────────
+
+// A fixed-extent span must be EXPLICIT from an iterator pair; a dynamic one
+// implicit. Dependent so the answer is a substitution failure, not an error.
+template <class S, class It>
+constexpr bool P151ImplicitFrom = requires(It a, It b) { [](S) {}({a, b}); };
+
+void Phase151()
+{
+    // ── span: iterator constructors, explicitness, and the range guide ────
+    {
+        std::vector<int> v{1, 2, 3, 4};
+        auto             s = std::span(v); // the guide that did not exist
+        static_assert(
+            std::is_same_v<decltype(s), std::span<int, std::dynamic_extent>>);
+        Check(s.size() == 4 && s[0] == 1 && s.data() == v.data(),
+              "phase151 (1) std::span(v) deduces from a contiguous range");
+
+        auto s2 = std::span(v.begin(), v.end());
+        auto s3 = std::span(v.begin(), v.size());
+        static_assert(
+            std::is_same_v<decltype(s2), std::span<int, std::dynamic_extent>>);
+        Check(s2.size() == 4 && s3.size() == 4 && *s2.crbegin() == 4,
+              "phase151 (2) the iterator/sentinel and iterator/count forms, "
+              "and crbegin");
+
+        const std::vector<int> cv{7, 8};
+        auto                   s4 = std::span(cv);
+        static_assert(std::is_same_v<decltype(s4),
+                                     std::span<const int, std::dynamic_extent>>);
+        Check(s4.size() == 2 && s4[1] == 8,
+              "phase151 (3) a const range deduces a span of const");
+
+        std::array<int, 3> arr{1, 2, 3};
+        auto               s5 = std::span(arr);
+        static_assert(std::is_same_v<decltype(s5), std::span<int, 3>>);
+        Check(s5.extent == 3, "phase151 (4) an array keeps its static extent");
+
+        // [span.cons]: explicit exactly when the extent is fixed, because
+        // there the caller asserts a size the type cannot check.
+        static_assert(!P151ImplicitFrom<std::span<int, 3>, int *>);
+        static_assert(P151ImplicitFrom<std::span<int>, int *>);
+        std::span<int, 4> fixed(v.begin(), 4u);
+        Check(fixed.size() == 4,
+              "phase151 (5) a fixed extent is explicit from an iterator pair, "
+              "a dynamic one is not");
+    }
+
+    // ── string_view crbegin/crend ─────────────────────────────────────────
+    {
+        std::string_view sv("abcd");
+        Check(*sv.crbegin() == 'd' && (sv.crend() - sv.crbegin()) == 4,
+              "phase151 (6) string_view::crbegin/crend walk it backwards");
+    }
+
+    // ── string::resize_and_overwrite (P1072R10) ───────────────────────────
+    {
+        std::string s = "abc";
+        // Grow, fill the raw tail, and report LESS than asked for: the string
+        // must end up at what was reported, not at what was reserved.
+        s.resize_and_overwrite(16, [](char *p, std::size_t n) {
+            for (std::size_t i = 3; i < n; ++i) p[i] = 'z';
+            return std::size_t(6);
+        });
+        Check(s.size() == 6 && s == "abczzz",
+              "phase151 (7) resize_and_overwrite truncates to what the "
+              "callable reports, not to the size it was given");
+        s.resize_and_overwrite(2, [](char *, std::size_t n) { return n; });
+        Check(s.size() == 2 && s == "ab",
+              "phase151 (8) and shrinking keeps the prefix");
+        // A callable claiming more than it was given would make the string
+        // report characters nobody wrote — it throws instead.
+        bool threw = false;
+        try {
+            s.resize_and_overwrite(4, [](char *, std::size_t n) { return n + 1; });
+        } catch (const std::length_error &) {
+            threw = true;
+        }
+        Check(threw, "phase151 (9) over-reporting is caught, not trusted");
+    }
+
+    // ── erase_if(basic_string&, Pred) ─────────────────────────────────────
+    {
+        std::string s = "a1b2c3";
+        auto        n = std::erase_if(s, [](char c) { return c >= '0' && c <= '9'; });
+        Check(n == 3 && s == "abc",
+              "phase151 (10) erase_if on a string removes by predicate and "
+              "returns the count");
+        std::string t = "xyz";
+        Check(std::erase_if(t, [](char) { return false; }) == 0 && t == "xyz",
+              "phase151 (11) and leaves it alone when nothing matches");
+    }
+
+    // ── empty / data over an initializer_list ─────────────────────────────
+    {
+        auto il = {10, 20, 30};
+        static_assert(std::is_same_v<decltype(std::data(il)), const int *>);
+        Check(!std::empty(il) && std::data(il)[2] == 30 && std::size(il) == 3,
+              "phase151 (12) the initializer_list overloads of empty and data");
+        Check(std::empty(std::initializer_list<int>{}),
+              "phase151 (13) an empty initializer_list reports empty");
+    }
+
+    // ── aligned_storage_t / aligned_union_t ───────────────────────────────
+    {
+        // The default alignment is the most stringent for a type of size
+        // <= Len, NOT alignof(max_align_t) flat — which would over-align
+        // every small buffer.
+        static_assert(sizeof(std::aligned_storage_t<1>) == 1 &&
+                      alignof(std::aligned_storage_t<1>) == 1);
+        static_assert(alignof(std::aligned_storage_t<4>) == 4);
+        static_assert(alignof(std::aligned_storage_t<64>) ==
+                      alignof(std::max_align_t));
+        static_assert(alignof(std::aligned_storage_t<8, 16>) == 16);
+        static_assert(sizeof(std::aligned_union_t<1, char, double>) >=
+                      sizeof(double));
+        static_assert(std::aligned_union<1, char, double>::alignment_value ==
+                      alignof(double));
+        using Slot = std::aligned_storage_t<sizeof(double), alignof(double)>;
+        Slot  buf{};
+        auto *d = ::new (static_cast<void *>(&buf)) double(2.5);
+        Check(*d == 2.5 && sizeof(Slot) >= sizeof(double) &&
+                  alignof(Slot) == alignof(double),
+              "phase151 (14) aligned_storage_t holds what it is sized and "
+              "aligned for");
+        std::destroy_at(d);
+    }
+
+    // ── classic sample / shuffle ──────────────────────────────────────────
+    {
+        std::vector<int> pop{1, 2, 3, 4, 5, 6, 7, 8};
+        std::vector<int> out(4, 0);
+        std::mt19937     g(12345);
+        auto             last = std::sample(pop.begin(), pop.end(), out.begin(), 4, g);
+        Check(last == out.end(),
+              "phase151 (15) std::sample fills exactly the requested count");
+        bool all_from_pop = true, ascending = true;
+        for (std::size_t i = 0; i < out.size(); ++i) {
+            if (std::find(pop.begin(), pop.end(), out[i]) == pop.end())
+                all_from_pop = false;
+            if (i && out[i] <= out[i - 1]) ascending = false;
+        }
+        Check(all_from_pop, "phase151 (16) every sampled value came from the "
+                            "population");
+        // Selection sampling over a forward range preserves input order, so
+        // a sample of an ascending population is ascending.
+        Check(ascending, "phase151 (17) and the sample keeps the population's "
+                         "order");
+        std::vector<int> deck{1, 2, 3, 4, 5, 6, 7, 8};
+        std::shuffle(deck.begin(), deck.end(), g);
+        std::vector<int> sorted = deck;
+        std::sort(sorted.begin(), sorted.end());
+        Check(sorted == pop,
+              "phase151 (18) std::shuffle is a permutation — every element "
+              "still there, exactly once");
+    }
+
+    printf("[CXX] PASS phase151: Ф31e-g-1 — span's iterator constructors, explicit "
+           "only for a fixed extent, and its range deduction guide; string_view "
+           "crbegin/crend; resize_and_overwrite truncating to what the callable "
+           "reports; erase_if over a string; empty/data on an initializer_list; "
+           "aligned_storage_t defaulting to the alignment the standard asks for; "
+           "and the classic sample/shuffle\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -37893,6 +38073,7 @@ int main()
     Phase148();
     Phase149();
     Phase150();
+    Phase151();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -7,6 +7,7 @@
 #define BOXCXX_SPAN
 
 #include <__bits/iterator_core>
+#include <__bits/version_span>
 #include <__bits/throw_helpers>
 #include <array>
 #include <cstddef>
@@ -70,11 +71,30 @@ public:
     {
     }
 
-    constexpr span(pointer first, size_type count) : __data(first), __size(count)
+    // [span.cons] takes an ITERATOR and a count, or an iterator and a
+    // sentinel — not two pointers. The distinction is real even on a
+    // contiguous range: an iterator whose reference is a proxy, or a checked
+    // iterator that is a class type, converts to a pointer only through
+    // to_address, and the pointer-taking form could not be called with one at
+    // all. Both are explicit for a FIXED extent, because the caller is
+    // asserting a size the type system cannot check there; for a dynamic
+    // extent the size comes from the argument and no assertion is being made.
+    template <typename It>
+        requires contiguous_iterator<It> &&
+                 is_convertible_v<remove_reference_t<iter_reference_t<It>> (*)[],
+                                  T (*)[]>
+    constexpr explicit(Extent != dynamic_extent) span(It first, size_type count)
+        : __data(std::to_address(first)), __size(count)
     {
     }
-    constexpr span(pointer first, pointer last)
-        : __data(first), __size(static_cast<size_type>(last - first))
+    template <typename It, typename End>
+        requires contiguous_iterator<It> && sized_sentinel_for<End, It> &&
+                 (!is_convertible_v<End, size_type>) &&
+                 is_convertible_v<remove_reference_t<iter_reference_t<It>> (*)[],
+                                  T (*)[]>
+    constexpr explicit(Extent != dynamic_extent) span(It first, End last)
+        : __data(std::to_address(first)),
+          __size(static_cast<size_type>(last - first))
     {
     }
 
@@ -224,10 +244,15 @@ template <typename T, size_t N>
 span(std::array<T, N> &) -> span<T, N>;
 template <typename T, size_t N>
 span(const std::array<T, N> &) -> span<const T, N>;
-template <typename T>
-span(T *, size_t) -> span<T>;
-template <typename T>
-span(T *, T *) -> span<T>;
+// [span.deduct]'s guides for the iterator forms are stated over an ITERATOR,
+// so they also cover the two pointer spellings that used to be the only ones
+// here.
+template <contiguous_iterator It, typename EndOrSize>
+span(It, EndOrSize) -> span<remove_reference_t<iter_reference_t<It>>>;
+// The range guide, which was absent: `std::span(v)` over a vector could not
+// deduce, so every call had to spell the element type by hand.
+template <ranges::contiguous_range R>
+span(R &&) -> span<remove_reference_t<ranges::range_reference_t<R>>>;
 
 // ── byte views ──────────────────────────────────────────────────────────
 
