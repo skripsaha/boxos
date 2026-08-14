@@ -36673,6 +36673,145 @@ void Phase145()
            "owner_less<> is transparent, and six feature-test macros became honest\n");
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Ф31e-b-2 — the three views and the one algorithm that were missing, and
+// the const access transform_view never had. All four are compile-or-not
+// facts first, so the concept checks carry as much weight as the walks.
+// ─────────────────────────────────────────────────────────────────────────
+void Phase146()
+{
+    namespace rv = std::views;
+    namespace rg = std::ranges;
+
+    // ── transform_view is const-iterable ─────────────────────────────────
+    {
+        using TV = decltype(rv::transform(std::declval<std::vector<int> &>(),
+                                          [](int x) { return x * 2; }));
+        static_assert(rg::range<TV>);
+        static_assert(rg::range<const TV>);       // was false: "discards qualifiers"
+        static_assert(rg::random_access_range<const TV>);
+        // filter_view keeps its non-const shape on purpose — it caches begin(),
+        // and the standard gives it no begin() const either.
+        using FV = decltype(rv::filter(std::declval<std::vector<int> &>(),
+                                       [](int x) { return x > 0; }));
+        static_assert(rg::range<FV> && !rg::range<const FV>);
+
+        std::vector<int> v{1, 2, 3, 4};
+        auto             t  = rv::transform(v, [](int x) { return x * 10; });
+        const auto      &ct = t;
+        int              sum = 0;
+        for (int x : ct) sum += x;
+        Check(sum == 100, "phase146 (1) a const transform_view iterates");
+        Check(ct.end() - ct.begin() == 4 && ct[0] == 10 && ct[3] == 40,
+              "phase146 (2) and it is random-access through const");
+        // The non-const iterator converts to the const one, which is what
+        // makes a mixed begin()/end() pair comparable at all.
+        auto it  = t.begin();
+        auto cit = ct.begin();
+        Check(cit == decltype(cit)(it),
+              "phase146 (3) the non-const iterator converts to the const one");
+    }
+
+    // ── views::take_while ────────────────────────────────────────────────
+    {
+        const std::vector<int> v{1, 2, 3, 4, 1, 2};
+        int                    n = 0, sum = 0;
+        for (int x : v | rv::take_while([](int y) { return y < 4; })) {
+            ++n;
+            sum += x;
+        }
+        Check(n == 3 && sum == 6,
+              "phase146 (4) take_while stops at the first failure and does not resume");
+        int m = 0;
+        for (int x : v | rv::take_while([](int y) { return y > 100; })) {
+            (void)x;
+            ++m;
+        }
+        Check(m == 0, "phase146 (5) and yields nothing when the first element fails");
+        // Nothing fails: the sentinel must stop at the base end WITHOUT asking
+        // the predicate there, which would read one past the range.
+        int k = 0;
+        for (int x : v | rv::take_while([](int y) { return y < 100; })) {
+            (void)x;
+            ++k;
+        }
+        Check(k == 6,
+              "phase146 (6) and stops at the base end without dereferencing it");
+    }
+
+    // ── views::drop_while ────────────────────────────────────────────────
+    {
+        const std::vector<int> v{1, 2, 3, 4, 1, 2};
+        auto                   d = v | rv::drop_while([](int y) { return y < 4; });
+        int                    n = 0, first = 0;
+        for (int x : d) {
+            if (n == 0) first = x;
+            ++n;
+        }
+        Check(n == 3 && first == 4,
+              "phase146 (7) drop_while skips the leading run and keeps the rest");
+        // begin() is cached, which [range.drop.while] requires rather than
+        // suggests: without it begin() is O(n) every call and the view stops
+        // meeting the amortized constant the range concept asks for.
+        int n2 = 0;
+        for (int x : d) {
+            (void)x;
+            ++n2;
+        }
+        Check(n2 == 3, "phase146 (8) and a second walk agrees with the first");
+        int m = 0;
+        for (int x : v | rv::drop_while([](int y) { return y < 100; })) {
+            (void)x;
+            ++m;
+        }
+        int k = 0;
+        for (int x : v | rv::drop_while([](int y) { return y > 100; })) {
+            (void)x;
+            ++k;
+        }
+        Check(m == 0 && k == 6,
+              "phase146 (9) dropping everything and dropping nothing");
+        // Both adaptors are pipeable and compose.
+        int c = 0;
+        for (int x : v | rv::take_while([](int y) { return y < 4; }) |
+                         rv::transform([](int y) { return y + 1; }))
+            c += x;
+        Check(c == 9, "phase146 (10) they compose in a pipeline");
+    }
+
+    // ── ranges::is_permutation ───────────────────────────────────────────
+    {
+        const std::vector<int> a{1, 2, 3, 4};
+        const std::vector<int> b{4, 3, 2, 1};
+        const std::vector<int> c{1, 2, 3, 5};
+        const std::vector<int> d{1, 2, 3};
+        const std::vector<int> e{1, 1, 2, 2};
+        const std::vector<int> f{1, 2, 2, 2};
+        Check(rg::is_permutation(a, b) && rg::is_permutation(a, a),
+              "phase146 (11) ranges::is_permutation accepts a reordering");
+        Check(!rg::is_permutation(a, c) && !rg::is_permutation(a, d),
+              "phase146 (12) and rejects a different element, and a different length");
+        // The one a set-comparison would get wrong: same values, different
+        // multiplicities.
+        Check(!rg::is_permutation(e, f) &&
+                  rg::is_permutation(e, std::vector<int>{2, 1, 2, 1}),
+              "phase146 (13) multiplicities have to match, not just the values");
+        Check(rg::is_permutation(a.begin(), a.end(), b.begin(), b.end()) &&
+                  rg::is_permutation(a, b, [](int x, int y) { return x == y; }),
+              "phase146 (14) the iterator form and the predicate form");
+        Check(rg::is_permutation(a, std::vector<int>{-4, -3, -2, -1}, {},
+                                 std::identity{}, [](int x) { return -x; }),
+              "phase146 (15) and a projection on the second range");
+        const std::vector<int> z1{}, z2{};
+        Check(rg::is_permutation(z1, z2),
+              "phase146 (16) two empty ranges are permutations of each other");
+    }
+
+    printf("[CXX] PASS phase146: Ф31e-b-2 — transform_view iterates through const, "
+           "take_while and drop_while exist (the latter caching its begin as the "
+           "standard requires), and ranges::is_permutation counts multiplicities\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -36840,6 +36979,7 @@ int main()
     Phase143();
     Phase144();
     Phase145();
+    Phase146();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

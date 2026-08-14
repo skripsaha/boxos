@@ -34,7 +34,7 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 128 |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 158 phases, 4 543 runtime checks, 1 308 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 159 phases, 4 559 runtime checks, 1 312 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -57,7 +57,6 @@ the library itself; there is no "no-exceptions" configuration.
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
-| `views::take_while`, `views::drop_while` | no such name | Both `*_while` adaptors are still missing (§2 `<ranges>`). The seven range-access CPOs they used to be listed with were added in Ф31e-b-1. |
 | `std::sqrt(4)`, `std::pow(2, 3)` | ambiguous, does not compile | `<cmath>` has no promoting overloads for all-integer arguments (§2 `<cmath>`). Pass a floating-point value: `std::sqrt(4.0)`. |
 | a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
 
@@ -503,10 +502,13 @@ nothing has been found since.
   direction is a real cycle). `constant_range` moved there with them. Note that
   `cbegin` *wraps*: per P2278R4 it yields a constant iterator even for a non-const
   range, which a plain `begin()` would not.
-- `–` `views::take_while` and `views::drop_while` do not exist — two core C++20
-  adaptors.
-- `–` `ranges::is_permutation` does not exist (the non-ranges `std::is_permutation`
-  does).
+- `✓` Closed in Ф31e-b-2: `views::take_while` and `views::drop_while` did not
+  exist — two core C++20 adaptors. `drop_while_view` caches its `begin()`, which
+  [range.drop.while]/2 requires rather than suggests: without it `begin()` is O(n)
+  on every call and the view stops meeting the amortized constant the range
+  concept asks for.
+- `✓` Closed in Ф31e-b-2: `ranges::is_permutation` did not exist, though the
+  non-ranges `std::is_permutation` did.
 - `–` The entire `ranges::` uninitialized-memory family does not exist.
 - `–` `ranges::basic_istream_view` / `views::istream` do not exist (they are
   specified against `basic_istream`, whose global objects BoxOS does not have).
@@ -518,10 +520,13 @@ nothing has been found since.
   `iterator_category` sees "input".
 - `~` `filter_view` is not const-iterable. So is the standard's — `filter_view`
   caches `begin()` and has no `begin() const` there either.
-- `–` **`transform_view` is not const-iterable, and that one is a gap.** The
-  standard gives `transform_view` a conditional `begin() const`; boxcxx has a
-  single non-const `begin()`, so `range<const transform_view<…>>` is false and
-  iterating a `const transform_view` fails with "discards qualifiers".
+- `✓` Closed in Ф31e-b-2: `transform_view` was not const-iterable, so
+  `range<const transform_view<…>>` was false and iterating one failed with
+  "discards qualifiers". Its iterator and sentinel now take the `Const` parameter
+  the standard's `iterator<Const>` implies, and `begin()`/`end()` have the
+  conditional `const` overloads of [range.transform.view]. `filter_view` keeps its
+  non-const shape deliberately — it caches `begin()`, and the standard gives it no
+  `begin() const` either (the entry above).
 - `✓` Closed in Ф31e-b-1: `ranges::ssize` existed as an overloaded function
   template rather than a customization-point object, so unlike its twelve siblings
   it could not be passed around as a value or protected from ADL hijacking.
@@ -835,6 +840,8 @@ range-access CPOs, `ssize` as a real CPO, `view_interface::cbegin`/`cend`,
 `owner_less<void>`'s `is_transparent`, and `compare_three_way_result`'s default
 argument — which between them made six feature-test macros honest. Each is marked
 `✓` in §2 with what it used to do, and pinned by cxxtest phases 144 and 145.
+Ф31e-b-2 then added `views::take_while`, `views::drop_while`,
+`ranges::is_permutation` and a const-iterable `transform_view` (phase 146).
 What is left:
 
 The one with real teeth:
@@ -851,9 +858,10 @@ The rest:
   §2 (§2 `<cmath>`).
 - `<algorithm>`: `stable_partition` is annotated `constexpr` but can never be
   constant-evaluated (§2).
-- `<ranges>`: `views::take_while` and `views::drop_while`, `ranges::is_permutation`,
-  a const-iterable `transform_view`, and the whole `ranges::` specialized-memory
-  family are still absent — the remainder of Ф31e-b.
+- `<ranges>`: `views::istream` and its view types, `range_rvalue_reference_t`,
+  `range_common_reference_t`, `subrange`'s two range deduction guides, and the
+  whole `ranges::` specialized-memory family (14 names) are still absent. They are
+  what keeps `__cpp_lib_ranges` unclaimable.
 - `<cmath>`: `std::log10` is inexact on 1 of the 23 exact powers of ten. Measured
   on BoxOS; `box::log(x, 10)` returns 22 of 23 exactly by using `log10` directly.
 - `<iterator>`: `incrementable_traits<common_iterator>` is not specialized. The

@@ -34,13 +34,11 @@ namespace ranges {
 
 namespace __views_detail {
 
-// simple-view ([range.utility.helpers]) — non-const and const share the same
-// iterator/sentinel types, so a non-const begin() can safely hand back a
-// const-flavoured iterator without a caller ever noticing the difference.
-template <typename R>
-concept SimpleView = view<R> && range<const R> &&
-                      same_as<iterator_t<R>, iterator_t<const R>> &&
-                      same_as<sentinel_t<R>, sentinel_t<const R>>;
+// simple-view ([range.utility.helpers]) now lives in <__bits/ranges_views>,
+// which <ranges> includes ahead of this file: take_while_view needs it too,
+// and two definitions of the same concept in one namespace is an error the
+// moment both files are seen. Neither leaf is standalone-includable anyway —
+// both spell `view<R>`, which <ranges> itself defines.
 
 // has-arrow ([range.utility.helpers]) — distinct from CommonIterHasArrow in
 // <iterator>, which adds a third proxy-construction disjunct for a different
