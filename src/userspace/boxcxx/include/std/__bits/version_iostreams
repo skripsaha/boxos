@@ -10,6 +10,12 @@
 // (P2467R1) is a real enumerator now -- __cpp_lib_ios_noreplace.
 // Ф30e commit 4 (sstream stream-wrapper classes + new <iomanip>): quoted
 // is a real, complete [quoted.manip] facility -- __cpp_lib_quoted_string_io.
+//
+// Ф32a: __cpp_lib_sstream_from_string_view is the first C++26 macro this
+// library claims, and it is claimed unconditionally -- see <version>'s
+// preamble for the whole policy. P2495R3 is complete here: all three
+// string_view-like constructors (t / t+which / t+allocator) and the str(t)
+// setter, on basic_stringbuf and on all three stream wrappers.
 #ifndef BOXCXX_BITS_VERSION_IOSTREAMS
 #define BOXCXX_BITS_VERSION_IOSTREAMS
 
@@ -18,6 +24,9 @@
 #endif
 #ifndef __cpp_lib_quoted_string_io
 #  define __cpp_lib_quoted_string_io 201304L
+#endif
+#ifndef __cpp_lib_sstream_from_string_view
+#  define __cpp_lib_sstream_from_string_view 202306L
 #endif
 
 #endif // BOXCXX_BITS_VERSION_IOSTREAMS

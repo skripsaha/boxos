@@ -38424,6 +38424,195 @@ void Phase153()
            "propagating untouched, and pmr::basic_string with u8string and "
            "forward_list\n");
 }
+
+// ── Ф32-a ───────────────────────────────────────────────────────────────
+// An allocator with NO default constructor. This is the entire mutation
+// proof for LWG 2713's initializer-list form, and it works because the bug
+// it catches was never a compile error: without the (init-list, allocator)
+// constructor, `unordered_map<K,V,H,E,A> m(il, a)` STILL compiled -- the
+// braced list built a whole temporary container through the (init-list,
+// buckets = 0, ...) constructor, which default-constructs the allocator,
+// and that temporary then bound to (const unordered_map&, const A&). One
+// extra full construction plus a copy, the first one from the wrong
+// allocator. Delete the default constructor and that path cannot be formed
+// at all, so everything below compiles if and only if the real constructors
+// are present.
+template <class T> struct P154Alloc {
+    using value_type = T;
+    int tag;
+    explicit P154Alloc(int t) noexcept : tag(t) {}
+    template <class U> P154Alloc(const P154Alloc<U> &o) noexcept : tag(o.tag) {}
+    T   *allocate(std::size_t n) { return std::allocator<T>().allocate(n); }
+    void deallocate(T *p, std::size_t n) noexcept { std::allocator<T>().deallocate(p, n); }
+    bool operator==(const P154Alloc &o) const noexcept { return tag == o.tag; }
+};
+
+using P154AP = P154Alloc<std::pair<const int, int>>;
+using P154AK = P154Alloc<int>;
+
+using P154UM  = std::unordered_map<int, int, std::hash<int>, std::equal_to<int>, P154AP>;
+using P154UMM = std::unordered_multimap<int, int, std::hash<int>, std::equal_to<int>, P154AP>;
+using P154US  = std::unordered_set<int, std::hash<int>, std::equal_to<int>, P154AK>;
+using P154UMS = std::unordered_multiset<int, std::hash<int>, std::equal_to<int>, P154AK>;
+
+void Phase154()
+{
+    using namespace std;
+
+    const P154AP ap{7};
+    const P154AK ak{9};
+
+    // ── LWG 2713: the three bucket-less allocator constructors, x4 ────────
+    {
+        vector<pair<int, int>> src{{1, 10}, {2, 20}};
+        P154UM                 a(src.begin(), src.end(), ap);
+        P154UM                 b({{3, 30}, {4, 40}}, ap);
+        P154UM                 c(from_range, src, ap);
+        Check(a.size() == 2 && a.at(2) == 20, "phase154 (1) unordered_map(It, It, alloc)");
+        Check(b.size() == 2 && b.at(4) == 40, "phase154 (2) unordered_map(init-list, alloc)");
+        Check(c.size() == 2 && c.at(1) == 10, "phase154 (3) unordered_map(from_range, r, alloc)");
+        Check(a.get_allocator().tag == 7 && b.get_allocator().tag == 7 &&
+                  c.get_allocator().tag == 7,
+              "phase154 (4) ...and all three kept the allocator they were given");
+
+        P154UMM d(src.begin(), src.end(), ap);
+        P154UMM e({{5, 50}, {5, 51}}, ap);
+        P154UMM f(from_range, src, ap);
+        Check(d.size() == 2 && e.count(5) == 2 && f.size() == 2 &&
+                  e.get_allocator().tag == 7,
+              "phase154 (5) the same three on unordered_multimap");
+
+        vector<int> ks{1, 2, 3};
+        P154US      g(ks.begin(), ks.end(), ak);
+        P154US      h({4, 5}, ak);
+        P154US      i(from_range, ks, ak);
+        Check(g.size() == 3 && h.count(5) == 1 && i.size() == 3 &&
+                  h.get_allocator().tag == 9,
+              "phase154 (6) ...on unordered_set");
+
+        P154UMS j(ks.begin(), ks.end(), ak);
+        P154UMS k({6, 6}, ak);
+        P154UMS l(from_range, ks, ak);
+        Check(j.size() == 3 && k.count(6) == 2 && l.size() == 3 &&
+                  k.get_allocator().tag == 9,
+              "phase154 (7) ...and on unordered_multiset");
+    }
+    // The ordered four have had all three forms since C++23 -- LWG 2713 is
+    // exactly the observation that the unordered four were left behind. Pin
+    // the ordered side too so a future edit cannot quietly take them away.
+    {
+        vector<pair<int, int>>                     src{{1, 10}};
+        map<int, int, less<int>, P154AP>           m(src.begin(), src.end(), ap);
+        map<int, int, less<int>, P154AP>           n({{2, 20}}, ap);
+        map<int, int, less<int>, P154AP>           o(from_range, src, ap);
+        set<int, less<int>, P154AK>                p({1, 2}, ak);
+        Check(m.size() == 1 && n.at(2) == 20 && o.size() == 1 && p.size() == 2 &&
+                  n.get_allocator().tag == 7,
+              "phase154 (8) the ordered containers still have all three");
+    }
+
+    // ── deduction guides ─────────────────────────────────────────────────
+    // The const in value_type = pair<const Key, T> is why these could never
+    // be left to the implicit guides: a braced list of pair<int, int> does
+    // not deduce pair<const Key, T>. Before Ф32-a this line was a hard
+    // error, on both map and unordered_map.
+    {
+        map          m1{pair{1, 2}};
+        multimap     m2{pair{1, 2}};
+        unordered_map      u1{pair{1, 2}};
+        unordered_multimap u2{pair{1, 2}};
+        static_assert(is_same_v<decltype(m1), map<int, int>>,
+                      "phase154 (9) map deduces from an init-list of pairs");
+        static_assert(is_same_v<decltype(m2), multimap<int, int>>,
+                      "phase154 (10) ...and multimap");
+        static_assert(is_same_v<decltype(u1), unordered_map<int, int>>,
+                      "phase154 (11) ...and unordered_map");
+        static_assert(is_same_v<decltype(u2), unordered_multimap<int, int>>,
+                      "phase154 (12) ...and unordered_multimap");
+        Check(m1.at(1) == 2 && u1.at(1) == 2, "phase154 (13) ...and they hold the element");
+    }
+    {
+        // set's value_type IS Key, so `set{1, 2, 3}` always worked -- but
+        // `set({1, 2, 3}, alloc)` was AMBIGUOUS between two implicit guides,
+        // one deducing the allocator as the comparator. The explicit guides
+        // outrank both.
+        set                            s1({1, 2, 3}, P154AK{9});
+        multiset                       s2({1, 1}, P154AK{9});
+        static_assert(is_same_v<decltype(s1), set<int, less<int>, P154AK>>,
+                      "phase154 (14) set({...}, alloc) picks the allocator guide");
+        static_assert(is_same_v<decltype(s2), multiset<int, less<int>, P154AK>>,
+                      "phase154 (15) ...and multiset");
+        Check(s1.size() == 3 && s2.size() == 2, "phase154 (16) ...and they are built");
+    }
+    {
+        vector<pair<int, int>> vp{{1, 2}};
+        vector<int>            vi{1, 2, 3};
+        // The CTAD half of LWG 2713: [unord.map.syn] has listed these guides
+        // all along, for constructors that did not exist until now. A guide
+        // with no constructor behind it is two gaps, not one.
+        unordered_map      g1(vp.begin(), vp.end(), ap);
+        unordered_map      g2(from_range, vp, ap);
+        unordered_multimap g3(vp.begin(), vp.end(), ap);
+        unordered_set      g4(vi.begin(), vi.end(), ak);
+        unordered_set      g5(from_range, vi, ak);
+        unordered_multiset g6(from_range, vi, ak);
+        static_assert(is_same_v<decltype(g1), P154UM>, "phase154 (17) unordered_map(It, It, alloc)");
+        static_assert(is_same_v<decltype(g2), P154UM>,
+                      "phase154 (18) unordered_map(from_range, r, alloc)");
+        static_assert(is_same_v<decltype(g3), P154UMM>, "phase154 (19) multimap iterator form");
+        static_assert(is_same_v<decltype(g4), P154US>, "phase154 (20) unordered_set(It, It, alloc)");
+        static_assert(is_same_v<decltype(g5), P154US>, "phase154 (21) set from_range form");
+        static_assert(is_same_v<decltype(g6), P154UMS>, "phase154 (22) multiset from_range form");
+        Check(g1.size() == 1 && g4.size() == 3 && g6.size() == 3,
+              "phase154 (23) ...and every one of them is populated");
+    }
+
+    // ── P2495R3: string_view-like sources for the string streams ─────────
+    {
+        string_view sv{"42 rest"};
+        // The (t, allocator) form is the one that did not exist: an allocator
+        // does not convert to openmode, so it bound to nothing at all.
+        stringbuf     sb(sv, allocator<char>{});
+        istringstream is(sv, allocator<char>{});
+        ostringstream os(sv, allocator<char>{});
+        stringstream  ss(sv, allocator<char>{});
+        int           n = 0;
+        is >> n;
+        Check(sb.str() == "42 rest" && n == 42 && os.str() == "42 rest" &&
+                  ss.str() == "42 rest",
+              "phase154 (24) stringbuf and all three streams take (string_view, alloc)");
+
+        // Non-explicit three-argument form: this is copy-list-initialization,
+        // ill-formed if the constructor is explicit. Splitting the collapsed
+        // (t, which = ..., a = ...) constructor into the standard's three is
+        // what makes these compile.
+        stringbuf     sb2 = {sv, ios_base::in, allocator<char>{}};
+        istringstream is2 = {sv, ios_base::in, allocator<char>{}};
+        Check(sb2.str() == "42 rest" && is2.rdbuf()->str() == "42 rest",
+              "phase154 (25) ...and the three-argument form is not explicit");
+
+        // The two-argument (t, which) form IS explicit, and stays that way.
+        static_assert(!is_convertible_v<string_view, stringbuf>,
+                      "phase154 (26) stringbuf(string_view) stays explicit");
+        static_assert(!is_convertible_v<string_view, istringstream>,
+                      "phase154 (27) ...and so does istringstream's");
+
+        // str(t) takes the same sources.
+        sb.str(sv.substr(3));
+        Check(sb.str() == "rest", "phase154 (28) str(string_view-like) setter");
+    }
+    static_assert(__cpp_lib_sstream_from_string_view == 202306L,
+                  "phase154 (29) P2495R3 is complete, so the macro is claimed -- "
+                  "the first C++26 macro boxcxx defines");
+
+    printf("[CXX] PASS phase154: Ф32-a — LWG 2713's twelve bucket-less allocator "
+           "constructors (the init-list one silently built a temporary from the "
+           "wrong allocator before), the initializer-list deduction guides that "
+           "const Key made impossible to synthesize, the allocator guides that "
+           "had no constructors behind them, and P2495R3 split into the "
+           "standard's three constructors so the three-argument one stops being "
+           "explicit\n");
+}
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -38599,6 +38788,7 @@ int main()
     Phase151();
     Phase152();
     Phase153();
+    Phase154();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

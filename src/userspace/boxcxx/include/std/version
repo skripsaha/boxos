@@ -11,18 +11,32 @@
 // single macro directly, a separate, pre-existing pattern this file
 // doesn't change.
 //
-// Every value here is the C++23 value, cross-checked against N4950's own
-// [version.syn] (the C++23 standard) and against libstdc++'s
-// bits/version.def. C++23 is the target even where a reference library
-// ships a later, DR-applied C++26 value: __cpp_lib_bind_back stays 202202L
-// (not P2714's 202306L), __cpp_lib_out_ptr stays 202106L (not P2833's
-// 202311L), __cpp_lib_constexpr_algorithms stays 201806L (not P2562's
-// 202306L). Two C++26 features ARE in the tree by explicit owner decision
-// — P2510R3's pointer '0' presentation and
-// enable_nonlocking_formatter_optimization with its [time.format] /
-// [format.tuple] rules — but they would only bump __cpp_lib_format and
-// __cpp_lib_format_ranges, both of which are pinned at (or, for format,
-// excluded from) their C++23 state; boxcxx does not claim C++26 anywhere.
+// The baseline is C++23: every value is cross-checked against N4950's own
+// [version.syn] and against libstdc++'s bits/version.def, and a macro whose
+// C++26 feature is not implemented keeps its C++23 value rather than the
+// later, DR-applied one a reference library may ship (__cpp_lib_out_ptr
+// stays 202106L, not P2833's 202311L; __cpp_lib_bind_back stays 202202L,
+// not P2714's 202306L).
+//
+// On top of that baseline boxcxx implements named C++26 features, and from
+// Ф32 on it CLAIMS THEIR MACROS — unconditionally, with no __cplusplus
+// gate. That is a deliberate deviation from both reference libraries, which
+// hide every C++26 macro behind `__cplusplus > 202302L`, and the reason is
+// what a feature-test macro is for: it answers "does the library in front
+// of me have this?", not "which -std did you pass?". boxcxx is compiled at
+// -std=gnu++23 and std::views::concat is genuinely reachable there, so
+// hiding the macro would be a lie by omission — the far worse direction of
+// the two. libstdc++ and libc++ gate because they must not put C++26 names
+// into a strictly-conforming C++23 program; boxcxx is the single library of
+// a single target and has no such second audience.
+//
+// This is not a new posture so much as an honest one: three C++26 features
+// were already in the tree by owner decision before Ф32 — P2510R3's pointer
+// '0' presentation, enable_nonlocking_formatter_optimization with its
+// [time.format] / [format.tuple] rules, and P2495R3's string_view-like
+// basic_stringbuf constructors — the library simply stayed silent about
+// them. Every C++26 macro that IS claimed names its paper at the definition
+// site in the owning leaf.
 //
 // A macro appears here only if the feature it names is COMPLETE. A macro
 // that overstates is worse than a missing one: it makes portable code take
@@ -92,6 +106,12 @@
 // because the owning header does not exist — with the exact reason. This
 // list is the backlog: when the reason is fixed, the macro moves into the
 // owning header's leaf.
+//
+// C++26 macros are NOT listed here. This list is the C++23 backlog and is
+// meant to be finishable; the C++26 surface is an open frontier, and
+// enumerating everything not yet built there would say nothing an absent
+// macro does not already say. A C++26 macro is defined here only once its
+// feature is complete, by the same rule as everything else.
 //
 // algorithm_iterator_requirements
 //     P2408R5 is a pure requirements relaxation spanning every algorithm

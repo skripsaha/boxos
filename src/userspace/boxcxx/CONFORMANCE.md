@@ -14,6 +14,14 @@ wrong.
 **Working reference:** ISO/IEC 14882 C++23, document N4950. Where a rule comes
 from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 
+**C++26 on top of that baseline.** From Ф32 boxcxx implements named C++26
+features and *claims their feature-test macros*, unconditionally — there is no
+`__cplusplus` gate, and the library is still compiled at `-std=gnu++23`. Both
+reference implementations hide every C++26 macro behind `__cplusplus > 202302L`;
+this is a deliberate deviation, and the reasoning is in §1.3. Each such macro
+names its paper where it is defined. C++23 remains the baseline: a macro whose
+C++26 feature is *not* implemented keeps its C++23 value.
+
 ## How to read the per-header entries
 
 | Mark | Meaning |
@@ -32,9 +40,9 @@ from a later draft (C++26) and was adopted anyway, that is stated at the entry.
 | C++23 headers provided | **74**; 31 absent (§1) |
 | Internal implementation leaves (`include/std/__bits/`) | 95 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 164 |
+| Feature-test macros defined | 165 (164 C++23 + 1 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 165 phases, 4 697 runtime checks, 1 431 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 170 phases, 4 711 runtime checks, 1 446 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
@@ -129,11 +137,13 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **164** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **165** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
-- **Every one carries its N4950 value.** No macro is defined at a later
-  revision's value, and no macro is defined that N4950 does not name.
+- **Every C++23 macro carries its N4950 value**, and none is defined at a later
+  revision's value. The exceptions are the macros of *implemented C++26
+  features*, which carry their C++26 value and are listed at the end of this
+  section; there is exactly one so far.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
   cross-product of macros and headers, in both directions, with no failures. This
@@ -172,6 +182,25 @@ specifies:
 | `__cpp_lib_out_ptr` | **202106** | 202311 (P2833R2, post-N4950) | 202106 |
 | `__cpp_lib_flat_map` | **202207** | 202207 | 202511 (a later DR) |
 | `__cpp_lib_shift` | **202202** | 202202 | 201806 |
+
+**On claiming C++26 macros anyway.** The rule above is about a macro whose C++26
+*feature is not implemented*: it keeps its C++23 value, because raising it would
+be a claim the library cannot honour. When the feature *is* implemented the
+opposite argument applies, and boxcxx defines the macro — with no `__cplusplus`
+gate, even though the library is compiled at `-std=gnu++23`. A feature-test macro
+answers "does the library in front of me have this?", not "which `-std` did you
+pass?"; `std::stringbuf(sv, alloc)` is genuinely reachable at `-std=gnu++23`
+here, so hiding the macro would be a lie by omission, which is the worse of the
+two directions. The reference libraries gate because they must not put C++26
+names into a strictly-conforming C++23 program; boxcxx is the single library of a
+single target and has no such second audience. Three C++26 features were in the
+tree before this policy existed (P2510R3's pointer `0` presentation,
+`enable_nonlocking_formatter_optimization`, and P2495R3's `basic_stringbuf`
+constructors) — the library simply stayed silent about them.
+
+| C++26 macro claimed | Value | Paper | Since |
+|---|---|---|---|
+| `__cpp_lib_sstream_from_string_view` | 202306 | P2495R3 | Ф32-a |
 
 # 2. Per-header deviations
 
@@ -529,6 +558,33 @@ nothing has been found since.
   bound the rvalue to the const reference, and **copied the key** — which is the
   entire reason the rvalue overload exists. `try_emplace` was missing its two
   hint forms as well. Closed `__cpp_lib_unordered_map_try_emplace`.
+- `✓` Closed in Ф32-a, and this one also answered in silence: **the four
+  `unordered_*` containers had none of LWG 2713's three bucket-less
+  allocator constructors** — `(first, last, alloc)`, `(init-list, alloc)`,
+  `(from_range, r, alloc)` — which the four ordered containers have had all
+  along. Two of the three simply failed to compile. The init-list one did not:
+  with no such constructor, the braced list implicitly built a *whole temporary
+  container* through `(init-list, buckets = 0, ...)`, which **default-constructs
+  the allocator**, and that temporary then bound to `(const unordered_map&,
+  const Alloc&)`. An extra full construction plus a copy, the first one taken
+  from the wrong allocator — for a `pmr` container, from the default resource.
+  Pinned with an allocator that has no default constructor, which makes the old
+  path impossible to form.
+- `✓` Closed in Ф32-a: **no associative container had a single
+  `initializer_list` deduction guide**, and for the four `pair`-keyed ones that
+  was not a redundancy. `value_type` is `pair<const Key, T>`, so no implicit
+  guide can deduce `Key` and `T` from a braced list of `pair<int, int>`, and
+  `std::map m{std::pair{1, 2}}` was a hard error — while `std::set s{1, 2, 3}`
+  always worked, because `set`'s `value_type` *is* `Key`. `set` was not
+  unaffected either: `std::set s({1, 2, 3}, alloc)` was **ambiguous**, one
+  implicit guide deducing the allocator as the comparator. The standard's
+  `NotAllocatorLike` split on the comparator slot is exactly what breaks that
+  tie.
+- `✓` Closed in Ф32-a: the bucket-less allocator *guides* of
+  [unord.map.syn] / [unord.set.syn] were missing too — the standard has listed
+  them all along, for constructors that did not exist here. A guide with no
+  constructor behind it is two gaps, not one; the same shape as `subrange`'s
+  range guides in Ф31e-e.
 - `~` The move constructors of `map`, `set` and the `unordered_*` family are
   hard-coded `noexcept` even when the comparator or hasher has a throwing move,
   so such a move terminates instead of propagating. Both reference libraries
@@ -826,6 +882,25 @@ nothing has been found since.
   `std::span(v)` over a vector could not deduce at all. **This document's claim
   that span had no `crbegin`/`crend` was wrong** — both were there. Closed
   `__cpp_lib_span`.
+
+## `<sstream>`
+
+- `✓` Closed in Ф32-a: **P2495R3 is complete and its macro is claimed** — the
+  first C++26 macro boxcxx defines (§1.3). The string_view-like constructors had
+  been in the tree since Ф30e as a silent early superset, but collapsed: one
+  constructor with two defaulted parameters instead of the standard's three.
+  That cost two things. The `(t, allocator)` form did not exist at all — an
+  allocator does not convert to `openmode`, so the call bound to nothing — and
+  the three-argument form was `explicit`, which the synopsis does not make it,
+  so `basic_stringbuf<char> b = {sv, mode, alloc}` was rejected although
+  copy-list-initialization is well-formed there. Split into the standard's three
+  on `basic_stringbuf` and on all three stream wrappers; the two-argument
+  `(t, which)` form stays `explicit`, and the suite pins that it does.
+- `+` The constraint boxcxx uses is the standard's, in full:
+  `is_convertible_v<const T&, basic_string_view<charT, traits>>` **and**
+  `!is_convertible_v<const T&, const charT*>`. libstdc++ 16.1 writes only the
+  first half (measured in its `<sstream>`), so boxcxx rejects a source the
+  standard also means to keep out of these overloads and libstdc++ accepts.
 
 ## `<string>`
 
@@ -1289,6 +1364,21 @@ template they are spelled through, so `pmr::u8string` was missing with it, and
 in the same step: C++23 does not ask for it (P2562R1 is C++26), and
 `ranges::stable_partition` beside it already said so.
 
+Ф32-a opened the C++26 uplift (phase 154). Its three pieces share one shape:
+a promise written down and never wired up. LWG 2713's bucket-less allocator
+constructors were missing from all four `unordered_*` containers while the
+deduction guides for them had been standardised anyway — and the
+`initializer_list` one of the three was not a compile error but a **silent
+detour**, building a temporary container through a default-constructed allocator
+and copying it. No associative container had an `initializer_list` deduction
+guide at all, which the `const` in `pair<const Key, T>` turns from a redundancy
+into `std::map m{std::pair{1, 2}}` not compiling, and which left
+`std::set s({1, 2, 3}, alloc)` ambiguous besides. And P2495R3, in the tree since
+Ф30e as an unannounced superset, was collapsed into one constructor where the
+standard has three, which cost the `(t, allocator)` form entirely and made the
+three-argument form `explicit`. Splitting it finished the paper, and its macro
+is the first C++26 one this library claims (§1.3).
+
 What is left:
 
 - `<ranges>`: **every entity `__cpp_lib_ranges` promises now exists** (Ф31e-e),
@@ -1365,7 +1455,10 @@ recalled: **phases** are the `Phase*()` entry points `main` invokes, plus phase 
 which is proven by its translation unit linking at all rather than by a call;
 **runtime checks** are `Check(` call sites; **`static_assert`s** are occurrences
 of the keyword. Two of the three figures had drifted before Ф31e-d and were
-re-measured there. The macro count is the one a translation unit actually sees:
+re-measured there; the phase figure had drifted again by Ф32-a — the rule above
+yields 170, not the 166 that incrementing the recorded 165 would have given — so
+it is stated here as measured rather than as carried forward. The other two
+reproduced exactly. The macro count is the one a translation unit actually sees:
 `-dM -E` over a file containing only `#include <version>`, counting
 `__cpp_lib_` defines — not a grep of the leaf files, which undercounts by one
 because two macros are self-declared rather than defined in a leaf.

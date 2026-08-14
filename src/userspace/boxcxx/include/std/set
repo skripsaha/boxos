@@ -730,6 +730,26 @@ template <ranges::input_range R, AllocatorLike Alloc>
 multiset(from_range_t, R &&, Alloc)
     -> multiset<ranges::range_value_t<R>, less<ranges::range_value_t<R>>, Alloc>;
 
+// Initializer-list guides ([set.deduct] / [multiset.deduct]). set's
+// value_type IS Key, so the implicit guides already deduced `set s{1, 2, 3}`
+// correctly -- but not `set s({1, 2, 3}, alloc)`, which was AMBIGUOUS: the
+// implicit guide off (init-list, const Comp&, const Alloc& = ) deduced
+// Comp = the allocator, and the one off (init-list, const Alloc&) deduced
+// Alloc = the allocator, with nothing to separate them. NotAllocatorLike on
+// the Comp slot below is what the standard uses to break exactly that tie,
+// and an explicit guide outranks an implicit one, so these settle it.
+template <typename Key, NotAllocatorLike Comp = less<Key>, typename Alloc = allocator<Key>>
+set(initializer_list<Key>, Comp = Comp(), Alloc = Alloc()) -> set<Key, Comp, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+set(initializer_list<Key>, Alloc) -> set<Key, less<Key>, Alloc>;
+
+template <typename Key, NotAllocatorLike Comp = less<Key>, typename Alloc = allocator<Key>>
+multiset(initializer_list<Key>, Comp = Comp(), Alloc = Alloc()) -> multiset<Key, Comp, Alloc>;
+
+template <typename Key, AllocatorLike Alloc>
+multiset(initializer_list<Key>, Alloc) -> multiset<Key, less<Key>, Alloc>;
+
 } // namespace std
 
 #endif // BOXCXX_SET

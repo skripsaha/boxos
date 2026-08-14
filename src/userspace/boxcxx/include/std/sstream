@@ -111,10 +111,28 @@ public:
         ResetPositions();
     }
 
+    // P2495R3 [stringbuf.cons]. Three separate constructors, not one with two
+    // defaulted parameters: only the (t, which) form is explicit. Collapsing
+    // them made the three-argument form explicit too, which rejects
+    // `basic_stringbuf<char> b = {sv, mode, alloc}` -- well-formed
+    // copy-list-initialization per the synopsis. The (t, alloc) form did not
+    // exist at all: an allocator does not convert to openmode, so it bound to
+    // nothing.
     template <typename SV>
         requires IsViewLike<SV>
-    explicit basic_stringbuf(const SV &t, ios_base::openmode which = ios_base::in | ios_base::out,
-                             const Allocator &a = Allocator())
+    explicit basic_stringbuf(const SV &t, ios_base::openmode which = ios_base::in | ios_base::out)
+        : basic_stringbuf(t, which, Allocator())
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_stringbuf(const SV &t, const Allocator &a)
+        : basic_stringbuf(t, ios_base::in | ios_base::out, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_stringbuf(const SV &t, ios_base::openmode which, const Allocator &a)
         : __mode(which), __buf(__view(t), a)
     {
         ResetPositions();
@@ -471,8 +489,18 @@ public:
     }
     template <typename SV>
         requires IsViewLike<SV>
-    explicit basic_istringstream(const SV &t, ios_base::openmode which = ios_base::in,
-                                  const Allocator &a = Allocator())
+    explicit basic_istringstream(const SV &t, ios_base::openmode which = ios_base::in)
+        : basic_istringstream(t, which, Allocator())
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_istringstream(const SV &t, const Allocator &a) : basic_istringstream(t, ios_base::in, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_istringstream(const SV &t, ios_base::openmode which, const Allocator &a)
         : basic_istream<CharT, Traits>(&sb_), sb_(t, which | ios_base::in, a)
     {
     }
@@ -586,8 +614,18 @@ public:
     }
     template <typename SV>
         requires IsViewLike<SV>
-    explicit basic_ostringstream(const SV &t, ios_base::openmode which = ios_base::out,
-                                  const Allocator &a = Allocator())
+    explicit basic_ostringstream(const SV &t, ios_base::openmode which = ios_base::out)
+        : basic_ostringstream(t, which, Allocator())
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_ostringstream(const SV &t, const Allocator &a) : basic_ostringstream(t, ios_base::out, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_ostringstream(const SV &t, ios_base::openmode which, const Allocator &a)
         : basic_ostream<CharT, Traits>(&sb_), sb_(t, which | ios_base::out, a)
     {
     }
@@ -703,8 +741,19 @@ public:
     template <typename SV>
         requires IsViewLike<SV>
     explicit basic_stringstream(const SV &t,
-                                 ios_base::openmode which = ios_base::out | ios_base::in,
-                                 const Allocator &a = Allocator())
+                                 ios_base::openmode which = ios_base::out | ios_base::in)
+        : basic_stringstream(t, which, Allocator())
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_stringstream(const SV &t, const Allocator &a)
+        : basic_stringstream(t, ios_base::out | ios_base::in, a)
+    {
+    }
+    template <typename SV>
+        requires IsViewLike<SV>
+    basic_stringstream(const SV &t, ios_base::openmode which, const Allocator &a)
         : basic_iostream<CharT, Traits>(&sb_), sb_(t, which, a)
     {
     }
