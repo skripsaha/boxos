@@ -10,13 +10,21 @@
 #include <__bits/iterator_core>
 #include <__bits/ranges_core>
 #include <__bits/throw_helpers>
-#include <__bits/version_containers>
 #include <algorithm>
 #include <compare>
 #include <cstddef>
 #include <initializer_list>
 #include <type_traits>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_allocator_traits_is_always_equal
+#define BOXCXX_OWNS_containers_ranges
+#define BOXCXX_OWNS_erase_if
+#include <__bits/version_containers>
+#define BOXCXX_OWNS_nonmember_container_access
+#include <__bits/version_iterator>
 
 namespace std {
 

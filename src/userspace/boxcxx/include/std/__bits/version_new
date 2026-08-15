@@ -1,17 +1,28 @@
 // boxcxx — <__bits/version_new>
 //
 // The feature-test macros [version.syn] owned by <new>.
-#ifndef BOXCXX_BITS_VERSION_NEW
-#define BOXCXX_BITS_VERSION_NEW
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_destroying_delete
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_destroying_delete)) && \
+    !defined(__cpp_lib_destroying_delete)
 #  define __cpp_lib_destroying_delete 201806L
 #endif
-#ifndef __cpp_lib_hardware_interference_size
+#undef BOXCXX_OWNS_destroying_delete
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_hardware_interference_size)) && \
+    !defined(__cpp_lib_hardware_interference_size)
 #  define __cpp_lib_hardware_interference_size 201703L
 #endif
-#ifndef __cpp_lib_launder
+#undef BOXCXX_OWNS_hardware_interference_size
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_launder)) && \
+    !defined(__cpp_lib_launder)
 #  define __cpp_lib_launder 201606L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_NEW
+#undef BOXCXX_OWNS_launder

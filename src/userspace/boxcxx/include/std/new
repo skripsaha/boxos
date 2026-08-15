@@ -4,6 +4,12 @@
 
 #include <cstddef>
 #include <exception>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_destroying_delete
+#define BOXCXX_OWNS_hardware_interference_size
+#define BOXCXX_OWNS_launder
 #include <__bits/version_new>
 
 namespace std {

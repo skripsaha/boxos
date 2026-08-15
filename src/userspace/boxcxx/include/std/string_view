@@ -24,6 +24,13 @@
 #include <iosfwd>
 #include <type_traits>
 
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constexpr_string_view
+#define BOXCXX_OWNS_starts_ends_with
+#define BOXCXX_OWNS_string_contains
+#define BOXCXX_OWNS_string_subview
+#define BOXCXX_OWNS_string_view
 #include <__bits/version_string>
 
 namespace std {

@@ -4,30 +4,45 @@
 // split out for the same [support.limits.general] per-header reason as
 // <__bits/version_ranges>/<__bits/version_algorithm> -- see those files'
 // comments.
-#ifndef BOXCXX_BITS_VERSION_NUMERIC
-#define BOXCXX_BITS_VERSION_NUMERIC
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_gcd_lcm
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_gcd_lcm)) && \
+    !defined(__cpp_lib_gcd_lcm)
 #  define __cpp_lib_gcd_lcm 201606L
 #endif
-#ifndef __cpp_lib_interpolate
+#undef BOXCXX_OWNS_gcd_lcm
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_interpolate)) && \
+    !defined(__cpp_lib_interpolate)
 // P0811R3, co-owned with <cmath> -- see the note there. midpoint is this
 // header's half of the paper.
 #  define __cpp_lib_interpolate 201902L
 #endif
-#ifndef __cpp_lib_constexpr_numeric
+#undef BOXCXX_OWNS_interpolate
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_numeric)) && \
+    !defined(__cpp_lib_constexpr_numeric)
 #  define __cpp_lib_constexpr_numeric 201911L
 #endif
-#ifndef __cpp_lib_ranges_iota
+#undef BOXCXX_OWNS_constexpr_numeric
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_iota)) && \
+    !defined(__cpp_lib_ranges_iota)
 #  define __cpp_lib_ranges_iota 202202L
 #endif
+#undef BOXCXX_OWNS_ranges_iota
 
 // P0543R3 (C++26, Ф32-e): add_sat / sub_sat / mul_sat / div_sat /
 // saturate_cast. 202311L is P0543R3's own value; the current working draft
 // carries 202603L for a later paper this does not implement, and a macro names
 // the newest feature actually present.
-#ifndef __cpp_lib_saturation_arithmetic
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_saturation_arithmetic)) && \
+    !defined(__cpp_lib_saturation_arithmetic)
 #  define __cpp_lib_saturation_arithmetic 202311L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_NUMERIC
+#undef BOXCXX_OWNS_saturation_arithmetic

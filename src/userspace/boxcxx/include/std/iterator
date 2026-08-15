@@ -28,7 +28,6 @@
 #include <new>
 #include <type_traits>
 #include <utility>
-#include <__bits/version_iterator>
 
 namespace std {
 
@@ -693,6 +692,17 @@ concept indirectly_movable_storable =
 // ranges_core's own #include <iterator> is a no-op re-entry: BOXCXX_ITERATOR
 // is already defined at this point in this file's own processing.
 #include <__bits/ranges_core>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_array_constexpr
+#define BOXCXX_OWNS_constexpr_iterator
+#define BOXCXX_OWNS_make_reverse_iterator
+#define BOXCXX_OWNS_move_iterator_concept
+#define BOXCXX_OWNS_nonmember_container_access
+#define BOXCXX_OWNS_null_iterators
+#define BOXCXX_OWNS_ssize
+#include <__bits/version_iterator>
 
 namespace std {
 

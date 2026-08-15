@@ -27,6 +27,10 @@
 #include <type_traits>
 
 #include "box/core/strand_self.h"   // strand_self — the running strand's pid
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_jthread
 #include <__bits/version_thread>
 
 namespace std {

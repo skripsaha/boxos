@@ -1,23 +1,38 @@
 // boxcxx — <__bits/version_bit>
 //
 // The feature-test macros [version.syn] owned by <bit>.
-#ifndef BOXCXX_BITS_VERSION_BIT
-#define BOXCXX_BITS_VERSION_BIT
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_bit_cast
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bit_cast)) && \
+    !defined(__cpp_lib_bit_cast)
 #  define __cpp_lib_bit_cast 201806L
 #endif
-#ifndef __cpp_lib_bitops
+#undef BOXCXX_OWNS_bit_cast
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bitops)) && \
+    !defined(__cpp_lib_bitops)
 #  define __cpp_lib_bitops 201907L
 #endif
-#ifndef __cpp_lib_byteswap
+#undef BOXCXX_OWNS_bitops
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_byteswap)) && \
+    !defined(__cpp_lib_byteswap)
 #  define __cpp_lib_byteswap 202110L
 #endif
-#ifndef __cpp_lib_endian
+#undef BOXCXX_OWNS_byteswap
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_endian)) && \
+    !defined(__cpp_lib_endian)
 #  define __cpp_lib_endian 201907L
 #endif
-#ifndef __cpp_lib_int_pow2
+#undef BOXCXX_OWNS_endian
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_int_pow2)) && \
+    !defined(__cpp_lib_int_pow2)
 #  define __cpp_lib_int_pow2 202002L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_BIT
+#undef BOXCXX_OWNS_int_pow2

@@ -18,6 +18,10 @@
 #include <new>
 #include <type_traits>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_optional
 #include <__bits/version_optional>
 
 namespace std {

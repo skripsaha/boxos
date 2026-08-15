@@ -10,8 +10,15 @@
 // the basic_string predicate overload, the last of the thirteen.
 //
 // Deliberately absent (see <version>'s list): constexpr_string, char8_t.
-#ifndef BOXCXX_BITS_VERSION_STRING
-#define BOXCXX_BITS_VERSION_STRING
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
 // 201803L is this macro's C++23 value, and its C++20 one — C++23 never bumped
 // it, even though [string.view.synop] gained the It/End and range constructors
@@ -19,32 +26,46 @@
 // has ever carried in any revision (libstdc++ knows only 201803L and C++26's
 // 202403L); it was a transcription error, not a claim. Corrected in Ф32-i,
 // together with the two constructors that were genuinely missing.
-#ifndef __cpp_lib_string_view
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_view)) && \
+    !defined(__cpp_lib_string_view)
 #  define __cpp_lib_string_view 201803L
 #endif
-#ifndef __cpp_lib_string_resize_and_overwrite
+#undef BOXCXX_OWNS_string_view
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_resize_and_overwrite)) && \
+    !defined(__cpp_lib_string_resize_and_overwrite)
 #  define __cpp_lib_string_resize_and_overwrite 202110L
 #endif
-#ifndef __cpp_lib_erase_if
+#undef BOXCXX_OWNS_string_resize_and_overwrite
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_erase_if)) && \
+    !defined(__cpp_lib_erase_if)
 #  define __cpp_lib_erase_if 202002L
 #endif
+#undef BOXCXX_OWNS_erase_if
 
-#ifndef __cpp_lib_constexpr_string_view
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_string_view)) && \
+    !defined(__cpp_lib_constexpr_string_view)
 #  define __cpp_lib_constexpr_string_view 201811L
 #endif
-#ifndef __cpp_lib_starts_ends_with
+#undef BOXCXX_OWNS_constexpr_string_view
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_starts_ends_with)) && \
+    !defined(__cpp_lib_starts_ends_with)
 #  define __cpp_lib_starts_ends_with 201711L
 #endif
-#ifndef __cpp_lib_string_contains
+#undef BOXCXX_OWNS_starts_ends_with
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_contains)) && \
+    !defined(__cpp_lib_string_contains)
 #  define __cpp_lib_string_contains 202011L
 #endif
-#ifndef __cpp_lib_string_udls
+#undef BOXCXX_OWNS_string_contains
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_udls)) && \
+    !defined(__cpp_lib_string_udls)
 #  define __cpp_lib_string_udls 201304L
 #endif
+#undef BOXCXX_OWNS_string_udls
 
 // P3044R2 (C++26, Ф32-e): basic_string::subview and basic_string_view::subview.
-#ifndef __cpp_lib_string_subview
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_subview)) && \
+    !defined(__cpp_lib_string_subview)
 #  define __cpp_lib_string_subview 202506L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_STRING
+#undef BOXCXX_OWNS_string_subview

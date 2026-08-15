@@ -1,17 +1,26 @@
 // boxcxx — <__bits/version_exception>
 //
 // The feature-test macro [version.syn] owned by <exception>.
-#ifndef BOXCXX_BITS_VERSION_EXCEPTION
-#define BOXCXX_BITS_VERSION_EXCEPTION
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_uncaught_exceptions
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_uncaught_exceptions)) && \
+    !defined(__cpp_lib_uncaught_exceptions)
 #  define __cpp_lib_uncaught_exceptions 201411L
 #endif
+#undef BOXCXX_OWNS_uncaught_exceptions
 
 // P2927R3 (C++26, Ф32-f): exception_ptr_cast, which asks the runtime the same
 // question the personality routine asks instead of rethrowing to find out.
-#ifndef __cpp_lib_exception_ptr_cast
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_exception_ptr_cast)) && \
+    !defined(__cpp_lib_exception_ptr_cast)
 #  define __cpp_lib_exception_ptr_cast 202506L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_EXCEPTION
+#undef BOXCXX_OWNS_exception_ptr_cast

@@ -7,7 +7,6 @@
 #define BOXCXX_ALGORITHM
 
 #include <__bits/algorithm_classic>
-#include <__bits/version_algorithm>
 
 // The ranges:: constrained algorithms ([algorithms.results] + the niebloids)
 // build on everything above plus the Ф29a indirect-callable foundation. Order
@@ -19,6 +18,20 @@
 #include <__bits/ranges_algo_mut>   // [alg.modifying] + sample/shuffle    (Ф29b-2)
 #include <__bits/ranges_algo_sort>  // partition/sort/heap/permutation     (Ф29b-2)
 #include <__bits/ranges_algo_set>   // merge + set operations              (Ф29b-2)
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_clamp
+#define BOXCXX_OWNS_ranges_contains
+#define BOXCXX_OWNS_ranges_find_last
+#define BOXCXX_OWNS_ranges_fold
+#define BOXCXX_OWNS_ranges_starts_ends_with
+#define BOXCXX_OWNS_robust_nonmodifying_seq_ops
+#define BOXCXX_OWNS_sample
+#define BOXCXX_OWNS_shift
+#include <__bits/version_algorithm>
+#define BOXCXX_OWNS_constexpr_algorithms
+#include <__bits/version_utility>
 
 // ── [alg.random.sample] / [alg.random.shuffle], classic spelling ────────
 // The ranges:: forms have been here since Ф29b-2 and the classic ones never

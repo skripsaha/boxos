@@ -23,6 +23,10 @@
 #include "box/system.h"             // sysinfo / system_info_t (hardware_concurrency)
 #include "box/core/strand_self.h"   // strand_self — this_thread::get_id
 #include "box/cxx/tls_strand.h"     // per-strand thread_local bootstrap the trampoline drives
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_jthread
 #include <__bits/version_thread>
 
 // box::strand::completion() (Ф24b co_await join) reads this thread's join flag

@@ -3,11 +3,18 @@
 // The __cpp_lib_* feature-test macro [version.syn] owned by <flat_map> --
 // split out for the same [support.limits.general] per-header reason as
 // <__bits/version_any> -- see that file's comments.
-#ifndef BOXCXX_BITS_VERSION_FLAT_MAP
-#define BOXCXX_BITS_VERSION_FLAT_MAP
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_flat_map
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_flat_map)) && \
+    !defined(__cpp_lib_flat_map)
 #  define __cpp_lib_flat_map 202207L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_FLAT_MAP
+#undef BOXCXX_OWNS_flat_map

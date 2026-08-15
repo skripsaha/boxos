@@ -17,6 +17,11 @@
 #include <utility>
 
 #include "box/sync.h" // umutex_t for synchronized_pool_resource
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_memory_resource
+#define BOXCXX_OWNS_polymorphic_allocator
 #include <__bits/version_memory_resource>
 
 namespace std::pmr {

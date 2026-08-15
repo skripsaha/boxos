@@ -11,7 +11,6 @@
 #define BOXCXX_RANGES
 
 #include <__bits/ranges_core>
-#include <__bits/version_ranges>
 #include <concepts>
 #include <cstddef>
 #include <iterator>
@@ -191,6 +190,27 @@ using range_const_reference_t = iter_const_reference_t<iterator_t<R>>;
 // can actually call it has a stream, and therefore has <istream> or
 // <sstream> included already.
 #include <iosfwd>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_ranges_as_const
+#define BOXCXX_OWNS_ranges_as_input
+#define BOXCXX_OWNS_ranges_as_rvalue
+#define BOXCXX_OWNS_ranges_cache_latest
+#define BOXCXX_OWNS_ranges_cartesian_product
+#define BOXCXX_OWNS_ranges_chunk
+#define BOXCXX_OWNS_ranges_chunk_by
+#define BOXCXX_OWNS_ranges_concat
+#define BOXCXX_OWNS_ranges_enumerate
+#define BOXCXX_OWNS_ranges_join_with
+#define BOXCXX_OWNS_ranges_repeat
+#define BOXCXX_OWNS_ranges_reserve_hint
+#define BOXCXX_OWNS_ranges_slide
+#define BOXCXX_OWNS_ranges_stride
+#define BOXCXX_OWNS_ranges_to_container
+#include <__bits/version_ranges>
+#define BOXCXX_OWNS_ranges_zip
+#include <__bits/version_utility>
 
 namespace std {
 namespace ranges {

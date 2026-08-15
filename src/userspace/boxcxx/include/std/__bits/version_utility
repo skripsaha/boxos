@@ -19,39 +19,66 @@
 // <__bits/version_algorithm> and <__bits/version_ranges> include it so
 // <algorithm> and <ranges> get their share through the leaf they already
 // include.
-#ifndef BOXCXX_BITS_VERSION_UTILITY
-#define BOXCXX_BITS_VERSION_UTILITY
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_as_const
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_as_const)) && \
+    !defined(__cpp_lib_as_const)
 #  define __cpp_lib_as_const 201510L
 #endif
-#ifndef __cpp_lib_constexpr_utility
+#undef BOXCXX_OWNS_as_const
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_utility)) && \
+    !defined(__cpp_lib_constexpr_utility)
 #  define __cpp_lib_constexpr_utility 201811L
 #endif
-#ifndef __cpp_lib_exchange_function
+#undef BOXCXX_OWNS_constexpr_utility
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_exchange_function)) && \
+    !defined(__cpp_lib_exchange_function)
 #  define __cpp_lib_exchange_function 201304L
 #endif
-#ifndef __cpp_lib_forward_like
+#undef BOXCXX_OWNS_exchange_function
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_forward_like)) && \
+    !defined(__cpp_lib_forward_like)
 #  define __cpp_lib_forward_like 202207L
 #endif
-#ifndef __cpp_lib_integer_comparison_functions
+#undef BOXCXX_OWNS_forward_like
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_integer_comparison_functions)) && \
+    !defined(__cpp_lib_integer_comparison_functions)
 #  define __cpp_lib_integer_comparison_functions 202002L
 #endif
-#ifndef __cpp_lib_integer_sequence
+#undef BOXCXX_OWNS_integer_comparison_functions
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_integer_sequence)) && \
+    !defined(__cpp_lib_integer_sequence)
 #  define __cpp_lib_integer_sequence 201304L
 #endif
-#ifndef __cpp_lib_to_underlying
+#undef BOXCXX_OWNS_integer_sequence
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_to_underlying)) && \
+    !defined(__cpp_lib_to_underlying)
 #  define __cpp_lib_to_underlying 202102L
 #endif
-#ifndef __cpp_lib_tuples_by_type
+#undef BOXCXX_OWNS_to_underlying
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_tuples_by_type)) && \
+    !defined(__cpp_lib_tuples_by_type)
 #  define __cpp_lib_tuples_by_type 201304L
 #endif
-#ifndef __cpp_lib_tuple_like
+#undef BOXCXX_OWNS_tuples_by_type
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_tuple_like)) && \
+    !defined(__cpp_lib_tuple_like)
 #  define __cpp_lib_tuple_like 202207L
 #endif
-#ifndef __cpp_lib_unreachable
+#undef BOXCXX_OWNS_tuple_like
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_unreachable)) && \
+    !defined(__cpp_lib_unreachable)
 #  define __cpp_lib_unreachable 202202L
 #endif
+#undef BOXCXX_OWNS_unreachable
 
 // C++26 value (P2562R1 "constexpr Stable Sorting"), claimed in Ф32-b. P0202
 // gave C++20 the 201806L value and excluded three algorithms because they
@@ -66,16 +93,18 @@
 // The rest of P0202's exclusion list -- shuffle and sample, which want a
 // constexpr uniform_random_bit_generator -- is not part of P2562R1 and is
 // not part of this macro.
-#ifndef __cpp_lib_constexpr_algorithms
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_algorithms)) && \
+    !defined(__cpp_lib_constexpr_algorithms)
 #  define __cpp_lib_constexpr_algorithms 202306L
 #endif
+#undef BOXCXX_OWNS_constexpr_algorithms
 // P2321R2 "zip". The <ranges> half (zip/zip_transform/adjacent/pairwise and
 // their _transform forms) shipped in Ф29d; the <tuple>/<utility> half is
 // the converting constructors, the const-qualified assignments and swaps,
 // and the basic_common_reference / common_type specializations that let a
 // proxy pair/tuple of references meet its value counterpart.
-#ifndef __cpp_lib_ranges_zip
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_zip)) && \
+    !defined(__cpp_lib_ranges_zip)
 #  define __cpp_lib_ranges_zip 202110L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_UTILITY
+#undef BOXCXX_OWNS_ranges_zip

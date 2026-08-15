@@ -30,6 +30,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_atomic_flag_test
+#define BOXCXX_OWNS_atomic_float
+#define BOXCXX_OWNS_atomic_is_always_lock_free
+#define BOXCXX_OWNS_atomic_lock_free_type_aliases
+#define BOXCXX_OWNS_atomic_min_max
+#define BOXCXX_OWNS_atomic_ref
+#define BOXCXX_OWNS_atomic_value_initialization
+#define BOXCXX_OWNS_atomic_wait
 #include <__bits/version_atomic>
 
 extern "C" {

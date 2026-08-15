@@ -2,12 +2,19 @@
 //
 // The feature-test macro [version.syn] owned by <variant>. 202106L is the
 // C++23 value (P2231 constexpr variant, incl. constexpr visit).
-#ifndef BOXCXX_BITS_VERSION_VARIANT
-#define BOXCXX_BITS_VERSION_VARIANT
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_variant
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_variant)) && \
+    !defined(__cpp_lib_variant)
 // 202306L = P2637R3's member variant::visit (Ф32-e).
 #  define __cpp_lib_variant 202306L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_VARIANT
+#undef BOXCXX_OWNS_variant

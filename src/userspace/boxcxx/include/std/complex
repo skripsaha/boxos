@@ -20,13 +20,18 @@
 #ifndef BOXCXX_COMPLEX
 #define BOXCXX_COMPLEX
 
-#include <__bits/version_complex>
 #include <cmath>
 #include <istream>
 #include <limits>
 #include <sstream>
 #include <type_traits>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_complex_udls
+#define BOXCXX_OWNS_constexpr_complex
+#include <__bits/version_complex>
 
 namespace std {
 

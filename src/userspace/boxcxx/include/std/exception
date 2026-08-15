@@ -9,6 +9,11 @@
 #include <cstddef>
 #include <type_traits>
 #include <typeinfo>   // typeid / type_info — exception_ptr_cast (P2927R3)
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_exception_ptr_cast
+#define BOXCXX_OWNS_uncaught_exceptions
 #include <__bits/version_exception>
 
 namespace std {

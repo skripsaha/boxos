@@ -18,84 +18,134 @@
 //
 // Deliberately absent (see <version>'s list): is_implicit_lifetime,
 // result_of_sfinae.
-#ifndef BOXCXX_BITS_VERSION_TYPE_TRAITS
-#define BOXCXX_BITS_VERSION_TYPE_TRAITS
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_transformation_trait_aliases
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_transformation_trait_aliases)) && \
+    !defined(__cpp_lib_transformation_trait_aliases)
 #  define __cpp_lib_transformation_trait_aliases 201304L
 #endif
+#undef BOXCXX_OWNS_transformation_trait_aliases
 
-#ifndef __cpp_lib_common_reference
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_common_reference)) && \
+    !defined(__cpp_lib_common_reference)
 #  define __cpp_lib_common_reference 202302L
 #endif
-#ifndef __cpp_lib_bool_constant
+#undef BOXCXX_OWNS_common_reference
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bool_constant)) && \
+    !defined(__cpp_lib_bool_constant)
 #  define __cpp_lib_bool_constant 201505L
 #endif
-#ifndef __cpp_lib_is_swappable
+#undef BOXCXX_OWNS_bool_constant
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_swappable)) && \
+    !defined(__cpp_lib_is_swappable)
 // P0185R1. Claimable since Ф31e-a: the array overload of std::swap is now
 // declared beside the scalar one in <type_traits>, so is_swappable_v answers
 // true for array types instead of never seeing them.
 #  define __cpp_lib_is_swappable 201603L
 #endif
-#ifndef __cpp_lib_bounded_array_traits
+#undef BOXCXX_OWNS_is_swappable
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bounded_array_traits)) && \
+    !defined(__cpp_lib_bounded_array_traits)
 #  define __cpp_lib_bounded_array_traits 201902L
 #endif
-#ifndef __cpp_lib_has_unique_object_representations
+#undef BOXCXX_OWNS_bounded_array_traits
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_has_unique_object_representations)) && \
+    !defined(__cpp_lib_has_unique_object_representations)
 #  define __cpp_lib_has_unique_object_representations 201606L
 #endif
-#ifndef __cpp_lib_integral_constant_callable
+#undef BOXCXX_OWNS_has_unique_object_representations
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_integral_constant_callable)) && \
+    !defined(__cpp_lib_integral_constant_callable)
 #  define __cpp_lib_integral_constant_callable 201304L
 #endif
-#ifndef __cpp_lib_is_aggregate
+#undef BOXCXX_OWNS_integral_constant_callable
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_aggregate)) && \
+    !defined(__cpp_lib_is_aggregate)
 #  define __cpp_lib_is_aggregate 201703L
 #endif
-#ifndef __cpp_lib_is_constant_evaluated
+#undef BOXCXX_OWNS_is_aggregate
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_constant_evaluated)) && \
+    !defined(__cpp_lib_is_constant_evaluated)
 #  define __cpp_lib_is_constant_evaluated 201811L
 #endif
-#ifndef __cpp_lib_is_final
+#undef BOXCXX_OWNS_is_constant_evaluated
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_final)) && \
+    !defined(__cpp_lib_is_final)
 #  define __cpp_lib_is_final 201402L
 #endif
-#ifndef __cpp_lib_is_invocable
+#undef BOXCXX_OWNS_is_final
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_invocable)) && \
+    !defined(__cpp_lib_is_invocable)
 #  define __cpp_lib_is_invocable 201703L
 #endif
-#ifndef __cpp_lib_is_layout_compatible
+#undef BOXCXX_OWNS_is_invocable
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_layout_compatible)) && \
+    !defined(__cpp_lib_is_layout_compatible)
 #  define __cpp_lib_is_layout_compatible 201907L
 #endif
-#ifndef __cpp_lib_is_pointer_interconvertible
+#undef BOXCXX_OWNS_is_layout_compatible
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_pointer_interconvertible)) && \
+    !defined(__cpp_lib_is_pointer_interconvertible)
 #  define __cpp_lib_is_pointer_interconvertible 201907L
 #endif
-#ifndef __cpp_lib_is_nothrow_convertible
+#undef BOXCXX_OWNS_is_pointer_interconvertible
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_nothrow_convertible)) && \
+    !defined(__cpp_lib_is_nothrow_convertible)
 #  define __cpp_lib_is_nothrow_convertible 201806L
 #endif
-#ifndef __cpp_lib_is_null_pointer
+#undef BOXCXX_OWNS_is_nothrow_convertible
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_null_pointer)) && \
+    !defined(__cpp_lib_is_null_pointer)
 #  define __cpp_lib_is_null_pointer 201309L
 #endif
-#ifndef __cpp_lib_is_scoped_enum
+#undef BOXCXX_OWNS_is_null_pointer
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_scoped_enum)) && \
+    !defined(__cpp_lib_is_scoped_enum)
 #  define __cpp_lib_is_scoped_enum 202011L
 #endif
-#ifndef __cpp_lib_logical_traits
+#undef BOXCXX_OWNS_is_scoped_enum
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_logical_traits)) && \
+    !defined(__cpp_lib_logical_traits)
 #  define __cpp_lib_logical_traits 201510L
 #endif
-#if defined(__has_builtin) && __has_builtin(__reference_constructs_from_temporary) && \
-    __has_builtin(__reference_converts_from_temporary)
-#  ifndef __cpp_lib_reference_from_temporary
-#    define __cpp_lib_reference_from_temporary 202202L
-#  endif
+#undef BOXCXX_OWNS_logical_traits
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_reference_from_temporary)) && \
+    defined(__has_builtin) && __has_builtin(__reference_constructs_from_temporary) && \
+    __has_builtin(__reference_converts_from_temporary) && \
+    !defined(__cpp_lib_reference_from_temporary)
+#  define __cpp_lib_reference_from_temporary 202202L
 #endif
-#ifndef __cpp_lib_remove_cvref
+#undef BOXCXX_OWNS_reference_from_temporary
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_remove_cvref)) && \
+    !defined(__cpp_lib_remove_cvref)
 #  define __cpp_lib_remove_cvref 201711L
 #endif
-#ifndef __cpp_lib_type_identity
+#undef BOXCXX_OWNS_remove_cvref
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_type_identity)) && \
+    !defined(__cpp_lib_type_identity)
 #  define __cpp_lib_type_identity 201806L
 #endif
-#ifndef __cpp_lib_type_trait_variable_templates
+#undef BOXCXX_OWNS_type_identity
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_type_trait_variable_templates)) && \
+    !defined(__cpp_lib_type_trait_variable_templates)
 #  define __cpp_lib_type_trait_variable_templates 201510L
 #endif
-#ifndef __cpp_lib_unwrap_ref
+#undef BOXCXX_OWNS_type_trait_variable_templates
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_unwrap_ref)) && \
+    !defined(__cpp_lib_unwrap_ref)
 #  define __cpp_lib_unwrap_ref 201811L
 #endif
-#ifndef __cpp_lib_void_t
+#undef BOXCXX_OWNS_unwrap_ref
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_void_t)) && \
+    !defined(__cpp_lib_void_t)
 #  define __cpp_lib_void_t 201411L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_TYPE_TRAITS
+#undef BOXCXX_OWNS_void_t

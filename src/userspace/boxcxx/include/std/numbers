@@ -3,6 +3,10 @@
 #define BOXCXX_NUMBERS
 
 #include <concepts>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_math_constants
 #include <__bits/version_numbers>
 
 namespace std::numbers {

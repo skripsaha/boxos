@@ -3,20 +3,33 @@
 // The feature-test macros [version.syn] owned by <tuple>. <tuple> also
 // includes <__bits/version_utility> for __cpp_lib_tuples_by_type, which
 // the two headers own jointly.
-#ifndef BOXCXX_BITS_VERSION_TUPLE
-#define BOXCXX_BITS_VERSION_TUPLE
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_apply
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_apply)) && \
+    !defined(__cpp_lib_apply)
 #  define __cpp_lib_apply 201603L
 #endif
-#ifndef __cpp_lib_constexpr_tuple
+#undef BOXCXX_OWNS_apply
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_tuple)) && \
+    !defined(__cpp_lib_constexpr_tuple)
 #  define __cpp_lib_constexpr_tuple 201811L
 #endif
-#ifndef __cpp_lib_make_from_tuple
+#undef BOXCXX_OWNS_constexpr_tuple
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_make_from_tuple)) && \
+    !defined(__cpp_lib_make_from_tuple)
 #  define __cpp_lib_make_from_tuple 201606L
 #endif
-#ifndef __cpp_lib_tuple_element_t
+#undef BOXCXX_OWNS_make_from_tuple
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_tuple_element_t)) && \
+    !defined(__cpp_lib_tuple_element_t)
 #  define __cpp_lib_tuple_element_t 201402L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_TUPLE
+#undef BOXCXX_OWNS_tuple_element_t

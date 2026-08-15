@@ -7,7 +7,6 @@
 #define BOXCXX_FUNCTIONAL
 
 #include <__bits/callable_sbo>
-#include <__bits/version_functional>
 #include <compare>   // __cmp::SynthThreeWay — reference_wrapper's <=> (P2944R3)
 #include <concepts>
 #include <type_traits>
@@ -235,6 +234,21 @@ template <class T> void cref(const T &&) = delete;
 // for why it must come before this file's std::equal_to primary template
 // below.
 #include <__bits/searcher>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_bind_back
+#define BOXCXX_OWNS_bind_front
+#define BOXCXX_OWNS_boyer_moore_searcher
+#define BOXCXX_OWNS_common_reference_wrapper
+#define BOXCXX_OWNS_constexpr_functional
+#define BOXCXX_OWNS_invoke
+#define BOXCXX_OWNS_invoke_r
+#define BOXCXX_OWNS_move_only_function
+#define BOXCXX_OWNS_not_fn
+#define BOXCXX_OWNS_reference_wrapper
+#define BOXCXX_OWNS_transparent_operators
+#include <__bits/version_functional>
 
 namespace std {
 

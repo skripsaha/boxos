@@ -21,30 +21,51 @@
 //
 // Deliberately absent (see <version>'s list): none -- every macro this
 // header owns is now defined.
-#ifndef BOXCXX_BITS_VERSION_ATOMIC
-#define BOXCXX_BITS_VERSION_ATOMIC
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_atomic_flag_test
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_flag_test)) && \
+    !defined(__cpp_lib_atomic_flag_test)
 #  define __cpp_lib_atomic_flag_test 201907L
 #endif
-#ifndef __cpp_lib_atomic_float
+#undef BOXCXX_OWNS_atomic_flag_test
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_float)) && \
+    !defined(__cpp_lib_atomic_float)
 #  define __cpp_lib_atomic_float 201711L
 #endif
-#ifndef __cpp_lib_atomic_is_always_lock_free
+#undef BOXCXX_OWNS_atomic_float
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_is_always_lock_free)) && \
+    !defined(__cpp_lib_atomic_is_always_lock_free)
 #  define __cpp_lib_atomic_is_always_lock_free 201603L
 #endif
-#ifndef __cpp_lib_atomic_lock_free_type_aliases
+#undef BOXCXX_OWNS_atomic_is_always_lock_free
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_lock_free_type_aliases)) && \
+    !defined(__cpp_lib_atomic_lock_free_type_aliases)
 #  define __cpp_lib_atomic_lock_free_type_aliases 201907L
 #endif
-#ifndef __cpp_lib_atomic_ref
+#undef BOXCXX_OWNS_atomic_lock_free_type_aliases
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_ref)) && \
+    !defined(__cpp_lib_atomic_ref)
 #  define __cpp_lib_atomic_ref 201806L
 #endif
-#ifndef __cpp_lib_atomic_value_initialization
+#undef BOXCXX_OWNS_atomic_ref
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_value_initialization)) && \
+    !defined(__cpp_lib_atomic_value_initialization)
 #  define __cpp_lib_atomic_value_initialization 201911L
 #endif
-#ifndef __cpp_lib_atomic_wait
+#undef BOXCXX_OWNS_atomic_value_initialization
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_wait)) && \
+    !defined(__cpp_lib_atomic_wait)
 #  define __cpp_lib_atomic_wait 201907L
 #endif
+#undef BOXCXX_OWNS_atomic_wait
 
 // P0493R5 (C++26, Ф32-h): atomic fetch_max / fetch_min on the integral and
 // pointer specializations of atomic and atomic_ref, plus the free functions.
@@ -58,8 +79,8 @@
 // constexpr atomics of P3309, which this library does not have. The value
 // names the revision that is actually implemented -- which is what a feature
 // test macro is for -- and matches libstdc++ 16.
-#ifndef __cpp_lib_atomic_min_max
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_min_max)) && \
+    !defined(__cpp_lib_atomic_min_max)
 #  define __cpp_lib_atomic_min_max 202403L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_ATOMIC
+#undef BOXCXX_OWNS_atomic_min_max

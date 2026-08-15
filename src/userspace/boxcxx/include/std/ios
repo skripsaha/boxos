@@ -23,7 +23,11 @@
 #include <system_error>
 #include <vector>
 
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_ios_noreplace
 #include <__bits/version_iostreams>
+
 
 namespace std {
 

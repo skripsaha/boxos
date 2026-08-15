@@ -10,11 +10,25 @@
 #include <__bits/node_handle>
 #include <__bits/ranges_core>
 #include <__bits/throw_helpers>
-#include <__bits/version_containers>
 #include <functional>
 #include <initializer_list>
 #include <tuple>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_allocator_traits_is_always_equal
+#define BOXCXX_OWNS_associative_heterogeneous_erasure
+#define BOXCXX_OWNS_containers_ranges
+#define BOXCXX_OWNS_erase_if
+#define BOXCXX_OWNS_generic_unordered_lookup
+#define BOXCXX_OWNS_node_extract
+#define BOXCXX_OWNS_unordered_map_try_emplace
+#include <__bits/version_containers>
+#define BOXCXX_OWNS_nonmember_container_access
+#include <__bits/version_iterator>
+#define BOXCXX_OWNS_tuple_like
+#include <__bits/version_utility>
 
 namespace std {
 

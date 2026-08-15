@@ -5,10 +5,15 @@
 #ifndef BOXCXX_COMPARE
 #define BOXCXX_COMPARE
 
-#include <__bits/version_concepts>
-#include <__bits/version_compare>
 #include <type_traits>
 #include <bit>          // bit_cast for the IEEE strong/weak total orders (acyclic:
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_three_way_comparison
+#include <__bits/version_compare>
+#define BOXCXX_OWNS_concepts
+#include <__bits/version_concepts>
                         // bit -> type_traits,limits; neither includes compare)
 
 namespace std {

@@ -28,7 +28,6 @@
 #include <__bits/unicode_escape>  // Utf8Decode + the escape category tables
 #include <__bits/format_escape>   // EscapeInto / EscapeChar
 #include <__bits/ranges_core>     // ranges::input_range &c., for [format.range]
-#include <__bits/version_format>  // __cpp_lib_format_ranges
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -1900,5 +1899,10 @@ size_t formatted_size(format_string<Args...> fmt, Args &&...args)
 // <map,R> machinery can format ranges of pairs/tuples and std::map/std::set
 // with no changes of their own.
 #include <__bits/format_tuple>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_format_ranges
+#include <__bits/version_format>
 
 #endif // BOXCXX_FORMAT

@@ -7,12 +7,20 @@
 
 #include <__bits/ranges_core>    // concepts + dangling/borrowed_iterator_t/out_value_result (post-relocation, step 4)
 #include <__bits/iterator_core>  // iterator_traits (reduce no-init overload only)
-#include <__bits/version_numeric>
 #include <functional>            // plus<>, multiplies<>
 #include <limits>                // numeric_limits — floating midpoint overflow-avoidance
 #include <type_traits>           // common_type_t, make_unsigned_t, is_integral_v, is_arithmetic_v, is_object_v, is_signed_v, is_same_v, remove_cv_t
 #include <utility>               // std::move
 #include <cstddef>               // ptrdiff_t
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constexpr_numeric
+#define BOXCXX_OWNS_gcd_lcm
+#define BOXCXX_OWNS_interpolate
+#define BOXCXX_OWNS_ranges_iota
+#define BOXCXX_OWNS_saturation_arithmetic
+#include <__bits/version_numeric>
 
 namespace std {
 

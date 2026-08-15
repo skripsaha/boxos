@@ -10,11 +10,18 @@
 // correctly but cannot carry a conditional typedef. Ф31e-d supplied it from
 // a base, which is what [thread.lock.scoped] describes -- a member present
 // "only if sizeof...(MutexTypes) == 1" -- rather than a second class body.
-#ifndef BOXCXX_BITS_VERSION_MUTEX
-#define BOXCXX_BITS_VERSION_MUTEX
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_scoped_lock
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_scoped_lock)) && \
+    !defined(__cpp_lib_scoped_lock)
 #  define __cpp_lib_scoped_lock 201703L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_MUTEX
+#undef BOXCXX_OWNS_scoped_lock
