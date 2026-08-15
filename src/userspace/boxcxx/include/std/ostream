@@ -19,7 +19,6 @@
 #ifndef BOXCXX_OSTREAM
 #define BOXCXX_OSTREAM
 
-#include <__bits/version_print>
 #include <ios>
 #include <streambuf>
 #include <charconv>
@@ -30,6 +29,11 @@
 #include <type_traits>
 #include <cstdint>
 #include <cstddef>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_print
+#include <__bits/version_print>
 
 namespace std {
 

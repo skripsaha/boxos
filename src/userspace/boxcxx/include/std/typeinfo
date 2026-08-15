@@ -9,6 +9,10 @@
 
 #include <cstddef>
 #include <__bits/exception_base>  // std::exception — bad_cast/bad_typeid's base, without the cycle
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constexpr_typeinfo
 #include <__bits/version_typeinfo>
 
 namespace __cxxabiv1 {

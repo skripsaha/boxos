@@ -23,75 +23,110 @@
 // algorithms, and boxcxx is missing 23 of the entities it promises. See
 // <version>'s omission list for the enumeration. Neither is
 // __cpp_lib_ranges_as_const, for the reason recorded there.
-#ifndef BOXCXX_BITS_VERSION_RANGES
-#define BOXCXX_BITS_VERSION_RANGES
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
 // __cpp_lib_ranges_zip is co-owned by <ranges>, <tuple> and <utility>, so
 // it is DEFINED in <__bits/version_utility> (one definition site for every
 // co-owned macro) and reaches <ranges> through this include.
 #include <__bits/version_utility>
 
-#ifndef __cpp_lib_ranges_to_container
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_to_container)) && \
+    !defined(__cpp_lib_ranges_to_container)
 #  define __cpp_lib_ranges_to_container 202202L
 #endif
-#ifndef __cpp_lib_ranges_as_const
+#undef BOXCXX_OWNS_ranges_to_container
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_as_const)) && \
+    !defined(__cpp_lib_ranges_as_const)
 // P2278R4. Claimable since Ф31e-b added the paper's last four names:
 // ranges::cbegin / ranges::cend (in <iterator>, beside make_const_iterator)
 // and view_interface::cbegin / cend. N4950's value is taken, not the 202311L
 // libstdc++ reports -- that is the later P2836R1 DR, which is not built here.
 #  define __cpp_lib_ranges_as_const 202207L
 #endif
-#ifndef __cpp_lib_ranges_join_with
+#undef BOXCXX_OWNS_ranges_as_const
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_join_with)) && \
+    !defined(__cpp_lib_ranges_join_with)
 #  define __cpp_lib_ranges_join_with 202202L
 #endif
-#ifndef __cpp_lib_ranges_chunk
+#undef BOXCXX_OWNS_ranges_join_with
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_chunk)) && \
+    !defined(__cpp_lib_ranges_chunk)
 #  define __cpp_lib_ranges_chunk 202202L
 #endif
-#ifndef __cpp_lib_ranges_chunk_by
+#undef BOXCXX_OWNS_ranges_chunk
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_chunk_by)) && \
+    !defined(__cpp_lib_ranges_chunk_by)
 #  define __cpp_lib_ranges_chunk_by 202202L
 #endif
-#ifndef __cpp_lib_ranges_slide
+#undef BOXCXX_OWNS_ranges_chunk_by
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_slide)) && \
+    !defined(__cpp_lib_ranges_slide)
 #  define __cpp_lib_ranges_slide 202202L
 #endif
-#ifndef __cpp_lib_ranges_stride
+#undef BOXCXX_OWNS_ranges_slide
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_stride)) && \
+    !defined(__cpp_lib_ranges_stride)
 #  define __cpp_lib_ranges_stride 202207L
 #endif
-#ifndef __cpp_lib_ranges_cartesian_product
+#undef BOXCXX_OWNS_ranges_stride
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_cartesian_product)) && \
+    !defined(__cpp_lib_ranges_cartesian_product)
 #  define __cpp_lib_ranges_cartesian_product 202207L
 #endif
-#ifndef __cpp_lib_ranges_enumerate
+#undef BOXCXX_OWNS_ranges_cartesian_product
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_enumerate)) && \
+    !defined(__cpp_lib_ranges_enumerate)
 #  define __cpp_lib_ranges_enumerate 202302L
 #endif
-#ifndef __cpp_lib_ranges_repeat
+#undef BOXCXX_OWNS_ranges_enumerate
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_repeat)) && \
+    !defined(__cpp_lib_ranges_repeat)
 #  define __cpp_lib_ranges_repeat 202207L
 #endif
-#ifndef __cpp_lib_ranges_as_rvalue
+#undef BOXCXX_OWNS_ranges_repeat
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_as_rvalue)) && \
+    !defined(__cpp_lib_ranges_as_rvalue)
 #  define __cpp_lib_ranges_as_rvalue 202207L
 #endif
+#undef BOXCXX_OWNS_ranges_as_rvalue
 
-#ifndef __cpp_lib_ranges_reserve_hint
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_reserve_hint)) && \
+    !defined(__cpp_lib_ranges_reserve_hint)
 #  define __cpp_lib_ranges_reserve_hint 202502L
 #endif
+#undef BOXCXX_OWNS_ranges_reserve_hint
 
 // __cpp_lib_ranges_concat (P2542R8, C++26), Ф32-d. concat_view, views::concat
 // and the deduction guide are all here; the Concatable gate they need was
 // already in the tree, built for join_with (LWG 4074).
-#ifndef __cpp_lib_ranges_concat
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_concat)) && \
+    !defined(__cpp_lib_ranges_concat)
 #  define __cpp_lib_ranges_concat 202403L
 #endif
+#undef BOXCXX_OWNS_ranges_concat
 
 // P3138R5 (C++26, Ф32-g): views::cache_latest. A transform_view recomputes on
 // every dereference by design, so a filter above one calls the transform twice
 // per surviving element; this remembers the last value produced.
-#ifndef __cpp_lib_ranges_cache_latest
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_cache_latest)) && \
+    !defined(__cpp_lib_ranges_cache_latest)
 #  define __cpp_lib_ranges_cache_latest 202411L
 #endif
+#undef BOXCXX_OWNS_ranges_cache_latest
 
 // P3137R3 (C++26, Ф32-g): views::to_input, the opposite favour -- a range that
 // COULD be walked twice, told not to be, so the adaptors above it stop paying
 // for a guarantee the consumer never uses.
-#ifndef __cpp_lib_ranges_as_input
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_as_input)) && \
+    !defined(__cpp_lib_ranges_as_input)
 #  define __cpp_lib_ranges_as_input 202502L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_RANGES
+#undef BOXCXX_OWNS_ranges_as_input

@@ -6,7 +6,17 @@
 #include <utility>
 #include <functional>   // invoke (std::apply), reference_wrapper unwrap
 #include <compare>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_apply
+#define BOXCXX_OWNS_constexpr_tuple
+#define BOXCXX_OWNS_make_from_tuple
+#define BOXCXX_OWNS_tuple_element_t
 #include <__bits/version_tuple>
+#define BOXCXX_OWNS_ranges_zip
+#define BOXCXX_OWNS_tuple_like
+#define BOXCXX_OWNS_tuples_by_type
 #include <__bits/version_utility>
 
 namespace std {

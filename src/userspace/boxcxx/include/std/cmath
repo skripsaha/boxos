@@ -7,7 +7,6 @@
 #include <__bits/math_fenv_defs>
 #include <__bits/cmath_coeffs>
 #include <type_traits>   // conditional_t / is_same_v / is_arithmetic_v — [cmath.syn]/2's promoting overloads at the foot of this file
-#include <__bits/version_cmath>
 // Everything here is transplanted verbatim into src/runtime/cmath*.cpp.
 
 namespace std {
@@ -2589,4 +2588,11 @@ inline constexpr long long abs(long long j) { return j < 0 ? -j : j; }
 
 } // namespace std
 #include <__bits/cmath_special>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_hypot
+#define BOXCXX_OWNS_interpolate
+#define BOXCXX_OWNS_math_special_functions
+#include <__bits/version_cmath>
 #endif

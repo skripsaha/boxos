@@ -3,6 +3,10 @@
 #define BOXCXX_CSTDDEF
 
 #include <__bits/core_traits>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_byte
 #include <__bits/version_cstddef>
 
 typedef __SIZE_TYPE__    size_t;

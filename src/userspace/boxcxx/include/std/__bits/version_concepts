@@ -14,11 +14,18 @@
 // from each operand. Where that common reference is a prvalue, constructible
 // means copyable, so a move-only type could not be compared with anything it
 // converts from, however well-formed every == and <=> between them was.
-#ifndef BOXCXX_BITS_VERSION_CONCEPTS
-#define BOXCXX_BITS_VERSION_CONCEPTS
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_concepts
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_concepts)) && \
+    !defined(__cpp_lib_concepts)
 #  define __cpp_lib_concepts 202207L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_CONCEPTS
+#undef BOXCXX_OWNS_concepts

@@ -9,59 +9,86 @@
 // the remaining six -- std::function itself has no dedicated macro
 // pre-C++23. Chunk 3 (default_searcher/boyer_moore_searcher/
 // boyer_moore_horspool_searcher) adds __cpp_lib_boyer_moore_searcher.
-#ifndef BOXCXX_BITS_VERSION_FUNCTIONAL
-#define BOXCXX_BITS_VERSION_FUNCTIONAL
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_common_reference_wrapper
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_common_reference_wrapper)) && \
+    !defined(__cpp_lib_common_reference_wrapper)
 #  define __cpp_lib_common_reference_wrapper 202302L
 #endif
+#undef BOXCXX_OWNS_common_reference_wrapper
 
-#ifndef __cpp_lib_move_only_function
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_move_only_function)) && \
+    !defined(__cpp_lib_move_only_function)
 #  define __cpp_lib_move_only_function 202110L
 #endif
+#undef BOXCXX_OWNS_move_only_function
 
-#ifndef __cpp_lib_bind_front
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bind_front)) && \
+    !defined(__cpp_lib_bind_front)
 // 202306L = P2714R1's NTTP form, bind_front<f>(args...) (Ф32-f).
 #  define __cpp_lib_bind_front 202306L
 #endif
+#undef BOXCXX_OWNS_bind_front
 
-#ifndef __cpp_lib_bind_back
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bind_back)) && \
+    !defined(__cpp_lib_bind_back)
 // 202306L = P2714R1's NTTP form, bind_back<f>(args...) (Ф32-f).
 #  define __cpp_lib_bind_back 202306L
 #endif
+#undef BOXCXX_OWNS_bind_back
 
-#ifndef __cpp_lib_not_fn
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_not_fn)) && \
+    !defined(__cpp_lib_not_fn)
 // 202306L = P2714R1's NTTP form, not_fn<f>() (Ф32-f).
 #  define __cpp_lib_not_fn 202306L
 #endif
-#ifndef __cpp_lib_transparent_operators
+#undef BOXCXX_OWNS_not_fn
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_transparent_operators)) && \
+    !defined(__cpp_lib_transparent_operators)
 // P0074R0, co-owned with <memory>: the nineteen void specializations of the
 // operator functors live here, owner_less<void> lives there. Claimable since
 // Ф31e-b gave owner_less<void> its is_transparent member.
 #  define __cpp_lib_transparent_operators 201510L
 #endif
+#undef BOXCXX_OWNS_transparent_operators
 
-#ifndef __cpp_lib_invoke
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_invoke)) && \
+    !defined(__cpp_lib_invoke)
 #  define __cpp_lib_invoke 201411L
 #endif
+#undef BOXCXX_OWNS_invoke
 
-#ifndef __cpp_lib_invoke_r
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_invoke_r)) && \
+    !defined(__cpp_lib_invoke_r)
 #  define __cpp_lib_invoke_r 202106L
 #endif
+#undef BOXCXX_OWNS_invoke_r
 
-#ifndef __cpp_lib_constexpr_functional
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_functional)) && \
+    !defined(__cpp_lib_constexpr_functional)
 #  define __cpp_lib_constexpr_functional 201907L
 #endif
+#undef BOXCXX_OWNS_constexpr_functional
 
-#ifndef __cpp_lib_boyer_moore_searcher
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_boyer_moore_searcher)) && \
+    !defined(__cpp_lib_boyer_moore_searcher)
 #  define __cpp_lib_boyer_moore_searcher 201603L
 #endif
+#undef BOXCXX_OWNS_boyer_moore_searcher
 
 // P2944R3 (C++26, Ф32-e): reference_wrapper compares as its referent does,
 // through hidden friends constrained on the underlying comparison existing --
 // so a wrapper around a type with no operator== does not acquire one.
-#ifndef __cpp_lib_reference_wrapper
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_reference_wrapper)) && \
+    !defined(__cpp_lib_reference_wrapper)
 #  define __cpp_lib_reference_wrapper 202403L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_FUNCTIONAL
+#undef BOXCXX_OWNS_reference_wrapper

@@ -6,6 +6,21 @@
 #include <compare>
 #include <initializer_list>
 #include <cstddef>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_as_const
+#define BOXCXX_OWNS_constexpr_algorithms
+#define BOXCXX_OWNS_constexpr_utility
+#define BOXCXX_OWNS_exchange_function
+#define BOXCXX_OWNS_forward_like
+#define BOXCXX_OWNS_integer_comparison_functions
+#define BOXCXX_OWNS_integer_sequence
+#define BOXCXX_OWNS_ranges_zip
+#define BOXCXX_OWNS_to_underlying
+#define BOXCXX_OWNS_tuple_like
+#define BOXCXX_OWNS_tuples_by_type
+#define BOXCXX_OWNS_unreachable
 #include <__bits/version_utility>
 
 namespace std {

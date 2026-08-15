@@ -25,45 +25,74 @@
 //
 // Deliberately absent (see <version>'s list): constexpr_vector,
 // constexpr_string.
-#ifndef BOXCXX_BITS_VERSION_CONTAINERS
-#define BOXCXX_BITS_VERSION_CONTAINERS
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_erase_if
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_erase_if)) && \
+    !defined(__cpp_lib_erase_if)
 #  define __cpp_lib_erase_if 202002L
 #endif
+#undef BOXCXX_OWNS_erase_if
 
-#ifndef __cpp_lib_adaptor_iterator_pair_constructor
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_adaptor_iterator_pair_constructor)) && \
+    !defined(__cpp_lib_adaptor_iterator_pair_constructor)
 #  define __cpp_lib_adaptor_iterator_pair_constructor 202106L
 #endif
-#ifndef __cpp_lib_allocator_traits_is_always_equal
+#undef BOXCXX_OWNS_adaptor_iterator_pair_constructor
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_allocator_traits_is_always_equal)) && \
+    !defined(__cpp_lib_allocator_traits_is_always_equal)
 #  define __cpp_lib_allocator_traits_is_always_equal 201411L
 #endif
-#ifndef __cpp_lib_associative_heterogeneous_erasure
+#undef BOXCXX_OWNS_allocator_traits_is_always_equal
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_associative_heterogeneous_erasure)) && \
+    !defined(__cpp_lib_associative_heterogeneous_erasure)
 #  define __cpp_lib_associative_heterogeneous_erasure 202110L
 #endif
-#ifndef __cpp_lib_containers_ranges
+#undef BOXCXX_OWNS_associative_heterogeneous_erasure
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_containers_ranges)) && \
+    !defined(__cpp_lib_containers_ranges)
 #  define __cpp_lib_containers_ranges 202202L
 #endif
-#ifndef __cpp_lib_map_try_emplace
+#undef BOXCXX_OWNS_containers_ranges
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_map_try_emplace)) && \
+    !defined(__cpp_lib_map_try_emplace)
 #  define __cpp_lib_map_try_emplace 201411L
 #endif
-#ifndef __cpp_lib_unordered_map_try_emplace
+#undef BOXCXX_OWNS_map_try_emplace
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_unordered_map_try_emplace)) && \
+    !defined(__cpp_lib_unordered_map_try_emplace)
 #  define __cpp_lib_unordered_map_try_emplace 201411L
 #endif
-#ifndef __cpp_lib_generic_associative_lookup
+#undef BOXCXX_OWNS_unordered_map_try_emplace
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_generic_associative_lookup)) && \
+    !defined(__cpp_lib_generic_associative_lookup)
 #  define __cpp_lib_generic_associative_lookup 201304L
 #endif
-#ifndef __cpp_lib_generic_unordered_lookup
+#undef BOXCXX_OWNS_generic_associative_lookup
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_generic_unordered_lookup)) && \
+    !defined(__cpp_lib_generic_unordered_lookup)
 #  define __cpp_lib_generic_unordered_lookup 201811L
 #endif
-#ifndef __cpp_lib_incomplete_container_elements
+#undef BOXCXX_OWNS_generic_unordered_lookup
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_incomplete_container_elements)) && \
+    !defined(__cpp_lib_incomplete_container_elements)
 #  define __cpp_lib_incomplete_container_elements 201505L
 #endif
-#ifndef __cpp_lib_list_remove_return_type
+#undef BOXCXX_OWNS_incomplete_container_elements
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_list_remove_return_type)) && \
+    !defined(__cpp_lib_list_remove_return_type)
 #  define __cpp_lib_list_remove_return_type 201806L
 #endif
-#ifndef __cpp_lib_node_extract
+#undef BOXCXX_OWNS_list_remove_return_type
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_node_extract)) && \
+    !defined(__cpp_lib_node_extract)
 #  define __cpp_lib_node_extract 201606L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_CONTAINERS
+#undef BOXCXX_OWNS_node_extract

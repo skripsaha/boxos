@@ -16,17 +16,28 @@
 // preamble for the whole policy. P2495R3 is complete here: all three
 // string_view-like constructors (t / t+which / t+allocator) and the str(t)
 // setter, on basic_stringbuf and on all three stream wrappers.
-#ifndef BOXCXX_BITS_VERSION_IOSTREAMS
-#define BOXCXX_BITS_VERSION_IOSTREAMS
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_ios_noreplace
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ios_noreplace)) && \
+    !defined(__cpp_lib_ios_noreplace)
 #  define __cpp_lib_ios_noreplace 202207L
 #endif
-#ifndef __cpp_lib_quoted_string_io
+#undef BOXCXX_OWNS_ios_noreplace
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_quoted_string_io)) && \
+    !defined(__cpp_lib_quoted_string_io)
 #  define __cpp_lib_quoted_string_io 201304L
 #endif
-#ifndef __cpp_lib_sstream_from_string_view
+#undef BOXCXX_OWNS_quoted_string_io
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_sstream_from_string_view)) && \
+    !defined(__cpp_lib_sstream_from_string_view)
 #  define __cpp_lib_sstream_from_string_view 202306L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_IOSTREAMS
+#undef BOXCXX_OWNS_sstream_from_string_view

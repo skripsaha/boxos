@@ -13,7 +13,6 @@
 #include <__bits/iterator_core>
 #include <__bits/pointer>
 #include <__bits/ranges_uninitialized>
-#include <__bits/version_memory>
 #include <atomic>
 #include <compare>
 #include <concepts>
@@ -24,8 +23,6 @@
 #include <type_traits>
 #include <typeinfo>
 #include <utility>
-#include <__bits/version_atomic>
-#include <__bits/version_containers>
 
 namespace std {
 
@@ -2171,5 +2168,30 @@ bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
 // <functional>'s own __bits/bind et al. placement for the identical
 // reason (see that file's comment).
 #include <__bits/smartptr_adapt>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_atomic_value_initialization
+#include <__bits/version_atomic>
+#define BOXCXX_OWNS_allocator_traits_is_always_equal
+#include <__bits/version_containers>
+#define BOXCXX_OWNS_addressof_constexpr
+#define BOXCXX_OWNS_allocate_at_least
+#define BOXCXX_OWNS_assume_aligned
+#define BOXCXX_OWNS_atomic_shared_ptr
+#define BOXCXX_OWNS_constexpr_dynamic_alloc
+#define BOXCXX_OWNS_constexpr_memory
+#define BOXCXX_OWNS_enable_shared_from_this
+#define BOXCXX_OWNS_is_sufficiently_aligned
+#define BOXCXX_OWNS_make_unique
+#define BOXCXX_OWNS_out_ptr
+#define BOXCXX_OWNS_raw_memory_algorithms
+#define BOXCXX_OWNS_shared_ptr_arrays
+#define BOXCXX_OWNS_shared_ptr_weak_type
+#define BOXCXX_OWNS_smart_ptr_for_overwrite
+#define BOXCXX_OWNS_start_lifetime_as
+#define BOXCXX_OWNS_to_address
+#define BOXCXX_OWNS_transparent_operators
+#include <__bits/version_memory>
 
 #endif // BOXCXX_MEMORY

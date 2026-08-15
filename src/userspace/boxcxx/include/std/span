@@ -7,12 +7,16 @@
 #define BOXCXX_SPAN
 
 #include <__bits/iterator_core>
-#include <__bits/version_span>
 #include <__bits/throw_helpers>
 #include <array>
 #include <cstddef>
 #include <ranges>
 #include <type_traits>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_span
+#include <__bits/version_span>
 
 namespace std {
 

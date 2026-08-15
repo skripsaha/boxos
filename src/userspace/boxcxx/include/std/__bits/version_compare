@@ -15,11 +15,18 @@
 // operators at all. Every other <=> P1614R2 asks for was already here, and
 // that was re-measured across all 26 of them before this macro was defined
 // rather than taken from the note that said so.
-#ifndef BOXCXX_BITS_VERSION_COMPARE
-#define BOXCXX_BITS_VERSION_COMPARE
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_three_way_comparison
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_three_way_comparison)) && \
+    !defined(__cpp_lib_three_way_comparison)
 #  define __cpp_lib_three_way_comparison 201907L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_COMPARE
+#undef BOXCXX_OWNS_three_way_comparison

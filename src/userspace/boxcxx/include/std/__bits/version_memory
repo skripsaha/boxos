@@ -38,65 +38,104 @@
 //
 // Deliberately absent (see <version>'s list): start_lifetime_as's sibling
 // is_implicit_lifetime (no toolchain builtin).
-#ifndef BOXCXX_BITS_VERSION_MEMORY
-#define BOXCXX_BITS_VERSION_MEMORY
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_atomic_shared_ptr
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_shared_ptr)) && \
+    !defined(__cpp_lib_atomic_shared_ptr)
 #  define __cpp_lib_atomic_shared_ptr 201711L
 #endif
+#undef BOXCXX_OWNS_atomic_shared_ptr
 
-#ifndef __cpp_lib_addressof_constexpr
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_addressof_constexpr)) && \
+    !defined(__cpp_lib_addressof_constexpr)
 #  define __cpp_lib_addressof_constexpr 201603L
 #endif
-#ifndef __cpp_lib_allocate_at_least
+#undef BOXCXX_OWNS_addressof_constexpr
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_allocate_at_least)) && \
+    !defined(__cpp_lib_allocate_at_least)
 #  define __cpp_lib_allocate_at_least 202302L
 #endif
-#ifndef __cpp_lib_assume_aligned
+#undef BOXCXX_OWNS_allocate_at_least
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_assume_aligned)) && \
+    !defined(__cpp_lib_assume_aligned)
 #  define __cpp_lib_assume_aligned 201811L
 #endif
-#ifndef __cpp_lib_constexpr_memory
+#undef BOXCXX_OWNS_assume_aligned
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_memory)) && \
+    !defined(__cpp_lib_constexpr_memory)
 #  define __cpp_lib_constexpr_memory 202202L
 #endif
-#ifndef __cpp_lib_constexpr_dynamic_alloc
+#undef BOXCXX_OWNS_constexpr_memory
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_dynamic_alloc)) && \
+    !defined(__cpp_lib_constexpr_dynamic_alloc)
 #  define __cpp_lib_constexpr_dynamic_alloc 201907L
 #endif
-#ifndef __cpp_lib_enable_shared_from_this
+#undef BOXCXX_OWNS_constexpr_dynamic_alloc
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_enable_shared_from_this)) && \
+    !defined(__cpp_lib_enable_shared_from_this)
 #  define __cpp_lib_enable_shared_from_this 201603L
 #endif
-#ifndef __cpp_lib_make_unique
+#undef BOXCXX_OWNS_enable_shared_from_this
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_make_unique)) && \
+    !defined(__cpp_lib_make_unique)
 #  define __cpp_lib_make_unique 201304L
 #endif
-#ifndef __cpp_lib_transparent_operators
+#undef BOXCXX_OWNS_make_unique
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_transparent_operators)) && \
+    !defined(__cpp_lib_transparent_operators)
 // P0074R0, co-owned with <functional> -- see the note there. owner_less<void>
 // is this header's half of the paper.
 #  define __cpp_lib_transparent_operators 201510L
 #endif
-#ifndef __cpp_lib_out_ptr
+#undef BOXCXX_OWNS_transparent_operators
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_out_ptr)) && \
+    !defined(__cpp_lib_out_ptr)
 #  define __cpp_lib_out_ptr 202106L
 #endif
-#ifndef __cpp_lib_raw_memory_algorithms
+#undef BOXCXX_OWNS_out_ptr
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_raw_memory_algorithms)) && \
+    !defined(__cpp_lib_raw_memory_algorithms)
 #  define __cpp_lib_raw_memory_algorithms 201606L
 #endif
-#ifndef __cpp_lib_shared_ptr_arrays
+#undef BOXCXX_OWNS_raw_memory_algorithms
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shared_ptr_arrays)) && \
+    !defined(__cpp_lib_shared_ptr_arrays)
 #  define __cpp_lib_shared_ptr_arrays 201707L
 #endif
-#ifndef __cpp_lib_shared_ptr_weak_type
+#undef BOXCXX_OWNS_shared_ptr_arrays
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shared_ptr_weak_type)) && \
+    !defined(__cpp_lib_shared_ptr_weak_type)
 #  define __cpp_lib_shared_ptr_weak_type 201606L
 #endif
-#ifndef __cpp_lib_smart_ptr_for_overwrite
+#undef BOXCXX_OWNS_shared_ptr_weak_type
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_smart_ptr_for_overwrite)) && \
+    !defined(__cpp_lib_smart_ptr_for_overwrite)
 #  define __cpp_lib_smart_ptr_for_overwrite 202002L
 #endif
-#ifndef __cpp_lib_start_lifetime_as
+#undef BOXCXX_OWNS_smart_ptr_for_overwrite
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_start_lifetime_as)) && \
+    !defined(__cpp_lib_start_lifetime_as)
 #  define __cpp_lib_start_lifetime_as 202207L
 #endif
-#ifndef __cpp_lib_to_address
+#undef BOXCXX_OWNS_start_lifetime_as
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_to_address)) && \
+    !defined(__cpp_lib_to_address)
 #  define __cpp_lib_to_address 201711L
 #endif
+#undef BOXCXX_OWNS_to_address
 
 // P2897R7 (C++26, Ф32-e): is_sufficiently_aligned, the question whose
 // assertion half (assume_aligned) was already here.
-#ifndef __cpp_lib_is_sufficiently_aligned
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_sufficiently_aligned)) && \
+    !defined(__cpp_lib_is_sufficiently_aligned)
 #  define __cpp_lib_is_sufficiently_aligned 202411L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_MEMORY
+#undef BOXCXX_OWNS_is_sufficiently_aligned

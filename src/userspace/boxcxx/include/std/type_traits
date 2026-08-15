@@ -10,6 +10,32 @@
                                 // remove_cv(+_t), is_same(+_v), enable_if(+_t),
                                 // is_integral(+_v)
 #include <cstddef>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_bool_constant
+#define BOXCXX_OWNS_bounded_array_traits
+#define BOXCXX_OWNS_common_reference
+#define BOXCXX_OWNS_has_unique_object_representations
+#define BOXCXX_OWNS_integral_constant_callable
+#define BOXCXX_OWNS_is_aggregate
+#define BOXCXX_OWNS_is_constant_evaluated
+#define BOXCXX_OWNS_is_final
+#define BOXCXX_OWNS_is_invocable
+#define BOXCXX_OWNS_is_layout_compatible
+#define BOXCXX_OWNS_is_nothrow_convertible
+#define BOXCXX_OWNS_is_null_pointer
+#define BOXCXX_OWNS_is_pointer_interconvertible
+#define BOXCXX_OWNS_is_scoped_enum
+#define BOXCXX_OWNS_is_swappable
+#define BOXCXX_OWNS_logical_traits
+#define BOXCXX_OWNS_reference_from_temporary
+#define BOXCXX_OWNS_remove_cvref
+#define BOXCXX_OWNS_transformation_trait_aliases
+#define BOXCXX_OWNS_type_identity
+#define BOXCXX_OWNS_type_trait_variable_templates
+#define BOXCXX_OWNS_unwrap_ref
+#define BOXCXX_OWNS_void_t
 #include <__bits/version_type_traits>
 
 namespace std {

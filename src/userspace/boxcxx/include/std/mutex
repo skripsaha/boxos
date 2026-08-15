@@ -35,12 +35,16 @@
 
 #include <__bits/chrono_clock>
 #include <__bits/chrono_duration>
-#include <__bits/version_mutex>
 #include <atomic>
 #include <functional>
 #include <system_error>
 #include <tuple>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_scoped_lock
+#include <__bits/version_mutex>
 
 extern "C" void *__boxcxx_thread_id() noexcept;
 

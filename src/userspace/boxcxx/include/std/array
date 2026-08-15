@@ -11,7 +11,13 @@
 #include <cstddef>
 #include <type_traits>
 #include <utility>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_to_array
 #include <__bits/version_array>
+#define BOXCXX_OWNS_array_constexpr
+#define BOXCXX_OWNS_nonmember_container_access
 #include <__bits/version_iterator>
 
 namespace std {

@@ -10,7 +10,6 @@
 #include <__bits/algorithm_classic>
 #include <__bits/allocator_core>
 #include <__bits/ranges_core>
-#include <__bits/version_containers>
 #include <compare>
 #include <cstddef>
 #include <deque>
@@ -18,6 +17,12 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_adaptor_iterator_pair_constructor
+#define BOXCXX_OWNS_containers_ranges
+#include <__bits/version_containers>
 
 namespace std {
 

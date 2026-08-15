@@ -7,11 +7,18 @@
 // __cpp_lib_format itself (the base <format> macro) is deliberately NOT
 // defined here: backfilling feature-test macros for Ф1-Ф28 is a separate,
 // out-of-scope epic-wide item (see <version>'s own header comment).
-#ifndef BOXCXX_BITS_VERSION_FORMAT
-#define BOXCXX_BITS_VERSION_FORMAT
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_format_ranges
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format_ranges)) && \
+    !defined(__cpp_lib_format_ranges)
 #  define __cpp_lib_format_ranges 202207L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_FORMAT
+#undef BOXCXX_OWNS_format_ranges

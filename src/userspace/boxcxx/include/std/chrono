@@ -13,6 +13,10 @@
 #include <__bits/chrono_calendar>
 #include <__bits/chrono_format>
 #include <__bits/chrono_io>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_chrono_udls
 #include <__bits/version_chrono>
 
 #endif // BOXCXX_CHRONO

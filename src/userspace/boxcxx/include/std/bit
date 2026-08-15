@@ -4,6 +4,14 @@
 
 #include <type_traits>
 #include <limits>
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_bit_cast
+#define BOXCXX_OWNS_bitops
+#define BOXCXX_OWNS_byteswap
+#define BOXCXX_OWNS_endian
+#define BOXCXX_OWNS_int_pow2
 #include <__bits/version_bit>
 
 namespace std {

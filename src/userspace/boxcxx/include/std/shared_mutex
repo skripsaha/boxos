@@ -22,6 +22,11 @@
 #define BOXCXX_SHARED_MUTEX
 
 #include <mutex> // atomic, <chrono> bits, __mutex_impl::RemainingMs, lock
+
+// [version.syn] names this header as an owner of the macros below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_shared_mutex
+#define BOXCXX_OWNS_shared_timed_mutex
 #include <__bits/version_sync>
                  // tags, system_error; transitively __boxcxx_atomic_wait_cycle
 

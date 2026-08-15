@@ -47,6 +47,15 @@
 #ifndef BOXCXX_VERSION
 #define BOXCXX_VERSION
 
+// Each leaf below defines only what the including header declared it owns, via
+// BOXCXX_OWNS_<stem>; that is what keeps <vector> from answering for
+// __cpp_lib_format. <version> is the one header that owns nothing and answers
+// for everything, so it takes the lot in one flag rather than repeating 175
+// declarations. The leaves have no include guards — each is meant to be
+// re-entered once per owning header — so this must come before them and the
+// #undef after them.
+#define BOXCXX_OWNS_ALL
+
 #include <__bits/version_algorithm>       // <algorithm>
 #include <__bits/version_any>             // <any>
 #include <__bits/version_array>           // <array>
@@ -88,6 +97,8 @@
 #include <__bits/version_typeinfo>        // <typeinfo>
 #include <__bits/version_utility>         // <utility> (+ <tuple>)
 #include <__bits/version_variant>         // <variant>
+
+#undef BOXCXX_OWNS_ALL
 
 // <coroutine> and <generator> self-declare their own single macro, a
 // pre-existing pattern with no leaf. Repeating the two definitions here —

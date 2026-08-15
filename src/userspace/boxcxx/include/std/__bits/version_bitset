@@ -11,7 +11,12 @@
 //
 // Same split rationale as <__bits/version_any>/<__bits/version_complex> --
 // see those files' comments.
-#ifndef BOXCXX_BITS_VERSION_BITSET
-#define BOXCXX_BITS_VERSION_BITSET
-
-#endif // BOXCXX_BITS_VERSION_BITSET
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.

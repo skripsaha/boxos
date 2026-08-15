@@ -9,12 +9,21 @@
 // and pulled in below. Split out of <version> for the same
 // [support.limits.general] per-header reason as <__bits/version_ranges> --
 // see that file's comment.
-#ifndef BOXCXX_BITS_VERSION_ALGORITHM
-#define BOXCXX_BITS_VERSION_ALGORITHM
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_sample
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_sample)) && \
+    !defined(__cpp_lib_sample)
 #  define __cpp_lib_sample 201603L
 #endif
+#undef BOXCXX_OWNS_sample
 
 // __cpp_lib_constexpr_algorithms is co-owned by <algorithm> and <utility>,
 // so it is DEFINED in <__bits/version_utility> (one definition site for
@@ -28,28 +37,40 @@
 // four-iterator overloads, so __cpp_lib_sample and
 // __cpp_lib_robust_nonmodifying_seq_ops both stay undefined; see
 // <version>'s list.
-#ifndef __cpp_lib_clamp
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_clamp)) && \
+    !defined(__cpp_lib_clamp)
 #  define __cpp_lib_clamp 201603L
 #endif
-#ifndef __cpp_lib_robust_nonmodifying_seq_ops
+#undef BOXCXX_OWNS_clamp
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_robust_nonmodifying_seq_ops)) && \
+    !defined(__cpp_lib_robust_nonmodifying_seq_ops)
 // N3346. Claimable since Ф31e-b: std::mismatch gained its four-iterator
 // overloads, which were the last of the family still missing them.
 #  define __cpp_lib_robust_nonmodifying_seq_ops 201304L
 #endif
-#ifndef __cpp_lib_shift
+#undef BOXCXX_OWNS_robust_nonmodifying_seq_ops
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shift)) && \
+    !defined(__cpp_lib_shift)
 #  define __cpp_lib_shift 202202L
 #endif
-#ifndef __cpp_lib_ranges_contains
+#undef BOXCXX_OWNS_shift
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_contains)) && \
+    !defined(__cpp_lib_ranges_contains)
 #  define __cpp_lib_ranges_contains 202207L
 #endif
-#ifndef __cpp_lib_ranges_find_last
+#undef BOXCXX_OWNS_ranges_contains
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_find_last)) && \
+    !defined(__cpp_lib_ranges_find_last)
 #  define __cpp_lib_ranges_find_last 202207L
 #endif
-#ifndef __cpp_lib_ranges_starts_ends_with
+#undef BOXCXX_OWNS_ranges_find_last
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_starts_ends_with)) && \
+    !defined(__cpp_lib_ranges_starts_ends_with)
 #  define __cpp_lib_ranges_starts_ends_with 202106L
 #endif
-#ifndef __cpp_lib_ranges_fold
+#undef BOXCXX_OWNS_ranges_starts_ends_with
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_fold)) && \
+    !defined(__cpp_lib_ranges_fold)
 #  define __cpp_lib_ranges_fold 202207L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_ALGORITHM
+#undef BOXCXX_OWNS_ranges_fold

@@ -15,23 +15,38 @@
 // expected-count decrement sequenced before it. The claim was retired in
 // Ф31e-d; cxxtest phase139 drives four strands through staggered
 // arrive_and_drop rounds against a live completion.
-#ifndef BOXCXX_BITS_VERSION_SYNC
-#define BOXCXX_BITS_VERSION_SYNC
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
-#ifndef __cpp_lib_barrier
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_barrier)) && \
+    !defined(__cpp_lib_barrier)
 #  define __cpp_lib_barrier 201907L
 #endif
-#ifndef __cpp_lib_latch
+#undef BOXCXX_OWNS_barrier
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_latch)) && \
+    !defined(__cpp_lib_latch)
 #  define __cpp_lib_latch 201907L
 #endif
-#ifndef __cpp_lib_semaphore
+#undef BOXCXX_OWNS_latch
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_semaphore)) && \
+    !defined(__cpp_lib_semaphore)
 #  define __cpp_lib_semaphore 201907L
 #endif
-#ifndef __cpp_lib_shared_mutex
+#undef BOXCXX_OWNS_semaphore
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shared_mutex)) && \
+    !defined(__cpp_lib_shared_mutex)
 #  define __cpp_lib_shared_mutex 201505L
 #endif
-#ifndef __cpp_lib_shared_timed_mutex
+#undef BOXCXX_OWNS_shared_mutex
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shared_timed_mutex)) && \
+    !defined(__cpp_lib_shared_timed_mutex)
 #  define __cpp_lib_shared_timed_mutex 201402L
 #endif
-
-#endif // BOXCXX_BITS_VERSION_SYNC
+#undef BOXCXX_OWNS_shared_timed_mutex
