@@ -39180,6 +39180,171 @@ void Phase160()
            "rethrowing to find out\n");
 }
 
+// ── Ф32-g ───────────────────────────────────────────────────────────────
+static int g_p161_calls = 0;
+
+// A prvalue element that can be built and moved but never assigned. It is what
+// separates emplace-deref from `cache = *it`: the second would not compile
+// against this at all, which is why the standard specifies the first.
+struct P161NoAssign {
+    int x;
+    explicit P161NoAssign(int v) : x(v) {}
+    P161NoAssign(const P161NoAssign &)            = default;
+    P161NoAssign(P161NoAssign &&)                 = default;
+    P161NoAssign &operator=(const P161NoAssign &) = delete;
+    P161NoAssign &operator=(P161NoAssign &&)      = delete;
+};
+
+void Phase161()
+{
+    using namespace std;
+    namespace r = std::ranges;
+    namespace v = std::views;
+
+    // P3138R5. A transform_view recomputes on every dereference by design, so
+    // a filter above one calls the transform TWICE per surviving element: once
+    // for the predicate and once for the caller. Counting the calls is the
+    // only way to see it, which is why the test counts them.
+    {
+        vector<int> src{1, 2, 3, 4, 5, 6};
+        auto        expensive = [](int x) { ++g_p161_calls; return x * 2; };
+
+        g_p161_calls = 0;
+        int sum      = 0;
+        for (int x : src | v::transform(expensive) | v::filter([](int y) { return y > 4; }))
+            sum += x;
+        const int uncached = g_p161_calls;
+        Check(sum == 2 * (3 + 4 + 5 + 6),
+              "phase161 (1) the uncached pipeline gives the right answer");
+
+        g_p161_calls = 0;
+        int sum2     = 0;
+        for (int x : src | v::transform(expensive) | v::cache_latest |
+                         v::filter([](int y) { return y > 4; }))
+            sum2 += x;
+        const int cached = g_p161_calls;
+        Check(sum2 == sum, "phase161 (2) ...and cache_latest does not change it");
+        Check(cached < uncached,
+              "phase161 (3) but it does change the cost -- the transform runs fewer "
+              "times, which is the entire observable content of the paper");
+        Check(cached == 6 && uncached == 10,
+              "phase161 (4) exactly once per element, against once per element plus "
+              "once more per element that survives the filter");
+    }
+    {
+        // Input-only by construction, and its iterator is move-only AND has no
+        // default state: a copyable iterator would be a forward iterator, and
+        // two of them sharing one cache is the thing that cannot work.
+        vector<int> src{1, 2, 3};
+        auto        cl = src | v::cache_latest;
+        static_assert(r::input_range<decltype(cl)>, "phase161 (5) cache_latest is input");
+        static_assert(!r::forward_range<decltype(cl)>,
+                      "phase161 (6) ...and deliberately no more than that");
+        static_assert(!is_copy_constructible_v<r::iterator_t<decltype(cl)>>,
+                      "phase161 (7) its iterator is move-only");
+        static_assert(!is_default_constructible_v<r::iterator_t<decltype(cl)>>,
+                      "phase161 (8) ...and has no default state either, which is what "
+                      "an adaptor holding a cached position must not assume");
+        Check(r::size(cl) == 3u, "phase161 (9) size still passes through");
+        Check(r::reserve_hint(src | v::cache_latest) == 3u,
+              "phase161 (10) ...and so does reserve_hint, per its C++26 synopsis");
+        // Writing through the cached reference reaches the original element:
+        // a reference is cached as a POINTER, never as a copy.
+        for (int &e : src | v::cache_latest) e += 10;
+        Check(src[0] == 11 && src[2] == 13,
+              "phase161 (11) a reference is cached as a pointer, so writes land in the "
+              "original range rather than in a copy of it");
+        static_assert(__cpp_lib_ranges_cache_latest == 202411L, "phase161 (12) P3138R5 claimed");
+    }
+    {
+        // views::as_rvalue makes range_reference_t an XVALUE (string&&), and an
+        // xvalue has no address. Caching one is only expressible because the
+        // cast is to an LVALUE -- a cast to range_reference_t itself would be
+        // handing addressof an xvalue, which does not compile.
+        vector<string> s{"alpha", "beta", "gamma"};
+        const string  *addr[3] = {&s[0], &s[1], &s[2]};
+        int            i       = 0;
+        bool           same    = true;
+        for (string &e : s | v::as_rvalue | v::cache_latest) {
+            same = same && (&e == addr[i]);
+            ++i;
+        }
+        Check(i == 3 && same,
+              "phase161 (13) an xvalue-reference range caches the ADDRESS of each "
+              "element rather than a copy of it");
+    }
+    {
+        // The other branch: a prvalue element is cached by value, constructed
+        // straight into the cache. P161NoAssign cannot be assigned at all, so
+        // filling the cache by assignment would not compile.
+        vector<int> src{1, 2, 3};
+        int         total = 0;
+        for (auto &&e :
+             src | v::transform([](int i) { return P161NoAssign(i); }) | v::cache_latest)
+            total += e.x;
+        Check(total == 6,
+              "phase161 (14) a prvalue element is constructed straight into the cache, "
+              "so an element type that cannot be assigned still works");
+    }
+    {
+        // drop_while over a move-only iterator. Its cached begin() is present
+        // only for forward ranges: keeping an empty slot for one would quietly
+        // demand a DEFAULT-CONSTRUCTIBLE iterator, which [range.drop.while]
+        // never asks of V.
+        vector<int> src{1, 2, 3, 4, 5};
+        int         sum = 0;
+        for (int x : src | v::cache_latest | v::drop_while([](int i) { return i < 3; }))
+            sum += x;
+        Check(sum == 3 + 4 + 5,
+              "phase161 (15) drop_while over an input-only range keeps no cached "
+              "begin(), so it never asks the iterator for a default state");
+    }
+    // P3137R3: a range that COULD be walked twice, told not to be. Adaptors
+    // pay for the strongest category they are handed; when the consumer makes
+    // one pass, that is work bought and thrown away.
+    {
+        vector<int> src{1, 2, 3, 4};
+        auto        ti = src | v::to_input;
+        static_assert(r::input_range<decltype(ti)>, "phase161 (16) to_input is a range");
+        static_assert(!r::forward_range<decltype(ti)>,
+                      "phase161 (17) ...and the forward guarantee is gone");
+        static_assert(!r::common_range<decltype(ti)>,
+                      "phase161 (18) ...along with common-ness, which is half the saving");
+        static_assert(r::forward_range<vector<int>>,
+                      "phase161 (19) while the source itself is untouched");
+        int sum = 0;
+        for (int x : ti) sum += x;
+        Check(sum == 10, "phase161 (20) and it still iterates everything, once");
+        Check(r::size(ti) == 4u, "phase161 (21) size survives -- only the CATEGORY drops");
+        Check(r::reserve_hint(src | v::to_input) == 4u,
+              "phase161 (22) ...and reserve_hint with it");
+        static_assert(!is_copy_constructible_v<r::iterator_t<decltype(ti)>>,
+                      "phase161 (23) its iterator is move-only too");
+        // A const base keeps the const overloads reachable, which is the whole
+        // reason the iterator is a template on Const.
+        const vector<int> &cs   = src;
+        int                csum = 0;
+        for (int x : cs | v::to_input) csum += x;
+        Check(csum == 10, "phase161 (24) ...and a const base iterates through the "
+                          "const overloads");
+        // Already input-only and not common: nothing left to give up, so the
+        // adaptor must not wrap at all.
+        static_assert(is_same_v<decltype(v::to_input(src | v::cache_latest)),
+                                decltype(src | v::cache_latest)>,
+                      "phase161 (25) to_input over an already-input, non-common range is "
+                      "views::all, not another wrapper");
+        static_assert(__cpp_lib_ranges_as_input == 202502L, "phase161 (26) P3137R3 claimed");
+    }
+
+    printf("[CXX] PASS phase161: Ф32-g — P3138R5 views::cache_latest (proven by "
+           "counting transform calls: 6 instead of 10, with the answer unchanged) "
+           "and P3137R3 views::to_input, which drops the forward guarantee and "
+           "common-ness so the adaptors above stop paying for a promise nobody "
+           "collects. Both iterators are move-only, and getting them through "
+           "filter and drop_while is what showed those two had been quietly "
+           "demanding a copyable and a default-constructible iterator\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39362,6 +39527,7 @@ int main()
     Phase158();
     Phase159();
     Phase160();
+    Phase161();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -143,6 +143,10 @@ using borrowed_subrange_t =
 // chain it reuses, and after ranges_views for MaybeConst/SimpleView.
 #include <__bits/ranges_concat>
 
+// cache_latest_view (P3138R5) and to_input_view (P3137R3), both C++26. After
+// ranges_join: cache_latest needs its non-propagating-cache.
+#include <__bits/ranges_input_views>
+
 // ranges::to (Ф29f-2): conversion from a range to a container. Tail
 // position — needs views::transform for its range-of-ranges recursive case.
 #include <__bits/ranges_to>

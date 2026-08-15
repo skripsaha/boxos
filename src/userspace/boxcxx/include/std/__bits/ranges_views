@@ -297,6 +297,27 @@ struct SubrangeSize<true> {
     constexpr SubrangeSize(size_t n) noexcept : __n(n) {}
 };
 
+// PresentIf<Present,T> — the same shape one degree more general: a data
+// member the standard specifies as "present only if <condition>". The primary
+// template is the absent case, the <true,T> specialization holds the value.
+// It lives here rather than in <__bits/ranges_join> with its other four users
+// (join, join_with, slide, split) because drop_while_view needs it and this
+// file is included first.
+template <bool Present, typename T>
+struct PresentIf {
+    constexpr PresentIf() = default;
+    constexpr PresentIf(T) noexcept {}
+};
+template <typename T>
+struct PresentIf<true, T> {
+    T __value{};
+    constexpr PresentIf() = default;
+    constexpr PresentIf(T v) noexcept(is_nothrow_move_constructible_v<T>)
+        : __value(std::move(v))
+    {
+    }
+};
+
 // [range.subrange]'s two exposition-only concepts. The point of the pair is
 // that plain convertible_to is TOO PERMISSIVE for an iterator: Derived* does
 // convert to Base*, but a subrange<Base*> built from a Derived* range would
@@ -1099,8 +1120,16 @@ template <view V, typename Pred>
 class drop_while_view : public view_interface<drop_while_view<V, Pred>> {
     V __base = V();
     __views_detail::MovableBox<Pred> __pred;
-    iterator_t<V> __cached  = iterator_t<V>();
-    bool          __hasCache = false;
+    // Present only for forward ranges. An input range cannot be walked twice,
+    // so there is nothing to cache -- and holding an empty slot for one would
+    // silently demand a DEFAULT-CONSTRUCTIBLE iterator, which [range.drop.while]
+    // never asks of V. (forward_range does supply one, via semiregular, which
+    // is why the true arm is safe.) Nothing in the tree could violate that
+    // until cache_latest_view arrived with a move-only, non-default-
+    // constructible iterator.
+    [[no_unique_address]] __views_detail::PresentIf<forward_range<V>, iterator_t<V>>
+        __cached;
+    [[no_unique_address]] __views_detail::PresentIf<forward_range<V>, bool> __hasCache;
 
 public:
     drop_while_view()
@@ -1122,11 +1151,11 @@ public:
     constexpr auto begin()
     {
         if constexpr (forward_range<V>) {
-            if (!__hasCache) {
-                __cached   = __Find();
-                __hasCache = true;
+            if (!__hasCache.__value) {
+                __cached.__value   = __Find();
+                __hasCache.__value = true;
             }
-            return __cached;
+            return __cached.__value;
         } else {
             // An input range cannot be walked twice, so there is nothing to
             // cache: begin() is single-pass by construction and the standard's
@@ -1261,7 +1290,12 @@ struct filter_view<V, Pred>::Iterator
     constexpr Iterator &operator++()
     {
         ++__cur;
-        __cur = __parent->__FindNext(__cur);
+        // Moved, not copied: [iterator.concept.input] asks only for `movable`,
+        // so an input iterator is allowed to be move-only. Handing __cur over
+        // by value from an lvalue quietly imposed `copyable` on every V, which
+        // nothing in the tree could violate until cache_latest_view arrived
+        // with the first genuinely move-only iterator.
+        __cur = __parent->__FindNext(std::move(__cur));
         return *this;
     }
     constexpr void operator++(int) { ++*this; }
