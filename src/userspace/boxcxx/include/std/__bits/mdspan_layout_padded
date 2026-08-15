@@ -1,0 +1,551 @@
+// boxcxx — <__bits/mdspan_layout_padded>  ([mdspan.layout.leftpad],
+//                                          [mdspan.layout.rightpad], P2642R6)
+//
+// layout_right_padded is what a framebuffer actually is: rows laid out one
+// after another, but each row rounded up to a stride that is NOT the width.
+// The gap at the end of every row is the padding, and every hand-written
+// `base + y * pitch + x` in a graphics or DMA path is this mapping with the
+// pitch inlined by hand. layout_left_padded is the same idea with the
+// leftmost extent padded instead.
+//
+// The padding value can be fixed at compile time (layout_right_padded<64>
+// for a 64-element alignment) or carried at run time
+// (layout_right_padded<> plus the pitch), and the storage follows: the
+// padding stride is held in an extents<index_type, S>, which is an empty
+// type when S is static. That is the standard's own Recommended practice,
+// and it is why layout_right_padded<64>::mapping<extents<int, 8, 8>> is the
+// same size as layout_right::mapping of the same extents -- nothing.
+#ifndef BOXCXX_BITS_MDSPAN_LAYOUT_PADDED
+#define BOXCXX_BITS_MDSPAN_LAYOUT_PADDED
+
+#include <__bits/mdspan_extents>
+#include <__bits/mdspan_layout>
+#include <array>
+#include <cstddef>
+#include <limits>
+#include <span>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __mdsp {
+
+// "Is the index space empty", i.e. is any extent zero. False at rank 0,
+// whose index space holds exactly one element.
+template <class E>
+constexpr bool IsEmptySpace(const E &e) noexcept
+{
+    for (typename E::rank_type r = 0; r < E::rank(); ++r)
+        if (e.extent(r) == 0) return true;
+    return false;
+}
+
+// (*this)(extent(0) - 1, extent(1) - 1, ...) + 1: the offset of the far
+// corner, plus one. For a padded layout that is NOT the product of the
+// extents -- the trailing padding of the last row is not addressed, but the
+// padding between rows is.
+template <class M, size_t... P>
+constexpr typename M::index_type FarCorner(const M &m, index_sequence<P...>) noexcept
+{
+    using I = typename M::index_type;
+    return static_cast<I>(m(static_cast<I>(m.extents().extent(P) - 1)...) + 1);
+}
+
+} // namespace __mdsp
+
+// ── layout_left_padded ([mdspan.layout.leftpad]) ─────────────────────────
+
+template <size_t PaddingValue>
+struct layout_left_padded {
+    template <class Extents> class mapping;
+};
+
+template <size_t PaddingValue>
+template <class Extents>
+class layout_left_padded<PaddingValue>::mapping {
+    static_assert(__mdsp::IsExtents<Extents>,
+                  "layout_left_padded<P>::mapping<E>: E must be a "
+                  "specialization of std::extents");
+
+public:
+    static constexpr size_t padding_value = PaddingValue;
+
+    using extents_type = Extents;
+    using index_type   = typename extents_type::index_type;
+    using size_type    = typename extents_type::size_type;
+    using rank_type    = typename extents_type::rank_type;
+    using layout_type  = layout_left_padded<PaddingValue>;
+
+private:
+    static constexpr size_t rank_        = extents_type::rank();
+    static constexpr size_t kFirstStatic = extents_type::static_extent(0);
+
+public:
+    // static-padding-stride ([mdspan.layout.leftpad.expo]/1).
+    static constexpr size_t kStaticPaddingStride =
+        (rank_ <= 1)
+            ? size_t(0)
+            : ((padding_value == dynamic_extent || kFirstStatic == dynamic_extent)
+                   ? dynamic_extent
+                   : __mdsp::LeastMultipleAtLeast(padding_value, kFirstStatic));
+
+    static_assert(extents_type::rank_dynamic() != 0 ||
+                      __mdsp::StaticSizeRepresentable<extents_type>(),
+                  "layout_left_padded: with no dynamic extents, the size of "
+                  "the index space must be representable as index_type");
+    static_assert(padding_value == dynamic_extent ||
+                      padding_value <=
+                          static_cast<size_t>(numeric_limits<index_type>::max()),
+                  "layout_left_padded<P>: P must be representable as "
+                  "index_type");
+
+private:
+    // The stride between successive values of the SECOND index. Stored in an
+    // extents so that a statically known padding costs no space at all.
+    using PadStore = std::extents<index_type, kStaticPaddingStride>;
+
+    static constexpr index_type PaddedStride(index_type first_extent) noexcept
+    {
+        if constexpr (padding_value == dynamic_extent)
+            return first_extent;
+        else
+            return static_cast<index_type>(__mdsp::LeastMultipleAtLeast(
+                padding_value, static_cast<size_t>(first_extent)));
+    }
+
+public:
+    // ── [mdspan.layout.leftpad.cons] ─────────────────────────────────────
+
+    constexpr mapping() noexcept : mapping(extents_type{}) {}
+    constexpr mapping(const mapping &) noexcept = default;
+
+    constexpr mapping(const extents_type &ext) : extents_(ext)
+    {
+        if constexpr (rank_ > 1)
+            stride1_ = PadStore(PaddedStride(ext.extent(0)));
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<OtherIndexType, index_type> &&
+                 is_nothrow_constructible_v<index_type, OtherIndexType>)
+    constexpr mapping(const extents_type &ext, OtherIndexType padding)
+        : extents_(ext)
+    {
+        if constexpr (rank_ > 1) {
+            const auto pad = __mdsp::IndexCast<index_type>(std::move(padding));
+            stride1_       = PadStore(static_cast<index_type>(
+                __mdsp::LeastMultipleAtLeast(static_cast<size_t>(pad),
+                                             static_cast<size_t>(ext.extent(0)))));
+        } else {
+            (void)padding;
+        }
+    }
+
+    template <class OtherExtents>
+        requires(is_constructible_v<extents_type, OtherExtents>)
+    constexpr explicit(!is_convertible_v<OtherExtents, extents_type>)
+        mapping(const layout_left::mapping<OtherExtents> &other)
+        : mapping(extents_type(other.extents()))
+    {
+        static_assert(OtherExtents::rank() <= 1 ||
+                          kStaticPaddingStride == dynamic_extent ||
+                          OtherExtents::static_extent(0) == dynamic_extent ||
+                          kStaticPaddingStride == OtherExtents::static_extent(0),
+                      "layout_left_padded::mapping: the unpadded mapping's "
+                      "first extent disagrees with this padding value");
+    }
+
+    template <class OtherExtents>
+        requires(is_constructible_v<extents_type, OtherExtents>)
+    constexpr explicit(!(rank_ == 0 && is_convertible_v<OtherExtents, extents_type>))
+        mapping(const layout_stride::mapping<OtherExtents> &other)
+        : extents_(other.extents())
+    {
+        if constexpr (rank_ > 1)
+            stride1_ = PadStore(static_cast<index_type>(other.stride(1)));
+    }
+
+    template <class LayoutLeftPaddedMapping>
+        requires(__mdsp::IsLeftPaddedMapping<LayoutLeftPaddedMapping> &&
+                 is_constructible_v<extents_type,
+                                    typename LayoutLeftPaddedMapping::extents_type>)
+    constexpr explicit(
+        !is_convertible_v<typename LayoutLeftPaddedMapping::extents_type,
+                          extents_type> ||
+        (rank_ > 1 && (padding_value != dynamic_extent ||
+                       LayoutLeftPaddedMapping::padding_value == dynamic_extent)))
+        mapping(const LayoutLeftPaddedMapping &other)
+        : extents_(other.extents())
+    {
+        static_assert(rank_ <= 1 || padding_value == dynamic_extent ||
+                          LayoutLeftPaddedMapping::padding_value == dynamic_extent ||
+                          padding_value == LayoutLeftPaddedMapping::padding_value,
+                      "layout_left_padded::mapping: the two padding values "
+                      "disagree");
+        if constexpr (rank_ > 1)
+            stride1_ = PadStore(static_cast<index_type>(other.stride(1)));
+    }
+
+    // At rank 0 and 1 the padding stride is never consulted, so a padded (or
+    // plain) RIGHT mapping is the same function and converts freely.
+    template <class LayoutRightPaddedMapping>
+        requires((__mdsp::IsRightPaddedMapping<LayoutRightPaddedMapping> ||
+                  __mdsp::MappingOf<layout_right, LayoutRightPaddedMapping>) &&
+                 rank_ <= 1 &&
+                 is_constructible_v<extents_type,
+                                    typename LayoutRightPaddedMapping::extents_type>)
+    constexpr explicit(
+        !is_convertible_v<typename LayoutRightPaddedMapping::extents_type,
+                          extents_type>)
+        mapping(const LayoutRightPaddedMapping &other) noexcept
+        : extents_(other.extents())
+    {
+    }
+
+    constexpr mapping &operator=(const mapping &) noexcept = default;
+
+    // ── [mdspan.layout.leftpad.obs] ──────────────────────────────────────
+
+    constexpr const extents_type &extents() const noexcept { return extents_; }
+
+    constexpr array<index_type, rank_> strides() const noexcept
+    {
+        array<index_type, rank_> out{};
+        for (rank_type r = 0; r < rank_; ++r) out[r] = stride(r);
+        return out;
+    }
+
+    constexpr index_type required_span_size() const noexcept
+    {
+        if (__mdsp::IsEmptySpace(extents_)) return index_type(0);
+        return __mdsp::FarCorner(*this, make_index_sequence<rank_>{});
+    }
+
+    template <class... Indices>
+        requires(sizeof...(Indices) == rank_ &&
+                 (is_convertible_v<Indices, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, Indices> && ...))
+    constexpr index_type operator()(Indices... idxs) const noexcept
+    {
+        return __mdsp::Dot(*this, index_sequence_for<Indices...>{},
+                           std::move(idxs)...);
+    }
+
+    static constexpr bool is_always_unique() noexcept { return true; }
+
+    static constexpr bool is_always_exhaustive() noexcept
+    {
+        if constexpr (rank_ <= 1)
+            return true;
+        else if constexpr (kStaticPaddingStride != dynamic_extent &&
+                           kFirstStatic != dynamic_extent)
+            return kStaticPaddingStride == kFirstStatic;
+        else
+            return false;
+    }
+
+    static constexpr bool is_always_strided() noexcept { return true; }
+
+    static constexpr bool is_unique() noexcept { return true; }
+
+    constexpr bool is_exhaustive() const noexcept
+    {
+        if constexpr (rank_ <= 1)
+            return true;
+        else
+            return extents_.extent(0) == stride(1);
+    }
+
+    static constexpr bool is_strided() noexcept { return true; }
+
+    constexpr index_type stride(rank_type r) const noexcept
+    {
+        if (r == 0) return index_type(1);
+        if constexpr (rank_ > 1) {
+            index_type s = stride1_.extent(0);
+            for (rank_type k = 1; k < r; ++k)
+                s = static_cast<index_type>(s * extents_.extent(k));
+            return s;
+        } else {
+            return index_type(1);
+        }
+    }
+
+    template <class LayoutLeftPaddedMapping>
+        requires(__mdsp::IsLeftPaddedMapping<LayoutLeftPaddedMapping> &&
+                 LayoutLeftPaddedMapping::extents_type::rank() == rank_)
+    friend constexpr bool operator==(const mapping                 &x,
+                                     const LayoutLeftPaddedMapping &y) noexcept
+    {
+        if (!(x.extents() == y.extents())) return false;
+        if constexpr (rank_ < 2)
+            return true;
+        else
+            return cmp_equal(x.stride(1), y.stride(1));
+    }
+
+private:
+    [[no_unique_address]] PadStore     stride1_{};
+    [[no_unique_address]] extents_type extents_{};
+
+    template <class... SliceSpecifiers>
+    constexpr auto SubmdspanMappingImpl(SliceSpecifiers... slices) const;
+
+    template <class... SliceSpecifiers>
+    friend constexpr auto submdspan_mapping(const mapping   &src,
+                                            SliceSpecifiers... slices)
+    {
+        return src.SubmdspanMappingImpl(slices...);
+    }
+};
+
+// ── layout_right_padded ([mdspan.layout.rightpad]) ───────────────────────
+
+template <size_t PaddingValue>
+struct layout_right_padded {
+    template <class Extents> class mapping;
+};
+
+template <size_t PaddingValue>
+template <class Extents>
+class layout_right_padded<PaddingValue>::mapping {
+    static_assert(__mdsp::IsExtents<Extents>,
+                  "layout_right_padded<P>::mapping<E>: E must be a "
+                  "specialization of std::extents");
+
+public:
+    static constexpr size_t padding_value = PaddingValue;
+
+    using extents_type = Extents;
+    using index_type   = typename extents_type::index_type;
+    using size_type    = typename extents_type::size_type;
+    using rank_type    = typename extents_type::rank_type;
+    using layout_type  = layout_right_padded<PaddingValue>;
+
+private:
+    static constexpr size_t rank_ = extents_type::rank();
+    static constexpr size_t kLastStatic =
+        rank_ == 0 ? size_t(0) : extents_type::static_extent(rank_ - 1);
+
+public:
+    static constexpr size_t kStaticPaddingStride =
+        (rank_ <= 1)
+            ? size_t(0)
+            : ((padding_value == dynamic_extent || kLastStatic == dynamic_extent)
+                   ? dynamic_extent
+                   : __mdsp::LeastMultipleAtLeast(padding_value, kLastStatic));
+
+    static_assert(extents_type::rank_dynamic() != 0 ||
+                      __mdsp::StaticSizeRepresentable<extents_type>(),
+                  "layout_right_padded: with no dynamic extents, the size of "
+                  "the index space must be representable as index_type");
+    static_assert(padding_value == dynamic_extent ||
+                      padding_value <=
+                          static_cast<size_t>(numeric_limits<index_type>::max()),
+                  "layout_right_padded<P>: P must be representable as "
+                  "index_type");
+
+private:
+    using PadStore = std::extents<index_type, kStaticPaddingStride>;
+
+    static constexpr index_type PaddedStride(index_type last_extent) noexcept
+    {
+        if constexpr (padding_value == dynamic_extent)
+            return last_extent;
+        else
+            return static_cast<index_type>(__mdsp::LeastMultipleAtLeast(
+                padding_value, static_cast<size_t>(last_extent)));
+    }
+
+public:
+    // ── [mdspan.layout.rightpad.cons] ────────────────────────────────────
+
+    constexpr mapping() noexcept : mapping(extents_type{}) {}
+    constexpr mapping(const mapping &) noexcept = default;
+
+    constexpr mapping(const extents_type &ext) : extents_(ext)
+    {
+        if constexpr (rank_ > 1)
+            striderm2_ = PadStore(PaddedStride(ext.extent(rank_ - 1)));
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<OtherIndexType, index_type> &&
+                 is_nothrow_constructible_v<index_type, OtherIndexType>)
+    constexpr mapping(const extents_type &ext, OtherIndexType padding)
+        : extents_(ext)
+    {
+        if constexpr (rank_ > 1) {
+            const auto pad = __mdsp::IndexCast<index_type>(std::move(padding));
+            striderm2_     = PadStore(static_cast<index_type>(
+                __mdsp::LeastMultipleAtLeast(
+                    static_cast<size_t>(pad),
+                    static_cast<size_t>(ext.extent(rank_ - 1)))));
+        } else {
+            (void)padding;
+        }
+    }
+
+    template <class OtherExtents>
+        requires(is_constructible_v<extents_type, OtherExtents>)
+    constexpr explicit(!is_convertible_v<OtherExtents, extents_type>)
+        mapping(const layout_right::mapping<OtherExtents> &other)
+        : mapping(extents_type(other.extents()))
+    {
+        static_assert(
+            OtherExtents::rank() <= 1 || kStaticPaddingStride == dynamic_extent ||
+                OtherExtents::static_extent(OtherExtents::rank() - 1) ==
+                    dynamic_extent ||
+                kStaticPaddingStride ==
+                    OtherExtents::static_extent(OtherExtents::rank() - 1),
+            "layout_right_padded::mapping: the unpadded mapping's last extent "
+            "disagrees with this padding value");
+    }
+
+    template <class OtherExtents>
+        requires(is_constructible_v<extents_type, OtherExtents>)
+    constexpr explicit(!(rank_ == 0 && is_convertible_v<OtherExtents, extents_type>))
+        mapping(const layout_stride::mapping<OtherExtents> &other)
+        : extents_(other.extents())
+    {
+        if constexpr (rank_ > 1)
+            striderm2_ = PadStore(static_cast<index_type>(other.stride(rank_ - 2)));
+    }
+
+    template <class LayoutRightPaddedMapping>
+        requires(__mdsp::IsRightPaddedMapping<LayoutRightPaddedMapping> &&
+                 is_constructible_v<extents_type,
+                                    typename LayoutRightPaddedMapping::extents_type>)
+    constexpr explicit(
+        !is_convertible_v<typename LayoutRightPaddedMapping::extents_type,
+                          extents_type> ||
+        (rank_ > 1 && (padding_value != dynamic_extent ||
+                       LayoutRightPaddedMapping::padding_value == dynamic_extent)))
+        mapping(const LayoutRightPaddedMapping &other)
+        : extents_(other.extents())
+    {
+        static_assert(rank_ <= 1 || padding_value == dynamic_extent ||
+                          LayoutRightPaddedMapping::padding_value == dynamic_extent ||
+                          padding_value == LayoutRightPaddedMapping::padding_value,
+                      "layout_right_padded::mapping: the two padding values "
+                      "disagree");
+        if constexpr (rank_ > 1)
+            striderm2_ = PadStore(static_cast<index_type>(other.stride(rank_ - 2)));
+    }
+
+    template <class LayoutLeftPaddedMapping>
+        requires((__mdsp::IsLeftPaddedMapping<LayoutLeftPaddedMapping> ||
+                  __mdsp::MappingOf<layout_left, LayoutLeftPaddedMapping>) &&
+                 rank_ <= 1 &&
+                 is_constructible_v<extents_type,
+                                    typename LayoutLeftPaddedMapping::extents_type>)
+    constexpr explicit(
+        !is_convertible_v<typename LayoutLeftPaddedMapping::extents_type,
+                          extents_type>)
+        mapping(const LayoutLeftPaddedMapping &other) noexcept
+        : extents_(other.extents())
+    {
+    }
+
+    constexpr mapping &operator=(const mapping &) noexcept = default;
+
+    // ── [mdspan.layout.rightpad.obs] ─────────────────────────────────────
+
+    constexpr const extents_type &extents() const noexcept { return extents_; }
+
+    constexpr array<index_type, rank_> strides() const noexcept
+    {
+        array<index_type, rank_> out{};
+        for (rank_type r = 0; r < rank_; ++r) out[r] = stride(r);
+        return out;
+    }
+
+    constexpr index_type required_span_size() const noexcept
+    {
+        if (__mdsp::IsEmptySpace(extents_)) return index_type(0);
+        return __mdsp::FarCorner(*this, make_index_sequence<rank_>{});
+    }
+
+    template <class... Indices>
+        requires(sizeof...(Indices) == rank_ &&
+                 (is_convertible_v<Indices, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, Indices> && ...))
+    constexpr index_type operator()(Indices... idxs) const noexcept
+    {
+        return __mdsp::Dot(*this, index_sequence_for<Indices...>{},
+                           std::move(idxs)...);
+    }
+
+    static constexpr bool is_always_unique() noexcept { return true; }
+
+    static constexpr bool is_always_exhaustive() noexcept
+    {
+        if constexpr (rank_ <= 1)
+            return true;
+        else if constexpr (kStaticPaddingStride != dynamic_extent &&
+                           kLastStatic != dynamic_extent)
+            return kStaticPaddingStride == kLastStatic;
+        else
+            return false;
+    }
+
+    static constexpr bool is_always_strided() noexcept { return true; }
+
+    static constexpr bool is_unique() noexcept { return true; }
+
+    constexpr bool is_exhaustive() const noexcept
+    {
+        if constexpr (rank_ <= 1)
+            return true;
+        else
+            return extents_.extent(rank_ - 1) == stride(rank_ - 2);
+    }
+
+    static constexpr bool is_strided() noexcept { return true; }
+
+    constexpr index_type stride(rank_type r) const noexcept
+    {
+        if constexpr (rank_ <= 1) {
+            (void)r;
+            return index_type(1);
+        } else {
+            if (r == rank_ - 1) return index_type(1);
+            index_type s = striderm2_.extent(0);
+            for (rank_type k = r + 1; k < rank_ - 1; ++k)
+                s = static_cast<index_type>(s * extents_.extent(k));
+            return s;
+        }
+    }
+
+    template <class LayoutRightPaddedMapping>
+        requires(__mdsp::IsRightPaddedMapping<LayoutRightPaddedMapping> &&
+                 LayoutRightPaddedMapping::extents_type::rank() == rank_)
+    friend constexpr bool operator==(const mapping                  &x,
+                                     const LayoutRightPaddedMapping &y) noexcept
+    {
+        if (!(x.extents() == y.extents())) return false;
+        if constexpr (rank_ < 2)
+            return true;
+        else
+            return cmp_equal(x.stride(rank_ - 2), y.stride(rank_ - 2));
+    }
+
+private:
+    [[no_unique_address]] PadStore     striderm2_{};
+    [[no_unique_address]] extents_type extents_{};
+
+    template <class... SliceSpecifiers>
+    constexpr auto SubmdspanMappingImpl(SliceSpecifiers... slices) const;
+
+    template <class... SliceSpecifiers>
+    friend constexpr auto submdspan_mapping(const mapping   &src,
+                                            SliceSpecifiers... slices)
+    {
+        return src.SubmdspanMappingImpl(slices...);
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_MDSPAN_LAYOUT_PADDED

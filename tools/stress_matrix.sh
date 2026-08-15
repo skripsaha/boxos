@@ -44,16 +44,21 @@ FAILED=0
 # Use for quick regression checks; full matrix for releases.
 MODE=${MODE:-${1:-full}}
 
-# Per-command poll budget (units of 0.5 s). Big tests (touch_stress,
-# write_stress, decks) genuinely take ~30 s on saturated hosts, so 240
-# = 120 s ceiling. Empty loop exits the instant the marker appears so
-# fast tests cost nothing. Fast mode trims to 60 s ceiling since the
-# heavy tests are skipped.
-if [ "$MODE" = "fast" ]; then
-    POLL_TICKS=120
-else
-    POLL_TICKS=240
-fi
+# Per-command budget, in SECONDS OF WALL CLOCK. It used to be a count of
+# iterations of {grep serial.log; sleep 0.5}, which is not a budget at all:
+# each grep walks the whole serial.log, so the effective deadline grew as the
+# log grew and shrank again on an idle host. cxxtest legitimately takes ~180 s
+# at -O0 -- the correctly-rounded cmath phases stream 20 000 MPFR-verified
+# values each -- and whether it fit inside a nominal "60 s" was decided by how
+# slow grep happened to be on that run. That is what made cxxtest and, right
+# behind it, strandtest fail intermittently in configs that had passed minutes
+# earlier with the same binary. Measured, not guessed: cxxtest was timed at
+# 180.6 s with Ф35's five new phases and 182.4 s without them, so the suite's
+# size was never the variable.
+#
+# The loop still exits the instant the marker appears, so a fast test costs
+# nothing and only a genuinely stuck one pays the ceiling.
+POLL_SECONDS=300
 
 run_config() {
     cfg_name=$1
@@ -123,8 +128,10 @@ run_config() {
                 pat="\[STRESS\] Done";                        want=1 ;;
         esac
 
-        for i in $(seq 1 $POLL_TICKS); do
+        deadline=$(( $(date +%s) + POLL_SECONDS ))
+        while :; do
             [ "$(grep -cE "$pat" build/serial.log)" -ge "$want" ] && break
+            [ "$(date +%s)" -ge "$deadline" ] && break
             sleep 0.5
         done
     done

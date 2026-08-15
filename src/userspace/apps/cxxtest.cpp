@@ -320,6 +320,22 @@
 #ifndef __cpp_lib_to_address
 #  error "__cpp_lib_to_address is not visible from <memory> alone"
 #endif
+#ifndef __cpp_lib_indirect
+#  error "__cpp_lib_indirect is not visible from <memory> alone"
+#endif
+#ifndef __cpp_lib_polymorphic
+#  error "__cpp_lib_polymorphic is not visible from <memory> alone"
+#endif
+#include <mdspan>
+#ifndef __cpp_lib_mdspan
+#  error "__cpp_lib_mdspan is not visible from <mdspan> alone"
+#endif
+#ifndef __cpp_lib_aligned_accessor
+#  error "__cpp_lib_aligned_accessor is not visible from <mdspan> alone"
+#endif
+#ifndef __cpp_lib_submdspan
+#  error "__cpp_lib_submdspan is not visible from <mdspan> alone"
+#endif
 #include <memory_resource>
 #ifndef __cpp_lib_memory_resource
 #  error "__cpp_lib_memory_resource is not visible from <memory_resource> alone"
@@ -495,6 +511,7 @@
 #include <list>
 #include <locale>
 #include <map>
+#include <mdspan>
 #include <ostream>
 #include <memory>
 #include <memory_resource>
@@ -29543,9 +29560,7 @@ static_assert(__cpp_lib_interpolate == 201902L, "phase131: __cpp_lib_interpolate
 #  error "phase131: __cpp_lib_is_implicit_lifetime must stay undefined"
 #endif
 static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappable — closed by Ф31e");
-#ifdef __cpp_lib_mdspan
-#  error "phase131: __cpp_lib_mdspan must stay undefined"
-#endif
+static_assert(__cpp_lib_mdspan == 202406L, "phase131: __cpp_lib_mdspan — closed by Ф35");
 #ifdef __cpp_lib_modules
 #  error "phase131: __cpp_lib_modules must stay undefined"
 #endif
@@ -37315,6 +37330,17 @@ void Phase148()
                 g_p148_ap.wait(g_p148_b);
             }
             nanoseconds took = sw.elapsed();
+            // The join comes BEFORE the hop count, and the order is
+            // load-bearing. The worker increments its counter AFTER the
+            // notify_all that releases this side, so on real parallelism the
+            // loop above can return, read the counter and see one hop fewer
+            // while the worker is still between those two instructions. That
+            // is what the 4-core matrix caught: (33) and (34) passed while
+            // (32) failed -- the worker had finished and joined, and only the
+            // relaxed counter had not become visible yet. Joining first is
+            // the synchronizing edge that makes it visible; the elapsed time
+            // is sampled above, so the event-driven bound is unaffected.
+            Check(p148_join(), "phase148 (34) rendezvous worker joined");
             Check(g_p148_worker_hops.load(std::memory_order_acquire) ==
                           kP148Hops &&
                       g_p148_ap.load() == g_p148_a,
@@ -37326,7 +37352,6 @@ void Phase148()
             Check(took < bound,
                   "phase148 (33) the rendezvous ran on notify, not on the "
                   "100ms backstop");
-            Check(p148_join(), "phase148 (34) rendezvous worker joined");
         }
     }
 
@@ -41394,6 +41419,972 @@ void Phase180()
            "integer is a code unit\n");
 }
 
+
+// ── Ф35 test helpers ────────────────────────────────────────────────────
+namespace __phase35 {
+
+// A NAMED concept, because `requires { a == b; }` over a non-dependent type
+// is a hard error rather than false -- the rake Ф33 and Ф34 both stepped on.
+template <class T>
+concept HasEq = requires(const T &a, const T &b) { a == b; };
+
+template <class M, class... S>
+using SubOf = decltype(std::submdspan(std::declval<const M &>(),
+                                      std::declval<S>()...));
+template <class M, class... S>
+using LayoutOf = typename SubOf<M, S...>::layout_type;
+
+} // namespace __phase35
+
+// ── P35 support: an allocator whose propagation traits are dialable ──────
+// indirect and polymorphic have three propagate_on_container_* switches and
+// a stateful-allocator comparison, and the branches they select are the
+// hardest part of both classes to get right. One allocator template with
+// the traits as parameters covers all of them.
+template <class T, bool Pocca, bool Pocma, bool Pocs>
+struct TagAlloc {
+    using value_type                             = T;
+    using propagate_on_container_copy_assignment = std::bool_constant<Pocca>;
+    using propagate_on_container_move_assignment = std::bool_constant<Pocma>;
+    using propagate_on_container_swap            = std::bool_constant<Pocs>;
+
+    // Non-type template parameters put this allocator outside the automatic
+    // rebind of [allocator.traits.types], so it brings its own -- which
+    // polymorphic needs, since its control block is not a T.
+    template <class U> struct rebind {
+        using other = TagAlloc<U, Pocca, Pocma, Pocs>;
+    };
+
+    int tag = 0;
+    TagAlloc() = default;
+    explicit TagAlloc(int t) : tag(t) {}
+    template <class U>
+    TagAlloc(const TagAlloc<U, Pocca, Pocma, Pocs> &o) : tag(o.tag)
+    {
+    }
+    T   *allocate(std::size_t n) { return static_cast<T *>(::operator new(n * sizeof(T))); }
+    void deallocate(T *p, std::size_t) { ::operator delete(p); }
+    bool operator==(const TagAlloc &o) const { return tag == o.tag; }
+};
+
+struct P35Boom {};
+
+// A T that counts its live instances and can be told to throw from its copy
+// operations, so exception safety is observed rather than assumed.
+int g_ph35_live = 0;
+struct P35Counted {
+    int                v;
+    static inline bool poison = false;
+    P35Counted(int x) : v(x) { ++g_ph35_live; }
+    P35Counted(const P35Counted &o) : v(o.v)
+    {
+        if (poison) throw P35Boom{};
+        ++g_ph35_live;
+    }
+    P35Counted &operator=(const P35Counted &o)
+    {
+        if (poison) throw P35Boom{};
+        v = o.v;
+        return *this;
+    }
+    ~P35Counted() { --g_ph35_live; }
+    bool operator==(const P35Counted &o) const { return v == o.v; }
+};
+
+// A small hierarchy for polymorphic. The base is not abstract, so
+// polymorphic<Shape> can hold a Shape as well as anything derived.
+struct P35Shape {
+    virtual ~P35Shape()     = default;
+    virtual int sides() const { return 0; }
+};
+struct P35Tri : P35Shape {
+    int extra;
+    P35Tri(int e) : extra(e) {}
+    int sides() const override { return 3 + extra; }
+};
+struct P35Quad : P35Shape {
+    std::string name;
+    P35Quad(const char *n) : name(n) {}
+    int sides() const override { return 4 + static_cast<int>(name.size()); }
+};
+
+// constexpr indirect: a whole owning value type, allocation included, in a
+// constant expression.
+constexpr int P35IndirectConstexpr()
+{
+    std::indirect<int> a(7);
+    std::indirect<int> b = a;
+    *b                   = 35;
+    std::indirect<int> c(std::move(b));
+    a = std::move(c);
+    return *a + (b.valueless_after_move() ? 7 : 0);
+}
+
+struct P35CBase {
+    constexpr virtual ~P35CBase() = default;
+    constexpr virtual int f() const { return 1; }
+};
+struct P35CDer : P35CBase {
+    int v;
+    constexpr P35CDer(int x) : v(x) {}
+    constexpr int f() const override { return v; }
+};
+
+// constexpr polymorphic: the clone goes through the vtable AT COMPILE TIME.
+constexpr int P35PolyConstexpr()
+{
+    std::polymorphic<P35CBase> p(std::in_place_type<P35CDer>, 20);
+    std::polymorphic<P35CBase> q = p;
+    std::polymorphic<P35CBase> r(std::move(p));
+    return q->f() + r->f() + (p.valueless_after_move() ? 2 : 0);
+}
+
+void Phase181()
+{
+    using namespace std;
+
+    // ── value semantics, which is the entire point ───────────────────────
+    {
+        indirect<int> a(42);
+        indirect<int> b = a;
+        *b              = 7;
+        Check(*a == 42 && *b == 7, "phase181 (1) copying an indirect copies "
+                                   "what it owns, not the pointer");
+        Check(a != b, "phase181 (2) ...so the two compare unequal");
+        b = a;
+        Check(*b == 42, "phase181 (3) and assignment copies through");
+    }
+    // const propagates -- the thing no smart pointer does.
+    {
+        const indirect<int> a(1);
+        static_assert(is_same_v<decltype(*a), const int &>,
+                      "phase181 (4) operator* on a const indirect yields "
+                      "const T&");
+        static_assert(is_same_v<decltype(*declval<indirect<int> &>()), int &>,
+                      "phase181 (5) ...and on a mutable one, T&");
+    }
+    // ── valueless only ever comes from a move ────────────────────────────
+    {
+        indirect<int> a(5);
+        Check(!a.valueless_after_move(), "phase181 (6) a fresh indirect owns "
+                                         "an object");
+        indirect<int> b(std::move(a));
+        Check(a.valueless_after_move() && *b == 5,
+              "phase181 (7) moving from one leaves it valueless");
+        indirect<int> c(9);
+        Check(!(a == c) && a != c,
+              "phase181 (9) a valueless indirect equals nothing that owns");
+    }
+    // ── constructors ─────────────────────────────────────────────────────
+    {
+        indirect<string> s(in_place, 5, 'x');
+        Check(*s == "xxxxx", "phase181 (10) in_place forwards to T");
+        indirect<vector<int>> v(in_place, {1, 2, 3});
+        Check(v->size() == 3, "phase181 (11) the initializer_list form");
+        indirect<int> d;
+        Check(*d == 0, "phase181 (12) the default constructor builds a T");
+    }
+    // ── comparison, including against a bare T ───────────────────────────
+    {
+        indirect<int> a(3);
+        Check(a == 3 && 3 == a, "phase181 (13) compares against a bare T");
+        Check(a < 4 && a > 2, "phase181 (14) ...and orders against one");
+        indirect<long> b(3);
+        Check(a == b, "phase181 (15) heterogeneous across allocators and "
+                      "value types");
+    }
+    // Constrained, not Mandated: asking whether a non-comparable T compares
+    // must answer false rather than fail to compile. That is the defect Ф34
+    // removed from pair/tuple/variant/expected, and this class was written
+    // after it.
+    {
+        struct NoEq {
+            int x;
+        };
+        static_assert(!__phase35::HasEq<indirect<NoEq>>,
+                      "phase181 (16) equality on an indirect<NoEq> is "
+                      "constrained away, not a hard error");
+        static_assert(__phase35::HasEq<indirect<int>>,
+                      "phase181 (17) ...and present when T has it");
+    }
+    // ── hash ─────────────────────────────────────────────────────────────
+    {
+        indirect<int> a(1234);
+        Check(hash<indirect<int>>{}(a) == hash<int>{}(1234),
+              "phase181 (18) hashes as the owned object does");
+        unordered_set<indirect<int>> set;
+        set.insert(indirect<int>(1));
+        set.insert(indirect<int>(1));
+        Check(set.size() == 1, "phase181 (19) ...so it is a usable key");
+    }
+    // ── constexpr ────────────────────────────────────────────────────────
+    static_assert(P35IndirectConstexpr() == 42,
+                  "phase181 (20) copy, move and assignment all work in a "
+                  "constant expression");
+    // ── allocator propagation ────────────────────────────────────────────
+    {
+        using A = TagAlloc<int, false, false, false>;
+        indirect<int, A> x(allocator_arg, A(1), 10);
+        indirect<int, A> y(allocator_arg, A(2), 20);
+        x = y;
+        Check(*x == 20 && x.get_allocator().tag == 1,
+              "phase181 (21) POCCA false keeps this object's allocator");
+    }
+    {
+        using A = TagAlloc<int, true, false, false>;
+        indirect<int, A> x(allocator_arg, A(1), 10);
+        indirect<int, A> y(allocator_arg, A(2), 20);
+        x = y;
+        Check(*x == 20 && x.get_allocator().tag == 2,
+              "phase181 (22) POCCA true replaces it");
+    }
+    {
+        using A = TagAlloc<int, false, false, false>;
+        indirect<int, A> x(allocator_arg, A(1), 10);
+        indirect<int, A> y(allocator_arg, A(2), 20);
+        x = std::move(y);
+        Check(*x == 20 && x.get_allocator().tag == 1,
+              "phase181 (23) a move across unequal, non-propagating "
+              "allocators rebuilds the object here");
+        Check(y.valueless_after_move(),
+              "phase181 (24) ...and STILL leaves the source valueless, which "
+              "[indirect.assign]/7 requires even though the pointer could "
+              "not change hands");
+    }
+    {
+        using A = TagAlloc<int, false, false, true>;
+        indirect<int, A> x(allocator_arg, A(1), 10);
+        indirect<int, A> y(allocator_arg, A(2), 20);
+        swap(x, y);
+        Check(*x == 20 && *y == 10 && x.get_allocator().tag == 2 &&
+                  y.get_allocator().tag == 1,
+              "phase181 (25) POCS swaps the allocators with the values");
+    }
+    {
+        using A = TagAlloc<int, false, false, false>;
+        indirect<int, A> y(allocator_arg, A(2), 20);
+        indirect<int, A> x(allocator_arg, A(1), std::move(y));
+        Check(*x == 20 && y.valueless_after_move(),
+              "phase181 (26) the allocator-extended move constructor");
+    }
+    // ── exception safety ─────────────────────────────────────────────────
+    {
+        g_ph35_live = 0;
+        {
+            indirect<P35Counted> a(in_place, 1);
+            indirect<P35Counted> b(in_place, 2);
+            P35Counted::poison = true;
+            bool caught        = false;
+            try {
+                a = b;
+            } catch (P35Boom &) {
+                caught = true;
+            }
+            P35Counted::poison = false;
+            Check(caught && !a.valueless_after_move() && (*a).v == 1,
+                  "phase181 (27) a throwing copy-assignment leaves the target "
+                  "exactly as it was");
+        }
+        Check(g_ph35_live == 0, "phase181 (28) and nothing leaked");
+    }
+    {
+        using A     = TagAlloc<P35Counted, false, false, false>;
+        g_ph35_live = 0;
+        {
+            indirect<P35Counted, A> a(allocator_arg, A(1), in_place, 1);
+            indirect<P35Counted, A> b(allocator_arg, A(2), in_place, 2);
+            P35Counted::poison = true;
+            bool caught        = false;
+            try {
+                a = b;
+            } catch (P35Boom &) {
+                caught = true;
+            }
+            P35Counted::poison = false;
+            Check(caught && (*a).v == 1,
+                  "phase181 (29) the unequal-allocator path builds the new "
+                  "object BEFORE destroying the old one");
+        }
+        Check(g_ph35_live == 0, "phase181 (30) and that path leaks nothing "
+                                "either");
+    }
+    // ── pmr ──────────────────────────────────────────────────────────────
+    {
+        pmr::indirect<int> p(3);
+        Check(*p == 3, "phase181 (31) pmr::indirect resolves and works");
+        static_assert(is_same_v<pmr::indirect<int>,
+                                indirect<int, pmr::polymorphic_allocator<int>>>,
+                      "phase181 (32) ...and is the alias [memory.syn] names");
+    }
+    static_assert(__cpp_lib_indirect == 202502L, "phase181 (33) macro (P3019R11)");
+
+    printf("[CXX] PASS phase181: indirect owns one object by value -- deep "
+           "copies, const propagation, three allocator propagation traits and "
+           "exception safety on both assignment paths\n");
+}
+
+void Phase182()
+{
+    using namespace std;
+
+    // ── the point: a value that holds a DERIVED object ───────────────────
+    {
+        polymorphic<P35Shape> p(in_place_type<P35Tri>, 10);
+        Check(p->sides() == 13, "phase182 (1) holds a derived object");
+        polymorphic<P35Shape> q = p;
+        Check(q->sides() == 13,
+              "phase182 (2) copying clones THROUGH the vtable -- the copy is "
+              "a Tri, not a sliced Shape");
+        polymorphic<P35Shape> r(in_place_type<P35Quad>, "hexa");
+        Check(r->sides() == 8, "phase182 (3) a different derived type");
+        r = q;
+        Check(r->sides() == 13,
+              "phase182 (4) assignment replaces the held TYPE, not just the "
+              "value");
+    }
+    // ── converting constructor from a derived object ─────────────────────
+    {
+        polymorphic<P35Shape> p(P35Tri(2));
+        Check(p->sides() == 5, "phase182 (5) constructs from a derived value");
+        // A non-derived type is not a candidate at all.
+        static_assert(!is_constructible_v<polymorphic<P35Shape>, int>,
+                      "phase182 (6) ...and only from a derived one");
+    }
+    // ── move leaves the source valueless ─────────────────────────────────
+    {
+        polymorphic<P35Shape> p(in_place_type<P35Tri>, 1);
+        polymorphic<P35Shape> q(std::move(p));
+        Check(p.valueless_after_move() && q->sides() == 4,
+              "phase182 (7) moving hands the control block over");
+    }
+    // ── the deliberate difference from indirect ──────────────────────────
+    {
+        using A = TagAlloc<P35Shape, false, false, false>;
+        polymorphic<P35Shape, A> y(allocator_arg, A(2), in_place_type<P35Tri>, 3);
+        polymorphic<P35Shape, A> x(allocator_arg, A(1), std::move(y));
+        Check(x->sides() == 6, "phase182 (8) the allocator-extended move "
+                               "constructor clones when the allocators differ");
+        Check(!y.valueless_after_move(),
+              "phase182 (9) ...and, unlike indirect's, leaves the source "
+              "USABLE -- [polymorphic.ctor]/11 states no valueless "
+              "postcondition here");
+    }
+    {
+        using A = TagAlloc<P35Shape, true, false, false>;
+        polymorphic<P35Shape, A> x(allocator_arg, A(1), in_place_type<P35Tri>, 1);
+        polymorphic<P35Shape, A> y(allocator_arg, A(2), in_place_type<P35Tri>, 5);
+        x = y;
+        Check(x->sides() == 8 && x.get_allocator().tag == 2,
+              "phase182 (10) POCCA replaces the allocator here too");
+    }
+    {
+        using A = TagAlloc<P35Shape, false, false, true>;
+        polymorphic<P35Shape, A> x(allocator_arg, A(1), in_place_type<P35Tri>, 1);
+        polymorphic<P35Shape, A> y(allocator_arg, A(2), in_place_type<P35Tri>, 5);
+        swap(x, y);
+        Check(x->sides() == 8 && y->sides() == 4 && x.get_allocator().tag == 2,
+              "phase182 (11) POCS swap");
+    }
+    // ── constexpr, virtual dispatch and all ──────────────────────────────
+    static_assert(P35PolyConstexpr() == 42,
+                  "phase182 (12) a polymorphic clone runs at COMPILE TIME: "
+                  "allocation, placement, virtual call, destruction");
+    // ── pmr ──────────────────────────────────────────────────────────────
+    {
+        pmr::polymorphic<P35Shape> p(in_place_type<P35Quad>, "sq");
+        Check(p->sides() == 6, "phase182 (13) pmr::polymorphic");
+    }
+    // ── no comparison operators, by design ───────────────────────────────
+    static_assert(!__phase35::HasEq<polymorphic<P35Shape>>,
+                  "phase182 (14) polymorphic has NO operator== -- two "
+                  "different derived types have nothing to compare");
+    static_assert(__cpp_lib_polymorphic == 202502L,
+                  "phase182 (15) macro (P3019R11)");
+
+    printf("[CXX] PASS phase182: polymorphic clones a derived object through "
+           "the vtable, at compile time as well as at run time\n");
+}
+
+void Phase183()
+{
+    using namespace std;
+
+    // ── extents ──────────────────────────────────────────────────────────
+    static_assert(extents<int, 3, 4>::rank() == 2);
+    static_assert(extents<int, 3, 4>::rank_dynamic() == 0);
+    static_assert(extents<int, 3, dynamic_extent>::rank_dynamic() == 1);
+    static_assert(is_same_v<dextents<int, 2>,
+                            extents<int, dynamic_extent, dynamic_extent>>,
+                  "phase183 (1) dextents is all-dynamic");
+    static_assert(is_same_v<dims<3>, dextents<size_t, 3>>,
+                  "phase183 (2) dims puts the rank first (P2389R2)");
+    // A fully static extents stores NOTHING.
+    static_assert(sizeof(extents<int, 3, 4>) == 1,
+                  "phase183 (3) static extents cost no storage");
+    static_assert(sizeof(extents<int, 3, dynamic_extent>) == sizeof(int),
+                  "phase183 (4) ...and a dynamic one costs exactly one index");
+    {
+        constexpr extents<int, 3, dynamic_extent> e(7);
+        static_assert(e.extent(0) == 3 && e.extent(1) == 7,
+                      "phase183 (5) a mixed extents takes only its dynamic "
+                      "values");
+        constexpr extents<int, 3, dynamic_extent> e2(3, 7);
+        static_assert(e2.extent(1) == 7,
+                      "phase183 (6) ...or all of them, with the static ones "
+                      "as a precondition");
+        static_assert(e == e2, "phase183 (7) and the two are equal");
+        // Compared by VALUE across index types and static/dynamic spelling.
+        static_assert(e == (extents<long, dynamic_extent, dynamic_extent>(3, 7)),
+                      "phase183 (8) equality is across index types too");
+        static_assert(!(e == extents<int, 3>(3)),
+                      "phase183 (9) but a different rank is never equal");
+    }
+    {
+        array<int, 2> a{4, 5};
+        extents<int, dynamic_extent, dynamic_extent> e(a);
+        Check(e.extent(0) == 4 && e.extent(1) == 5,
+              "phase183 (10) constructed from an array");
+        extents<int, dynamic_extent, dynamic_extent> f{span<int, 2>(a)};
+        Check(e == f, "phase183 (11) ...and from a span");
+    }
+    // Deduction: an integral_constant argument becomes a STATIC extent.
+    {
+        auto e = extents(2, 3);
+        static_assert(is_same_v<decltype(e), extents<size_t, dynamic_extent,
+                                                     dynamic_extent>>,
+                      "phase183 (12) plain integers deduce dynamic extents");
+        auto f = extents(cw<2zu>, 3);
+        static_assert(is_same_v<decltype(f), extents<size_t, 2, dynamic_extent>>,
+                      "phase183 (13) a compile-time constant deduces a STATIC "
+                      "one");
+        Check(e.extent(1) == 3 && f.extent(0) == 2, "phase183 (14) values");
+    }
+
+    // ── layout_left / layout_right ───────────────────────────────────────
+    {
+        layout_right::mapping<extents<int, 4, 6>> r;
+        Check(r(0, 0) == 0 && r(1, 0) == 6 && r(1, 2) == 8,
+              "phase183 (15) layout_right: the rightmost index is contiguous");
+        Check(r.stride(0) == 6 && r.stride(1) == 1, "phase183 (16) its strides");
+        Check(r.required_span_size() == 24, "phase183 (17) its span size");
+        static_assert(decltype(r)::is_always_exhaustive() &&
+                          decltype(r)::is_always_unique() &&
+                          decltype(r)::is_always_strided(),
+                      "phase183 (18) and it is all three things");
+
+        layout_left::mapping<extents<int, 4, 6>> l;
+        Check(l(0, 0) == 0 && l(1, 0) == 1 && l(1, 2) == 9,
+              "phase183 (19) layout_left: the leftmost index is contiguous");
+        Check(l.stride(0) == 1 && l.stride(1) == 4, "phase183 (20) its strides");
+    }
+    // Rank 0 is a single element at offset 0.
+    {
+        layout_right::mapping<extents<int>> r;
+        Check(r() == 0 && r.required_span_size() == 1,
+              "phase183 (21) a rank-0 mapping addresses exactly one element");
+    }
+    // left <-> right convert only at rank <= 1.
+    static_assert(is_constructible_v<layout_left::mapping<extents<int, 4>>,
+                                     layout_right::mapping<extents<int, 4>>>,
+                  "phase183 (22) left and right agree at rank 1");
+    static_assert(!is_constructible_v<layout_left::mapping<extents<int, 4, 6>>,
+                                      layout_right::mapping<extents<int, 4, 6>>>,
+                  "phase183 (23) ...and nowhere else");
+
+    // ── layout_stride ────────────────────────────────────────────────────
+    {
+        layout_stride::mapping<dextents<int, 2>> s(dextents<int, 2>(4, 6),
+                                                   array<int, 2>{6, 1});
+        Check(s(1, 2) == 8, "phase183 (24) layout_stride does what it is told");
+        Check(s.is_exhaustive(), "phase183 (25) these strides leave no holes");
+        Check(s.required_span_size() == 24, "phase183 (26) its span size");
+        layout_stride::mapping<dextents<int, 2>> h(dextents<int, 2>(4, 6),
+                                                   array<int, 2>{8, 1});
+        Check(!h.is_exhaustive(),
+              "phase183 (27) a row pitch wider than the row does leave holes");
+        Check(h.required_span_size() == 3 * 8 + 6, "phase183 (28) ...and a "
+                                                   "larger span than 4*6");
+        // Comparable against ANY strided mapping of the same rank.
+        Check(s == layout_right::mapping<dextents<int, 2>>(dextents<int, 2>(4, 6)),
+              "phase183 (29) a stride mapping equals the layout_right it "
+              "reproduces");
+        Check(!(h == layout_right::mapping<dextents<int, 2>>(dextents<int, 2>(4, 6))),
+              "phase183 (30) ...and not one it does not");
+    }
+
+    // ── the padded layouts: a framebuffer with a pitch ───────────────────
+    {
+        // 5 rows of 6 pixels each, but the scan line is 8 pixels wide.
+        layout_right_padded<>::mapping<dextents<int, 2>> fb(dextents<int, 2>(5, 6), 8);
+        Check(fb.stride(0) == 8 && fb.stride(1) == 1,
+              "phase183 (31) the row pitch lives in the mapping");
+        Check(fb(2, 3) == 19, "phase183 (32) so indexing needs no pitch math");
+        Check(!fb.is_exhaustive(), "phase183 (33) padding means holes");
+        Check(fb.required_span_size() == 4 * 8 + 6,
+              "phase183 (34) and the last row's padding is not addressed");
+
+        layout_right_padded<8>::mapping<extents<int, 5, 6>> st;
+        Check(st.stride(0) == 8 && st(2, 3) == 19,
+              "phase183 (35) the same with the pitch known at compile time");
+        static_assert(sizeof(st) == 2,
+                      "phase183 (36) which then costs no storage at all");
+        static_assert(!decltype(st)::is_always_exhaustive(),
+                      "phase183 (37) and is known non-exhaustive statically");
+
+        layout_right_padded<8>::mapping<extents<int, 5, 8>> tight;
+        static_assert(decltype(tight)::is_always_exhaustive(),
+                      "phase183 (38) a padding equal to the extent IS "
+                      "exhaustive, and statically so");
+
+        layout_left_padded<>::mapping<dextents<int, 2>> lp(dextents<int, 2>(6, 5), 8);
+        Check(lp.stride(0) == 1 && lp.stride(1) == 8,
+              "phase183 (39) the left-padded mirror");
+        Check(lp(3, 2) == 19, "phase183 (40) its indexing");
+    }
+    // A padded mapping converts back to the plain one when it has no padding.
+    {
+        layout_right_padded<8>::mapping<extents<int, 5, 8>> tight;
+        layout_right::mapping<extents<int, 5, 8>>           plain(tight);
+        Check(plain(2, 3) == 19,
+              "phase183 (41) an unpadded padded mapping converts to plain");
+        layout_stride::mapping<extents<int, 5, 8>> str(tight);
+        Check(str.stride(0) == 8,
+              "phase183 (42) and any of them converts to layout_stride");
+    }
+    static_assert(__cpp_lib_mdspan == 202406L, "phase183 (43) macro");
+
+    printf("[CXX] PASS phase183: extents cost only their dynamic half, and "
+           "all five layout mappings agree with their strides\n");
+}
+
+void Phase184()
+{
+    using namespace std;
+
+    static int buf[64];
+    for (int i = 0; i < 64; ++i) buf[i] = i;
+
+    // ── construction and indexing ────────────────────────────────────────
+    {
+        mdspan m(buf, 4, 6);
+        static_assert(decltype(m)::rank() == 2,
+                      "phase184 (1) deduced rank from the argument count");
+        static_assert(is_same_v<decltype(m)::layout_type, layout_right>,
+                      "phase184 (2) row-major by default");
+        Check(m[1, 2] == 8, "phase184 (3) the multidimensional subscript");
+        Check(m.size() == 24 && !m.empty(), "phase184 (4) size and empty");
+        Check(m.extent(0) == 4 && m.stride(0) == 6, "phase184 (5) observers");
+        Check(m.is_exhaustive() && m.is_unique() && m.is_strided(),
+              "phase184 (6) a plain row-major view is all three");
+        array<int, 2> idx{1, 2};
+        Check(m[idx] == 8, "phase184 (7) subscript by array");
+        Check(m[span<int, 2>(idx)] == 8, "phase184 (8) and by span");
+    }
+    // Static extents deduce from a compile-time constant.
+    {
+        auto m = mdspan(buf, cw<4zu>, cw<6zu>);
+        static_assert(decltype(m)::static_extent(0) == 4,
+                      "phase184 (9) a compile-time extent stays static");
+        static_assert(sizeof(m) == sizeof(int *),
+                      "phase184 (10) so the view is exactly a pointer");
+        Check(m[1, 2] == 8, "phase184 (11) and indexes the same");
+    }
+    // The C-array guide.
+    {
+        int    arr[5]{};
+        mdspan m(arr);
+        static_assert(decltype(m)::static_extent(0) == 5,
+                      "phase184 (12) deduced from a C array");
+    }
+    // ── at() is the checked form ─────────────────────────────────────────
+    {
+        mdspan m(buf, 4, 6);
+        Check(m.at(1, 2) == 8, "phase184 (13) at() agrees with operator[]");
+        bool caught = false;
+        try {
+            (void)m.at(4, 0);
+        } catch (const out_of_range &) {
+            caught = true;
+        }
+        Check(caught, "phase184 (14) at() throws past the end");
+        caught = false;
+        try {
+            (void)m.at(0, 6);
+        } catch (const out_of_range &) {
+            caught = true;
+        }
+        Check(caught, "phase184 (15) ...in every rank");
+    }
+    // ── accessors ────────────────────────────────────────────────────────
+    {
+        alignas(64) static int wide[16];
+        for (int i = 0; i < 16; ++i) wide[i] = 100 + i;
+        using AA = aligned_accessor<int, 64>;
+        static_assert(AA::byte_alignment == 64, "phase184 (16)");
+        mdspan<int, dextents<int, 1>, layout_right, AA> am(wide,
+                                                           dextents<int, 1>(16));
+        Check(am[3] == 103, "phase184 (17) an over-aligned view reads the same");
+        Check(is_sufficiently_aligned<64>(am.data_handle()),
+              "phase184 (18) and the promise it makes is checkable");
+        mdspan<int, dextents<int, 1>> plain = am;
+        Check(plain[3] == 103,
+              "phase184 (19) dropping the promise is implicit");
+        static_assert(!is_convertible_v<mdspan<int, dextents<int, 1>>,
+                                        decltype(am)>,
+                      "phase184 (20) ...and MAKING one is not");
+        static_assert(is_same_v<AA::offset_policy, default_accessor<int>>,
+                      "phase184 (21) an offset handle is no longer aligned");
+    }
+    // ── converting between mdspans ───────────────────────────────────────
+    {
+        mdspan<int, extents<int, 4, 6>> fixed(buf);
+        mdspan<int, dextents<int, 2>>   loose = fixed;
+        Check(loose[1, 2] == 8, "phase184 (22) static extents convert to "
+                                "dynamic implicitly");
+        static_assert(!is_convertible_v<mdspan<int, dextents<int, 2>>,
+                                        mdspan<int, extents<int, 4, 6>>>,
+                      "phase184 (23) and the other way is explicit only");
+        mdspan<const int, dextents<int, 2>> ro = loose;
+        Check(ro[1, 2] == 8, "phase184 (24) and int -> const int is implicit");
+    }
+    // ── copy / fill ──────────────────────────────────────────────────────
+    {
+        static int a[12], b[12];
+        mdspan     src(a, 3, 4), dst(b, 3, 4);
+        std::fill(src, 7);
+        Check(src[2, 3] == 7 && src[0, 0] == 7, "phase184 (25) fill covers "
+                                                "the whole index space");
+        std::fill(dst, 0);
+        std::copy(src, dst);
+        Check(dst[2, 3] == 7, "phase184 (26) copy carries it across");
+        // It is elementwise, not memcpy: layouts may differ.
+        static int c[12];
+        mdspan<int, dextents<int, 2>, layout_left> col(c, dextents<int, 2>(3, 4));
+        std::copy(src, col);
+        Check(col[2, 3] == 7 && c[3 * 4 - 1] == 7,
+              "phase184 (27) copy between DIFFERENT layouts is elementwise");
+    }
+    // ── swap ─────────────────────────────────────────────────────────────
+    {
+        static int a[4], b[4];
+        mdspan     x(a, 4), y(b, 4);
+        swap(x, y);
+        Check(x.data_handle() == b && y.data_handle() == a,
+              "phase184 (28) swap exchanges the handles");
+    }
+    static_assert(__cpp_lib_aligned_accessor == 202411L,
+                  "phase184 (29) macro (P2897R7)");
+
+    printf("[CXX] PASS phase184: mdspan indexes, converts, checks and copies "
+           "across layouts and accessors\n");
+}
+
+// The submdspan verifier: every element of the result must be the SAME
+// OBJECT as the source element the slice specifies. Address identity, not
+// value equality -- a wrong stride that happens to land on an equal value
+// cannot slip through.
+struct P35Desc {
+    int  off, cnt, str;
+    bool collapse;
+};
+
+int g_ph35_checks = 0;
+
+template <class Src, class Sub>
+void P35Verify2(const char *tag, const Src &src, const Sub &sub, P35Desc d0,
+                P35Desc d1)
+{
+    constexpr size_t SR = Sub::rank();
+    const size_t     want_rank =
+        (d0.collapse ? 0u : 1u) + (d1.collapse ? 0u : 1u);
+    if (SR != want_rank) {
+        Check(false, tag);
+        return;
+    }
+    for (int a = 0; a < d0.cnt; ++a)
+        for (int b = 0; b < d1.cnt; ++b) {
+            const auto *want = &src[d0.off + a * d0.str, d1.off + b * d1.str];
+            const auto *got  = want;
+            if constexpr (SR == 2)
+                got = &sub[a, b];
+            else if constexpr (SR == 1)
+                got = &sub[d0.collapse ? b : a];
+            else
+                got = &sub[];
+            ++g_ph35_checks;
+            if (want != got) {
+                Check(false, tag);
+                return;
+            }
+        }
+}
+
+template <class Src>
+void P35Sweep2(const char *tag, const Src &src)
+{
+    using namespace std;
+    const int E0 = static_cast<int>(src.extent(0));
+    const int E1 = static_cast<int>(src.extent(1));
+    P35Verify2(tag, src, submdspan(src, 1, 2), {1, 1, 1, true}, {2, 1, 1, true});
+    P35Verify2(tag, src, submdspan(src, 1, full_extent), {1, 1, 1, true},
+               {0, E1, 1, false});
+    P35Verify2(tag, src, submdspan(src, full_extent, 2), {0, E0, 1, false},
+               {2, 1, 1, true});
+    P35Verify2(tag, src, submdspan(src, full_extent, full_extent),
+               {0, E0, 1, false}, {0, E1, 1, false});
+    P35Verify2(tag, src, submdspan(src, range_slice{1, E0}, full_extent),
+               {1, E0 - 1, 1, false}, {0, E1, 1, false});
+    P35Verify2(tag, src, submdspan(src, full_extent, range_slice{1, E1}),
+               {0, E0, 1, false}, {1, E1 - 1, 1, false});
+    P35Verify2(tag, src, submdspan(src, range_slice{1, E0}, range_slice{1, E1}),
+               {1, E0 - 1, 1, false}, {1, E1 - 1, 1, false});
+    P35Verify2(tag, src,
+               submdspan(src, extent_slice{0, (E0 + 1) / 2, 2}, full_extent),
+               {0, (E0 + 1) / 2, 2, false}, {0, E1, 1, false});
+    P35Verify2(tag, src,
+               submdspan(src, full_extent, extent_slice{0, (E1 + 1) / 2, 2}),
+               {0, E0, 1, false}, {0, (E1 + 1) / 2, 2, false});
+    P35Verify2(tag, src, submdspan(src, extent_slice{1, 2, 2}, extent_slice{1, 2, 2}),
+               {1, 2, 2, false}, {1, 2, 2, false});
+    P35Verify2(tag, src, submdspan(src, 2, range_slice{1, E1}), {2, 1, 1, true},
+               {1, E1 - 1, 1, false});
+    P35Verify2(tag, src, submdspan(src, pair{1, E0}, pair{1, E1}),
+               {1, E0 - 1, 1, false}, {1, E1 - 1, 1, false});
+    P35Verify2(tag, src, submdspan(src, range_slice{cw<1zu>, cw<3zu>}, full_extent),
+               {1, 2, 1, false}, {0, E1, 1, false});
+    P35Verify2(tag, src, submdspan(src, range_slice{1, 1}, full_extent),
+               {1, 0, 1, false}, {0, E1, 1, false});
+}
+
+template <class Src, class Sub>
+void P35Verify3(const char *tag, const Src &src, const Sub &sub, P35Desc d0,
+                P35Desc d1, P35Desc d2)
+{
+    constexpr size_t SR = Sub::rank();
+    const size_t     want_rank = (d0.collapse ? 0u : 1u) + (d1.collapse ? 0u : 1u) +
+                             (d2.collapse ? 0u : 1u);
+    if (SR != want_rank) {
+        Check(false, tag);
+        return;
+    }
+    for (int a = 0; a < d0.cnt; ++a)
+        for (int b = 0; b < d1.cnt; ++b)
+            for (int c = 0; c < d2.cnt; ++c) {
+                const auto *want = &src[d0.off + a * d0.str, d1.off + b * d1.str,
+                                        d2.off + c * d2.str];
+                const auto *got  = want;
+                const int   ix[3] = {a, b, c};
+                int         kept[3];
+                int         n = 0;
+                if (!d0.collapse) kept[n++] = ix[0];
+                if (!d1.collapse) kept[n++] = ix[1];
+                if (!d2.collapse) kept[n++] = ix[2];
+                if constexpr (SR == 3)
+                    got = &sub[kept[0], kept[1], kept[2]];
+                else if constexpr (SR == 2)
+                    got = &sub[kept[0], kept[1]];
+                else if constexpr (SR == 1)
+                    got = &sub[kept[0]];
+                else
+                    got = &sub[];
+                ++g_ph35_checks;
+                if (want != got) {
+                    Check(false, tag);
+                    return;
+                }
+            }
+}
+
+template <class Src>
+void P35Sweep3(const char *tag, const Src &src)
+{
+    using namespace std;
+    const int E0 = static_cast<int>(src.extent(0));
+    const int E1 = static_cast<int>(src.extent(1));
+    const int E2 = static_cast<int>(src.extent(2));
+    P35Verify3(tag, src, submdspan(src, 1, full_extent, full_extent),
+               {1, 1, 1, true}, {0, E1, 1, false}, {0, E2, 1, false});
+    P35Verify3(tag, src, submdspan(src, full_extent, 1, full_extent),
+               {0, E0, 1, false}, {1, 1, 1, true}, {0, E2, 1, false});
+    P35Verify3(tag, src, submdspan(src, full_extent, full_extent, 1),
+               {0, E0, 1, false}, {0, E1, 1, false}, {1, 1, 1, true});
+    P35Verify3(tag, src, submdspan(src, 1, 1, full_extent), {1, 1, 1, true},
+               {1, 1, 1, true}, {0, E2, 1, false});
+    P35Verify3(tag, src, submdspan(src, full_extent, 1, 1), {0, E0, 1, false},
+               {1, 1, 1, true}, {1, 1, 1, true});
+    P35Verify3(tag, src, submdspan(src, range_slice{1, E0}, full_extent, full_extent),
+               {1, E0 - 1, 1, false}, {0, E1, 1, false}, {0, E2, 1, false});
+    P35Verify3(tag, src, submdspan(src, full_extent, range_slice{1, E1}, full_extent),
+               {0, E0, 1, false}, {1, E1 - 1, 1, false}, {0, E2, 1, false});
+    P35Verify3(tag, src, submdspan(src, full_extent, full_extent, range_slice{1, E2}),
+               {0, E0, 1, false}, {0, E1, 1, false}, {1, E2 - 1, 1, false});
+    P35Verify3(tag, src,
+               submdspan(src, extent_slice{0, 2, 2}, extent_slice{0, 2, 2},
+                         extent_slice{0, 2, 2}),
+               {0, 2, 2, false}, {0, 2, 2, false}, {0, 2, 2, false});
+    P35Verify3(tag, src, submdspan(src, 1, 2, 3), {1, 1, 1, true},
+               {2, 1, 1, true}, {3, 1, 1, true});
+}
+
+void Phase185()
+{
+    using namespace std;
+
+    static int buf[512];
+    for (int i = 0; i < 512; ++i) buf[i] = i;
+
+    // ── every slice shape, over every layout, checked by ADDRESS ─────────
+    {
+        mdspan<int, dextents<int, 2>, layout_right> a(buf, dextents<int, 2>(5, 7));
+        P35Sweep2("phase185 sweep right/dyn", a);
+        mdspan<int, extents<int, 5, 7>, layout_right> b(buf);
+        P35Sweep2("phase185 sweep right/static", b);
+        mdspan<int, dextents<int, 2>, layout_left> c(buf, dextents<int, 2>(5, 7));
+        P35Sweep2("phase185 sweep left/dyn", c);
+        mdspan<int, extents<int, 5, 7>, layout_left> d(buf);
+        P35Sweep2("phase185 sweep left/static", d);
+
+        layout_stride::mapping<dextents<int, 2>> sm(dextents<int, 2>(5, 7),
+                                                    array<int, 2>{9, 1});
+        mdspan<int, dextents<int, 2>, layout_stride> e(buf, sm);
+        P35Sweep2("phase185 sweep stride", e);
+
+        layout_right_padded<>::mapping<dextents<int, 2>> rp(dextents<int, 2>(5, 7), 9);
+        mdspan<int, dextents<int, 2>, layout_right_padded<>> f(buf, rp);
+        P35Sweep2("phase185 sweep rpad/dyn", f);
+
+        layout_right_padded<8>::mapping<extents<int, 5, 7>> rps;
+        mdspan<int, extents<int, 5, 7>, layout_right_padded<8>> g(buf, rps);
+        P35Sweep2("phase185 sweep rpad/static", g);
+
+        layout_left_padded<>::mapping<dextents<int, 2>> lp(dextents<int, 2>(5, 7), 9);
+        mdspan<int, dextents<int, 2>, layout_left_padded<>> h(buf, lp);
+        P35Sweep2("phase185 sweep lpad/dyn", h);
+    }
+    {
+        mdspan<int, dextents<int, 3>, layout_right> a(buf, dextents<int, 3>(4, 5, 6));
+        P35Sweep3("phase185 sweep right3", a);
+        mdspan<int, extents<int, 4, 5, 6>, layout_left> b(buf);
+        P35Sweep3("phase185 sweep left3", b);
+        layout_stride::mapping<dextents<int, 3>> sm(dextents<int, 3>(4, 5, 6),
+                                                    array<int, 3>{40, 7, 1});
+        mdspan<int, dextents<int, 3>, layout_stride> c(buf, sm);
+        P35Sweep3("phase185 sweep stride3", c);
+        layout_right_padded<>::mapping<dextents<int, 3>> rp(dextents<int, 3>(4, 5, 6), 8);
+        mdspan<int, dextents<int, 3>, layout_right_padded<>> d(buf, rp);
+        P35Sweep3("phase185 sweep rpad3", d);
+    }
+    Check(g_ph35_checks > 3000,
+          "phase185 (1) the sweep really did visit thousands of elements");
+
+    // ── the layout STAIRCASE ─────────────────────────────────────────────
+    // Correct values are not enough: submdspan must hand back the strongest
+    // layout the slicing allows. Falling back to layout_stride everywhere
+    // would pass every value check above and still cost a multiply per
+    // index. These pins are cross-checked against libstdc++ 16.1, which
+    // answers identically for each one.
+    {
+        using R2 = mdspan<int, dextents<int, 2>, layout_right>;
+        using L2 = mdspan<int, dextents<int, 2>, layout_left>;
+        using R3 = mdspan<int, dextents<int, 3>, layout_right>;
+        using RS = range_slice<int, int>;
+        using ES = extent_slice<int, int, int>;
+        using FE = full_extent_t;
+
+        static_assert(is_same_v<__phase35::LayoutOf<R2, int, FE>, layout_right>,
+                      "phase185 (2) fixing a leading index keeps the rest "
+                      "contiguous");
+        static_assert(is_same_v<__phase35::LayoutOf<R2, FE, int>, layout_stride>,
+                      "phase185 (3) a column of a row-major matrix is strided "
+                      "and nothing better");
+        static_assert(is_same_v<__phase35::LayoutOf<R2, RS, FE>, layout_right>,
+                      "phase185 (4) trimming WHOLE ROWS leaves it contiguous");
+        static_assert(is_same_v<__phase35::LayoutOf<R2, FE, RS>,
+                                layout_right_padded<dynamic_extent>>,
+                      "phase185 (5) trimming COLUMNS keeps the original row "
+                      "pitch -- that is what padded means");
+        static_assert(is_same_v<__phase35::LayoutOf<R2, FE, ES>, layout_stride>,
+                      "phase185 (6) a non-unit step defeats padding");
+        static_assert(is_same_v<__phase35::LayoutOf<R3, FE, int, FE>,
+                                layout_right_padded<dynamic_extent>>,
+                      "phase185 (7) collapsing a MIDDLE rank still leaves a "
+                      "constant pitch");
+        static_assert(is_same_v<__phase35::LayoutOf<L2, FE, int>, layout_left>,
+                      "phase185 (8) the left mirror");
+        static_assert(is_same_v<__phase35::LayoutOf<L2, RS, FE>,
+                                layout_left_padded<dynamic_extent>>,
+                      "phase185 (9) ...and its padded case");
+
+        using RSt = mdspan<int, extents<int, 5, 8>, layout_right>;
+        static_assert(is_same_v<__phase35::LayoutOf<RSt, FE, RS>,
+                                layout_right_padded<8>>,
+                      "phase185 (10) a static extent makes the padding static");
+    }
+    // ── compile-time bounds become static extents of the result ──────────
+    {
+        using R2  = mdspan<int, dextents<int, 2>, layout_right>;
+        using CwR = range_slice<constant_wrapper<size_t(1)>,
+                                constant_wrapper<size_t(4)>>;
+        static_assert(__phase35::SubOf<R2, CwR, full_extent_t>::static_extent(0) == 3,
+                      "phase185 (11) cw bounds subtract into a STATIC extent");
+        static_assert(__phase35::SubOf<R2, CwR, full_extent_t>::static_extent(1) ==
+                          dynamic_extent,
+                      "phase185 (12) while the untouched rank stays dynamic");
+    }
+
+    // ── the case this header exists for: a window into a framebuffer ─────
+    {
+        // 8 scan lines of pitch 16, showing 12 pixels each.
+        static int fbuf[8 * 16];
+        for (int i = 0; i < 8 * 16; ++i) fbuf[i] = i;
+        using FB = layout_right_padded<>;
+        FB::mapping<dextents<int, 2>> map(dextents<int, 2>(8, 12), 16);
+        mdspan<int, dextents<int, 2>, FB> fb(fbuf, map);
+        Check(fb[1, 0] == 16, "phase185 (13) the pitch is honoured");
+
+        auto win = submdspan(fb, range_slice{2, 6}, range_slice{3, 9});
+        Check(win.extent(0) == 4 && win.extent(1) == 6,
+              "phase185 (14) a 4x6 window");
+        Check(&win[0, 0] == &fb[2, 3] && &win[3, 5] == &fb[5, 8],
+              "phase185 (15) aliasing the same pixels");
+        Check(win.stride(0) == 16,
+              "phase185 (16) and it still knows the ORIGINAL pitch, so a blit "
+              "over it is the same loop as over the whole screen");
+        static_assert(is_same_v<decltype(win)::layout_type,
+                                layout_right_padded<dynamic_extent>>,
+                      "phase185 (17) which is what the type says too");
+    }
+    // ── slicing a slice ──────────────────────────────────────────────────
+    {
+        mdspan<int, dextents<int, 3>, layout_right> a(buf, dextents<int, 3>(4, 5, 6));
+        auto s1 = submdspan(a, full_extent, range_slice{1, 4}, full_extent);
+        auto s2 = submdspan(s1, 2, full_extent, range_slice{1, 5});
+        bool ok = true;
+        for (int b = 0; b < 3; ++b)
+            for (int c = 0; c < 4; ++c)
+                if (&s2[b, c] != &a[2, 1 + b, 1 + c]) ok = false;
+        Check(ok, "phase185 (18) a slice of a slice still aliases correctly");
+    }
+    // ── subextents and canonical_slices answer on their own ──────────────
+    {
+        mdspan m(buf, 5, 7);
+        auto   se = subextents(m.extents(), 2, full_extent);
+        static_assert(decltype(se)::rank() == 1,
+                      "phase185 (19) subextents drops the collapsed rank");
+        Check(se.extent(0) == 7, "phase185 (20) and keeps the other");
+        auto cs = canonical_slices(m.extents(), 2, full_extent);
+        static_assert(tuple_size_v<decltype(cs)> == 2,
+                      "phase185 (21) canonical_slices answers one per rank");
+        static_assert(is_same_v<tuple_element_t<1, decltype(cs)>, full_extent_t>,
+                      "phase185 (22) leaving full_extent as itself");
+    }
+    static_assert(__cpp_lib_submdspan == 202603L, "phase185 (23) macro");
+
+    printf("[CXX] PASS phase185: submdspan aliases the right elements across "
+           "%d checks, and promotes the layout as far as the slicing allows\n",
+           g_ph35_checks);
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -41596,6 +42587,11 @@ int main()
     Phase178();
     Phase179();
     Phase180();
+    Phase181();
+    Phase182();
+    Phase183();
+    Phase184();
+    Phase185();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

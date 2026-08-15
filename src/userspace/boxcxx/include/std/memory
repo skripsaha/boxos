@@ -2286,6 +2286,32 @@ bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
 // reason (see that file's comment).
 #include <__bits/smartptr_adapt>
 
+// __bits/indirect ([mem.composite.types]: indirect and polymorphic) sits
+// here for the same two-phase-lookup reason as the line above, plus one of
+// its own: hash<indirect<T, A>> specializes the hash primary template,
+// which <functional> declares, and the specialization has to be seen by
+// every translation unit that could instantiate it.
+#include <__bits/indirect>
+
+namespace std {
+namespace pmr {
+
+// [memory.syn] places these two aliases in <memory>, not in
+// <memory_resource>, so the allocator template is declared here rather than
+// included: naming a class template in an alias needs a declaration and
+// nothing more. The default argument stays where the definition is, in
+// <memory_resource> -- repeating it here would be a second default for the
+// same parameter, and this header may be seen either before or after that
+// one.
+template <class T> class polymorphic_allocator;
+
+template <class T> using indirect = std::indirect<T, polymorphic_allocator<T>>;
+template <class T>
+using polymorphic = std::polymorphic<T, polymorphic_allocator<T>>;
+
+} // namespace pmr
+} // namespace std
+
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_algorithm_default_value_type
@@ -2301,9 +2327,11 @@ bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
 #define BOXCXX_OWNS_constexpr_dynamic_alloc
 #define BOXCXX_OWNS_constexpr_memory
 #define BOXCXX_OWNS_enable_shared_from_this
+#define BOXCXX_OWNS_indirect
 #define BOXCXX_OWNS_is_sufficiently_aligned
 #define BOXCXX_OWNS_make_unique
 #define BOXCXX_OWNS_out_ptr
+#define BOXCXX_OWNS_polymorphic
 #define BOXCXX_OWNS_raw_memory_algorithms
 #define BOXCXX_OWNS_shared_ptr_arrays
 #define BOXCXX_OWNS_shared_ptr_weak_type

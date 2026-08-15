@@ -1,0 +1,594 @@
+// boxcxx — <mdspan>  ([views.multidim], P0009R18 and the C++26 papers on top)
+//
+// A non-owning view of a MULTIDIMENSIONAL array: mdspan is to a 2-D or 3-D
+// buffer what span is to a 1-D one. Nothing is owned, nothing is allocated,
+// and the whole thing is three members -- a data handle, a layout mapping,
+// and an accessor -- of which the last two are usually empty.
+//
+// Why this header earns its place in a kernel's standard library:
+//
+//  - A framebuffer is a 2-D array whose row pitch is NOT its width. That is
+//    a layout, not a hack, and layout_right_padded is exactly it: the scan
+//    line stride lives in the mapping, the drawing code just writes
+//    fb[y, x]. Every hand-rolled `base + y * pitch + x` in a graphics path
+//    is this type, spelled by hand and re-derived per call site.
+//
+//  - A sub-rectangle of that framebuffer is submdspan(fb, {y0, y1},
+//    {x0, x1}). The result is another mdspan with the same element type and
+//    a mapping that already knows the pitch, so a blit loop over a window
+//    is the same loop as over the whole screen.
+//
+//  - Page tables, descriptor rings, MTRR banks and firmware tables are all
+//    rank-2 or rank-3 index spaces over flat memory. extents<size_t, 512>
+//    costs nothing at run time and turns a bounds question into a type.
+//
+// Layout of this header family:
+//   <__bits/mdspan_extents>       extents, dextents, dims
+//   <__bits/mdspan_layout>        layout_left, layout_right, layout_stride
+//   <__bits/mdspan_layout_padded> layout_left_padded, layout_right_padded
+//   <__bits/mdspan_sub>           the submdspan family
+//   this file                     the accessors, mdspan itself, copy/fill
+#ifndef BOXCXX_MDSPAN
+#define BOXCXX_MDSPAN
+
+#include <__bits/mdspan_extents>
+#include <__bits/mdspan_layout>
+#include <__bits/mdspan_layout_padded>
+#include <__bits/mdspan_sub>
+#include <__bits/throw_helpers>
+#include <array>
+#include <cstddef>
+#include <memory>       // assume_aligned, is_sufficiently_aligned
+#include <span>
+#include <type_traits>
+#include <utility>
+
+// [version.syn] names this header as the owner of the macros below.
+#define BOXCXX_OWNS_mdspan
+#define BOXCXX_OWNS_aligned_accessor
+#define BOXCXX_OWNS_submdspan
+#include <__bits/version_mdspan>
+
+namespace std {
+
+// ── default_accessor ([mdspan.accessor.default]) ─────────────────────────
+//
+// The accessor is the indirection mdspan keeps between "offset i" and "the
+// object at i". The default one is a plain pointer and plain subscript, and
+// it is an empty type, so mdspan over it is exactly a pointer plus whatever
+// the mapping stores.
+
+template <class ElementType>
+struct default_accessor {
+    static_assert(!is_abstract_v<ElementType> && !is_array_v<ElementType>,
+                  "std::default_accessor<T>: T must be a complete object type "
+                  "that is neither abstract nor an array");
+
+    using offset_policy    = default_accessor;
+    using element_type     = ElementType;
+    using reference        = ElementType &;
+    using data_handle_type = ElementType *;
+
+    constexpr default_accessor() noexcept = default;
+
+    // The array-of-unknown-bound spelling is not decoration: it is what
+    // allows T* -> const T* while REJECTING Derived* -> Base*, which would
+    // silently index with the wrong element size.
+    template <class OtherElementType>
+        requires(is_convertible_v<OtherElementType (*)[], element_type (*)[]>)
+    constexpr default_accessor(default_accessor<OtherElementType>) noexcept
+    {
+    }
+
+    constexpr reference access(data_handle_type p, size_t i) const noexcept
+    {
+        return p[i];
+    }
+
+    constexpr data_handle_type offset(data_handle_type p, size_t i) const noexcept
+    {
+        return p + i;
+    }
+};
+
+// ── aligned_accessor ([mdspan.accessor.aligned], P2897R7) ────────────────
+//
+// Same pointer, plus a promise: the handle really is over-aligned to
+// byte_alignment, so the compiler may assume it and vectorize accordingly.
+// The promise is the caller's to keep -- is_sufficiently_aligned is how it
+// checks before making one.
+
+template <class ElementType, size_t ByteAlignment>
+struct aligned_accessor {
+    static_assert(ByteAlignment != 0 && (ByteAlignment & (ByteAlignment - 1)) == 0,
+                  "std::aligned_accessor<T, N>: N must be a power of two");
+    static_assert(ByteAlignment >= alignof(ElementType),
+                  "std::aligned_accessor<T, N>: N must be at least alignof(T)");
+    static_assert(!is_abstract_v<ElementType> && !is_array_v<ElementType>,
+                  "std::aligned_accessor<T, N>: T must be a complete object "
+                  "type that is neither abstract nor an array");
+
+    // Note the offset policy is the UNALIGNED accessor: p + i keeps the
+    // alignment only when i is a multiple of it, and nothing here knows i.
+    using offset_policy    = default_accessor<ElementType>;
+    using element_type     = ElementType;
+    using reference        = ElementType &;
+    using data_handle_type = ElementType *;
+
+    static constexpr size_t byte_alignment = ByteAlignment;
+
+    constexpr aligned_accessor() noexcept = default;
+
+    // Converting between aligned accessors may only ever WEAKEN the promise.
+    template <class OtherElementType, size_t OtherByteAlignment>
+        requires(is_convertible_v<OtherElementType (*)[], element_type (*)[]> &&
+                 OtherByteAlignment >= byte_alignment)
+    constexpr aligned_accessor(
+        aligned_accessor<OtherElementType, OtherByteAlignment>) noexcept
+    {
+    }
+
+    // From an unaligned accessor the conversion is explicit, because it
+    // MAKES the promise rather than passing one on.
+    template <class OtherElementType>
+        requires(is_convertible_v<OtherElementType (*)[], element_type (*)[]>)
+    constexpr explicit aligned_accessor(default_accessor<OtherElementType>) noexcept
+    {
+    }
+
+    // Dropping the promise, on the other hand, is always safe and implicit.
+    template <class OtherElementType>
+        requires(is_convertible_v<element_type (*)[], OtherElementType (*)[]>)
+    constexpr operator default_accessor<OtherElementType>() const noexcept
+    {
+        return {};
+    }
+
+    constexpr reference access(data_handle_type p, size_t i) const noexcept
+    {
+        return assume_aligned<byte_alignment>(p)[i];
+    }
+
+    constexpr typename offset_policy::data_handle_type
+    offset(data_handle_type p, size_t i) const noexcept
+    {
+        return assume_aligned<byte_alignment>(p) + i;
+    }
+};
+
+// ── mdspan ([mdspan.mdspan]) ─────────────────────────────────────────────
+
+template <class ElementType, class Extents, class LayoutPolicy = layout_right,
+          class AccessorPolicy = default_accessor<ElementType>>
+class mdspan {
+    static_assert(__mdsp::IsExtents<Extents>,
+                  "std::mdspan<T, E, ...>: E must be a specialization of "
+                  "std::extents");
+    static_assert(!is_abstract_v<ElementType> && !is_array_v<ElementType>,
+                  "std::mdspan<T, ...>: T must be a complete object type that "
+                  "is neither abstract nor an array");
+    static_assert(is_same_v<ElementType, typename AccessorPolicy::element_type>,
+                  "std::mdspan<T, E, L, A>: A::element_type must be T");
+
+public:
+    using extents_type     = Extents;
+    using layout_type      = LayoutPolicy;
+    using accessor_type    = AccessorPolicy;
+    using mapping_type     = typename layout_type::template mapping<extents_type>;
+    using element_type     = ElementType;
+    using value_type       = remove_cv_t<element_type>;
+    using index_type       = typename extents_type::index_type;
+    using size_type        = typename extents_type::size_type;
+    using rank_type        = typename extents_type::rank_type;
+    using data_handle_type = typename accessor_type::data_handle_type;
+    using reference        = typename accessor_type::reference;
+
+    static constexpr rank_type rank() noexcept { return extents_type::rank(); }
+    static constexpr rank_type rank_dynamic() noexcept
+    {
+        return extents_type::rank_dynamic();
+    }
+    static constexpr size_t static_extent(rank_type r) noexcept
+    {
+        return extents_type::static_extent(r);
+    }
+    constexpr index_type extent(rank_type r) const noexcept
+    {
+        return extents().extent(r);
+    }
+
+    // ── [mdspan.mdspan.cons] ─────────────────────────────────────────────
+
+    constexpr mdspan()
+        requires(rank_dynamic() > 0 && is_default_constructible_v<data_handle_type> &&
+                 is_default_constructible_v<mapping_type> &&
+                 is_default_constructible_v<accessor_type>)
+        : acc_(), map_(), ptr_()
+    {
+    }
+
+    constexpr mdspan(const mdspan &) = default;
+    constexpr mdspan(mdspan &&)      = default;
+
+    template <class... OtherIndexTypes>
+        requires((is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+                 (sizeof...(OtherIndexTypes) == rank() ||
+                  sizeof...(OtherIndexTypes) == rank_dynamic()) &&
+                 is_constructible_v<mapping_type, extents_type> &&
+                 is_default_constructible_v<accessor_type>)
+    constexpr explicit mdspan(data_handle_type p, OtherIndexTypes... exts)
+        : acc_(), map_(extents_type(static_cast<index_type>(std::move(exts))...)),
+          ptr_(std::move(p))
+    {
+    }
+
+    template <class OtherIndexType, size_t N>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &> &&
+                 (N == rank() || N == rank_dynamic()) &&
+                 is_constructible_v<mapping_type, extents_type> &&
+                 is_default_constructible_v<accessor_type>)
+    constexpr explicit(N != rank_dynamic())
+        mdspan(data_handle_type p, span<OtherIndexType, N> exts)
+        : acc_(), map_(extents_type(exts)), ptr_(std::move(p))
+    {
+    }
+
+    template <class OtherIndexType, size_t N>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &> &&
+                 (N == rank() || N == rank_dynamic()) &&
+                 is_constructible_v<mapping_type, extents_type> &&
+                 is_default_constructible_v<accessor_type>)
+    constexpr explicit(N != rank_dynamic())
+        mdspan(data_handle_type p, const array<OtherIndexType, N> &exts)
+        : acc_(), map_(extents_type(exts)), ptr_(std::move(p))
+    {
+    }
+
+    constexpr mdspan(data_handle_type p, const extents_type &ext)
+        requires(is_constructible_v<mapping_type, const extents_type &> &&
+                 is_default_constructible_v<accessor_type>)
+        : acc_(), map_(ext), ptr_(std::move(p))
+    {
+    }
+
+    constexpr mdspan(data_handle_type p, const mapping_type &m)
+        requires(is_default_constructible_v<accessor_type>)
+        : acc_(), map_(m), ptr_(std::move(p))
+    {
+    }
+
+    constexpr mdspan(data_handle_type p, const mapping_type &m,
+                     const accessor_type &a)
+        : acc_(a), map_(m), ptr_(std::move(p))
+    {
+    }
+
+    template <class OtherElementType, class OtherExtents, class OtherLayoutPolicy,
+              class OtherAccessor>
+        requires(is_constructible_v<
+                     mapping_type,
+                     const typename OtherLayoutPolicy::template mapping<OtherExtents> &> &&
+                 is_constructible_v<accessor_type, const OtherAccessor &>)
+    constexpr explicit(
+        !is_convertible_v<
+            const typename OtherLayoutPolicy::template mapping<OtherExtents> &,
+            mapping_type> ||
+        !is_convertible_v<const OtherAccessor &, accessor_type>)
+        mdspan(const mdspan<OtherElementType, OtherExtents, OtherLayoutPolicy,
+                            OtherAccessor> &other)
+        : acc_(other.accessor()), map_(other.mapping()), ptr_(other.data_handle())
+    {
+        static_assert(is_constructible_v<data_handle_type,
+                                         const typename OtherAccessor::data_handle_type &>,
+                      "std::mdspan: the source's data handle does not convert");
+        static_assert(is_constructible_v<extents_type, OtherExtents>,
+                      "std::mdspan: the source's extents do not convert");
+    }
+
+    constexpr mdspan &operator=(const mdspan &) = default;
+    constexpr mdspan &operator=(mdspan &&)      = default;
+
+    // ── [mdspan.mdspan.members] ──────────────────────────────────────────
+
+    template <class... OtherIndexTypes>
+        requires((is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+                 sizeof...(OtherIndexTypes) == extents_type::rank())
+    constexpr reference operator[](OtherIndexTypes... indices) const
+    {
+        return acc_.access(ptr_,
+                           map_(static_cast<index_type>(std::move(indices))...));
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &>)
+    constexpr reference operator[](
+        span<OtherIndexType, extents_type::rank()> indices) const
+    {
+        return Subscript(indices, make_index_sequence<extents_type::rank()>{});
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &>)
+    constexpr reference operator[](
+        const array<OtherIndexType, extents_type::rank()> &indices) const
+    {
+        return Subscript(indices, make_index_sequence<extents_type::rank()>{});
+    }
+
+    // at() is operator[] with the bounds question asked out loud. It is the
+    // only member of this header that can throw, and the only reason
+    // <mdspan> is not entirely freestanding.
+    template <class... OtherIndexTypes>
+        requires((is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+                 sizeof...(OtherIndexTypes) == extents_type::rank())
+    constexpr reference at(OtherIndexTypes... indices) const
+    {
+        CheckBounds(index_sequence_for<OtherIndexTypes...>{},
+                    static_cast<index_type>(indices)...);
+        return acc_.access(ptr_,
+                           map_(static_cast<index_type>(std::move(indices))...));
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &>)
+    constexpr reference at(span<OtherIndexType, extents_type::rank()> indices) const
+    {
+        return AtPack(indices, make_index_sequence<extents_type::rank()>{});
+    }
+
+    template <class OtherIndexType>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &>)
+    constexpr reference at(
+        const array<OtherIndexType, extents_type::rank()> &indices) const
+    {
+        return AtPack(indices, make_index_sequence<extents_type::rank()>{});
+    }
+
+    constexpr size_type size() const noexcept
+    {
+        return static_cast<size_type>(
+            __mdsp::FwdProd(extents(), extents_type::rank()));
+    }
+
+    constexpr bool empty() const noexcept
+    {
+        for (rank_type r = 0; r < extents_type::rank(); ++r)
+            if (extents().extent(r) == 0) return true;
+        return false;
+    }
+
+    friend constexpr void swap(mdspan &x, mdspan &y) noexcept
+    {
+        using std::swap;
+        swap(x.ptr_, y.ptr_);
+        swap(x.map_, y.map_);
+        swap(x.acc_, y.acc_);
+    }
+
+    constexpr const extents_type &extents() const noexcept
+    {
+        return map_.extents();
+    }
+    constexpr const data_handle_type &data_handle() const noexcept { return ptr_; }
+    constexpr const mapping_type     &mapping() const noexcept { return map_; }
+    constexpr const accessor_type    &accessor() const noexcept { return acc_; }
+
+    static constexpr bool is_always_unique() { return mapping_type::is_always_unique(); }
+    static constexpr bool is_always_exhaustive()
+    {
+        return mapping_type::is_always_exhaustive();
+    }
+    static constexpr bool is_always_strided()
+    {
+        return mapping_type::is_always_strided();
+    }
+
+    constexpr bool       is_unique() const { return map_.is_unique(); }
+    constexpr bool       is_exhaustive() const { return map_.is_exhaustive(); }
+    constexpr bool       is_strided() const { return map_.is_strided(); }
+    constexpr index_type stride(rank_type r) const { return map_.stride(r); }
+
+private:
+    template <class Src, size_t... P>
+    constexpr reference Subscript(const Src &src, index_sequence<P...>) const
+    {
+        return acc_.access(ptr_, map_(static_cast<index_type>(as_const(src[P]))...));
+    }
+
+    template <class Src, size_t... P>
+    constexpr reference AtPack(const Src &src, index_sequence<P...>) const
+    {
+        return at(static_cast<index_type>(as_const(src[P]))...);
+    }
+
+    static constexpr bool InRange(index_type i, index_type e) noexcept
+    {
+        if constexpr (is_signed_v<index_type>)
+            return i >= index_type(0) && i < e;
+        else
+            return i < e;
+    }
+
+    template <size_t... P, class... Idx>
+    constexpr void CheckBounds(index_sequence<P...>, Idx... idxs) const
+    {
+        const bool ok = (InRange(idxs, extents().extent(P)) && ... && true);
+        if (!ok) boxcxx::ThrowOutOfRange("mdspan::at: index out of range");
+    }
+
+    [[no_unique_address]] accessor_type acc_;
+    [[no_unique_address]] mapping_type  map_;
+    data_handle_type                    ptr_;
+};
+
+template <class CArray>
+    requires(is_array_v<CArray> && rank_v<CArray> == 1)
+mdspan(CArray &)
+    -> mdspan<remove_all_extents_t<CArray>, extents<size_t, extent_v<CArray, 0>>>;
+
+template <class Pointer>
+    requires(is_pointer_v<remove_reference_t<Pointer>>)
+mdspan(Pointer &&)
+    -> mdspan<remove_pointer_t<remove_reference_t<Pointer>>, extents<size_t>>;
+
+template <class ElementType, class... Integrals>
+    requires((is_convertible_v<Integrals, size_t> && ...) && sizeof...(Integrals) > 0)
+explicit mdspan(ElementType *, Integrals...)
+    -> mdspan<ElementType, extents<size_t, __span_impl::MaybeStaticExt<Integrals>...>>;
+
+template <class ElementType, class OtherIndexType, size_t N>
+mdspan(ElementType *, span<OtherIndexType, N>)
+    -> mdspan<ElementType, dextents<size_t, N>>;
+
+template <class ElementType, class OtherIndexType, size_t N>
+mdspan(ElementType *, const array<OtherIndexType, N> &)
+    -> mdspan<ElementType, dextents<size_t, N>>;
+
+template <class ElementType, class IndexType, size_t... ExtentsPack>
+mdspan(ElementType *, const extents<IndexType, ExtentsPack...> &)
+    -> mdspan<ElementType, extents<IndexType, ExtentsPack...>>;
+
+template <class ElementType, class MappingType>
+mdspan(ElementType *, const MappingType &)
+    -> mdspan<ElementType, typename MappingType::extents_type,
+              typename MappingType::layout_type>;
+
+template <class MappingType, class AccessorType>
+mdspan(typename AccessorType::data_handle_type, const MappingType &,
+       const AccessorType &)
+    -> mdspan<typename AccessorType::element_type,
+              typename MappingType::extents_type,
+              typename MappingType::layout_type, AccessorType>;
+
+// ── submdspan ([mdspan.sub.sub]) ─────────────────────────────────────────
+//
+// The rest of the family is in <__bits/mdspan_sub>, which had to come
+// before the mdspan class so the layout mappings could define their
+// submdspan_mapping. This one function is the other way round: it BUILDS an
+// mdspan, so it waits until there is one.
+
+namespace __mdsp {
+
+// sliceable-mapping ([mdspan.sub.map.sliceable]/6): does submdspan_mapping,
+// found by ADL, accept this mapping with a full_extent per rank, and does
+// it answer with a submdspan_mapping_result? That is the whole contract a
+// user-written layout has to meet to work with submdspan.
+template <class M, size_t... K>
+constexpr bool SliceableCheck(index_sequence<K...>)
+{
+    if constexpr (requires(const M &lm) {
+                      submdspan_mapping(lm, ((void)K, full_extent)...);
+                  })
+        return IsSubmdspanResult<remove_cvref_t<decltype(submdspan_mapping(
+            declval<const M &>(), ((void)K, full_extent)...))>>;
+    else
+        return false;
+}
+
+template <class M>
+concept SliceableMapping =
+    requires { typename M::extents_type; } &&
+    SliceableCheck<M>(make_index_sequence<M::extents_type::rank()>{});
+
+} // namespace __mdsp
+
+template <class ElementType, class Extents, class LayoutPolicy,
+          class AccessorPolicy, class... SliceSpecifiers>
+    requires(sizeof...(SliceSpecifiers) == Extents::rank() &&
+             __mdsp::SliceableMapping<
+                 typename LayoutPolicy::template mapping<Extents>>)
+constexpr auto submdspan(
+    const mdspan<ElementType, Extents, LayoutPolicy, AccessorPolicy> &src,
+    SliceSpecifiers... raw_slices)
+{
+    using I = typename Extents::index_type;
+    // Canonicalized ONCE, here, so every submdspan_mapping downstream sees
+    // one of four shapes instead of everything convertible to them.
+    auto res = submdspan_mapping(
+        src.mapping(), __mdsp::CanonicalSlice<I>(std::move(raw_slices))...);
+    return mdspan(src.accessor().offset(src.data_handle(), res.offset),
+                  res.mapping,
+                  typename AccessorPolicy::offset_policy(src.accessor()));
+}
+
+// ── multidimensional copy algorithms ([mdspan.copy]) ─────────────────────
+//
+// The rank-generic loop everyone writes by hand, once. The standard says
+// only WHICH elements are assigned, not in what order; this walks the
+// DESTINATION's index space with the last index varying fastest. That is
+// the destination's own storage order whenever it is layout_right, which is
+// the case worth optimising for: writes to device memory are the ones that
+// must not be scattered.
+//
+// The ExecutionPolicy-taking overloads are absent: there is no <execution>
+// in boxcxx, which is the same reason __cpp_lib_parallel_algorithm is not
+// defined. __cpp_lib_mdspan_copy is not claimed for exactly that reason --
+// it names both overload sets.
+
+namespace __mdsp {
+
+template <class T> inline constexpr bool IsMdspan = false;
+template <class T, class E, class L, class A>
+inline constexpr bool IsMdspan<mdspan<T, E, L, A>> = true;
+
+// Walk every multidimensional index of `ext` in layout_right order (last
+// index fastest) and hand each one to `f` as a pack.
+template <class Extents, class F, size_t... P>
+constexpr void ForEachIndex(const Extents &ext, F &&f, index_sequence<P...>)
+{
+    using I = typename Extents::index_type;
+    constexpr size_t kRank = Extents::rank();
+    if constexpr (kRank == 0) {
+        f();
+    } else {
+        I idx[kRank] = {};
+        for (size_t r = 0; r < kRank; ++r)
+            if (ext.extent(r) == 0) return;
+        for (;;) {
+            f(idx[P]...);
+            size_t r = kRank;
+            while (r-- > 0) {
+                if (++idx[r] < ext.extent(r)) break;
+                idx[r] = I(0);
+                if (r == 0) return;
+            }
+        }
+    }
+}
+
+} // namespace __mdsp
+
+template <class Src, class Dst>
+    requires(__mdsp::IsMdspan<Src> && __mdsp::IsMdspan<Dst> &&
+             is_assignable_v<typename Dst::reference, typename Src::reference> &&
+             is_constructible_v<typename Src::extents_type,
+                                typename Dst::extents_type>)
+constexpr void copy(const Src &src, const Dst &dst)
+{
+    __mdsp::ForEachIndex(
+        dst.extents(), [&](auto... i) { dst[i...] = src[i...]; },
+        make_index_sequence<Dst::extents_type::rank()>{});
+}
+
+template <class Dst, class T = typename Dst::value_type>
+    requires(__mdsp::IsMdspan<Dst> &&
+             is_assignable_v<typename Dst::reference, const T &>)
+constexpr void fill(const Dst &dst, const T &value)
+{
+    __mdsp::ForEachIndex(
+        dst.extents(), [&](auto... i) { dst[i...] = value; },
+        make_index_sequence<Dst::extents_type::rank()>{});
+}
+
+} // namespace std
+
+#endif // BOXCXX_MDSPAN

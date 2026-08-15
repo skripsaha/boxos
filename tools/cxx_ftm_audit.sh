@@ -41,12 +41,21 @@
 #           other three macros Ф34 added -- stdatomic_h, stdbit_h and
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
+#
+#           Ф35 raised it 158 -> 161, and the three are: indirect and
+#           polymorphic (owned by <memory>, which nearly every container
+#           pulls in), plus __cpp_lib_span, which had never leaked ANYWHERE
+#           because nothing included <span> -- and now <mdspan> does, since
+#           extents and mdspan both take one. That third is the whole delta
+#           from adding a header, not from a header answering for more than
+#           it provides. mdspan, aligned_accessor and submdspan leak
+#           nowhere: nothing includes <mdspan>.
 #   SYNOPSIS every macro is visible from <version> itself
 #
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=158
+LEAK_BUDGET=161
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

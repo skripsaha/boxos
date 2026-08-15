@@ -1,0 +1,305 @@
+// boxcxx — <__bits/mdspan_extents>  ([mdspan.extents])
+//
+// extents<IndexType, E...> is a multidimensional index space: a rank and,
+// per rank index, either a size fixed at compile time or one carried at run
+// time. It is the shape half of mdspan -- the layout says where element
+// (i,j,k) lives, the extents say which (i,j,k) exist.
+//
+// The storage is exactly the dynamic extents and nothing else, so
+// extents<int, 3, 4> is an empty type and extents<int, dynamic_extent, 4>
+// is one int. That is the whole reason the static extents are template
+// parameters instead of an array: a framebuffer view whose pixel format is
+// known at compile time and whose height is not should pay for the height
+// only.
+#ifndef BOXCXX_BITS_MDSPAN_EXTENTS
+#define BOXCXX_BITS_MDSPAN_EXTENTS
+
+#include <array>
+#include <cstddef>
+#include <limits>
+#include <span>          // dynamic_extent, __span_impl::MaybeStaticExt
+#include <type_traits>
+#include <utility>       // cmp_less, cmp_equal, as_const
+
+namespace std {
+
+template <class IndexType, size_t... Extents> class extents;
+
+namespace __mdsp {
+
+// index-cast ([mdspan.extents.expo]/9). An integer other than bool is
+// handed back as it is; anything else -- an integer-class type, a
+// constant_wrapper -- is converted. Every call site is already constrained
+// on convertibility, so the cast never loses precision.
+template <class IndexType, class Other>
+constexpr auto IndexCast(Other &&i) noexcept
+{
+    using U = remove_cvref_t<Other>;
+    if constexpr (is_integral_v<U> && !is_same_v<U, bool>)
+        return i;
+    else
+        return static_cast<IndexType>(static_cast<Other &&>(i));
+}
+
+template <class T> inline constexpr bool IsExtents = false;
+template <class I, size_t... E> inline constexpr bool IsExtents<extents<I, E...>> = true;
+
+// The two conditions that decide whether an extents-to-extents conversion is
+// explicit ([mdspan.extents.cons]/4). They live out here, at namespace
+// scope, rather than as members: an explicit-specifier is part of a member
+// DECLARATION, and a member function's body is not available to it -- only
+// a name already complete at that point is.
+template <class I, class OI>
+inline constexpr bool IndexNarrows =
+    cmp_less(numeric_limits<I>::max(), numeric_limits<OI>::max());
+
+template <size_t... E>
+struct ExtentsPack {
+    // "some extent is static here and dynamic there", i.e. the conversion
+    // would have to be checked at run time. A rank mismatch answers true so
+    // that the specifier is well-formed even for a candidate the
+    // constraints are about to reject -- the two packs would otherwise be
+    // expanded together at different lengths.
+    template <size_t... OE>
+    static constexpr bool LosesStatic() noexcept
+    {
+        if constexpr (sizeof...(E) != sizeof...(OE))
+            return true;
+        else
+            return ((E != dynamic_extent && OE == dynamic_extent) || ... || false);
+    }
+};
+
+// fwd-prod-of-extents / rev-prod-of-extents ([mdspan.extents.expo]/5-8),
+// as free functions for the same reason: layout_left, layout_right, the
+// padded layouts and mdspan::size() all need them, and none of them is a
+// friend of extents.
+//
+// The products are computed in size_t, not index_type: [mdspan.layout.
+// reqmts] lets a mapping's required_span_size() reach numeric_limits<size_t>
+// even when index_type is narrower, and the intermediate must not wrap
+// before the caller can check it.
+template <class E>
+constexpr size_t FwdProd(const E &e, typename E::rank_type i) noexcept
+{
+    size_t p = 1;
+    for (typename E::rank_type r = 0; r < i; ++r)
+        p *= static_cast<size_t>(e.extent(r));
+    return p;
+}
+
+template <class E>
+constexpr size_t RevProd(const E &e, typename E::rank_type i) noexcept
+{
+    size_t p = 1;
+    for (typename E::rank_type r = i + 1; r < E::rank(); ++r)
+        p *= static_cast<size_t>(e.extent(r));
+    return p;
+}
+
+// The same two products over STATIC extents only, answering dynamic_extent
+// as soon as one of the factors is not known at compile time. The padded
+// layouts and submdspan_mapping need this to decide a static padding value.
+template <class E>
+constexpr size_t StaticFwdProd(size_t first, size_t last) noexcept
+{
+    size_t p = 1;
+    for (size_t r = first; r < last; ++r) {
+        if (E::static_extent(r) == dynamic_extent) return dynamic_extent;
+        p *= E::static_extent(r);
+    }
+    return p;
+}
+
+// Multiplication in the same "dynamic_extent means unknown" arithmetic:
+// unknown times anything is unknown.
+constexpr size_t MulStatic(size_t a, size_t b) noexcept
+{
+    if (a == dynamic_extent || b == dynamic_extent) return dynamic_extent;
+    return a * b;
+}
+
+} // namespace __mdsp
+
+// ── extents ([mdspan.extents]) ───────────────────────────────────────────
+
+template <class IndexType, size_t... Extents>
+class extents {
+    static_assert(is_integral_v<IndexType> && !is_same_v<remove_cv_t<IndexType>, bool>,
+                  "std::extents<IndexType, ...>: IndexType must be a signed or "
+                  "unsigned integer type");
+    static_assert(((Extents == dynamic_extent ||
+                    Extents <= static_cast<size_t>(numeric_limits<IndexType>::max())) &&
+                   ...),
+                  "std::extents<IndexType, ...>: every static extent must be "
+                  "representable as a value of IndexType");
+
+public:
+    using index_type = IndexType;
+    using size_type  = make_unsigned_t<index_type>;
+    using rank_type  = size_t;
+
+private:
+    static constexpr rank_type kRank = sizeof...(Extents);
+    static constexpr rank_type kRankDynamic =
+        ((Extents == dynamic_extent ? rank_type(1) : rank_type(0)) + ... + rank_type(0));
+
+    // The extra 0 keeps this well-formed at rank 0, where {Extents...} alone
+    // would declare a zero-length array. Every caller has i < rank().
+    static constexpr size_t StaticAt(rank_type i) noexcept
+    {
+        constexpr size_t vals[kRank + 1] = {Extents..., size_t(0)};
+        return vals[i];
+    }
+
+    // dynamic-index ([mdspan.extents.expo]/1-2): how many dynamic extents
+    // come before rank index i, i.e. where i's value sits in dyn_.
+    static constexpr rank_type DynamicIndex(rank_type i) noexcept
+    {
+        rank_type n = 0;
+        for (rank_type r = 0; r < i; ++r)
+            if (StaticAt(r) == dynamic_extent) ++n;
+        return n;
+    }
+
+    // dynamic-index-inv ([mdspan.extents.expo]/3-4): the inverse map, from a
+    // slot in dyn_ back to the rank index it belongs to.
+    static constexpr rank_type DynamicIndexInv(rank_type i) noexcept
+    {
+        rank_type seen = 0;
+        for (rank_type r = 0; r < kRank; ++r)
+            if (StaticAt(r) == dynamic_extent && seen++ == i) return r;
+        return kRank;
+    }
+
+    // [[no_unique_address]] is load-bearing, not decoration: array<T, 0> is
+    // an empty type, but an empty MEMBER still takes a byte without it, and
+    // that byte is what would keep a fully-static extents from being empty
+    // -- and with it, mdspan over one from being exactly a pointer.
+    [[no_unique_address]] array<index_type, kRankDynamic> dyn_{};
+
+    // Copy the dynamic extents out of anything indexable. N is how many
+    // values the source carries: either just the dynamic ones, in order, or
+    // all of them, in which case only the dynamic positions are read.
+    template <size_t N, class Source>
+    constexpr void FillFrom(const Source &src) noexcept
+    {
+        for (rank_type d = 0; d < kRankDynamic; ++d) {
+            const rank_type k = (N == kRankDynamic) ? d : DynamicIndexInv(d);
+            dyn_[d]           = static_cast<index_type>(as_const(src[k]));
+        }
+    }
+
+    template <class OtherIndexType, size_t... OtherExtents> friend class extents;
+
+public:
+    // ── [mdspan.extents.obs] ─────────────────────────────────────────────
+
+    static constexpr rank_type rank() noexcept { return kRank; }
+    static constexpr rank_type rank_dynamic() noexcept { return kRankDynamic; }
+    static constexpr size_t static_extent(rank_type i) noexcept { return StaticAt(i); }
+
+    constexpr index_type extent(rank_type i) const noexcept
+    {
+        const size_t s = StaticAt(i);
+        return s == dynamic_extent ? dyn_[DynamicIndex(i)]
+                                   : static_cast<index_type>(s);
+    }
+
+    // ── [mdspan.extents.cons] ────────────────────────────────────────────
+
+    constexpr extents() noexcept = default;
+
+    template <class OtherIndexType, size_t... OtherExtents>
+        requires(sizeof...(OtherExtents) == kRank &&
+                 ((OtherExtents == dynamic_extent || Extents == dynamic_extent ||
+                   OtherExtents == Extents) &&
+                  ...))
+    constexpr explicit(
+        __mdsp::ExtentsPack<Extents...>::template LosesStatic<OtherExtents...>() ||
+        __mdsp::IndexNarrows<IndexType, OtherIndexType>)
+        extents(const extents<OtherIndexType, OtherExtents...> &other) noexcept
+    {
+        for (rank_type d = 0; d < kRankDynamic; ++d)
+            dyn_[d] = static_cast<index_type>(other.extent(DynamicIndexInv(d)));
+    }
+
+    template <class... OtherIndexTypes>
+        requires((is_convertible_v<OtherIndexTypes, index_type> && ...) &&
+                 (is_nothrow_constructible_v<index_type, OtherIndexTypes> && ...) &&
+                 (sizeof...(OtherIndexTypes) == kRankDynamic ||
+                  sizeof...(OtherIndexTypes) == kRank))
+    constexpr explicit extents(OtherIndexTypes... exts) noexcept
+    {
+        if constexpr (sizeof...(OtherIndexTypes) > 0) {
+            const index_type arr[]{static_cast<index_type>(std::move(exts))...};
+            FillFrom<sizeof...(OtherIndexTypes)>(arr);
+        }
+    }
+
+    template <class OtherIndexType, size_t N>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &> &&
+                 (N == kRankDynamic || N == kRank))
+    constexpr explicit(N != kRankDynamic) extents(span<OtherIndexType, N> exts) noexcept
+    {
+        FillFrom<N>(exts);
+    }
+
+    template <class OtherIndexType, size_t N>
+        requires(is_convertible_v<const OtherIndexType &, index_type> &&
+                 is_nothrow_constructible_v<index_type, const OtherIndexType &> &&
+                 (N == kRankDynamic || N == kRank))
+    constexpr explicit(N != kRankDynamic)
+        extents(const array<OtherIndexType, N> &exts) noexcept
+    {
+        FillFrom<N>(exts);
+    }
+
+    // ── [mdspan.extents.cmp] ─────────────────────────────────────────────
+    //
+    // Compared by VALUE, across index types and across static/dynamic: a
+    // static 4 and a dynamic 4 are the same index space, and saying so is
+    // what lets a caller check its shape against a differently-spelled one.
+    template <class OtherIndexType, size_t... OtherExtents>
+    friend constexpr bool operator==(
+        const extents &lhs, const extents<OtherIndexType, OtherExtents...> &rhs) noexcept
+    {
+        if constexpr (kRank != sizeof...(OtherExtents))
+            return false;
+        else {
+            for (rank_type r = 0; r < kRank; ++r)
+                if (!cmp_equal(lhs.extent(r), rhs.extent(r))) return false;
+            return true;
+        }
+    }
+};
+
+template <class... Integrals>
+    requires((is_convertible_v<Integrals, size_t> && ...))
+explicit extents(Integrals...)
+    -> extents<size_t, __span_impl::MaybeStaticExt<Integrals>...>;
+
+// ── dextents / dims ([mdspan.extents.dextents], [mdspan.extents.dims]) ───
+
+namespace __mdsp {
+template <class IndexType, size_t Rank, size_t... Es>
+struct AllDynamic : AllDynamic<IndexType, Rank - 1, dynamic_extent, Es...> {};
+template <class IndexType, size_t... Es>
+struct AllDynamic<IndexType, 0, Es...> {
+    using type = extents<IndexType, Es...>;
+};
+} // namespace __mdsp
+
+template <class IndexType, size_t Rank>
+using dextents = typename __mdsp::AllDynamic<IndexType, Rank>::type;
+
+// P2389R2's spelling of the same thing with the arguments in the order one
+// actually writes them: the rank first, the index type only when it is not
+// size_t. dims<2> is the two-dimensional shape almost every caller wants.
+template <size_t Rank, class IndexType = size_t>
+using dims = dextents<IndexType, Rank>;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_MDSPAN_EXTENTS
