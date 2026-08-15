@@ -108,6 +108,68 @@ constexpr memory_order FailOrder(memory_order m) noexcept
                                        : m;
 }
 
+// ── P0493R5 fetch_max / fetch_min ───────────────────────────────────────
+// x86-64 has no instruction for either, and GCC 15 has no builtin, so both
+// are a CAS loop -- written once here rather than twelve times across the
+// four class templates that owe them.
+//
+// The obvious loop ("skip the store when the value already wins") is the one
+// the paper writes out in §5.1 and REJECTS: that is read-and-conditional-
+// store, and these are read-modify-write operations like every other
+// fetch_key. The single relaxation §5.3 grants is what keeps this from being
+// an unconditional CAS: a store is only REQUIRED when the caller asked for a
+// release, because a release that stores nothing releases nothing. Below
+// that, the omitted store would have added a modification-order entry
+// carrying the value that was already there -- indistinguishable from its
+// absence -- and omitting it is what keeps a many-core high-water mark off an
+// exclusive cache line it never needed.
+constexpr memory_order DropRelease(memory_order m) noexcept
+{
+    return m == memory_order_release ? memory_order_relaxed
+           : (m == memory_order_acq_rel || m == memory_order_seq_cst)
+               ? memory_order_acquire
+               : m;
+}
+
+// Does the object's own value already win? "The maximum and minimum
+// computation is performed as if by the max and min algorithms
+// ([alg.min.max]), with the object value and the first parameter as the
+// arguments" -- both compare with <, and both keep the first argument, the
+// object's value, when the two are equivalent. Comparison is SIGNED for
+// signed types: the convert-to-unsigned rule the other fetch_key operations
+// carry is worded "except for fetch_max and fetch_min".
+template <bool Max, typename V>
+constexpr bool MinMaxHolds(V cur, V d) noexcept
+{
+    if constexpr (Max)
+        return !(cur < d);
+    else
+        return !(d < cur);
+}
+
+template <bool Max, typename P, typename V>
+inline V FetchMinMax(P *addr, V d, memory_order m) noexcept
+{
+    const memory_order mr = DropRelease(m);
+    V                  old = __atomic_load_n(addr, Order(mr));
+    if (mr != m) {
+        // A release was asked for, so something has to be stored: write the
+        // value straight back when it already wins. Exactly one read-modify-
+        // write, always -- cheaper than the paper's §5.3 sketch, which primes
+        // with a dummy no-op RMW and can then take a second one on top.
+        while (!__atomic_compare_exchange_n(
+            addr, &old, MinMaxHolds<Max>(old, d) ? old : d, true, Order(m),
+            Order(mr)))
+            ;
+        return old;
+    }
+    while (!MinMaxHolds<Max>(old, d) &&
+           !__atomic_compare_exchange_n(addr, &old, d, true, Order(m),
+                                        Order(mr)))
+        ;
+    return old;
+}
+
 // Over-align storage to the operation width so 2/4/8-byte objects take
 // the inline path and 16-byte objects satisfy cmpxchg16b alignment.
 constexpr size_t StorageAlign(size_t size, size_t align) noexcept
@@ -472,6 +534,35 @@ struct atomic : __atomic_impl::DifferenceType<T> {
         return __atomic_fetch_xor(&__v, d, __atomic_impl::Order(m));
     }
 
+    // P0493R5 ([atomics.types.int]): "keep the largest value anyone has
+    // published" is one of the few atomic idioms in wide use with nothing
+    // behind it, so everyone wrote the CAS loop by hand. It is written once,
+    // in __atomic_impl::FetchMinMax, with the read-modify-write semantics the
+    // paper settled on. bool is excluded because it is not an integral-type
+    // in [atomics.types.int]'s sense, and floating point because R5 dropped
+    // the [atomics.types.float] changes outright -- NaN and signed zero do
+    // not survive std::max.
+    T fetch_max(T d, memory_order m = memory_order_seq_cst) noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<true>(&__v, d, m);
+    }
+    T fetch_max(T d, memory_order m = memory_order_seq_cst) volatile noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<true>(&__v, d, m);
+    }
+    T fetch_min(T d, memory_order m = memory_order_seq_cst) noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<false>(&__v, d, m);
+    }
+    T fetch_min(T d, memory_order m = memory_order_seq_cst) volatile noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<false>(&__v, d, m);
+    }
+
     // ── floating extras (C++20 [atomics.types.float]) ───────────────────
     // A read-modify-write on a floating value has no hardware instruction, so
     // it is a CAS loop. Both cv-forms are required; the volatile one resolves
@@ -789,6 +880,29 @@ struct atomic<T *> {
                                   __atomic_impl::Order(m));
     }
 
+    // P0493R5 ([atomics.types.pointer]) — the paper covers pointers as well as
+    // integers, and only floating point was dropped. No scaling by the pointee
+    // here, unlike fetch_add: max and min compare addresses, they do not walk.
+    // The accompanying note says out loud what the caller owes: < orders two
+    // pointers only within one complete object, so a max over pointers into
+    // unrelated objects is as unordered as `p1 < p2` on them already is.
+    T *fetch_max(T *d, memory_order m = memory_order_seq_cst) noexcept
+    {
+        return __atomic_impl::FetchMinMax<true>(&__v, d, m);
+    }
+    T *fetch_max(T *d, memory_order m = memory_order_seq_cst) volatile noexcept
+    {
+        return __atomic_impl::FetchMinMax<true>(&__v, d, m);
+    }
+    T *fetch_min(T *d, memory_order m = memory_order_seq_cst) noexcept
+    {
+        return __atomic_impl::FetchMinMax<false>(&__v, d, m);
+    }
+    T *fetch_min(T *d, memory_order m = memory_order_seq_cst) volatile noexcept
+    {
+        return __atomic_impl::FetchMinMax<false>(&__v, d, m);
+    }
+
     // [atomics.types.pointer] lists each of these twice as well.
     T *operator++() noexcept { return fetch_add(1) + 1; }
     T *operator++() volatile noexcept { return fetch_add(1) + 1; }
@@ -908,6 +1022,19 @@ struct atomic_ref : __atomic_impl::DifferenceType<T> {
         requires(is_integral_v<T> && !is_same_v<T, bool>)
     {
         return __atomic_fetch_xor(__p, d, __atomic_impl::Order(m));
+    }
+    // P0493R5 ([atomics.ref.int]) — the same loop as atomic<T>'s, and this is
+    // where a lockless high-water mark over a caller-owned cell actually
+    // reaches for it.
+    T fetch_max(T d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<true>(__p, d, m);
+    }
+    T fetch_min(T d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    {
+        return __atomic_impl::FetchMinMax<false>(__p, d, m);
     }
     T fetch_add(T d, memory_order m = memory_order_seq_cst) const noexcept
         requires is_floating_point_v<T>
@@ -1075,6 +1202,15 @@ struct atomic_ref<T *> {
     {
         return __atomic_fetch_sub(__p, d * static_cast<ptrdiff_t>(sizeof(T)),
                                   __atomic_impl::Order(m));
+    }
+    // P0493R5 ([atomics.ref.pointer]).
+    T *fetch_max(T *d, memory_order m = memory_order_seq_cst) const noexcept
+    {
+        return __atomic_impl::FetchMinMax<true>(__p, d, m);
+    }
+    T *fetch_min(T *d, memory_order m = memory_order_seq_cst) const noexcept
+    {
+        return __atomic_impl::FetchMinMax<false>(__p, d, m);
     }
     T *operator++() const noexcept { return fetch_add(1) + 1; }
     T *operator++(int) const noexcept { return fetch_add(1); }
@@ -1265,6 +1401,9 @@ BOXCXX_ATOMIC_FETCH_FREE(sub, difference_type)
 BOXCXX_ATOMIC_FETCH_FREE(and, value_type)
 BOXCXX_ATOMIC_FETCH_FREE(or, value_type)
 BOXCXX_ATOMIC_FETCH_FREE(xor, value_type)
+// P0493R5 — the free forms come for free from the same macro.
+BOXCXX_ATOMIC_FETCH_FREE(max, value_type)
+BOXCXX_ATOMIC_FETCH_FREE(min, value_type)
 
 #undef BOXCXX_ATOMIC_FETCH_FREE
 

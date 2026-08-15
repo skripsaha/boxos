@@ -46,4 +46,20 @@
 #  define __cpp_lib_atomic_wait 201907L
 #endif
 
+// P0493R5 (C++26, Ф32-h): atomic fetch_max / fetch_min on the integral and
+// pointer specializations of atomic and atomic_ref, plus the free functions.
+// "Keep the largest value anyone has published" is one of the few atomic
+// idioms in wide use with no primitive behind it on x86, so everyone wrote
+// the CAS loop by hand -- and the paper's own §5 is about the half of them
+// who wrote it as read-and-conditional-store, which is NOT what these
+// operations are. See __atomic_impl::FetchMinMax in <atomic>.
+//
+// 202403L, not the draft's current 202506L: the later value also promises the
+// constexpr atomics of P3309, which this library does not have. The value
+// names the revision that is actually implemented -- which is what a feature
+// test macro is for -- and matches libstdc++ 16.
+#ifndef __cpp_lib_atomic_min_max
+#  define __cpp_lib_atomic_min_max 202403L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_ATOMIC
