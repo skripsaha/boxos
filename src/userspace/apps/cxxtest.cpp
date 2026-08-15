@@ -29380,7 +29380,12 @@ void Phase131()
     static_assert(__cpp_lib_erase_if == 202002L, "phase131 erase_if");
     static_assert(__cpp_lib_nonmember_container_access == 201411L,
                   "phase131 nonmember_container_access");
-    static_assert(__cpp_lib_string_view == 202106L, "phase131 string_view");
+    static_assert(__cpp_lib_string_view == 201803L,
+                  "phase131 string_view -- 201803L is the C++23 value AND the "
+                  "C++20 one; C++23 never bumped it, even though the header "
+                  "gained two constructors. The 202106L pinned here since the "
+                  "beginning is a value this macro has never carried in any "
+                  "revision (Ф32-i)");
     static_assert(__cpp_lib_string_resize_and_overwrite == 202110L,
                   "phase131 string_resize_and_overwrite");
     static_assert(__cpp_lib_transformation_trait_aliases == 201304L,
@@ -39511,6 +39516,146 @@ void Phase162()
            "exclusive cache line it does not need\n");
 }
 
+
+// ── Ф32-i ───────────────────────────────────────────────────────────────
+// A sentinel for const char* that is ALSO convertible to size_type. It exists
+// to reach the one constraint in [string.view.cons] that raw pointers can
+// never reach: with pointers, sized_sentinel_for already excludes sv(p, 4),
+// so the is_convertible_v<End, size_type> exclusion never fires. Here both
+// constructors are viable and the exclusion is the only thing choosing.
+struct P163Sentinel {
+    const char *p = nullptr;
+    constexpr operator size_t() const { return 0; }
+    friend constexpr ptrdiff_t operator-(P163Sentinel s, const char *i) { return s.p - i; }
+    friend constexpr ptrdiff_t operator-(const char *i, P163Sentinel s) { return i - s.p; }
+    friend constexpr bool operator==(P163Sentinel s, const char *i) { return s.p == i; }
+};
+
+// A contiguous sized range of char that ALSO has its own conversion operator,
+// deliberately returning something different from its buffer. Without the
+// exclusion for exactly this, the range constructor would hijack the type and
+// read the buffer instead of asking it.
+struct P163OwnView {
+    char                  buf[5] = {'w', 'h', 'o', 'l', 'e'};
+    constexpr const char *begin() const { return buf; }
+    constexpr const char *end() const { return buf + 5; }
+    constexpr const char *data() const { return buf; }
+    constexpr size_t      size() const { return 5; }
+    constexpr operator std::string_view() const { return std::string_view(buf, 4); }
+};
+
+void Phase163()
+{
+    using namespace std;
+
+    // [string.view.cons]. Two constructors were missing outright, and the
+    // macro that is supposed to describe this header carried a value it has
+    // never had in any revision, so neither absence had anything pointing at
+    // it. P1391R4 first: an It/End pair is what a range hands out, and while
+    // only a raw pointer pair was accepted, a contiguous range whose iterator
+    // is a CLASS TYPE could not build a view of itself at all.
+    {
+        vector<char> v{'a', 'b', 'c'};
+        string_view  a(v.begin(), v.end());
+        Check(a.size() == 3 && a[0] == 'a' && a[2] == 'c',
+              "phase163 (1) It/End over a class-type contiguous iterator");
+        const char *p = "hello";
+        string_view b(p, p + 5);
+        Check(b == "hello", "phase163 (2) ...and the raw pointer pair still goes "
+                            "through the same template");
+        // The exclusion that earns its keep: (pointer, count) must not be read
+        // as a sentinel pair, or sv(p, 4) would be a 4-BYTE-ADDRESS sentinel.
+        Check(string_view(p, 4) == "hell",
+              "phase163 (3) (pointer, count) is still the count constructor");
+        Check(string_view(p, 0).empty(), "phase163 (4) ...including a zero count");
+    }
+    {
+        // P1989R2, explicit per P2499R0. Implicit was the original design and
+        // was pulled back before C++23 shipped: it let any contiguous range of
+        // the character type decay to a view of itself at every call boundary,
+        // temporaries included, and those die at the semicolon.
+        vector<char> v{'a', 'b', 'c'};
+        string_view  d(v);
+        Check(d == "abc", "phase163 (5) the range constructor reads the range");
+        static_assert(is_constructible_v<string_view, vector<char> &>,
+                      "phase163 (6) ...and is available");
+        static_assert(!is_convertible_v<vector<char> &, string_view>,
+                      "phase163 (7) ...but never implicitly, which is the whole "
+                      "content of P2499R0");
+        array<char, 2> arr{'o', 'k'};
+        Check(string_view(arr) == "ok", "phase163 (8) any contiguous sized range");
+        static_assert(!is_constructible_v<string_view, vector<int> &>,
+                      "phase163 (9) the element type has to match");
+        // basic_string keeps its own conversion operator, and the constraint
+        // that excludes it is why that stayed IMPLICIT.
+        string      s = "xyz";
+        string_view e = s;
+        Check(e == "xyz", "phase163 (10) basic_string still converts implicitly");
+        static_assert(is_convertible_v<string &, string_view>,
+                      "phase163 (11) ...through its own operator, not this ctor");
+    }
+    {
+        // [string.view.synop]'s two guides. Without them the constructors are
+        // only reachable by naming the character type, which is most of the
+        // point of having them.
+        vector<char>      v{'q', 'r'};
+        basic_string_view g(v.begin(), v.end());
+        static_assert(is_same_v<decltype(g), string_view>,
+                      "phase163 (12) It/End deduction guide");
+        basic_string_view h(v);
+        static_assert(is_same_v<decltype(h), string_view>,
+                      "phase163 (13) range deduction guide");
+        Check(g == "qr" && h == "qr", "phase163 (14) both deduce to the same view");
+    }
+    {
+        static constexpr char lit[] = "abcdef";
+        constexpr string_view k(lit, lit + 6);
+        static_assert(k.size() == 6 && k[5] == 'f',
+                      "phase163 (15) usable in constant evaluation");
+    }
+    {
+        // The two constraints that only a purpose-built type can reach.
+        static_assert(std::sized_sentinel_for<P163Sentinel, const char *>,
+                      "phase163 (17) the fixture really is a sized sentinel");
+        static_assert(is_convertible_v<P163Sentinel, string_view::size_type>,
+                      "phase163 (18) ...and really is convertible to size_type");
+        static constexpr char p[] = "hello";
+        // Both constructors are viable. [string.view.cons] excludes the It/End
+        // one, so this is the (pointer, count) constructor with a count of 0.
+        // Stated at COMPILE time on purpose: the two readings differ by a value,
+        // not by well-formedness, so a runtime check alone could not tell which
+        // constructor ran.
+        static_assert(string_view(p, P163Sentinel{p + 3}).empty(),
+                      "phase163 (19) a sentinel convertible to size_type is read "
+                      "as a COUNT, not as a sentinel -- the exclusion is the only "
+                      "thing choosing here, since both constructors match");
+        Check(string_view(p, P163Sentinel{p + 3}).empty(), "phase163 (19r) ...at runtime too");
+
+        P163OwnView o;
+        static_assert(ranges::contiguous_range<P163OwnView> &&
+                          ranges::sized_range<P163OwnView>,
+                      "phase163 (20) the fixture really is a contiguous sized range");
+        static_assert(string_view(P163OwnView{}).size() == 4,
+                      "phase163 (21) a type with its own operator string_view keeps "
+                      "it -- the range constructor is constrained out, so the "
+                      "length is the operator's 4 and not the buffer's 5. The two "
+                      "readings differ by a VALUE, which is why this is a "
+                      "static_assert and not a Check");
+        Check(string_view(o) == "whol", "phase163 (21r) ...at runtime too");
+    }
+    static_assert(__cpp_lib_string_view == 201803L,
+                  "phase163 (16) 201803L is the C++23 value and the C++20 one -- "
+                  "C++23 never bumped it, even in the cycle that added these two "
+                  "constructors");
+
+    printf("[CXX] PASS phase163: Ф32-i \u2014 the two <string_view> constructors "
+           "[string.view.cons] has and this header did not: P1391R4's It/End pair "
+           "(a contiguous range with a class-type iterator could not view itself) "
+           "and P1989R2's range constructor, explicit per P2499R0, plus both "
+           "deduction guides. __cpp_lib_string_view was carrying 202106L, a value "
+           "it has never had in any revision\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39695,6 +39840,7 @@ int main()
     Phase160();
     Phase161();
     Phase162();
+    Phase163();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
