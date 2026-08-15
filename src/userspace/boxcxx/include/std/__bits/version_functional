@@ -78,6 +78,19 @@
 #endif
 #undef BOXCXX_OWNS_constexpr_functional
 
+// P0792R14 as amended twice: the nontype_t constructors earlier C++26
+// drafts carried were replaced by constant_wrapper ones, and P3961R1
+// (202604L) then removed the double indirection when a function_ref is
+// built from another function_ref specialization and allowed a noexcept
+// one to be assigned to a non-noexcept one. Both are implemented; the
+// second is the reason this says 202604L where libstdc++ 16.1 says
+// 202603L.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_function_ref)) && \
+    !defined(__cpp_lib_function_ref)
+#  define __cpp_lib_function_ref 202604L
+#endif
+#undef BOXCXX_OWNS_function_ref
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_boyer_moore_searcher)) && \
     !defined(__cpp_lib_boyer_moore_searcher)
 #  define __cpp_lib_boyer_moore_searcher 201603L

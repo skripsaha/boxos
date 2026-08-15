@@ -4,6 +4,7 @@
 #ifndef BOXCXX_BITS_RANDOM_ENGINE
 #define BOXCXX_BITS_RANDOM_ENGINE
 
+#include <array>      // philox_engine's multipliers / round_consts / set_counter
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -363,6 +364,184 @@ private:
     size_t   idx_   = r;
 };
 
+// ── philox_engine ([rand.eng.philox], P2075R6) ───────────────────────────
+// A counter-based engine, and the first one here that is not a recurrence:
+// there is no state to walk forward. The n-word output block is a keyed
+// bijection of a counter, so the k-th block can be computed directly by
+// setting the counter — which is why this is the engine you want when a
+// thousand cores each need their own independent stream and none of them
+// may talk to the others. set_counter is the whole point of the paper.
+//
+// The round function is the standard's, one word-pair at a time:
+//   X'[2k]   = mulhi(V[2k], M[k]) xor (K[k] + q*C[k]) xor V[2k+1]
+//   X'[2k+1] = mullo(V[2k], M[k])
+// where V is X with words 0 and 2 exchanged when n == 4 (and X itself when
+// n == 2), and the round key is COMPUTED from the round index q rather than
+// accumulated, so no round depends on the previous one's key.
+template <class UIntType, size_t w, size_t n, size_t r, UIntType... consts>
+class philox_engine {
+    static_assert(is_unsigned_v<UIntType>, "philox: UIntType must be unsigned");
+    static_assert(sizeof...(consts) == n, "philox: needs n constants");
+    static_assert(n == 2 || n == 4, "philox: n must be 2 or 4");
+    static_assert(r > 0, "philox: needs at least one round");
+    static_assert(w > 0 && w <= static_cast<size_t>(numeric_limits<UIntType>::digits),
+                  "philox: w must fit the result type");
+
+public:
+    using result_type = UIntType;
+    static constexpr size_t word_size   = w;
+    static constexpr size_t word_count  = n;
+    static constexpr size_t round_count = r;
+
+private:
+    static constexpr result_type kMask = __rng::wmask<UIntType>(static_cast<int>(w));
+    static constexpr result_type kAll[n] = {consts...};
+
+    // The pack interleaves multiplier and round constant per word pair.
+    static constexpr array<result_type, n / 2> Evens()
+    {
+        array<result_type, n / 2> a{};
+        for (size_t k = 0; k != n / 2; ++k) a[k] = kAll[2 * k];
+        return a;
+    }
+    static constexpr array<result_type, n / 2> Odds()
+    {
+        array<result_type, n / 2> a{};
+        for (size_t k = 0; k != n / 2; ++k) a[k] = kAll[2 * k + 1];
+        return a;
+    }
+
+    // The w-bit halves of a w x w -> 2w bit product. For w <= 32 a 64-bit
+    // multiply is exact; above that it takes the 128-bit one, which the
+    // compiler turns into a single mulq.
+    static constexpr void MulHiLo(result_type a, result_type b, result_type &hi,
+                                  result_type &lo)
+    {
+        if constexpr (w <= 32) {
+            uint64_t prod = static_cast<uint64_t>(a) * static_cast<uint64_t>(b);
+            lo = static_cast<result_type>(prod) & kMask;
+            hi = static_cast<result_type>(prod >> w) & kMask;
+        } else {
+            unsigned __int128 prod =
+                static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
+            lo = static_cast<result_type>(prod) & kMask;
+            hi = static_cast<result_type>(prod >> w) & kMask;
+        }
+    }
+
+public:
+    static constexpr array<result_type, n / 2> multipliers  = Evens();
+    static constexpr array<result_type, n / 2> round_consts = Odds();
+
+    static constexpr result_type min() { return 0; }
+    static constexpr result_type max() { return kMask; }
+    static constexpr result_type default_seed = 20111115u;
+
+    philox_engine() : philox_engine(default_seed) {}
+    explicit philox_engine(result_type value) { seed(value); }
+    explicit philox_engine(seed_seq &q) { seed(q); }
+
+    void seed(result_type value = default_seed)
+    {
+        for (size_t k = 0; k != n / 2; ++k) key_[k] = 0;
+        key_[0] = value & kMask;
+        for (size_t j = 0; j != n; ++j) ctr_[j] = 0;
+        idx_ = n - 1;
+    }
+
+    void seed(seed_seq &q)
+    {
+        constexpr size_t kWordsPerKey = (w + 31) / 32;
+        uint_least32_t   a[n / 2 * kWordsPerKey]{};
+        q.generate(a + 0, a + n / 2 * kWordsPerKey);
+        for (size_t k = 0; k != n / 2; ++k) {
+            result_type v = 0;
+            for (size_t j = 0; j != kWordsPerKey; ++j)
+                v = static_cast<result_type>(
+                    v + (static_cast<result_type>(a[k * kWordsPerKey + j]) << (32 * j)));
+            key_[k] = v & kMask;
+        }
+        for (size_t j = 0; j != n; ++j) ctr_[j] = 0;
+        idx_ = n - 1;
+    }
+
+    // The counter arrives most-significant word first, which is why this
+    // reverses: internally word 0 is the one that increments.
+    void set_counter(const array<result_type, n> &c)
+    {
+        for (size_t j = 0; j != n; ++j) ctr_[j] = c[n - 1 - j] & kMask;
+        idx_ = n - 1;
+    }
+
+    result_type operator()()
+    {
+        if (++idx_ == n) {
+            Generate();
+            Increment();
+            idx_ = 0;
+        }
+        return out_[idx_];
+    }
+
+    void discard(unsigned long long z)
+    {
+        while (z--) (void)(*this)();
+    }
+
+    friend bool operator==(const philox_engine &l, const philox_engine &r2)
+    {
+        if (l.idx_ != r2.idx_) return false;
+        for (size_t k = 0; k != n / 2; ++k)
+            if (l.key_[k] != r2.key_[k]) return false;
+        for (size_t j = 0; j != n; ++j)
+            if (l.ctr_[j] != r2.ctr_[j] || l.out_[j] != r2.out_[j]) return false;
+        return true;
+    }
+
+private:
+    void Generate()
+    {
+        result_type v[n];
+        for (size_t j = 0; j != n; ++j) v[j] = ctr_[j];
+        for (size_t q = 0; q != r; ++q) {
+            result_type p[n];
+            if constexpr (n == 2) {
+                p[0] = v[0];
+                p[1] = v[1];
+            } else {
+                p[0] = v[2];
+                p[1] = v[1];
+                p[2] = v[0];
+                p[3] = v[3];
+            }
+            for (size_t k = 0; k != n / 2; ++k) {
+                result_type hi, lo;
+                MulHiLo(p[2 * k], multipliers[k], hi, lo);
+                const result_type rk =
+                    static_cast<result_type>(key_[k] +
+                                             static_cast<result_type>(q) *
+                                                 round_consts[k]) & kMask;
+                v[2 * k]     = static_cast<result_type>(hi ^ rk ^ p[2 * k + 1]) & kMask;
+                v[2 * k + 1] = lo;
+            }
+        }
+        for (size_t j = 0; j != n; ++j) out_[j] = v[j];
+    }
+
+    void Increment()
+    {
+        for (size_t j = 0; j != n; ++j) {
+            ctr_[j] = static_cast<result_type>(ctr_[j] + 1) & kMask;
+            if (ctr_[j] != 0) break;
+        }
+    }
+
+    result_type ctr_[n]{};
+    result_type key_[n / 2]{};
+    result_type out_[n]{};
+    size_t      idx_ = n - 1;
+};
+
 // ── engine adaptors ([rand.adapt]) ───────────────────────────────────────
 template <class Engine, size_t p, size_t r> class discard_block_engine {
 public:
@@ -541,6 +720,13 @@ using ranlux48_base = subtract_with_carry_engine<uint_fast64_t, 48, 5, 12>;
 using ranlux24      = discard_block_engine<ranlux24_base, 223, 23>;
 using ranlux48      = discard_block_engine<ranlux48_base, 389, 11>;
 using knuth_b       = shuffle_order_engine<minstd_rand0, 256>;
+using philox4x32 =
+    philox_engine<uint_fast32_t, 32, 4, 10, 0xCD9E8D57, 0x9E3779B9, 0xD2511F53,
+                  0xBB67AE85>;
+using philox4x64 =
+    philox_engine<uint_fast64_t, 64, 4, 10, 0xCA5A826395121157ULL,
+                  0x9E3779B97F4A7C15ULL, 0xD2E7470EE14C6C93ULL,
+                  0xBB67AE8584CAA73BULL>;
 using default_random_engine = mt19937;
 
 // ── random_device ([rand.device]) ────────────────────────────────────────

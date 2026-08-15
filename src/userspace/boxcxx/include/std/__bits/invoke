@@ -1,0 +1,90 @@
+// boxcxx — <__bits/invoke>  ([func.invoke])
+//
+// std::invoke / std::invoke_r and the INVOKE dispatcher behind them.
+// <type_traits> already carries the DECLARATION-only half of INVOKE (the
+// priority-ordered overload set that answers is_invocable / invoke_result);
+// this leaf is the half with bodies.
+//
+// It lives in __bits rather than in <functional> because <utility> needs it:
+// constant_wrapper's operator() and operator[] are specified in terms of
+// INVOKE, and <functional> is downstream of <utility>, not upstream. The
+// leaf therefore depends on nothing but <type_traits> — in particular it
+// spells argument forwarding as static_cast<T &&> rather than
+// std::forward, so it does not need <utility> and cannot close a cycle
+// with it.
+#ifndef BOXCXX_BITS_INVOKE
+#define BOXCXX_BITS_INVOKE
+
+#include <type_traits>
+
+namespace std {
+
+template <class T> class reference_wrapper;
+
+namespace __bits {
+
+template <class T> struct IsRefWrapper : false_type {};
+template <class T> struct IsRefWrapper<reference_wrapper<T>> : true_type {};
+
+template <class F, class... Args>
+constexpr decltype(auto) InvokeRt(F &&f, Args &&...args) noexcept(
+    is_nothrow_invocable_v<F, Args...>)
+{
+    using Fn = remove_cvref_t<F>;
+    if constexpr (is_member_function_pointer_v<Fn>) {
+        return [&]<class O, class... Rest>(
+                   O &&o, Rest &&...rest) constexpr -> decltype(auto) {
+            using OBare = remove_cvref_t<O>;
+            if constexpr (IsRefWrapper<OBare>::value)
+                return (o.get().*f)(static_cast<Rest &&>(rest)...);
+            else if constexpr (requires {
+                                   (static_cast<O &&>(o).*
+                                    f)(static_cast<Rest &&>(rest)...);
+                               })
+                return (static_cast<O &&>(o).*f)(static_cast<Rest &&>(rest)...);
+            else
+                return ((*static_cast<O &&>(o)).*
+                        f)(static_cast<Rest &&>(rest)...);
+        }(static_cast<Args &&>(args)...);
+    } else if constexpr (is_member_object_pointer_v<Fn>) {
+        static_assert(sizeof...(Args) == 1,
+                      "data-member pointer takes exactly one operand");
+        return [&]<class O>(O &&o) constexpr -> decltype(auto) {
+            using OBare = remove_cvref_t<O>;
+            if constexpr (IsRefWrapper<OBare>::value)
+                return o.get().*f;
+            else if constexpr (requires { static_cast<O &&>(o).*f; })
+                return static_cast<O &&>(o).*f;
+            else
+                return (*static_cast<O &&>(o)).*f;
+        }(static_cast<Args &&>(args)...);
+    } else {
+        return static_cast<F &&>(f)(static_cast<Args &&>(args)...);
+    }
+}
+
+} // namespace __bits
+
+template <class F, class... Args>
+    requires is_invocable_v<F, Args...>
+constexpr invoke_result_t<F, Args...>
+invoke(F &&f, Args &&...args) noexcept(is_nothrow_invocable_v<F, Args...>)
+{
+    return __bits::InvokeRt(static_cast<F &&>(f), static_cast<Args &&>(args)...);
+}
+
+template <class R, class F, class... Args>
+    requires is_invocable_r_v<R, F, Args...>
+constexpr R invoke_r(F &&f, Args &&...args) noexcept(
+    is_nothrow_invocable_r_v<R, F, Args...>)
+{
+    if constexpr (is_void_v<R>)
+        __bits::InvokeRt(static_cast<F &&>(f), static_cast<Args &&>(args)...);
+    else
+        return __bits::InvokeRt(static_cast<F &&>(f),
+                                static_cast<Args &&>(args)...);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_INVOKE

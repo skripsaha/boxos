@@ -117,6 +117,16 @@
 #  define __cpp_lib_logical_traits 201510L
 #endif
 #undef BOXCXX_OWNS_logical_traits
+// P2985R0. Gated on the builtin for the same reason as
+// reference_from_temporary just below: the trait cannot be written without
+// it, so the macro must appear exactly when the trait does.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_is_virtual_base_of)) && \
+    defined(__has_builtin) && __has_builtin(__builtin_is_virtual_base_of) && \
+    !defined(__cpp_lib_is_virtual_base_of)
+#  define __cpp_lib_is_virtual_base_of 202406L
+#endif
+#undef BOXCXX_OWNS_is_virtual_base_of
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_reference_from_temporary)) && \
     defined(__has_builtin) && __has_builtin(__reference_constructs_from_temporary) && \
     __has_builtin(__reference_converts_from_temporary) && \

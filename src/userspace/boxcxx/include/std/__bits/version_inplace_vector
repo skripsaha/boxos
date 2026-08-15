@@ -1,0 +1,21 @@
+// boxcxx — <__bits/version_inplace_vector>
+//
+// The feature-test macro [version.syn] owns for <inplace_vector>. 202603L
+// is the C++26 value for P0843R14 as amended — the revision whose
+// try_emplace_back family returns optional<T&> rather than a pointer, which
+// is why this header could not exist before P2988R12 did.
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_inplace_vector)) && \
+    !defined(__cpp_lib_inplace_vector)
+#  define __cpp_lib_inplace_vector 202603L
+#endif
+#undef BOXCXX_OWNS_inplace_vector

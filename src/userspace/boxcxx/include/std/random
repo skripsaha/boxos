@@ -10,4 +10,8 @@
 #include <__bits/random_engine>
 #include <__bits/random_dist>
 
+// [version.syn] names this header as the owner of the macro below.
+#define BOXCXX_OWNS_philox_engine
+#include <__bits/version_random>
+
 #endif // BOXCXX_RANDOM

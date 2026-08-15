@@ -15,6 +15,7 @@
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #define BOXCXX_OWNS_associative_heterogeneous_erasure
+#define BOXCXX_OWNS_associative_heterogeneous_insertion
 #define BOXCXX_OWNS_containers_ranges
 #define BOXCXX_OWNS_erase_if
 #define BOXCXX_OWNS_generic_unordered_lookup
@@ -200,6 +201,12 @@ public:
     {
         return const_cast<unordered_set *>(this)->__t.end();
     }
+    // [unord.req.general] requires these of every unordered container, and
+    // unordered_set was the only one in the library without them -- the
+    // name resolved to the BUCKET-local cbegin(size_type) instead, so
+    // c.cbegin() failed with "too few arguments" rather than working.
+    const_iterator cbegin() const noexcept { return begin(); }
+    const_iterator cend() const noexcept { return end(); }
 
     [[nodiscard]] bool empty() const noexcept { return __t.empty(); }
     size_type size() const noexcept { return __t.size(); }
@@ -214,6 +221,40 @@ public:
     {
         auto [it, ok] = __t.EmplaceUnique(std::move(v));
         return {iterator(it.__n, it.__t), ok};
+    }
+    // [unord.set.overview] lists both hint forms and neither existed here --
+    // the only container in the library that was missing them outright, so
+    // insert(pos, v) did not compile at all. The hint is advisory for a
+    // hash table (the bucket is decided by the hash, not by position), so
+    // they forward and drop the flag.
+    iterator insert(const_iterator, const Key &v) { return insert(v).first; }
+    iterator insert(const_iterator, Key &&v)
+    {
+        return insert(std::move(v)).first;
+    }
+
+    // ── heterogeneous insertion (P2363R5, C++26) ────────────────────────
+    // Needs a transparent Hash AND KeyEq, the same pair heterogeneous
+    // lookup needs: the hash of the lookup type has to agree with the hash
+    // of the key type, which is a promise only the hasher can make.
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    pair<iterator, bool> insert(K &&x)
+    {
+        iterator hit = find(x);
+        if (hit != end()) return {hit, false};
+        auto [it, ok] = __t.EmplaceUnique(std::forward<K>(x));
+        return {iterator(it.__n, it.__t), ok};
+    }
+    template <typename K>
+        requires(__detail::TransparentHashEq<Hash, KeyEq> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    iterator insert(const_iterator, K &&x)
+    {
+        return insert(std::forward<K>(x)).first;
     }
     template <typename It>
     void insert(It first, It last)
@@ -552,6 +593,11 @@ public:
     iterator insert(const_iterator, const Key &v)
     {
         auto it = __t.EmplaceMulti(v); // hint accepted, not exploited
+        return iterator(it.__n, it.__t);
+    }
+    iterator insert(const_iterator, Key &&v)
+    {
+        auto it = __t.EmplaceMulti(std::move(v));
         return iterator(it.__n, it.__t);
     }
     template <typename It>

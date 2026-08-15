@@ -28,6 +28,7 @@
 #define BOXCXX_OWNS_is_pointer_interconvertible
 #define BOXCXX_OWNS_is_scoped_enum
 #define BOXCXX_OWNS_is_swappable
+#define BOXCXX_OWNS_is_virtual_base_of
 #define BOXCXX_OWNS_logical_traits
 #define BOXCXX_OWNS_reference_from_temporary
 #define BOXCXX_OWNS_remove_cvref
@@ -653,6 +654,20 @@ constexpr bool is_corresponding_member(M1 S1::*m1, M2 S2::*m2) noexcept
 {
     return __builtin_is_corresponding_member(m1, m2);
 }
+
+// P2985R0. Every other inheritance question has had a trait since C++11;
+// this one needed a compiler builtin because virtualness of a base is not
+// observable from the outside by any library trick -- is_base_of is true
+// either way, and a cast that would distinguish them is ill-formed exactly
+// when the answer is "virtual".
+#if defined(__has_builtin) && __has_builtin(__builtin_is_virtual_base_of)
+template <class Base, class Derived>
+struct is_virtual_base_of
+    : bool_constant<__builtin_is_virtual_base_of(Base, Derived)> {};
+template <class Base, class Derived>
+inline constexpr bool is_virtual_base_of_v =
+    is_virtual_base_of<Base, Derived>::value;
+#endif
 
 #if defined(__has_builtin) && __has_builtin(__reference_constructs_from_temporary)
 template <class T, class U>

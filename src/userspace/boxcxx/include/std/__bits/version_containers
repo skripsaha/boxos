@@ -51,6 +51,16 @@
 #  define __cpp_lib_allocator_traits_is_always_equal 201411L
 #endif
 #undef BOXCXX_OWNS_allocator_traits_is_always_equal
+// P2363R5. The insertion half of what P2077R3 started for erasure: with a
+// transparent comparator (or Hash+KeyEq), the key type no longer has to be
+// materialised to insert, look up with operator[]/at, or emplace.
+#if (defined(BOXCXX_OWNS_ALL) || \
+     defined(BOXCXX_OWNS_associative_heterogeneous_insertion)) && \
+    !defined(__cpp_lib_associative_heterogeneous_insertion)
+#  define __cpp_lib_associative_heterogeneous_insertion 202306L
+#endif
+#undef BOXCXX_OWNS_associative_heterogeneous_insertion
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_associative_heterogeneous_erasure)) && \
     !defined(__cpp_lib_associative_heterogeneous_erasure)
 #  define __cpp_lib_associative_heterogeneous_erasure 202110L

@@ -18,6 +18,7 @@
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #define BOXCXX_OWNS_associative_heterogeneous_erasure
+#define BOXCXX_OWNS_associative_heterogeneous_insertion
 #define BOXCXX_OWNS_containers_ranges
 #define BOXCXX_OWNS_erase_if
 #define BOXCXX_OWNS_generic_associative_lookup
@@ -313,6 +314,88 @@ public:
     iterator insert_or_assign(const_iterator, Key &&key, M &&obj)
     {
         return insert_or_assign(std::move(key), std::forward<M>(obj)).first;
+    }
+
+    // ── heterogeneous insertion (P2363R5, C++26) ────────────────────────
+    // The mirror image of the C++14 heterogeneous LOOKUP that map has had
+    // for a decade: with a transparent comparator, find(sv) has long been
+    // able to avoid materialising a std::string, while try_emplace(sv, v)
+    // could not -- so the one call that is SUPPOSED to avoid building the
+    // key when it is already there was the one that always built it. These
+    // overloads close that. Each is excluded when K converts to an
+    // iterator, so try_emplace(it, k, v) still means the hint form.
+
+    template <typename K, typename... Args>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    pair<iterator, bool> try_emplace(K &&key, Args &&...args)
+    {
+        iterator hit = find(key);
+        if (hit != end()) return {hit, false};
+        return __t.EmplaceUnique(piecewise_construct,
+                                 forward_as_tuple(std::forward<K>(key)),
+                                 forward_as_tuple(std::forward<Args>(args)...));
+    }
+    template <typename K, typename... Args>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    iterator try_emplace(const_iterator, K &&key, Args &&...args)
+    {
+        return try_emplace(std::forward<K>(key),
+                           std::forward<Args>(args)...).first;
+    }
+
+    template <typename K, typename M>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    pair<iterator, bool> insert_or_assign(K &&key, M &&obj)
+    {
+        auto [it, inserted] =
+            try_emplace(std::forward<K>(key), std::forward<M>(obj));
+        if (!inserted) it->second = std::forward<M>(obj);
+        return {it, inserted};
+    }
+    template <typename K, typename M>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    iterator insert_or_assign(const_iterator, K &&key, M &&obj)
+    {
+        return insert_or_assign(std::forward<K>(key),
+                                std::forward<M>(obj)).first;
+    }
+
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    T &operator[](K &&key)
+    {
+        return try_emplace(std::forward<K>(key)).first->second;
+    }
+
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    T &at(const K &key)
+    {
+        iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("map::at");
+        return it->second;
+    }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    const T &at(const K &key) const
+    {
+        const_iterator it = find(key);
+        if (it == end()) boxcxx::ThrowOutOfRange("map::at");
+        return it->second;
     }
 
     iterator erase(const_iterator where) { return __t.Erase(where); }

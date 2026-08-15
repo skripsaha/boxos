@@ -38,6 +38,9 @@
 #  error "__cpp_lib_byte is not visible from <cstddef> alone"
 #endif
 #include <type_traits>
+#ifndef __cpp_lib_is_virtual_base_of
+#  error "__cpp_lib_is_virtual_base_of is not visible from <type_traits> alone"
+#endif
 #ifndef __cpp_lib_bool_constant
 #  error "__cpp_lib_bool_constant is not visible from <type_traits> alone"
 #endif
@@ -96,6 +99,9 @@
 #  error "__cpp_lib_void_t is not visible from <type_traits> alone"
 #endif
 #include <utility>
+#ifndef __cpp_lib_constant_wrapper
+#  error "__cpp_lib_constant_wrapper is not visible from <utility> alone"
+#endif
 #ifndef __cpp_lib_as_const
 #  error "__cpp_lib_as_const is not visible from <utility> alone"
 #endif
@@ -268,6 +274,9 @@
 #  error "__cpp_lib_string_contains is not visible from <string_view> alone"
 #endif
 #include <string>
+#ifndef __cpp_lib_to_string
+#  error "__cpp_lib_to_string is not visible from <string> alone"
+#endif
 #ifndef __cpp_lib_string_resize_and_overwrite
 #  error "__cpp_lib_string_resize_and_overwrite is not visible from <string> alone"
 #endif
@@ -319,6 +328,9 @@
 #  error "__cpp_lib_polymorphic_allocator is not visible from <memory_resource> alone"
 #endif
 #include <optional>
+#ifndef __cpp_lib_optional_range_support
+#  error "__cpp_lib_optional_range_support is not visible from <optional> alone"
+#endif
 #ifndef __cpp_lib_optional
 #  error "__cpp_lib_optional is not visible from <optional> alone"
 #endif
@@ -353,6 +365,9 @@
 #  error "__cpp_lib_three_way_comparison is not visible from <compare> alone"
 #endif
 #include <map>
+#ifndef __cpp_lib_associative_heterogeneous_insertion
+#  error "__cpp_lib_associative_heterogeneous_insertion is not visible from <map> alone"
+#endif
 #ifndef __cpp_lib_associative_heterogeneous_erasure
 #  error "__cpp_lib_associative_heterogeneous_erasure is not visible from <map> alone"
 #endif
@@ -441,6 +456,7 @@
 #include <complex>
 #include <coroutine>
 #include <generator>
+#include <debugging>
 #include <deque>
 #include <expected>
 #include <flat_map>
@@ -450,6 +466,7 @@
 #include <functional>
 #include <ios>
 #include <iosfwd>
+#include <inplace_vector>
 #include <istream>
 #include <iterator>
 #include <limits>
@@ -2866,11 +2883,18 @@ void Phase9a3()
     eqp(0.0, F::general, 4, "0", "phase9a3 zero general");
 
     // to_string (fixed, 6 fractional digits)
-    Check(std::to_string(3.14159265358979) == "3.141593", "phase9a3 to_string pi");
-    Check(std::to_string(0.0) == "0.000000", "phase9a3 to_string 0");
-    Check(std::to_string(-2.5) == "-2.500000", "phase9a3 to_string -2.5");
-    Check(std::to_string(1.0 / 3.0) == "0.333333", "phase9a3 to_string 1/3");
-    Check(std::to_string(100.0f) == "100.000000", "phase9a3 to_string float");
+    // P2587R3 (Ф33) replaced "as if by sprintf %f" with "as if by
+    // format(\"{}\", v)": the shortest decimal that reads back as the same
+    // value. These five pins carried the %f spelling and are the whole
+    // observable difference -- 0.0 was "0.000000" and 1/3 was "0.333333",
+    // which is not the value.
+    Check(std::to_string(3.14159265358979) == "3.14159265358979",
+          "phase9a3 to_string pi");
+    Check(std::to_string(0.0) == "0", "phase9a3 to_string 0");
+    Check(std::to_string(-2.5) == "-2.5", "phase9a3 to_string -2.5");
+    Check(std::to_string(1.0 / 3.0) == "0.3333333333333333",
+          "phase9a3 to_string 1/3");
+    Check(std::to_string(100.0f) == "100", "phase9a3 to_string float");
 
     printf("[CXX] PASS phase9a3: <charconv> float precision + to_string\n");
 }
@@ -11242,7 +11266,8 @@ void Phase61()
 
     // to_string / stold
     {
-        Check(std::to_string(3.14159L) == "3.141590", "phase61 to_string 3.14159L");
+        Check(std::to_string(3.14159L) == "3.14159",
+              "phase61 to_string 3.14159L -- P2587R3 shortest round-trip (Ф33)");
         size_t pos = 0;
         long double v = std::stold("3.14159", &pos);
         Check(bits(v) == bits(3.14159L) && pos == 7, "phase61 stold 3.14159");
@@ -29370,7 +29395,9 @@ void Phase131()
     static_assert(__cpp_lib_string_contains == 202011L, "phase131 string_contains");
     static_assert(__cpp_lib_string_udls == 201304L, "phase131 string_udls");
 
-    static_assert(__cpp_lib_optional == 202110L, "phase131 optional");
+    static_assert(__cpp_lib_optional == 202506L,
+                  "phase131 optional -- 202110L until Ф33 added "
+                  "P2988R12's optional<T&>");
     static_assert(__cpp_lib_variant == 202306L, "phase131 variant -- P2637R3 since Ф32-e");
     static_assert(__cpp_lib_expected == 202211L, "phase131 expected");
 
@@ -39656,6 +39683,873 @@ void Phase163()
            "it has never had in any revision\n");
 }
 
+// ── Ф33 fixtures ────────────────────────────────────────────────────────
+// At namespace scope, because a class defined inside a function cannot be a
+// template argument in every context these need, and because the operator
+// probes below have to be dependent on a template parameter: GCC diagnoses
+// a NON-dependent failing requirement eagerly rather than answering false
+// (the same rule the member-probe comment above this file's Check records).
+
+template <class T> concept P165CanPreInc = requires(T t) { ++t; };
+template <class T> concept P165CanAddAssign = requires(T t) { t += t; };
+
+struct P165NoInc {
+    int v;
+    friend constexpr bool operator==(P165NoInc, P165NoInc) = default;
+};
+
+int            P166Doubler(int x) { return x * 2; }
+constexpr int  P165Twice(int x) { return x * 2; }
+int  P166NoThrow(int x) noexcept { return x + 1; }
+struct P166Obj {
+    int m;
+    int Add(int y) const { return m + y; }
+    int Scale(int y) { return m * y; }
+};
+int P166FreeOnObj(const P166Obj &o, int y) noexcept { return o.m - y; }
+
+// A type whose every construction is counted, so "the key was not built"
+// can be asserted rather than asserted-about.
+int P169Builds = 0;
+struct P169Key {
+    std::string s;
+    P169Key() = default;
+    P169Key(std::string_view v) : s(v) { ++P169Builds; }
+    P169Key(const P169Key &o) : s(o.s) { ++P169Builds; }
+    P169Key(P169Key &&o) noexcept : s(static_cast<std::string &&>(o.s)) {}
+    P169Key &operator=(const P169Key &) = default;
+    P169Key &operator=(P169Key &&)      = default;
+};
+struct P169Less {
+    using is_transparent = void;
+    bool operator()(const P169Key &a, const P169Key &b) const { return a.s < b.s; }
+    bool operator()(const P169Key &a, std::string_view b) const { return a.s < b; }
+    bool operator()(std::string_view a, const P169Key &b) const { return a < b.s; }
+};
+struct P169SvHash {
+    using is_transparent = void;
+    std::size_t operator()(std::string_view s) const
+    {
+        return std::hash<std::string_view>{}(s);
+    }
+};
+struct P169SvEq {
+    using is_transparent = void;
+    bool operator()(std::string_view a, std::string_view b) const { return a == b; }
+};
+
+// Bases that differ only in the virtualness a library trait cannot see.
+struct P168Base {};
+struct P168Virtual : virtual P168Base {};
+struct P168Plain : P168Base {};
+
+// A non-trivial element type for inplace_vector: it counts its own
+// destructions, which is how "the container destroyed exactly what it
+// built" gets checked rather than assumed.
+int P167Live = 0;
+struct P167Elem {
+    int v;
+    P167Elem(int x = 0) : v(x) { ++P167Live; }
+    P167Elem(const P167Elem &o) : v(o.v) { ++P167Live; }
+    P167Elem(P167Elem &&o) noexcept : v(o.v) { ++P167Live; }
+    P167Elem &operator=(const P167Elem &) = default;
+    P167Elem &operator=(P167Elem &&)      = default;
+    ~P167Elem() { --P167Live; }
+    friend bool operator==(const P167Elem &a, const P167Elem &b)
+    {
+        return a.v == b.v;
+    }
+};
+
+void Phase164()
+{
+    using namespace std;
+
+    // [optional.optional.ref] (P2988R12). The reference specialization is a
+    // pointer with a nicer interface, and the design argument of the paper
+    // is one line long: assignment REBINDS. Assign-through would make the
+    // meaning of `a = b` depend on whether a was engaged.
+    {
+        int a = 1, b = 2;
+        optional<int &> o;
+        Check(!o.has_value() && !o, "phase164 (1) default is disengaged");
+        o = a;
+        Check(&*o == &a, "phase164 (2) binds to the object, not a copy");
+        o = b;
+        Check(a == 1 && b == 2 && &*o == &b,
+              "phase164 (3) assignment REBINDS -- 2 was not written into a");
+        *o = 7;
+        Check(b == 7, "phase164 (4) ...but writing THROUGH it does reach b");
+        o.reset();
+        Check(!o, "phase164 (5) reset");
+        o = nullopt;
+        Check(!o, "phase164 (6) nullopt assignment");
+        o.emplace(a);
+        Check(&*o == &a, "phase164 (7) emplace rebinds too");
+        Check(o.value() == 1 && o.operator->() == &a,
+              "phase164 (8) value() and operator->");
+    }
+    static_assert(is_trivially_copyable_v<optional<int &>>,
+                  "phase164 (9) it is a pointer, so it copies like one");
+    static_assert(sizeof(optional<int &>) == sizeof(int *),
+                  "phase164 (10) ...and costs like one");
+    static_assert(is_same_v<optional<int &>::value_type, int>,
+                  "phase164 (11) value_type is T, not T&");
+    // The deleted constructors. A binding that would have to materialise a
+    // temporary is rejected, because the temporary dies at the semicolon and
+    // the optional would outlive it.
+    static_assert(!is_constructible_v<optional<int &>, int &&>,
+                  "phase164 (12) no binding to an rvalue");
+    static_assert(!is_constructible_v<optional<const long &>, int &>,
+                  "phase164 (13) no binding through a converting temporary");
+    static_assert(is_constructible_v<optional<const int &>, int &>,
+                  "phase164 (14) ...but const int& from int& is a real binding");
+    {
+        int a = 5;
+        optional<int &> o{a};
+        auto            t = o.transform([](int &x) { return x * 2; });
+        Check(t && *t == 10, "phase164 (15) transform");
+        auto n = o.and_then([](int &x) { return optional<int>{x + 1}; });
+        Check(n && *n == 6, "phase164 (16) and_then");
+        optional<int &> e;
+        Check(e.value_or(42) == 42 && o.value_or(42) == 5,
+              "phase164 (17) value_or");
+        auto oe = e.or_else([&] { return optional<int &>{a}; });
+        Check(oe && &*oe == &a, "phase164 (18) or_else");
+        optional<int> copy{o};
+        Check(copy && *copy == 5,
+              "phase164 (19) converting to the value optional copies the referent");
+        Check(o == copy && o == 5 && !(o == nullopt),
+              "phase164 (20) comparisons reach through both sides");
+        optional<int &> f{a};
+        e.swap(f);
+        Check(&*e == &a && !f, "phase164 (21) swap exchanges the pointers");
+    }
+
+    // [optional.iterators] (P3168R2). An optional is a range of zero or one
+    // element, which is what lets it be piped instead of branched on.
+    static_assert(ranges::contiguous_range<optional<int>>,
+                  "phase164 (22) the primary template is a contiguous range");
+    static_assert(ranges::view<optional<int>>,
+                  "phase164 (23) ...and a view");
+    static_assert(!ranges::enable_borrowed_range<optional<int>>,
+                  "phase164 (24) but NOT borrowed: it owns its element");
+    static_assert(ranges::enable_borrowed_range<optional<int &>>,
+                  "phase164 (25) the reference specialization IS borrowed -- "
+                  "the referent outlives the optional");
+    static_assert(is_same_v<ranges::range_value_t<optional<int>>, int> &&
+                      is_same_v<ranges::range_value_t<optional<int &>>, int>,
+                  "phase164 (26) both yield T");
+    {
+        optional<int> some{7}, none;
+        int           sum = 0, count = 0;
+        for (int v : some) { sum += v; ++count; }
+        for (int v : none) { sum += v * 100; ++count; }
+        Check(sum == 7 && count == 1, "phase164 (27) one element, then none");
+        Check(ranges::distance(some) == 1 && ranges::distance(none) == 0,
+              "phase164 (28) sized");
+        int      a = 3;
+        optional<int &> r{a};
+        Check(ranges::distance(r) == 1 && *r.begin() == 3,
+              "phase164 (29) the reference specialization iterates too");
+    }
+    static_assert(format_kind<optional<int>> == range_format::disabled,
+                  "phase164 (30) formatting an optional as a range is DISABLED "
+                  "-- without this line format(\"{}\", opt) would silently start "
+                  "printing [7]");
+    // Everything above is also a constant expression, which it was not before
+    // Ф33 replaced optional's placement-new with construct_at.
+    static_assert([] {
+        int             a = 1, b = 2;
+        optional<int &> o{a};
+        o = b;
+        if (&*o != &b || a != 1) return false;
+        int sum = 0;
+        for (int &v : o) sum += v;
+        optional<int> byval;
+        byval = 5;               // engages through the converting assignment
+        for (int v : byval) sum += v;
+        return sum == 7;
+    }(),
+                  "phase164 (31) optional is usable in constant evaluation, "
+                  "including the paths that ENGAGE a disengaged optional");
+
+    static_assert(__cpp_lib_optional == 202506L, "phase164 (32) FTM");
+    static_assert(__cpp_lib_optional_range_support == 202406L,
+                  "phase164 (33) FTM");
+
+    printf("[CXX] PASS phase164: Ф33 — optional<T&> (P2988R12) with "
+           "rebinding assignment and deleted temporary-binding constructors, "
+           "plus P3168R2 range support on both -- and optional's whole "
+           "engage path is constexpr now (it used a bare placement-new, which "
+           "is never a constant expression outside std::construct_at)\n");
+}
+
+void Phase165()
+{
+    using namespace std;
+
+    // [const.wrap] (P2781R9). A value in the type system that still behaves
+    // like the value: cw<2> + cw<3> is not 5, it is cw<5> -- a type, usable
+    // straight back as a template argument.
+    static_assert(is_same_v<decltype(cw<2> + cw<3>), constant_wrapper<5>>,
+                  "phase165 (1) arithmetic stays in the type system");
+    static_assert(is_same_v<decltype(-cw<7>), constant_wrapper<-7>>,
+                  "phase165 (2) unary");
+    static_assert(is_same_v<decltype(cw<12> / cw<4>), constant_wrapper<3>>,
+                  "phase165 (3) division");
+    static_assert(is_same_v<decltype(cw<6> % cw<4>), constant_wrapper<2>>,
+                  "phase165 (4) modulo");
+    static_assert(is_same_v<decltype(cw<1> << cw<4>), constant_wrapper<16>>,
+                  "phase165 (5) shift");
+    static_assert(is_same_v<decltype(cw<0b1100> & cw<0b1010>),
+                            constant_wrapper<0b1000>>,
+                  "phase165 (6) bitwise");
+    static_assert(is_same_v<decltype(cw<2> < cw<3>), constant_wrapper<true>>,
+                  "phase165 (7) comparison yields a wrapped bool");
+    static_assert(cw<3> * cw<4> == cw<12>,
+                  "phase165 (8) ...which converts to bool where one is wanted");
+    static_assert(decltype(cw<42u>)::value == 42u &&
+                      is_same_v<decltype(cw<42u>)::value_type, unsigned>,
+                  "phase165 (9) value and value_type survive the round trip");
+    static_assert(!is_same_v<decltype(cw<0>), decltype(cw<0u>)>,
+                  "phase165 (10) 0 and 0u are DIFFERENT wrappers -- the second "
+                  "template parameter is what keeps them apart");
+    // bool-like operands step aside for the conversion operator, so && and ||
+    // keep short-circuiting instead of being hijacked.
+    static_assert(is_same_v<decltype(cw<true> && cw<false>), bool>,
+                  "phase165 (11) logical operators stand aside for bool");
+    // A string literal as a template argument, which is the reason the value
+    // is carried in a struct rather than as a plain auto NTTP.
+    static_assert(cw<"abc">.value[1] == 'b',
+                  "phase165 (12) arrays can be wrapped");
+    static_assert(is_same_v<decltype(cw<"abc">)::value_type, const char[4]>,
+                  "phase165 (13) ...and keep their array type");
+    // LWG 4383, approved into C++26 at Kona: the pseudo-mutators produce the
+    // value the mutation WOULD have left, and are constrained so that asking
+    // is a question rather than a hard error.
+    static_assert(is_same_v<decltype(++cw<1>), constant_wrapper<2>>,
+                  "phase165 (14) ++cw<1> is cw<2>");
+    static_assert(is_same_v<decltype(cw<1>++), constant_wrapper<1>>,
+                  "phase165 (15) post-increment yields the OLD value");
+    static_assert(is_same_v<decltype(--cw<5>), constant_wrapper<4>>,
+                  "phase165 (16) --");
+    static_assert(is_same_v<decltype(cw<1> += cw<2>), constant_wrapper<3>>,
+                  "phase165 (17) compound assignment");
+    static_assert(is_same_v<decltype(cw<7> ^= cw<1>), constant_wrapper<6>>,
+                  "phase165 (18) ...all ten of them");
+    static_assert(P165CanPreInc<decltype(cw<1>)>,
+                  "phase165 (19) the mutators are available for an int");
+    static_assert(!P165CanPreInc<decltype(cw<P165NoInc{1}>)>,
+                  "phase165 (20) ...and NOT available for a type without ++, "
+                  "which is the whole content of LWG 4383 -- before it, asking "
+                  "was a hard error rather than false");
+    static_assert(!P165CanAddAssign<decltype(cw<P165NoInc{1}>)>,
+                  "phase165 (21) same for +=");
+    // Call and subscript lift their result when every argument is itself a
+    // wrapper, and fall back to a plain runtime call when they are not.
+    static_assert(is_same_v<decltype(cw<&P165Twice>(cw<21>)),
+                            constant_wrapper<42>>,
+                  "phase165 (22) invoking with wrapped arguments lifts the "
+                  "RESULT back into the type system");
+    Check(cw<&P165Twice>(21) == 42,
+          "phase165 (23) ...and with a runtime argument it just calls");
+    static_assert(is_same_v<decltype(cw<&P166Doubler>(cw<21>)), int>,
+                  "phase165 (23b) a target that is not constexpr cannot be "
+                  "lifted, so the call falls back to the runtime one");
+    static_assert(__cpp_lib_constant_wrapper == 202606L, "phase165 (24) FTM");
+
+    printf("[CXX] PASS phase165: Ф33 — std::constant_wrapper / cw "
+           "(P2781R9) including LWG 4383's SFINAE-friendly pseudo-mutators, "
+           "which libstdc++ 16.1 does not have yet: there ++cw<1> is a hard "
+           "error, here it is cw<2>\n");
+}
+
+void Phase166()
+{
+    using namespace std;
+
+    // [func.wrap.ref] (P0792R14). Two pointers, no ownership, no allocation:
+    // the call wrapper for a callback that lives only for the duration of
+    // the call, which is the case std::function has always over-served.
+    static_assert(sizeof(function_ref<int(int)>) == 2 * sizeof(void *),
+                  "phase166 (1) exactly a thunk and a bound entity");
+    static_assert(is_trivially_copyable_v<function_ref<int(int)>>,
+                  "phase166 (2) trivially copyable");
+    {
+        function_ref<int(int)> a{&P166Doubler};
+        Check(a(21) == 42, "phase166 (3) a function pointer");
+        function_ref<int(int)> b{P166Doubler};
+        Check(b(3) == 6, "phase166 (4) ...and a function lvalue");
+        auto                   lam = [](int x) { return x - 1; };
+        function_ref<int(int)> c{lam};
+        Check(c(10) == 9, "phase166 (5) a lambda, by reference");
+        a = &P166NoThrow;
+        Check(a(1) == 2, "phase166 (6) assignment from a pointer rebinds");
+    }
+    {
+        // The constant_wrapper constructors: the target is fixed at compile
+        // time, so there is no indirection through a stored callable at all.
+        P166Obj                s{5};
+        function_ref<int(int)> mem{cw<&P166Obj::Add>, s};
+        Check(mem(3) == 8, "phase166 (7) member function bound to an lvalue");
+        function_ref<int(int)> memp{cw<&P166Obj::Scale>, &s};
+        Check(memp(3) == 15, "phase166 (8) ...or to a pointer");
+        function_ref<int(int)> fn{cw<&P166Doubler>};
+        Check(fn(4) == 8, "phase166 (9) a free function with no bound object");
+        function_ref<int(int) noexcept> nx{cw<&P166FreeOnObj>, s};
+        Check(nx(2) == 3, "phase166 (10) a free function taking the object first");
+    }
+    // The noexcept signature is a promise the target has to be able to keep.
+    static_assert(!is_constructible_v<function_ref<int(int) noexcept>, int (*)(int)>,
+                  "phase166 (11) a throwing target cannot fill a noexcept "
+                  "signature");
+    static_assert(is_constructible_v<function_ref<int(int) noexcept>,
+                                     int (*)(int) noexcept>,
+                  "phase166 (12) ...but a noexcept one can");
+    // Assignment from a callable is DELETED: it would bind to a temporary
+    // that dies at the semicolon. Pointers and wrappers stay assignable.
+    static_assert(!is_assignable_v<function_ref<int(int)> &, decltype([](int) { return 0; })>,
+                  "phase166 (13) assignment from a callable is deleted");
+    static_assert(is_assignable_v<function_ref<int(int)> &, int (*)(int)>,
+                  "phase166 (14) ...but not from a function pointer");
+    // P3961R1: building one specialization from another COPIES the thunk and
+    // the entity rather than wrapping, so the result outlives the source.
+    static_assert(is_constructible_v<function_ref<int(int)>,
+                                     function_ref<int(int) const> &>,
+                  "phase166 (15) a const-qualified source absorbs into a "
+                  "non-const one");
+    static_assert(is_constructible_v<function_ref<int(int) const>,
+                                     function_ref<int(int)> &>,
+                  "phase166 (16) the other direction still COMPILES -- it just "
+                  "wraps rather than absorbing, because a function_ref is a "
+                  "perfectly ordinary callable and the constraint only asks "
+                  "that it be invocable. The difference is a lifetime, not a "
+                  "diagnostic, which is what (17) measures");
+    {
+        auto                   lam = [](int x) { return x - 1; };
+        function_ref<int(int)> g = [&] {
+            function_ref<int(int) const> inner{lam};
+            return function_ref<int(int)>{inner};   // inner dies here
+        }();
+        Check(g(10) == 9,
+              "phase166 (17) the absorbed reference still points at the "
+              "LAMBDA, not at the function_ref that introduced it");
+    }
+    // Deduction guides.
+    static_assert(is_same_v<decltype(function_ref{&P166Doubler}),
+                            function_ref<int(int)>>,
+                  "phase166 (18) from a function pointer");
+    static_assert(is_same_v<decltype(function_ref{cw<&P166Doubler>}),
+                            function_ref<int(int)>>,
+                  "phase166 (19) from a wrapped function pointer");
+    static_assert(is_same_v<decltype(function_ref{cw<&P166Obj::Add>,
+                                                  declval<P166Obj &>()}),
+                            function_ref<int(int)>>,
+                  "phase166 (20) from a wrapped member function plus an object "
+                  "-- the guide drops the member's own const, since the "
+                  "qualifier on a function_ref signature is about how the "
+                  "TARGET is invoked, not about the member it came from");
+    static_assert(is_same_v<decltype(function_ref{cw<&P166Obj::m>,
+                                                  declval<P166Obj &>()}),
+                            function_ref<int &() noexcept>>,
+                  "phase166 (21) a data member deduces a nullary noexcept "
+                  "signature returning a reference");
+    static_assert(__cpp_lib_function_ref == 202604L, "phase166 (22) FTM");
+
+    printf("[CXX] PASS phase166: Ф33 — std::function_ref "
+           "(P0792R14) in all four cv/noexcept forms, with the "
+           "constant_wrapper constructors that replaced nontype_t and "
+           "P3961R1's absorb-instead-of-wrap conversion between "
+           "specializations\n");
+}
+
+void Phase167()
+{
+    using namespace std;
+
+    // [inplace.vector] (P0843R14): vector's interface over array's storage.
+    // Nothing is allocated, ever -- which is what makes it usable in a
+    // static, in an interrupt-reachable structure, or in a page you own.
+    static_assert(is_empty_v<inplace_vector<int, 0>>,
+                  "phase167 (1) the zero-capacity specialization is EMPTY");
+    static_assert(is_trivially_default_constructible_v<inplace_vector<int, 0>> &&
+                      is_trivially_copyable_v<inplace_vector<int, 0>>,
+                  "phase167 (2) ...and fully trivial, as the standard mandates");
+    static_assert(is_trivially_copyable_v<inplace_vector<int, 4>>,
+                  "phase167 (3) a trivially copyable T gives a trivially "
+                  "copyable container");
+    static_assert(!is_trivially_copyable_v<inplace_vector<P167Elem, 4>> &&
+                      !is_trivially_destructible_v<inplace_vector<P167Elem, 4>>,
+                  "phase167 (4) ...and a non-trivial one does not");
+    static_assert(sizeof(inplace_vector<char, 8>) == 9,
+                  "phase167 (5) the size field is the narrowest type that "
+                  "holds N -- one byte here, not eight");
+    static_assert(ranges::contiguous_range<inplace_vector<int, 4>> &&
+                      ranges::sized_range<inplace_vector<int, 4>>,
+                  "phase167 (6) a contiguous sized range");
+    {
+        inplace_vector<int, 6> v;
+        Check(v.empty() && v.size() == 0 && v.capacity() == 6 &&
+                  v.max_size() == 6,
+              "phase167 (7) capacity is a compile-time property");
+        v.push_back(1);
+        v.push_back(2);
+        v.emplace_back(3);
+        Check(v.size() == 3 && v.front() == 1 && v.back() == 3 && v[1] == 2,
+              "phase167 (8) push_back / emplace_back");
+        v.insert(v.begin() + 1, 9);
+        Check(v.size() == 4 && v[1] == 9 && v[3] == 3, "phase167 (9) insert");
+        v.insert(v.end(), 2, 7);
+        Check(v.size() == 6 && v[4] == 7 && v[5] == 7,
+              "phase167 (10) insert n copies");
+        auto it = v.erase(v.begin() + 1);
+        Check(*it == 2 && v.size() == 5, "phase167 (11) erase one");
+        v.erase(v.begin() + 3, v.end());
+        Check(v.size() == 3 && v.back() == 3, "phase167 (12) erase a range");
+        v.resize(5, 4);
+        Check(v.size() == 5 && v[4] == 4, "phase167 (13) resize up with a value");
+        v.resize(2);
+        Check(v.size() == 2, "phase167 (14) resize down");
+        v.assign(3, 8);
+        Check(v.size() == 3 && v[2] == 8, "phase167 (15) assign");
+        inplace_vector<int, 6> w{1, 2, 3};
+        v = w;
+        Check(v == w, "phase167 (16) copy assignment and ==");
+        v.pop_back();
+        Check(v < w && w > v, "phase167 (17) lexicographic <=>");
+        v.swap(w);
+        Check(v.size() == 3 && w.size() == 2, "phase167 (18) swap of unequal sizes");
+        v.clear();
+        Check(v.empty(), "phase167 (19) clear");
+    }
+    {
+        // The try_ family is the reason this container does not need
+        // exceptions to be usable: it reports a full buffer as a value.
+        inplace_vector<int, 2> t;
+        auto                   r1 = t.try_push_back(5);
+        Check(r1 && *r1 == 5, "phase167 (20) try_push_back returns optional<T&>");
+        t.unchecked_push_back(6);
+        Check(!t.try_push_back(7).has_value() && t.size() == 2,
+              "phase167 (21) ...and nullopt when full, with no effect");
+        static_assert(is_same_v<decltype(t.try_push_back(0)), optional<int &>>,
+                      "phase167 (22) optional<T&> is why this header needs "
+                      "P2988R12");
+    }
+    {
+        int                    src[] = {4, 5};
+        inplace_vector<int, 4> fr(from_range, src);
+        Check(fr.size() == 2 && fr[1] == 5, "phase167 (23) from_range");
+        fr.append_range(src);
+        Check(fr.size() == 4 && fr[3] == 5, "phase167 (24) append_range");
+        inplace_vector<int, 8> ir{1, 2, 3};
+        ir.insert_range(ir.begin() + 1, src);
+        Check(ir.size() == 5 && ir[1] == 4 && ir[2] == 5 && ir[3] == 2,
+              "phase167 (25) insert_range rotates the appended tail into place");
+        inplace_vector<int, 8> e{1, 2, 3, 4, 5, 6};
+        Check(erase_if(e, [](int x) { return x % 2 == 0; }) == 3 && e.size() == 3,
+              "phase167 (26) erase_if");
+        Check(erase(e, 3) == 1 && e.size() == 2, "phase167 (27) erase");
+    }
+    {
+        // Overflow is bad_alloc and leaves the container untouched -- even
+        // for an input range that cannot be measured before it is consumed.
+        inplace_vector<int, 2> o{1, 2};
+        bool                   threw = false;
+        try { o.push_back(3); } catch (const bad_alloc &) { threw = true; }
+        Check(threw && o.size() == 2 && o[1] == 2,
+              "phase167 (28) push_back past capacity throws bad_alloc");
+        inplace_vector<int, 3> r{1};
+        int                    many[] = {2, 3, 4, 5};
+        threw                         = false;
+        try { r.append_range(many); } catch (const bad_alloc &) { threw = true; }
+        Check(threw && r.size() == 1 && r[0] == 1,
+              "phase167 (29) an over-long range is rolled back completely");
+        threw = false;
+        try { (void)r.at(9); } catch (const out_of_range &) { threw = true; }
+        Check(threw, "phase167 (30) at() is checked");
+        threw = false;
+        try { inplace_vector<int, 2>::reserve(3); } catch (const bad_alloc &) { threw = true; }
+        Check(threw, "phase167 (31) even static reserve reports what it cannot do");
+    }
+    {
+        // A non-trivial element type: every construction has to be matched
+        // by a destruction, including the ones inside the union.
+        const int before = P167Live;
+        {
+            inplace_vector<P167Elem, 4> s;
+            s.push_back(P167Elem{1});
+            s.emplace_back(2);
+            s.insert(s.begin(), P167Elem{0});
+            Check(s.size() == 3 && s[0].v == 0 && s[2].v == 2,
+                  "phase167 (32) non-trivial elements");
+            auto t = s;
+            Check(t == s, "phase167 (33) copy");
+            auto u = static_cast<inplace_vector<P167Elem, 4> &&>(t);
+            Check(u.size() == 3, "phase167 (34) move");
+            u.erase(u.begin());
+            Check(u.size() == 2 && u[0].v == 1, "phase167 (35) erase destroys");
+            u.clear();
+        }
+        Check(P167Live == before,
+              "phase167 (36) every element built was destroyed -- the union "
+              "storage has no destructor of its own, so the container is the "
+              "only thing that can do it");
+    }
+    {
+        // Inserting an element of the vector INTO the same vector. This is
+        // the case a shift-the-tail implementation gets wrong: it moves the
+        // source out from under the argument. Appending first cannot.
+        inplace_vector<P167Elem, 8> s{P167Elem{1}, P167Elem{2}, P167Elem{3}};
+        s.insert(s.begin(), s[2]);
+        Check(s.size() == 4 && s[0].v == 3 && s[1].v == 1 && s[3].v == 3,
+              "phase167 (36b) insert of one of its own elements");
+        inplace_vector<P167Elem, 8> t{P167Elem{9}, P167Elem{8}};
+        t.insert(t.begin() + 1, 3, t[0]);
+        Check(t.size() == 5 && t[0].v == 9 && t[1].v == 9 && t[3].v == 9 &&
+                  t[4].v == 8,
+              "phase167 (36c) ...and of n copies of one of its own");
+    }
+    {
+        inplace_vector<int, 0> z;
+        Check(z.empty() && z.capacity() == 0 && z.begin() == z.end(),
+              "phase167 (37) the zero-capacity specialization still behaves");
+        bool threw = false;
+        try { z.push_back(1); } catch (const bad_alloc &) { threw = true; }
+        Check(threw && !z.try_push_back(1).has_value(),
+              "phase167 (38) ...and refuses everything, two ways");
+    }
+    // Constant evaluation, for a trivial element type. The union storage is
+    // what makes the run-time case free and the compile-time case limited:
+    // a union member whose lifetime has not begun cannot be written through
+    // in a constant expression, so the compile-time path value-initialises
+    // the whole buffer up front. libstdc++ 16 has the same limit.
+    static_assert([] {
+        inplace_vector<int, 6> v{1, 2, 3};
+        v.insert(v.begin() + 1, 9);
+        v.push_back(4);
+        v.erase(v.begin());
+        int sum = 0;
+        for (int x : v) sum += x;
+        return sum == 9 + 2 + 3 + 4;
+    }(),
+                  "phase167 (39) usable in constant evaluation");
+    static_assert(__cpp_lib_inplace_vector == 202603L, "phase167 (40) FTM");
+
+    printf("[CXX] PASS phase167: Ф33 — <inplace_vector> "
+           "(P0843R14): vector's interface, array's storage, no allocation "
+           "ever; conditional triviality, the try_/unchecked_ families, "
+           "bad_alloc with rollback, and the zero-capacity specialization\n");
+}
+
+void Phase168()
+{
+    using namespace std;
+
+    // P2697R1: a bitset could be built from a std::string or a const char*,
+    // but not from the type between them -- so a view had to be copied into
+    // a string, allocating, to build a container that allocates nothing.
+    {
+        string_view sv{"110100"};
+        bitset<6>   b{sv};
+        Check(b.to_ulong() == 0b110100, "phase168 (1) bitset from string_view");
+        bitset<3> c{sv, 2, 3};
+        Check(c.to_ulong() == 0b010, "phase168 (2) ...with pos and n");
+        bitset<4> d{string_view{"xyxy"}, 0, 4, 'x', 'y'};
+        Check(d.to_ulong() == 0b0101, "phase168 (3) ...and custom zero/one");
+        bool threw = false;
+        try { bitset<4> e{sv, 99}; (void)e; } catch (const out_of_range &) { threw = true; }
+        Check(threw, "phase168 (4) pos past the end throws, as for the string form");
+    }
+    static_assert([] {
+        return bitset<6>{string_view{"110100"}}.to_ulong() == 0b110100;
+    }(),
+                  "phase168 (5) and it is constexpr, unlike the string form -- "
+                  "which is exactly why the string form is why "
+                  "__cpp_lib_constexpr_bitset is still not claimed");
+
+    // P2985R0. No library trick can see the virtualness of a base: is_base_of
+    // is true either way, and the cast that would distinguish them is
+    // ill-formed precisely when the answer is yes.
+    static_assert(is_virtual_base_of_v<P168Base, P168Virtual>,
+                  "phase168 (6) a virtual base is seen");
+    static_assert(!is_virtual_base_of_v<P168Base, P168Plain>,
+                  "phase168 (7) ...and a non-virtual one is not");
+    static_assert(is_base_of_v<P168Base, P168Plain> &&
+                      is_base_of_v<P168Base, P168Virtual>,
+                  "phase168 (8) while is_base_of cannot tell them apart");
+
+    // P3060R2. views::indices(n) is iota from a zero of n's OWN type, which
+    // is the whole point: indices(v.size()) yields size_t, so comparing an
+    // index against another size_t needs no conversion.
+    {
+        vector<int> v{10, 20, 30};
+        int         sum = 0;
+        for (auto i : views::indices(v.size())) sum += v[i];
+        Check(sum == 60, "phase168 (9) views::indices over a container's size");
+        static_assert(is_same_v<ranges::range_value_t<
+                                    decltype(views::indices(size_t{3}))>,
+                                size_t>,
+                      "phase168 (10) the index type is the argument's type");
+        Check(ranges::equal(views::indices(4u), views::iota(0u, 4u)),
+              "phase168 (11) ...and it is exactly iota from zero");
+        static_assert(!is_invocable_v<decltype(views::indices), double>,
+                      "phase168 (12) only integer-like arguments");
+    }
+
+    // P2587R3. to_string on a floating-point value now means format("{}", v)
+    // -- the shortest decimal that reads back as the same value. Under the
+    // old sprintf("%f") rule to_string(1e-9) was "0.000000", which does not.
+    Check(to_string(0.5) == "0.5", "phase168 (13) to_string(double)");
+    Check(to_string(1e-9) == "1e-09",
+          "phase168 (14) ...and a small value round-trips instead of "
+          "flattening to zero");
+    Check(to_string(3.0f) == "3", "phase168 (15) to_string(float)");
+    Check(to_string(0.1) == "0.1",
+          "phase168 (16) the shortest form, not seventeen digits");
+    Check(to_string(-2.5e-7) == "-2.5e-07", "phase168 (17) sign and exponent");
+    Check(to_string(42) == "42" && to_string(-7L) == "-7",
+          "phase168 (18) the integer overloads are unchanged");
+    Check(to_string(1.0L) == "1", "phase168 (19) long double too");
+
+    // P2546R5. breakpoint_if_debugging() is the one meant to survive into
+    // shipping code, and on BoxOS it is a no-op because nothing can be
+    // attached: there is no debugger-attachment protocol at all, so
+    // is_debugger_present() answers false rather than "maybe".
+    Check(!is_debugger_present(),
+          "phase168 (20) no debugger can be attached on BoxOS today");
+    breakpoint_if_debugging();
+    Check(true, "phase168 (21) ...so this returned instead of trapping into "
+                "the kernel's #BP vector");
+
+    static_assert(__cpp_lib_bitset == 202306L, "phase168 (22) FTM");
+    static_assert(__cpp_lib_is_virtual_base_of == 202406L, "phase168 (23) FTM");
+    static_assert(__cpp_lib_ranges_indices == 202506L, "phase168 (24) FTM");
+    static_assert(__cpp_lib_to_string == 202306L, "phase168 (25) FTM");
+    static_assert(__cpp_lib_debugging == 202403L, "phase168 (26) FTM");
+
+    printf("[CXX] PASS phase168: Ф33 — five small C++26 items: "
+           "bitset(string_view) P2697R1, is_virtual_base_of P2985R0, "
+           "views::indices P3060R2, to_string as format(\"{}\") P2587R3, and "
+           "<debugging> P2546R5 with INT3 for breakpoint()\n");
+}
+
+void Phase169()
+{
+    using namespace std;
+
+    // P2363R5. Heterogeneous LOOKUP has been in the library since C++14;
+    // heterogeneous INSERTION had not, so the one call whose purpose is to
+    // avoid building the key when it is already present -- try_emplace --
+    // was the one that always built it.
+    {
+        map<string, int, less<>> m;
+        string_view              k{"alpha"};
+        auto [it, ok] = m.try_emplace(k, 1);
+        Check(ok && it->first == "alpha" && it->second == 1,
+              "phase169 (1) map::try_emplace by a view");
+        Check(!m.try_emplace(k, 2).second && m.at(k) == 1,
+              "phase169 (2) ...and no effect when the key is there");
+        Check(m.try_emplace(m.cbegin(), string_view{"beta"}, 5)->second == 5,
+              "phase169 (3) the hint form");
+        Check(m[k] == 1 && m[string_view{"gamma"}] == 0 && m.size() == 3,
+              "phase169 (4) operator[]");
+        Check(!m.insert_or_assign(k, 9).second && m.at(k) == 9,
+              "phase169 (5) insert_or_assign over an existing key");
+        Check(m.insert_or_assign(string_view{"delta"}, 4).second &&
+                  m.at(string_view{"delta"}) == 4,
+              "phase169 (6) ...and a new one");
+        Check(m.insert_or_assign(m.cbegin(), string_view{"eps"}, 7)->second == 7,
+              "phase169 (7) its hint form");
+        const auto &cm    = m;
+        bool        threw = false;
+        try { (void)cm.at(string_view{"nope"}); } catch (const out_of_range &) { threw = true; }
+        Check(cm.at(string_view{"alpha"}) == 9 && threw,
+              "phase169 (8) at(), const and throwing");
+    }
+    {
+        // The measurable claim: on a hit, the key is not built at all.
+        map<P169Key, int, P169Less> m;
+        m.try_emplace(string_view{"one"}, 1);
+        const int built = P169Builds;
+        auto [it, ok]   = m.try_emplace(string_view{"one"}, 2);
+        Check(!ok && it->second == 1 && P169Builds == built,
+              "phase169 (9) a hit constructs NOTHING -- which is the entire "
+              "reason the paper exists");
+        m.try_emplace(string_view{"two"}, 2);
+        Check(P169Builds == built + 1,
+              "phase169 (10) ...and a miss constructs exactly one");
+    }
+    {
+        unordered_map<string, int, P169SvHash, P169SvEq> m;
+        string_view                                      k{"alpha"};
+        Check(m.try_emplace(k, 1).second && !m.try_emplace(k, 2).second,
+              "phase169 (11) unordered_map::try_emplace");
+        Check(m[k] == 1 && m.at(k) == 1, "phase169 (12) operator[] and at");
+        Check(!m.insert_or_assign(k, 3).second && m.at(k) == 3,
+              "phase169 (13) insert_or_assign");
+        Check(m.try_emplace(m.cbegin(), string_view{"h"}, 6)->second == 6 &&
+                  m.insert_or_assign(m.cbegin(), string_view{"h"}, 7)->second == 7,
+              "phase169 (14) both hint forms");
+        Check(m.bucket(k) == m.bucket(string{"alpha"}),
+              "phase169 (15) bucket() agrees with the key-typed one");
+    }
+    {
+        set<string, less<>> s;
+        auto [it, ok] = s.insert(string_view{"a"});
+        Check(ok && *it == "a" && !s.insert(string_view{"a"}).second,
+              "phase169 (16) set::insert by a view");
+        Check(*s.insert(s.cbegin(), string_view{"b"}) == "b" && s.size() == 2,
+              "phase169 (17) ...and its hint form");
+    }
+    {
+        unordered_set<string, P169SvHash, P169SvEq> s;
+        Check(s.insert(string_view{"a"}).second &&
+                  !s.insert(string_view{"a"}).second,
+              "phase169 (18) unordered_set::insert by a view");
+        Check(*s.insert(s.cbegin(), string_view{"b"}) == "b" && s.size() == 2,
+              "phase169 (19) ...and its hint form");
+    }
+    // Three gaps this measurement uncovered, none of them P2363's:
+    {
+        unordered_set<string> u;
+        u.insert(u.cbegin(), string("a"));
+        Check(u.size() == 1 && u.cbegin() != u.cend(),
+              "phase169 (20) unordered_set had NEITHER hint-insert overload "
+              "and no cbegin()/cend() at all -- the name resolved to the "
+              "bucket-local cbegin(size_type), so c.cbegin() did not compile");
+    }
+    {
+        // The rvalue hint form was absent from three containers, so an
+        // rvalue bound to the const& overload and was silently COPIED.
+        string           big(64, 'z');
+        set<string>      s;
+        s.insert(s.cbegin(), static_cast<string &&>(big));
+        Check(big.empty(), "phase169 (21) set::insert(hint, T&&) MOVES");
+        string             big2(64, 'z');
+        multiset<string>   ms;
+        ms.insert(ms.cbegin(), static_cast<string &&>(big2));
+        Check(big2.empty(), "phase169 (22) multiset likewise");
+        string                    big3(64, 'z');
+        unordered_multiset<string> ums;
+        ums.insert(ums.cbegin(), static_cast<string &&>(big3));
+        Check(big3.empty(), "phase169 (23) unordered_multiset likewise");
+    }
+    {
+        // The exclusion that earns its keep: without a transparent
+        // comparator none of this appears, so a map<string,int> is exactly
+        // as strict as it was.
+        map<string, int> plain;
+        plain.try_emplace(string{"k"}, 1);
+        Check(plain.size() == 1 && plain.at("k") == 1,
+              "phase169 (24) a non-transparent map is untouched by all of it");
+    }
+    static_assert(__cpp_lib_associative_heterogeneous_insertion == 202306L,
+                  "phase169 (25) FTM");
+
+    printf("[CXX] PASS phase169: Ф33 — P2363R5 heterogeneous "
+           "insertion across map/unordered_map (operator[], at, try_emplace, "
+           "insert_or_assign) and set/unordered_set (insert), plus three "
+           "pre-existing container gaps the measurement turned up: "
+           "unordered_set had no cbegin()/cend() and no hint inserts, and "
+           "three containers copied instead of moving an rvalue through the "
+           "hint form\n");
+}
+
+void Phase170()
+{
+    using namespace std;
+
+    // [rand.eng.philox] (P2075R6). The first counter-based engine in the
+    // standard: no recurrence, so the k-th output block is computable
+    // directly by setting the counter. That is what lets a thousand cores
+    // take independent streams without a word of communication.
+    static_assert(philox4x32::word_size == 32 && philox4x32::word_count == 4 &&
+                      philox4x32::round_count == 10,
+                  "phase170 (1) the shape of philox4x32");
+    static_assert(philox4x32::multipliers[0] == 0xCD9E8D57u &&
+                      philox4x32::multipliers[1] == 0xD2511F53u,
+                  "phase170 (2) the multipliers come out of the const pack in "
+                  "the standard's order, not Random123's");
+    static_assert(philox4x32::round_consts[0] == 0x9E3779B9u &&
+                      philox4x32::round_consts[1] == 0xBB67AE85u,
+                  "phase170 (3) ...and so do the round constants");
+    static_assert(philox4x32::default_seed == 20111115u &&
+                      philox4x32::min() == 0 && philox4x32::max() == 0xFFFFFFFFu,
+                  "phase170 (4) seed and range");
+    static_assert(philox4x64::max() == 0xFFFFFFFFFFFFFFFFull,
+                  "phase170 (5) the 64-bit form uses the whole word");
+    static_assert(uniform_random_bit_generator<philox4x32>,
+                  "phase170 (6) it is a URBG");
+    {
+        // The standard states both of these values outright, which makes
+        // them the one check that cannot pass by accident.
+        philox4x32 a;
+        a.discard(9999);
+        Check(a() == 1955073260u,
+              "phase170 (7) the 10000th value of philox4x32 is the one "
+              "[rand.predef] names");
+        philox4x64 b;
+        b.discard(9999);
+        Check(b() == 3409172418970261260ull,
+              "phase170 (8) ...and so is philox4x64's");
+    }
+    {
+        philox4x32 a, b;
+        a.discard(37);
+        Check(!(a == b), "phase170 (9) equality sees the counter");
+        b.discard(37);
+        Check(a == b, "phase170 (10) ...and two engines that walked the same "
+                      "distance agree");
+    }
+    {
+        // set_counter is the whole point: jump anywhere in the stream.
+        philox4x32 a;
+        a.discard(8);              // consumes two blocks
+        philox4x32 b;
+        b.set_counter(array<uint_fast32_t, 4>{0, 0, 0, 2});
+        Check(a() == b(), "phase170 (11) set_counter lands on the same block "
+                          "the counter would have reached");
+    }
+    {
+        philox4x32 a(12345u), b;
+        b.seed(12345u);
+        Check(a == b, "phase170 (12) seed(value) matches the constructor");
+        seed_seq   q{1, 2, 3};
+        philox4x32 c(q);
+        seed_seq   q2{1, 2, 3};
+        philox4x32 d;
+        d.seed(q2);
+        Check(c == d, "phase170 (13) ...and so does seed(seed_seq)");
+    }
+    {
+        // A narrow word size exercises the mask and the n == 2 path, which
+        // has no word permutation at all.
+        philox_engine<uint_fast32_t, 24, 2, 7, 0xD256D193u, 0x9E3779B9u> e(999u);
+        bool inRange = true;
+        for (int i = 0; i < 32; ++i)
+            if (e() > 0xFFFFFFu) inRange = false;
+        Check(inRange, "phase170 (14) a 24-bit engine stays inside 24 bits");
+    }
+    {
+        philox4x32                     e;
+        uniform_int_distribution<int>  d(0, 9);
+        bool                           ok = true;
+        for (int i = 0; i < 64; ++i) {
+            int v = d(e);
+            if (v < 0 || v > 9) ok = false;
+        }
+        Check(ok, "phase170 (15) it drives the distributions");
+    }
+    static_assert(__cpp_lib_philox_engine == 202406L, "phase170 (16) FTM");
+
+    printf("[CXX] PASS phase170: Ф33 — std::philox_engine "
+           "(P2075R6) with philox4x32/philox4x64, set_counter, and both "
+           "10000th values the standard names; the implementation was "
+           "differentially checked against libstdc++ 16.1 over 300-output "
+           "streams for both typedefs plus narrow-word and n==2 forms\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39841,6 +40735,13 @@ int main()
     Phase161();
     Phase162();
     Phase163();
+    Phase164();
+    Phase165();
+    Phase166();
+    Phase167();
+    Phase168();
+    Phase169();
+    Phase170();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

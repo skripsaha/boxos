@@ -116,6 +116,14 @@
 // P3138R5 (C++26, Ф32-g): views::cache_latest. A transform_view recomputes on
 // every dereference by design, so a filter above one calls the transform twice
 // per surviving element; this remembers the last value produced.
+// P3060R2. views::indices(n) is iota_view<W>(W(), n) and nothing more --
+// the point is the ZERO having n's own type.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_indices)) && \
+    !defined(__cpp_lib_ranges_indices)
+#  define __cpp_lib_ranges_indices 202506L
+#endif
+#undef BOXCXX_OWNS_ranges_indices
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_cache_latest)) && \
     !defined(__cpp_lib_ranges_cache_latest)
 #  define __cpp_lib_ranges_cache_latest 202411L

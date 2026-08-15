@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| C++23 headers provided | **74**; 31 absent (§1) |
-| Internal implementation leaves (`include/std/__bits/`) | 104 |
-| Header source | ~81 000 lines |
-| Feature-test macros defined | 175 (164 C++23 + 11 C++26) |
+| Standard headers provided | **76** — 74 of C++23 (31 absent, §1) plus two of C++26, `<inplace_vector>` and `<debugging>` |
+| Internal implementation leaves (`include/std/__bits/`) | 110 |
+| Header source | ~80 000 lines |
+| Feature-test macros defined | 186 (164 C++23 + 22 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 178 phases, 4 834 runtime checks, 1 527 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 166 phases, 4 946 runtime checks, 1 601 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -51,7 +51,10 @@ here it is: headers and leaves are `ls -1` of `include/std` and
 translation unit containing only `#include <version>`; phases are `Phase*();`
 call sites in `main`; checks and `static_assert`s are occurrences of those two
 tokens in `cxxtest.cpp`. `tools/cxx_ftm_audit.sh` re-derives the macro count and
-checks it against [version.syn] on every run.
+checks it against [version.syn] on every run. The phase count moved DOWN at Ф33
+(178 → 166) without a phase being removed: the older figure had drifted from the
+rule, which counts `Phase*();` call sites in `main` and finds exactly as many as
+there are `void PhaseN()` definitions.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -81,8 +84,10 @@ the library itself; there is no "no-exceptions" configuration.
 
 ## 1.1 Headers that do not exist (31)
 
-74 standard headers are provided and 31 are absent, which accounts for the whole
-C++23 header list apart from the deprecated `<codecvt>`.
+74 of the C++23 headers are provided and 31 are absent, which accounts for the
+whole C++23 header list apart from the deprecated `<codecvt>`. Two C++26 headers
+are provided on top of that — `<inplace_vector>` (§2) and `<debugging>` (§2) —
+so the tree holds 76 standard headers in all.
 
 ### C library wrappers — 18
 
@@ -145,16 +150,16 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **175** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **186** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are eighteen so far.
+  section; there are thirty so far.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 175 macros × 74 headers by
+  checked over the full cross-product of 186 macros × 76 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -168,7 +173,7 @@ the whole set, not sampled:
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 147 of the 175 macros are also
+- **The converse does not hold, and cannot.** 153 of the 186 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -178,7 +183,12 @@ the whole set, not sampled:
   ours exposes 101. The gating still narrowed it (161 → 147, and `<string>`
   81 → 73), but the floor is set by the include graph, and closing that is a
   different piece of work than this one. The number is pinned in the audit
-  script as a ratchet: if it grows, the gate fails.
+  script as a ratchet: if it grows, the gate fails. Ф33 re-pinned it from 147
+  to 153, and the delta is accounted for macro by macro: six of its eleven new
+  macros live in headers that half the library includes (`<utility>`,
+  `<functional>`, `<type_traits>`, `<optional>`, `<ranges>`, `<string>`), and
+  the other five do not leak at all because nothing else includes their
+  headers.
 
 **21 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
@@ -248,6 +258,18 @@ constructors) — the library simply stayed silent about them.
 | `__cpp_lib_ranges_cache_latest` | 202411 | P3138R5 | Ф32-g |
 | `__cpp_lib_ranges_as_input` | 202502 | P3137R3 | Ф32-g |
 | `__cpp_lib_atomic_min_max` | 202403 | P0493R5 | Ф32-h |
+| `__cpp_lib_optional` | 202506 | P2988R12 | Ф33 |
+| `__cpp_lib_optional_range_support` | 202406 | P3168R2 | Ф33 |
+| `__cpp_lib_constant_wrapper` | 202606 | P2781R9 + LWG 4383/4500 | Ф33 |
+| `__cpp_lib_function_ref` | 202604 | P0792R14 + P3961R1 | Ф33 |
+| `__cpp_lib_inplace_vector` | 202603 | P0843R14 | Ф33 |
+| `__cpp_lib_debugging` | 202403 | P2546R5 | Ф33 |
+| `__cpp_lib_philox_engine` | 202406 | P2075R6 | Ф33 |
+| `__cpp_lib_bitset` | 202306 | P2697R1 | Ф33 |
+| `__cpp_lib_is_virtual_base_of` | 202406 | P2985R0 | Ф33 |
+| `__cpp_lib_ranges_indices` | 202506 | P3060R2 | Ф33 |
+| `__cpp_lib_to_string` | 202306 | P2587R3 | Ф33 |
+| `__cpp_lib_associative_heterogeneous_insertion` | 202306 | P2363R5 | Ф33 |
 
 Three of those carry a value the current working draft has already moved past,
 and deliberately: `__cpp_lib_to_chars` is at P2497R0's 202306 rather than the
@@ -256,6 +278,15 @@ than 202603, and `__cpp_lib_atomic_min_max` at P0493R5's 202403 rather than
 202506, which would additionally promise P3309's constexpr atomics. A macro
 names the newest feature actually present, so a later paper that is not
 implemented does not get to raise it.
+
+Two of Ф33's carry a value **higher** than libstdc++ 16.1's, for the same
+reason read the other way: `__cpp_lib_function_ref` is at 202604 rather than
+202603 because P3961R1 — build a function_ref from another specialization by
+copying its thunk instead of wrapping it — is implemented here and is not
+implemented there; `__cpp_lib_constant_wrapper` is at 202606 rather than 202603
+because LWG 4383's SFINAE-friendly pseudo-mutators are. In libstdc++ 16.1
+`requires { ++std::cw<1>; }` is a hard error; here it is `true`, and the result
+is `cw<2>`.
 
 `<ratio>`'s C++26 addition (P2734R0's quetta / ronna / ronto / quecto) is
 **not** implemented and its macro is not claimed, because on this target there
@@ -418,6 +449,10 @@ nothing has been found since.
   a literal type here (see `<string>`). Removing the annotation would be *less*
   conformant; it folds automatically once `<string>` becomes constexpr. The rest
   of P2417 is genuinely constant-evaluable.
+- `+` P2697R1's `basic_string_view` constructor is implemented, and unlike the
+  `basic_string` one it **is** constant-evaluable — which is worth stating
+  because the string constructor is precisely the reason
+  `__cpp_lib_constexpr_bitset` is still not claimed.
 
 ## `<charconv>`
 
@@ -516,6 +551,20 @@ nothing has been found since.
   the `<=>` overloads the paper asks for were re-measured before the macro was
   released, rather than taken from the note claiming they were there.
 
+## `<debugging>`
+
+- `~` `is_debugger_present()` always returns `false`, and that is the true
+  answer rather than a placeholder: BoxOS has no debugger-attachment protocol,
+  so there is nothing that could be attached. `breakpoint_if_debugging()` is
+  therefore a no-op, which is exactly the property that makes it safe to leave
+  in shipping code — the reason P2546R5 separates it from `breakpoint()`.
+- `!` `breakpoint()` executes `INT3`. IDT vector 3 is wired (`isr.asm`,
+  "Breakpoint") and a user-mode `#BP` takes the generic kill-the-faulting-
+  process path in `idt.c`, so calling it with nothing attached **ends the
+  program**. That is the standard's "otherwise the behavior is unspecified",
+  and it is what an uncaught `SIGTRAP` does elsewhere; it is recorded here
+  because the name does not suggest it.
+
 ## `<flat_map>` and `<flat_set>`
 
 - `~` `flat_set::iterator` **is** `KeyContainer::const_iterator` — for
@@ -607,6 +656,19 @@ nothing has been found since.
   wrapper, or the answer would not be unique. Closed
   `__cpp_lib_common_reference_wrapper` and, with it,
   `__cpp_lib_common_reference` (which `<type_traits>` owns for the same paper).
+- `+` `function_ref` (P0792R14) implements **P3961R1**, which libstdc++ 16.1
+  does not: constructing one specialization from another copies the source's
+  thunk and bound entity instead of binding to the source object. The
+  difference is a lifetime — the absorbed reference points at the original
+  target and survives the source function_ref's death — and it is why the macro
+  reads 202604.
+- `~` `operator()` is not `constexpr`, exactly as [func.wrap.ref.inv] declares
+  it. The constructors are, so a `function_ref` can be built in a constant
+  expression; it cannot be called in one, because recovering a `T*` from the
+  `void*` half of the bound entity is not a constant expression.
+- `–` `std::nontype` / `nontype_t` do not exist. They were removed from C++26
+  in favour of the `constant_wrapper` constructors, which are what is
+  implemented here.
 
 ## `<generator>`
 
@@ -616,6 +678,36 @@ nothing has been found since.
   observable consequence is that `iterator_traits<generator<T>::iterator>` is
   **non-empty** here and empty in libstdc++ 16.1 (measured). `input_range` holds
   in both.
+
+## `<inplace_vector>`
+
+- `~` **Constant evaluation works for trivially-default-constructible,
+  trivially-destructible element types only.** This is inherent, not a
+  shortcut: the storage is `union { T elems_[N]; }` with no active member, and
+  a union member whose lifetime has not begun cannot be written through in a
+  constant expression. The compile-time path therefore value-initializes all N
+  slots up front and then assigns; for a `T` that cannot be value-initialized
+  there is nothing to value-initialize. libstdc++ 16 has the same limit and
+  reaches for `__builtin_unreachable()` there; boxcxx calls a declared-but-not-
+  defined, deliberately non-constexpr
+  `__iv::NeedsTrivialTypeAtCompileTime()`, so the diagnostic names the reason.
+  Every run-time path is fully general.
+- `+` The size field is the narrowest unsigned type that can hold `N` without
+  costing alignment padding, so `sizeof(inplace_vector<char, 8>)` is 9 rather
+  than 16. This is not required by [inplace.vector]; it matters for a container
+  whose whole purpose is to sit inside another object.
+- `+` `iterator` is a plain `T*`. The standard leaves the type
+  implementation-defined and asks only for a contiguous constexpr iterator;
+  a wrapper would buy nothing but a longer name in diagnostics.
+- `+` Insertion in the middle **appends and then rotates**, rather than
+  shifting the tail right and filling the hole. The hole cannot be made
+  exception-safe with a single size field: while it is open the live
+  elements are not a prefix, so no count describes them, and a throw from
+  `T` would leave the destructor about to run over slots that were never
+  constructed. Appending keeps the count exact at every step, the rotate
+  only ever move-assigns between live elements, and an argument that names
+  an element of the same vector stays valid because nothing moves under it.
+  The cost is about three moves per element where a shift costs one.
 
 ## `<iterator>`
 
@@ -706,6 +798,21 @@ nothing has been found since.
 - `~` The iterator-pair constructors carry no input-iterator SFINAE guard.
   Diagnostics quality only: a wrong call fails inside the body rather than at
   the call site.
+- `+` P2363R5 heterogeneous insertion is implemented across all four
+  transparent-comparator containers: `operator[]`, `at`, `try_emplace` and
+  `insert_or_assign` (both hint forms of each) on `map` and `unordered_map`,
+  and `insert` (both forms) on `set` and `unordered_set`. The measurable
+  property is that a hit constructs **nothing** — the suite counts key
+  constructions to prove it, rather than asserting about it. `bucket(const K&)`
+  on the four unordered containers already existed.
+- `✓` Closed in Ф33, found while measuring for the above and none of it P2363's:
+  **`unordered_set` had no `cbegin()` / `cend()` at all** — the name resolved to
+  the bucket-local `cbegin(size_type)`, so `c.cbegin()` failed with "too few
+  arguments" — and **no hint-insert overloads at all**, the only container in
+  the library missing them. Separately, `set`, `multiset` and
+  `unordered_multiset` had no `insert(const_iterator, value_type&&)`: an rvalue
+  bound to the `const&` overload and was silently **copied** where
+  [set.overview] and its siblings call for a move.
 
 ## `<memory>`
 
@@ -814,6 +921,21 @@ nothing has been found since.
   now from a conditional base rather than a second class body, which is what the
   standard's wording describes. Closed `__cpp_lib_scoped_lock`.
 
+## `<optional>`
+
+- `+` Since Ф33 the whole of `optional` is usable in constant evaluation.
+  It was not: the one place that engages a disengaged optional went through a
+  bare placement-new, and a placement-new expression is a constant expression
+  only inside `std::construct_at` — so `emplace`, both converting
+  constructors, all four assignments and the non-trivial copy and move
+  constructors were run-time-only, which [optional] does not permit.
+- `~` `hash<optional<T&>>` exists as a type but has no usable `operator()`,
+  because `hash<remove_const_t<T&>>` is the undefined primary. libstdc++
+  disables the specialization outright. Nothing can be hashed either way; the
+  difference is only whether `is_default_constructible_v<hash<optional<int&>>>`
+  answers true or false. This follows boxcxx's epic-wide pattern of poisoning
+  the call operator rather than the class.
+
 ## `<ostream>`
 
 - `✓` Closed in Ф31e-a: the `wchar_t` / `char8_t` / `char16_t` / `char32_t`
@@ -886,6 +1008,19 @@ nothing has been found since.
 - `~` `random_device::entropy()` reports 32.0 when RDRAND backs it and 0.0 when it
   falls back to a TSC-seeded splitmix. **Without RDRAND, `random_device` is not
   cryptographically strong**, and reports so.
+- `~` The `Sseq` constructors and `seed` overloads take a concrete `seed_seq&`
+  rather than [rand.req.eng]'s `template<class Sseq>`. boxcxx has exactly one
+  seed-sequence type, and the concrete parameter is what keeps
+  `engine(some_unsigned_lvalue)` from becoming ambiguous without the
+  `is_convertible_v<Sseq, result_type>` exclusion the standard's form needs.
+  A user-written seed sequence will not bind. Epic-wide across every engine,
+  including `philox_engine`.
+- `+` `philox_engine` (P2075R6) was verified differentially against libstdc++
+  16.1 rather than by inspection: 300-output streams for `philox4x32` and
+  `philox4x64` default-constructed and seeded, both `set_counter` and
+  `seed_seq` paths, an all-ones counter wrap, and two off-menu instantiations
+  (24-bit `n == 2` with 7 rounds, 40-bit `n == 4` with 3) — zero differences,
+  plus both 10 000th values the standard states outright.
 
 ## `<ranges>`
 
@@ -1074,6 +1209,10 @@ nothing has been found since.
   `std::exception` and `<exception>` now needs `<typeinfo>`, which is a genuine
   cycle; the piece both sides need became its own leaf. Nothing else moved and
   both headers are unchanged from a user's point of view.
+- `+` P3060R2's `views::indices(n)` is provided: `iota` from a zero of `n`'s own
+  type, so `views::indices(v.size())` yields `size_t` indices and comparing one
+  against another `size_t` needs no conversion. That type agreement is the
+  entire content of the paper.
 
 ## `<span>`
 
@@ -1135,6 +1274,11 @@ nothing has been found since.
   translation unit that includes only `<string>` cannot see `pmr::string`. The
   aliases themselves are all present and correct.
 
+- `+` P2587R3: `to_string` on a floating-point value now means
+  `format("{}", v)` — the shortest decimal that reads back as the same value —
+  rather than `sprintf("%f")`. The old rule printed `to_string(1e-9)` as
+  `0.000000`, which does not round-trip, and `to_string(1e300)` as three
+  hundred digits. The integer overloads are unchanged.
 
 ## `<string_view>`
 
@@ -1224,12 +1368,24 @@ nothing has been found since.
   The nested case then fell over because the array overload is constrained on
   `is_swappable` of its **element** type — element `int[2]` answered false. The
   fix declares the array overload beside the scalar one, where the trait looks.
+- `+` `is_virtual_base_of` (P2985R0) is provided, gated on
+  `__builtin_is_virtual_base_of`. There is no library fallback and there cannot
+  be one: `is_base_of` is true either way, and the cast that would tell the two
+  apart is ill-formed exactly when the answer is "virtual". The macro appears
+  only when the builtin does.
 
 ## `<utility>`
 
 - `~` `in_range<char>(1)` compiles. [utility.intcmp]/5 makes the integer-comparison
   functions ill-formed for `char`, `bool` and the character types; both reference
   libraries diagnose it.
+- `+` `constant_wrapper` / `cw` (P2781R9) are implemented **including LWG 4383**,
+  which libstdc++ 16.1 does not have: there the pseudo-mutators are declared for
+  every wrapper and fail inside a template argument's constant evaluation, which
+  is not the immediate context — so `requires { ++std::cw<1>; }` is a hard error
+  rather than `false`. Here the operators are constrained on the mutation being
+  valid for a mutable copy, `++cw<1>` is `cw<2>`, and asking is a question. This
+  is why the macro reads 202606 and not 202603.
 
 ## `<variant>`
 

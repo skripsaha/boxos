@@ -64,6 +64,14 @@
 #undef BOXCXX_OWNS_string_udls
 
 // P3044R2 (C++26, Ф32-e): basic_string::subview and basic_string_view::subview.
+// P2587R3: to_string on a floating-point value now means format("{}", v),
+// the shortest round-tripping decimal, not sprintf("%f").
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_to_string)) && \
+    !defined(__cpp_lib_to_string)
+#  define __cpp_lib_to_string 202306L
+#endif
+#undef BOXCXX_OWNS_to_string
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_subview)) && \
     !defined(__cpp_lib_string_subview)
 #  define __cpp_lib_string_subview 202506L
