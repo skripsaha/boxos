@@ -28,11 +28,13 @@
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_algorithm_default_value_type
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #define BOXCXX_OWNS_containers_ranges
 #define BOXCXX_OWNS_erase_if
 #define BOXCXX_OWNS_incomplete_container_elements
 #include <__bits/version_containers>
+#include <__bits/version_algorithm>   // algorithm_default_value_type
 #define BOXCXX_OWNS_nonmember_container_access
 #include <__bits/version_iterator>
 
@@ -628,7 +630,7 @@ void swap(vector<T, A> &a, vector<T, A> &b) noexcept
 }
 
 // C++20 uniform erasure.
-template <typename T, typename A, typename V>
+template <typename T, typename A, typename V = T>
 typename vector<T, A>::size_type erase(vector<T, A> &v, const V &value)
 {
     typename vector<T, A>::size_type w = 0, removed = 0;

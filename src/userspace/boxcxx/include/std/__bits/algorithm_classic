@@ -215,7 +215,7 @@ constexpr It find_if_not(It first, It last, Pred pred)
         if (!pred(*first)) return first;
     return last;
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr It find(It first, It last, const T &value)
 {
     for (; first != last; ++first)
@@ -252,7 +252,7 @@ constexpr It for_each_n(It first, Size n, Fn fn)
     return first;
 }
 
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr typename iterator_traits<It>::difference_type
 count(It first, It last, const T &value)
 {
@@ -387,7 +387,8 @@ constexpr ForwardIterator search(ForwardIterator first, ForwardIterator last,
     return s(first, last).first;
 }
 
-template <typename It, typename Size, typename T, typename Pred>
+template <typename It, typename Size,
+          typename T = typename iterator_traits<It>::value_type, typename Pred>
 constexpr It search_n(It first, It last, Size count, const T &value, Pred pred)
 {
     if (count <= 0) return first;
@@ -405,7 +406,8 @@ constexpr It search_n(It first, It last, Size count, const T &value, Pred pred)
     }
     return last;
 }
-template <typename It, typename Size, typename T>
+template <typename It, typename Size,
+          typename T = typename iterator_traits<It>::value_type>
 constexpr It search_n(It first, It last, Size count, const T &value)
 {
     return search_n(first, last, count, value, __algo_impl::EqualTo{});
@@ -521,20 +523,22 @@ constexpr Out transform(In1 first1, In1 last1, In2 first2, Out out, Fn fn)
     return out;
 }
 
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr void replace(It first, It last, const T &old_value,
                        const T &new_value)
 {
     for (; first != last; ++first)
         if (*first == old_value) *first = new_value;
 }
-template <typename It, typename Pred, typename T>
+template <typename It, typename Pred,
+          typename T = typename iterator_traits<It>::value_type>
 constexpr void replace_if(It first, It last, Pred pred, const T &new_value)
 {
     for (; first != last; ++first)
         if (pred(*first)) *first = new_value;
 }
-template <typename In, typename Out, typename T>
+template <typename In, typename Out,
+          typename T = typename iterator_traits<In>::value_type>
 constexpr Out replace_copy(In first, In last, Out out, const T &old_value,
                            const T &new_value)
 {
@@ -542,7 +546,8 @@ constexpr Out replace_copy(In first, In last, Out out, const T &old_value,
         *out = (*first == old_value) ? new_value : *first;
     return out;
 }
-template <typename In, typename Out, typename Pred, typename T>
+template <typename In, typename Out, typename Pred,
+          typename T = typename iterator_traits<Out>::value_type>
 constexpr Out replace_copy_if(In first, In last, Out out, Pred pred,
                               const T &new_value)
 {
@@ -551,12 +556,13 @@ constexpr Out replace_copy_if(In first, In last, Out out, Pred pred,
     return out;
 }
 
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr void fill(It first, It last, const T &value)
 {
     for (; first != last; ++first) *first = value;
 }
-template <typename It, typename Size, typename T>
+template <typename It, typename Size,
+          typename T = typename iterator_traits<It>::value_type>
 constexpr It fill_n(It first, Size n, const T &value)
 {
     for (; n > 0; --n, ++first) *first = value;
@@ -584,7 +590,7 @@ constexpr It remove_if(It first, It last, Pred pred)
         if (!pred(*first)) *write++ = ranges::iter_move(first);
     return write;
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr It remove(It first, It last, const T &value)
 {
     return remove_if(first, last,
@@ -600,7 +606,8 @@ constexpr Out remove_copy_if(In first, In last, Out out, Pred pred)
         }
     return out;
 }
-template <typename In, typename Out, typename T>
+template <typename In, typename Out,
+          typename T = typename iterator_traits<In>::value_type>
 constexpr Out remove_copy(In first, In last, Out out, const T &value)
 {
     return remove_copy_if(first, last, out,
@@ -782,7 +789,8 @@ constexpr It partition_point(It first, It last, Pred pred)
 
 // ── binary search ([alg.binary.search]) ─────────────────────────────────
 
-template <typename It, typename T, typename Comp>
+template <typename It, typename T = typename iterator_traits<It>::value_type,
+          typename Comp>
 constexpr It lower_bound(It first, It last, const T &value, Comp comp)
 {
     auto n = distance(first, last);
@@ -798,12 +806,13 @@ constexpr It lower_bound(It first, It last, const T &value, Comp comp)
     }
     return first;
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr It lower_bound(It first, It last, const T &value)
 {
     return lower_bound(first, last, value, __algo_impl::Less{});
 }
-template <typename It, typename T, typename Comp>
+template <typename It, typename T = typename iterator_traits<It>::value_type,
+          typename Comp>
 constexpr It upper_bound(It first, It last, const T &value, Comp comp)
 {
     auto n = distance(first, last);
@@ -819,30 +828,32 @@ constexpr It upper_bound(It first, It last, const T &value, Comp comp)
     }
     return first;
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr It upper_bound(It first, It last, const T &value)
 {
     return upper_bound(first, last, value, __algo_impl::Less{});
 }
-template <typename It, typename T, typename Comp>
+template <typename It, typename T = typename iterator_traits<It>::value_type,
+          typename Comp>
 constexpr pair<It, It> equal_range(It first, It last, const T &value,
                                    Comp comp)
 {
     return {lower_bound(first, last, value, comp),
             upper_bound(first, last, value, comp)};
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr pair<It, It> equal_range(It first, It last, const T &value)
 {
     return equal_range(first, last, value, __algo_impl::Less{});
 }
-template <typename It, typename T, typename Comp>
+template <typename It, typename T = typename iterator_traits<It>::value_type,
+          typename Comp>
 constexpr bool binary_search(It first, It last, const T &value, Comp comp)
 {
     It hit = lower_bound(first, last, value, comp);
     return hit != last && !comp(value, *hit);
 }
-template <typename It, typename T>
+template <typename It, typename T = typename iterator_traits<It>::value_type>
 constexpr bool binary_search(It first, It last, const T &value)
 {
     return binary_search(first, last, value, __algo_impl::Less{});

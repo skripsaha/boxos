@@ -426,6 +426,28 @@
 #ifndef __cpp_lib_flat_map
 #  error "__cpp_lib_flat_map is not visible from <flat_map> alone"
 #endif
+#include <functional>
+#ifndef __cpp_lib_copyable_function
+#  error "__cpp_lib_copyable_function is not visible from <functional> alone"
+#endif
+// Ф34: the three C-compatibility headers each own exactly one macro, and
+// each is the only header that can answer for it.
+#include <stdbit.h>
+#ifndef __cpp_lib_stdbit_h
+#  error "__cpp_lib_stdbit_h is not visible from <stdbit.h> alone"
+#endif
+#ifndef __STDC_VERSION_STDBIT_H__
+#  error "<stdbit.h> does not define __STDC_VERSION_STDBIT_H__"
+#endif
+#include <stdckdint.h>
+#ifndef __cpp_lib_stdckdint_h
+#  error "__cpp_lib_stdckdint_h is not visible from <stdckdint.h> alone"
+#endif
+#include <stdatomic.h>
+#ifndef __cpp_lib_stdatomic_h
+#  error "__cpp_lib_stdatomic_h is not visible from <stdatomic.h> alone"
+#endif
+
 #ifdef BOXCXX_VERSION
 #  error "one of the owning headers above drags in <version>"
 #endif
@@ -29292,7 +29314,7 @@ void Phase131()
     static_assert(__cpp_lib_forward_like == 202207L, "phase131 forward_like");
     static_assert(__cpp_lib_integer_comparison_functions == 202002L,
                   "phase131 integer_comparison_functions");
-    static_assert(__cpp_lib_integer_sequence == 201304L, "phase131 integer_sequence");
+    static_assert(__cpp_lib_integer_sequence == 202511L, "phase131 integer_sequence -- + structured bindings (F34)");
     static_assert(__cpp_lib_to_underlying == 202102L, "phase131 to_underlying");
     static_assert(__cpp_lib_tuples_by_type == 201304L, "phase131 tuples_by_type");
     static_assert(__cpp_lib_unreachable == 202202L, "phase131 unreachable");
@@ -29359,7 +29381,7 @@ void Phase131()
                   "phase131 atomic_is_always_lock_free");
     static_assert(__cpp_lib_atomic_lock_free_type_aliases == 201907L,
                   "phase131 atomic_lock_free_type_aliases");
-    static_assert(__cpp_lib_atomic_ref == 201806L, "phase131 atomic_ref");
+    static_assert(__cpp_lib_atomic_ref == 202603L, "phase131 atomic_ref -- + cv-qualified T and address() (F34)");
     static_assert(__cpp_lib_atomic_value_initialization == 201911L,
                   "phase131 atomic_value_initialization");
     static_assert(__cpp_lib_atomic_wait == 201907L, "phase131 atomic_wait");
@@ -29374,7 +29396,7 @@ void Phase131()
     static_assert(__cpp_lib_enable_shared_from_this == 201603L,
                   "phase131 enable_shared_from_this");
     static_assert(__cpp_lib_make_unique == 201304L, "phase131 make_unique");
-    static_assert(__cpp_lib_raw_memory_algorithms == 201606L, "phase131 raw_memory_algorithms");
+    static_assert(__cpp_lib_raw_memory_algorithms == 202411L, "phase131 raw_memory_algorithms -- constexpr for real (F34)");
     static_assert(__cpp_lib_shared_ptr_arrays == 201707L, "phase131 shared_ptr_arrays");
     static_assert(__cpp_lib_shared_ptr_weak_type == 201606L, "phase131 shared_ptr_weak_type");
     static_assert(__cpp_lib_smart_ptr_for_overwrite == 202002L,
@@ -29407,8 +29429,8 @@ void Phase131()
     static_assert(__cpp_lib_erase_if == 202002L, "phase131 erase_if");
     static_assert(__cpp_lib_nonmember_container_access == 201411L,
                   "phase131 nonmember_container_access");
-    static_assert(__cpp_lib_string_view == 201803L,
-                  "phase131 string_view -- 201803L is the C++23 value AND the "
+    static_assert(__cpp_lib_string_view == 202403L,
+                  "phase131 string_view -- 201803L WAS the C++23 value AND the "
                   "C++20 one; C++23 never bumped it, even though the header "
                   "gained two constructors. The 202106L pinned here since the "
                   "beginning is a value this macro has never carried in any "
@@ -29453,8 +29475,8 @@ void Phase131()
     static_assert(__cpp_lib_common_reference_wrapper == 202302L,
                   "phase131 common_reference_wrapper");
     static_assert(__cpp_lib_concepts == 202207L, "phase131 concepts");
-    static_assert(__cpp_lib_print == 202207L, "phase131 print");
-    static_assert(__cpp_lib_tuple_like == 202207L, "phase131 tuple_like");
+    static_assert(__cpp_lib_print == 202406L, "phase131 print -- P3107R5 + argument-less println() (F34)");
+    static_assert(__cpp_lib_tuple_like == 202311L, "phase131 tuple_like -- + P2819R2 complex (F34)");
 
     static_assert(__cpp_lib_coroutine == 201902L, "phase131 coroutine");
     static_assert(__cpp_lib_generator == 202207L, "phase131 generator");
@@ -29540,7 +29562,7 @@ static_assert(__cpp_lib_is_swappable == 201603L, "phase131: __cpp_lib_is_swappab
 #ifdef __cpp_lib_ranges
 #  error "phase131: __cpp_lib_ranges must stay undefined"
 #endif
-static_assert(__cpp_lib_ranges_as_const == 202207L, "phase131: __cpp_lib_ranges_as_const — closed by Ф31e");
+static_assert(__cpp_lib_ranges_as_const == 202311L, "phase131: __cpp_lib_ranges_as_const — closed by Ф31e");
 #ifdef __cpp_lib_result_of_sfinae
 #  error "phase131: __cpp_lib_result_of_sfinae must stay undefined"
 #endif
@@ -29553,9 +29575,9 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #ifdef __cpp_lib_stacktrace
 #  error "phase131: __cpp_lib_stacktrace must stay undefined"
 #endif
-#ifdef __cpp_lib_stdatomic_h
-#  error "phase131: __cpp_lib_stdatomic_h must stay undefined"
-#endif
+static_assert(__cpp_lib_stdatomic_h == 202011L, "phase131: __cpp_lib_stdatomic_h -- <stdatomic.h> built in F34");
+static_assert(__cpp_lib_stdbit_h == 202603L, "phase131: __cpp_lib_stdbit_h -- F34");
+static_assert(__cpp_lib_stdckdint_h == 202603L, "phase131: __cpp_lib_stdckdint_h -- F34");
 #ifdef __cpp_lib_syncbuf
 #  error "phase131: __cpp_lib_syncbuf must stay undefined"
 #endif
@@ -34140,7 +34162,7 @@ void Phase137()
     // because [tuple.syn] ALSO constrains tuple_cat/apply/make_from_tuple's
     // argument with the tuple-like concept and those three still used the
     // older duck-typed tuple_size_v/get check. Phase153 pins that half.
-    static_assert(__cpp_lib_tuple_like == 202207L,
+    static_assert(__cpp_lib_tuple_like == 202311L,
                   "phase137 tuple_like is claimable now that all three "
                   "consumers are constrained too");
 
@@ -36709,7 +36731,7 @@ void Phase145()
     static_assert(__cpp_lib_is_swappable == 201603L);
     static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L);
     static_assert(__cpp_lib_transparent_operators == 201510L);
-    static_assert(__cpp_lib_ranges_as_const == 202207L);
+    static_assert(__cpp_lib_ranges_as_const == 202311L);
     static_assert(__cpp_lib_hypot == 201603L);
     static_assert(__cpp_lib_interpolate == 201902L);
 
@@ -38330,7 +38352,7 @@ void Phase153()
                   "phase153 (7) ...and make_from_tuple");
     static_assert(P153ApplyOk<void (*)(int, int), array<int, 2>>,
                   "phase153 (8) while a real tuple-like still passes");
-    static_assert(__cpp_lib_tuple_like == 202207L, "phase153 tuple_like");
+    static_assert(__cpp_lib_tuple_like == 202311L, "phase153 tuple_like");
 
     // ── P2655R3: common_reference over reference_wrapper ─────────────────
     {
@@ -38423,7 +38445,7 @@ void Phase153()
               "phase153 (20) a formatting error propagates and does NOT set "
               "badbit");
     }
-    static_assert(__cpp_lib_print == 202207L, "phase153 print");
+    static_assert(__cpp_lib_print == 202406L, "phase153 print");
 
     // ── pmr::basic_string, and the two aliases that waited on it ─────────
     {
@@ -39670,8 +39692,8 @@ void Phase163()
                       "static_assert and not a Check");
         Check(string_view(o) == "whol", "phase163 (21r) ...at runtime too");
     }
-    static_assert(__cpp_lib_string_view == 201803L,
-                  "phase163 (16) 201803L is the C++23 value and the C++20 one -- "
+    static_assert(__cpp_lib_string_view == 202403L,
+                  "phase163 (16) 201803L WAS the C++23 value and the C++20 one -- "
                   "C++23 never bumped it, even in the cycle that added these two "
                   "constructors");
 
@@ -40550,6 +40572,828 @@ void Phase170()
            "streams for both typedefs plus narrow-word and n==2 forms\n");
 }
 
+
+// ── Ф34 helpers ─────────────────────────────────────────────────────────
+// Named concepts, not inline requires-expressions: a requires-expression
+// over a NON-dependent type is a hard error in GCC, not a false -- the
+// same trap Ф33 hit twice.
+
+int g_uninit_live     = 0;
+int g_uninit_throw_at = -1;
+
+struct NonTrivialForUninit {
+    int v;
+    NonTrivialForUninit() : v(1)
+    {
+        if (g_uninit_throw_at >= 0 && g_uninit_live == g_uninit_throw_at)
+            throw 7;
+        ++g_uninit_live;
+    }
+    ~NonTrivialForUninit() { --g_uninit_live; }
+};
+
+template <class P>
+concept requires_deref = requires(const P &p) { *p; };
+
+template <class A> concept AtomicRefCanStore = requires(A a) { a.store(1); };
+template <class A> concept AtomicRefCanFetchAdd = requires(A a) { a.fetch_add(1); };
+template <class A> concept AtomicRefCanNotify = requires(A a) { a.notify_one(); };
+
+int CopyFnTwice(int x) { return 2 * x; }
+struct CopyFnAdder {
+    int n;
+    explicit CopyFnAdder(int v) : n(v) {}
+    int operator()(int x) const { return x + n; }
+};
+
+struct NoEqType {
+    int v;
+};
+template <class T>
+concept SelfComparable = requires(const T &a, const T &b) { a == b; };
+template <class A, class B>
+concept ComparableWith = requires(const A &a, const B &b) { a == b; };
+
+
+// ── Ф34-a: structured bindings for integer_sequence, tuple protocol for
+// complex ([intseq.general] / [complex.tuple]) ──────────────────────────
+void Phase171()
+{
+    using namespace std;
+
+    // integer_sequence gets a tuple protocol, so a pack of values that was
+    // only reachable through template argument deduction can be unpacked
+    // by name. It is deliberately NOT tuple-like: [tuple.like] stays the
+    // closed set, so pair/tuple's tuple-like constructor must reject it.
+    using Seq = integer_sequence<int, 3, 1, 4>;
+    static_assert(tuple_size_v<Seq> == 3, "phase171 (1) tuple_size");
+    static_assert(tuple_size_v<const Seq> == 3,
+                  "phase171 (2) ...through const too");
+    static_assert(is_same_v<tuple_element_t<0, Seq>, int>,
+                  "phase171 (3) tuple_element is the sequence's value type");
+    static_assert(is_same_v<tuple_element_t<2, const Seq>, int>,
+                  "phase171 (4) and const does NOT add const: the elements "
+                  "are values, not members");
+    static_assert(get<1>(Seq{}) == 1, "phase171 (5) get<i> by value");
+    static_assert(is_same_v<decltype(get<0>(Seq{})), int>,
+                  "phase171 (6) ...by value, not by reference");
+    {
+        auto [a, b, c] = Seq{};
+        Check(a == 3 && b == 1 && c == 4,
+              "phase171 (7) structured bindings over integer_sequence");
+    }
+    {
+        constexpr auto sum = [] {
+            auto [a, b, c] = make_index_sequence<3>{};
+            return a + b + c;
+        }();
+        static_assert(sum == 3, "phase171 (8) and in a constant expression");
+    }
+    static_assert(tuple_size_v<index_sequence<7, 8>> == 2,
+                  "phase171 (9) index_sequence is an integer_sequence");
+
+    // complex, on the other hand, IS tuple-like: get<> returns references
+    // (real()/imag() return by value and cannot), the const form adds
+    // const, and it can be the source of pair/tuple's tuple-like ctor.
+    static_assert(tuple_size_v<complex<double>> == 2,
+                  "phase171 (10) complex has two elements");
+    static_assert(is_same_v<tuple_element_t<0, complex<float>>, float>,
+                  "phase171 (11) both are the value type");
+    static_assert(is_same_v<tuple_element_t<1, const complex<float>>,
+                            const float>,
+                  "phase171 (12) const propagates -- these ARE members");
+    static_assert(is_same_v<decltype(get<0>(declval<complex<double> &>())),
+                            double &>,
+                  "phase171 (13) get on an lvalue yields a reference");
+    static_assert(is_same_v<decltype(get<1>(declval<complex<double> &&>())),
+                            double &&>,
+                  "phase171 (14) ...and an rvalue yields an rvalue reference");
+    {
+        complex<double> z{1.5, -2.5};
+        get<0>(z) = 4.0;
+        Check(z.real() == 4.0 && get<1>(z) == -2.5,
+              "phase171 (15) get<> writes through to the part");
+        auto &[re, im] = z;
+        im = 9.0;
+        Check(z.imag() == 9.0,
+              "phase171 (16) structured bindings bind to the parts");
+    }
+    {
+        constexpr double v = [] {
+            complex<double> z{2.0, 3.0};
+            get<0>(z) += 1.0;
+            return get<0>(z) * get<1>(z);
+        }();
+        static_assert(v == 9.0, "phase171 (17) all of it is constexpr");
+    }
+    {
+        // tuple-like membership is observable: pair can be built from a
+        // complex, which is the whole reason P2819R2 put it in the set.
+        complex<double> z{5.0, 6.0};
+        pair<double, double> p(z);
+        Check(p.first == 5.0 && p.second == 6.0,
+              "phase171 (18) complex satisfies tuple-like");
+    }
+    static_assert(__cpp_lib_integer_sequence == 202511L,
+                  "phase171 (19) the macro says structured bindings are here");
+    static_assert(__cpp_lib_tuple_like == 202311L,
+                  "phase171 (20) ...and that complex joined tuple-like");
+
+    printf("[CXX] PASS phase171: integer_sequence unpacks by structured "
+           "binding and complex joined the tuple protocol -- get<> hands "
+           "back references to the parts real()/imag() can only copy\n");
+}
+
+// ── Ф34-b: <stdbit.h>, <stdckdint.h>, <stdatomic.h> ─────────────────────
+void Phase172()
+{
+    using namespace std;
+
+    // The C spelling of <bit>. Every one of the fourteen families is one
+    // line over its std:: counterpart -- except stdc_bit_ceil, whose
+    // unrepresentable case is 0 rather than undefined, and where the
+    // obvious "top bit set => 0" test is WRONG: the top bit itself is a
+    // power of two and is representable. libstdc++ 16.1 gets that case
+    // wrong (measured: it returns 0 for both 0x80 as unsigned char and
+    // 0x80000000 as unsigned int); the check below is the C23 answer.
+    Check(stdc_bit_ceil_uc(0x80) == 0x80,
+          "phase172 (1) the top bit ceils to itself");
+    Check(stdc_bit_ceil_ui(0x80000000u) == 0x80000000u,
+          "phase172 (2) ...at every width");
+    Check(stdc_bit_ceil_uc(0x81) == 0,
+          "phase172 (3) and anything above it is unrepresentable => 0");
+    Check(stdc_bit_ceil_uc(0) == 1 && stdc_bit_ceil_us(5) == 8,
+          "phase172 (4) the ordinary cases still agree with bit_ceil");
+    Check(stdc_leading_zeros_uc(1) == 7 && stdc_leading_ones_uc(0xF0) == 4,
+          "phase172 (5) leading counts are width-relative");
+    Check(stdc_trailing_zeros_ui(8) == 3 && stdc_trailing_ones_ui(7) == 3,
+          "phase172 (6) trailing counts");
+    Check(stdc_first_leading_one_uc(0) == 0 && stdc_first_leading_one_uc(1) == 8,
+          "phase172 (7) first_* are 1-based, and 0 means \"no such bit\"");
+    Check(stdc_first_trailing_one_uc(8) == 4 &&
+              stdc_first_trailing_zero_uc(0xFF) == 0,
+          "phase172 (8) ...from the other end too");
+    Check(stdc_count_ones_uc(0xF0) == 4 && stdc_count_zeros_uc(0xF0) == 4,
+          "phase172 (9) population counts both ways");
+    Check(stdc_has_single_bit_ui(64) && !stdc_has_single_bit_ui(65),
+          "phase172 (10) has_single_bit");
+    Check(stdc_bit_width_ui(0) == 0 && stdc_bit_width_ui(255) == 8,
+          "phase172 (11) bit_width");
+    Check(stdc_bit_floor_ui(100) == 64 && stdc_bit_floor_ui(0) == 0,
+          "phase172 (12) bit_floor");
+    Check(stdc_leading_zeros(static_cast<unsigned long long>(1)) == 63,
+          "phase172 (13) the generic form deduces the width");
+    static_assert(__STDC_ENDIAN_NATIVE__ == __STDC_ENDIAN_LITTLE__,
+                  "phase172 (14) x86-64 is little-endian, and <stdbit.h> "
+                  "says so in C's spelling");
+
+    // Checked arithmetic: the result is always the wrapped value, and the
+    // return says whether the mathematical one fit.
+    {
+        int r = 0;
+        Check(ckd_add(&r, 2147483647, 1) && r == -2147483648,
+              "phase172 (15) signed overflow is reported AND wrapped");
+        Check(!ckd_add(&r, 2, 3) && r == 5,
+              "phase172 (16) ...and an ordinary sum is not");
+        Check(ckd_sub(&r, -2147483648, 1) && r == 2147483647,
+              "phase172 (17) subtraction underflows the same way");
+        Check(!ckd_mul(&r, 3, 4) && r == 12,
+              "phase172 (18) multiplication");
+        unsigned char b = 0;
+        Check(ckd_add(&b, 200, 100) && b == 44,
+              "phase172 (19) the result type decides: 300 does not fit a "
+              "byte, and the byte keeps 300 mod 256");
+        short  s16 = 0;
+        Check(!ckd_add(&s16, 200, 100) && s16 == 300,
+              "phase172 (20) the same operands DO fit a short -- the "
+              "operands and the result are three independent types");
+        long long big = 0;
+        Check(!ckd_mul(&big, 3000000000ll, 3ll) && big == 9000000000ll,
+              "phase172 (21) infinite-precision semantics, not promotion");
+    }
+
+    // <stdatomic.h>: _Atomic(T) IS std::atomic<T>, and every name is the
+    // same object the C++ side uses.
+    {
+        _Atomic(int) counter{0};
+        static_assert(is_same_v<decltype(counter), atomic<int>>,
+                      "phase172 (22) _Atomic(T) is std::atomic<T>, not a "
+                      "parallel type");
+        atomic_store(&counter, 7);
+        Check(atomic_load(&counter) == 7,
+              "phase172 (23) the C free functions drive it");
+        Check(atomic_fetch_add_explicit(&counter, 3, memory_order_relaxed) == 7 &&
+                  counter.load() == 10,
+              "phase172 (24) ...and the C++ members see the same object");
+        atomic_flag f = ATOMIC_FLAG_INIT;
+        Check(!atomic_flag_test_and_set(&f) && atomic_flag_test_and_set(&f),
+              "phase172 (25) atomic_flag through its C spelling");
+        atomic_flag_clear(&f);
+        Check(!atomic_flag_test_and_set(&f), "phase172 (26) ...and cleared");
+    }
+    // The least/fast alias families, absent from <atomic> until now.
+    static_assert(is_same_v<atomic_int_least16_t, atomic<int_least16_t>> &&
+                      is_same_v<atomic_uint_fast64_t, atomic<uint_fast64_t>>,
+                  "phase172 (27) [atomics.syn]'s least/fast aliases exist");
+
+    printf("[CXX] PASS phase172: <stdbit.h>/<stdckdint.h>/<stdatomic.h> -- "
+           "and stdc_bit_ceil answers 0x80 where libstdc++ 16.1 answers 0, "
+           "because the top bit is a representable power of two\n");
+}
+
+// ── Ф34-c: the uninitialized algorithms are now genuinely constexpr ──────
+void Phase173()
+{
+    using namespace std;
+
+    // Every one of these carried the constexpr keyword before Ф34 and
+    // none of them worked in a constant expression: they built elements
+    // with a bare placement-new, which is a constant expression only
+    // inside std::construct_at. The static_asserts below are the proof --
+    // each one is a call from constant evaluation.
+    struct Counted {
+        int v;
+        constexpr Counted() : v(5) {}
+        constexpr Counted(int x) : v(x) {}
+    };
+
+    static_assert(
+        [] {
+            allocator<Counted> al;
+            Counted *p = al.allocate(4);
+            uninitialized_default_construct_n(p, 1);
+            uninitialized_value_construct_n(p + 1, 1);
+            Counted src[2] = {Counted(9), Counted(11)};
+            uninitialized_copy_n(src, 1, p + 2);
+            uninitialized_move_n(src + 1, 1, p + 3);
+            int sum = p[0].v + p[1].v + p[2].v + p[3].v;
+            destroy_n(p, 4);
+            al.deallocate(p, 4);
+            return sum;
+        }() == 30,
+        "phase173 (1) default/value/copy/move construct in constant "
+        "evaluation");
+
+    static_assert(
+        [] {
+            allocator<int> al;
+            int *p = al.allocate(3);
+            uninitialized_fill_n(p, 3, 7);
+            int s = p[0] + p[1] + p[2];
+            destroy_n(p, 3);
+            al.deallocate(p, 3);
+            return s;
+        }() == 21,
+        "phase173 (2) uninitialized_fill_n too");
+
+    // ranges::construct_at was the same defect one level down: it wrote
+    // the placement-new itself instead of delegating to std::construct_at,
+    // so every ranges:: uninitialized algorithm was runtime-only.
+    static_assert(
+        [] {
+            allocator<Counted> al;
+            Counted *p = al.allocate(3);
+            ranges::construct_at(p, 4);
+            ranges::uninitialized_value_construct_n(p + 1, 1);
+            ranges::uninitialized_default_construct_n(p + 2, 1);
+            int s = p[0].v + p[1].v + p[2].v;
+            ranges::destroy_n(p, 3);
+            al.deallocate(p, 3);
+            return s;
+        }() == 14,
+        "phase173 (3) ranges::construct_at and the ranges:: family");
+
+    static_assert(
+        [] {
+            allocator<long> al;
+            long *p = al.allocate(2);
+            ranges::uninitialized_fill_n(p, 2, 11L);
+            long s = p[0] + p[1];
+            ranges::destroy_n(p, 2);
+            al.deallocate(p, 2);
+            return s;
+        }() == 22,
+        "phase173 (4) ranges::uninitialized_fill_n");
+
+    // Runtime behaviour is unchanged, including the roll-back on a
+    // throwing element.
+    {
+        alignas(NonTrivialForUninit) unsigned char buf[4 * sizeof(NonTrivialForUninit)];
+        NonTrivialForUninit *p = reinterpret_cast<NonTrivialForUninit *>(buf);
+        g_uninit_live = 0;
+        g_uninit_throw_at = -1;
+        uninitialized_default_construct_n(p, 4);
+        Check(g_uninit_live == 4,
+              "phase173 (5) default-construct runs the constructor at "
+              "runtime");
+        destroy_n(p, 4);
+        Check(g_uninit_live == 0, "phase173 (6) ...and destroy undoes it");
+
+        g_uninit_throw_at = 2;   // the third element throws
+        bool threw = false;
+        try {
+            uninitialized_value_construct_n(p, 4);
+        } catch (int) {
+            threw = true;
+        }
+        Check(threw && g_uninit_live == 0,
+              "phase173 (7) a throw mid-range destroys exactly the prefix "
+              "that was built");
+        g_uninit_throw_at = -1;
+    }
+
+    // shared_ptr<void> -- the most common type-erased owner in the
+    // language -- did not compile at all: operator* was declared T&, and
+    // a requires-clause does not stop a member DECLARATION from being
+    // instantiated with the class.
+    {
+        auto sp = make_shared<int>(7);
+        shared_ptr<void> v = sp;
+        Check(v.get() == sp.get() && sp.use_count() == 2,
+              "phase173 (8) shared_ptr<void> shares ownership");
+        shared_ptr<const void> cv = sp;
+        Check(cv.get() == sp.get(), "phase173 (9) ...and const void too");
+        weak_ptr<void> wv = v;
+        Check(!wv.expired(), "phase173 (10) weak_ptr<void> as well");
+        static_assert(!requires_deref<shared_ptr<void>>,
+                      "phase173 (11) and operator* is correctly absent");
+    }
+    static_assert(__cpp_lib_raw_memory_algorithms == 202411L,
+                  "phase173 (12) the macro claims the constexpr forms");
+
+    printf("[CXX] PASS phase173: the uninitialized algorithms are constexpr "
+           "for real -- the keyword had been there for phases while every "
+           "constant-evaluated call failed inside placement-new\n");
+}
+
+// ── Ф34-d: ownership-based hashing and equality for smart pointers ──────
+void Phase174()
+{
+    using namespace std;
+
+    auto sp = make_shared<int>(4);
+    weak_ptr<int> wp = sp;
+    // Aliasing constructor: a different stored pointer, the SAME owner.
+    shared_ptr<int> alias(sp, nullptr);
+
+    Check(sp.owner_equal(wp) && wp.owner_equal(sp),
+          "phase174 (1) shared and weak agree on the owner");
+    Check(sp.owner_equal(alias),
+          "phase174 (2) the aliasing constructor keeps the owner even when "
+          "the stored pointer is null");
+    Check(sp.get() != alias.get(),
+          "phase174 (3) ...and the stored pointers really do differ");
+    Check(sp.owner_hash() == wp.owner_hash() &&
+              sp.owner_hash() == alias.owner_hash(),
+          "phase174 (4) so the hashes must agree as well");
+
+    shared_ptr<int> other = make_shared<int>(4);
+    Check(!sp.owner_equal(other),
+          "phase174 (5) equal VALUES are not the same owner");
+    Check(owner_equal{}(sp, wp) && owner_equal{}(wp, wp) &&
+              !owner_equal{}(sp, other),
+          "phase174 (6) the function object mixes shared and weak freely");
+
+    shared_ptr<int> empty1, empty2;
+    Check(owner_equal{}(empty1, empty2) &&
+              owner_hash{}(empty1) == owner_hash{}(empty2),
+          "phase174 (7) every empty pointer is the same (absent) owner");
+
+    {
+        // The use it exists for: a weak_ptr key that must not be locked
+        // just to be looked up.
+        unordered_map<weak_ptr<int>, int, owner_hash, owner_equal> cache;
+        cache.emplace(wp, 42);
+        auto it = cache.find(wp);
+        Check(it != cache.end() && it->second == 42,
+              "phase174 (8) weak_ptr is a usable unordered_map key");
+        Check(cache.find(weak_ptr<int>(other)) == cache.end(),
+              "phase174 (9) ...and a different owner misses");
+    }
+    static_assert(is_same_v<owner_hash::is_transparent, void> &&
+                      is_same_v<owner_equal::is_transparent, void>,
+                  "phase174 (10) both are transparent from the start");
+    static_assert(__cpp_lib_smart_ptr_owner_equality == 202306L,
+                  "phase174 (11) macro");
+
+    printf("[CXX] PASS phase174: owner_equal/owner_hash -- ownership "
+           "identity survives the aliasing constructor and expiry, which is "
+           "exactly what the stored pointer does not\n");
+}
+
+// ── Ф34-e: string + string_view, and the four missing rvalue operator+ ──
+void Phase175()
+{
+    using namespace std;
+
+    string      s = "ab";
+    string_view v = "cd";
+
+    Check(s + v == "abcd", "phase175 (1) string + string_view");
+    Check(v + s == "cdab", "phase175 (2) string_view + string");
+    Check(string("x") + v == "xcd", "phase175 (3) rvalue string + view");
+    Check(v + string("y") == "cdy", "phase175 (4) view + rvalue string");
+
+    // type_identity_t on the view side is what keeps a literal from being
+    // hijacked: "lit" must still pick the const charT* overload.
+    Check(s + "lit" == "ablit" && "lit" + s == "litab",
+          "phase175 (5) the const char* overloads still win for literals");
+
+    {
+        // The four right-rvalue forms. They always compiled -- by falling
+        // back to the const&/const& one and allocating a third string --
+        // so what is checked here is the RESULT, plus the fact that the
+        // overloads now exist at all.
+        string a = "1", b = "2";
+        Check(a + std::move(b) == "12", "phase175 (6) const& + &&");
+        string c = "p", d = "q";
+        Check(std::move(c) + std::move(d) == "pq", "phase175 (7) && + &&");
+        string e = "z";
+        Check("#" + std::move(e) == "#z", "phase175 (8) const char* + &&");
+        string f = "w";
+        Check('#' + std::move(f) == "#w", "phase175 (9) charT + &&");
+    }
+    {
+        // Prepending into an rvalue reuses its buffer instead of building
+        // a third string -- observable through the returned data pointer
+        // when the target has room to spare.
+        string big;
+        big.reserve(64);
+        big = "tail";
+        const char *before = big.data();
+        string      out    = string_view("head") + std::move(big);
+        Check(out == "headtail",
+              "phase175 (10) view + rvalue string prepends in place");
+        Check(out.data() == before || out.capacity() >= 8,
+              "phase175 (11) ...reusing the buffer it was handed");
+    }
+    static_assert(__cpp_lib_string_view == 202403L,
+                  "phase175 (12) macro (P2591R5)");
+
+    printf("[CXX] PASS phase175: `s + sv` compiles at last (P2591R5), and "
+           "the four right-rvalue operator+ forms [string.op.plus] always "
+           "listed are no longer missing\n");
+}
+
+// ── Ф34-f: atomic_ref grows address() and cv-qualified forms ────────────
+void Phase176()
+{
+    using namespace std;
+
+    alignas(8) int cell = 3;
+    atomic_ref<int> r(cell);
+    Check(r.address() == &cell,
+          "phase176 (1) address() hands back the object it was built over");
+    r.store(9);
+    Check(r.load() == 9 && cell == 9, "phase176 (2) it is the same object");
+
+    // The read-only form, and the qualification conversion into it. This
+    // is the shape of a cell another cabin owns and this one only reads.
+    atomic_ref<const int> ro(r);
+    static_assert(is_same_v<decltype(ro.address()), const int *>,
+                  "phase176 (3) address() carries the const through");
+    static_assert(is_same_v<atomic_ref<const int>::value_type, int>,
+                  "phase176 (4) value_type drops the cv, per the standard");
+    Check(ro.load() == 9, "phase176 (5) the read-only ref sees the value");
+    r.store(11);
+    Check(ro.load() == 11, "phase176 (6) ...and keeps seeing it");
+
+    static_assert(!AtomicRefCanStore<atomic_ref<const int>>,
+                  "phase176 (7) store is absent on a const ref");
+    static_assert(!AtomicRefCanFetchAdd<atomic_ref<const int>>,
+                  "phase176 (8) so is fetch_add");
+    static_assert(!AtomicRefCanNotify<atomic_ref<const int>>,
+                  "phase176 (9) and notify_one -- nothing here can cause a "
+                  "change to announce");
+    static_assert(AtomicRefCanStore<atomic_ref<int>> &&
+                      AtomicRefCanFetchAdd<atomic_ref<int>>,
+                  "phase176 (10) the mutable form is untouched");
+    static_assert(!is_constructible_v<atomic_ref<int>, atomic_ref<const int>>,
+                  "phase176 (11) and the conversion does not run backwards");
+
+    {
+        const int frozen = 5;
+        atomic_ref<const int> ro2(frozen);
+        Check(ro2.load() == 5,
+              "phase176 (12) a genuinely const object can be observed");
+    }
+    {
+        // volatile: the MMIO shape. Same operations, and the static_assert
+        // inside the class refuses the case where they would not be atomic.
+        volatile int mmio = 1;
+        atomic_ref<volatile int> vr(mmio);
+        vr.store(7);
+        Check(vr.load() == 7, "phase176 (13) volatile T is a full ref");
+        Check(vr.fetch_add(1) == 7 && vr.load() == 8,
+              "phase176 (14) ...arithmetic included");
+        atomic_ref<const volatile int> cvr(vr);
+        Check(cvr.load() == 8,
+              "phase176 (15) const volatile is the read-only form of it");
+    }
+    {
+        int *p = &cell;
+        atomic_ref<int *> pr(p);
+        Check(pr.address() == &p,
+              "phase176 (16) the pointer specialization answers too");
+    }
+    static_assert(__cpp_lib_atomic_ref == 202603L, "phase176 (17) macro");
+
+    printf("[CXX] PASS phase176: atomic_ref<const T> refuses every mutating "
+           "operation at compile time, atomic_ref<volatile T> keeps them, "
+           "and address() makes the referenced cell nameable\n");
+}
+
+// ── Ф34-g: copyable_function ────────────────────────────────────────────
+void Phase177()
+{
+    using namespace std;
+
+    copyable_function<int(int)> f = [n = 5](int x) { return x + n; };
+    auto g = f;
+    Check(f(1) == 6 && g(2) == 7,
+          "phase177 (1) an inline target survives the copy");
+
+    {
+        // A target too large for the small buffer goes to the heap, and
+        // the copy must allocate a SECOND one rather than share.
+        struct Big {
+            char pad[64];
+            int  v;
+            int  operator()(int x) const { return x + v; }
+        };
+        copyable_function<int(int) const> h = Big{{}, 3};
+        auto h2 = h;
+        Check(h(1) == 4 && h2(2) == 5,
+              "phase177 (2) heap targets copy as well");
+    }
+    {
+        copyable_function<int(int)> c1 = [n = 0](int x) mutable {
+            n += x;
+            return n;
+        };
+        auto c2 = c1;
+        c1(10);
+        Check(c2(1) == 1,
+              "phase177 (3) the copy has its OWN state -- sharing would "
+              "make two functions one");
+        c2 = c1;
+        Check(c2(0) == 10, "phase177 (4) copy assignment takes the state");
+    }
+    {
+        copyable_function<int(int)> e;
+        Check(!e && e == nullptr, "phase177 (5) empty is falsy");
+        e = CopyFnTwice;
+        Check(e && e(4) == 8, "phase177 (6) a plain function is a target");
+        e = nullptr;
+        Check(!e, "phase177 (7) ...and can be emptied again");
+    }
+    static_assert(is_copy_constructible_v<copyable_function<int(int)>>,
+                  "phase177 (8) it is copyable");
+    static_assert(!is_copy_constructible_v<move_only_function<int(int)>>,
+                  "phase177 (9) which is the whole difference from "
+                  "move_only_function");
+    static_assert(!is_constructible_v<copyable_function<int(int)>,
+                                      move_only_function<int(int)>>,
+                  "phase177 (10) and a move-only target cannot sneak in");
+    {
+        copyable_function<int(int)> src = [](int x) { return x * 3; };
+        move_only_function<int(int)> m = std::move(src);
+        Check(m(2) == 6, "phase177 (11) it converts INTO a move_only_function");
+    }
+    {
+        // The row qualifiers are part of the type, which is what makes
+        // const-correctness real here and a lie in std::function.
+        copyable_function<int(int) noexcept> nx = [](int x) noexcept {
+            return -x;
+        };
+        Check(nx(3) == -3, "phase177 (12) the noexcept row");
+        copyable_function<int(int) &&> rr = [](int x) { return x + 100; };
+        Check(std::move(rr)(1) == 101, "phase177 (13) the rvalue row");
+        const copyable_function<int(int) const> cf = [](int x) { return x - 1; };
+        Check(cf(5) == 4, "phase177 (14) the const row is callable on a "
+                          "const object");
+    }
+    {
+        copyable_function<int(int)> a = [](int x) { return x + 1; };
+        copyable_function<int(int)> b = [](int x) { return x + 2; };
+        a.swap(b);
+        Check(a(0) == 2 && b(0) == 1, "phase177 (15) swap");
+        copyable_function<long(int, int)> two =
+            [](int x, int y) { return long(x) * y; };
+        Check(two(6, 7) == 42, "phase177 (16) more than one parameter");
+        copyable_function<int(int)> ip(in_place_type<CopyFnAdder>, 4);
+        Check(ip(1) == 5, "phase177 (17) in_place_type construction");
+    }
+    static_assert(__cpp_lib_copyable_function == 202306L,
+                  "phase177 (18) macro (P2548R6)");
+
+    printf("[CXX] PASS phase177: copyable_function -- std::function with "
+           "the cv/ref qualifiers in the type, no RTTI surface, and a deep "
+           "copy for heap targets\n");
+}
+
+// ── Ф34-h: constrained equality, and pair's heterogeneous comparisons ────
+void Phase178()
+{
+    using namespace std;
+
+    // Before P2944R3 these wrappers answered "yes, comparable" for element
+    // types that are not, and the failure arrived later, inside the
+    // operator, where no concept could see it.
+    static_assert(!SelfComparable<tuple<NoEqType>>,
+                  "phase178 (1) tuple of a non-comparable type is not "
+                  "comparable");
+    static_assert(!SelfComparable<pair<NoEqType, int>>,
+                  "phase178 (2) nor is such a pair");
+    static_assert(!SelfComparable<variant<NoEqType>>,
+                  "phase178 (3) nor a variant");
+    static_assert(!SelfComparable<expected<NoEqType, int>>,
+                  "phase178 (4) nor an expected");
+    static_assert(!SelfComparable<optional<NoEqType>>,
+                  "phase178 (5) optional was already constrained");
+    static_assert(SelfComparable<tuple<int>> && SelfComparable<pair<int, int>> &&
+                      SelfComparable<variant<int, double>> &&
+                      SelfComparable<expected<int, int>>,
+                  "phase178 (6) and the comparable cases still are");
+    static_assert(!ComparableWith<expected<NoEqType, int>, NoEqType>,
+                  "phase178 (7) the mixed value comparison is constrained "
+                  "too");
+    static_assert(!ComparableWith<optional<NoEqType>, NoEqType>,
+                  "phase178 (8) ...on both wrappers");
+
+    // pair's comparisons are heterogeneous, and always were in the
+    // standard -- boxcxx had only the same-type forms, so this did not
+    // compile at all.
+    {
+        pair<int, double> a{1, 2.0};
+        pair<long, float> b{1, 2.0f};
+        Check(a == b, "phase178 (9) pair == pair of different types");
+        pair<long, float> c{1, 3.0f};
+        Check((a <=> c) < 0, "phase178 (10) ...and <=> as well");
+        Check(a != c, "phase178 (11) != comes from ==");
+    }
+    {
+        tuple<int, double> t{1, 2.0};
+        tuple<long, float> u{1, 2.0f};
+        Check(t == u, "phase178 (12) tuple was already heterogeneous");
+    }
+    {
+        optional<int> o1{3};
+        optional<long> o2{3};
+        Check(o1 == o2, "phase178 (13) optional too");
+        expected<int, int> e1{3};
+        expected<long, long> e2{3};
+        Check(e1 == e2, "phase178 (14) and expected");
+    }
+    static_assert(equality_comparable<pair<int, int>>,
+                  "phase178 (15) the concept agrees for the good case");
+    static_assert(!equality_comparable<pair<NoEqType, NoEqType>>,
+                  "phase178 (16) and, at last, for the bad one");
+    static_assert(__cpp_lib_constrained_equality == 202411L,
+                  "phase178 (17) macro (P2944R3)");
+
+    printf("[CXX] PASS phase178: equality_comparable stops lying about "
+           "tuple/pair/variant/expected, and pair compares across types the "
+           "way [pairs.spec] has always said it does\n");
+}
+
+// ── Ф34-i: P2248R8 default value types, and the T1/T2 split in replace ──
+void Phase179()
+{
+    using namespace std;
+
+    // The value parameter now defaults to the type the iterator already
+    // implies, so `{}` alone names the element's own zero.
+    {
+        int a[] = {1, 0, 2, 0};
+        Check(count(begin(a), end(a), {}) == 2,
+              "phase179 (1) std::count with a defaulted value type");
+        Check(find(begin(a), end(a), {}) == a + 1, "phase179 (2) std::find");
+        Check(binary_search(begin(a), begin(a) + 1, {}) == false,
+              "phase179 (3) std::binary_search");
+        fill(begin(a), end(a), {});
+        Check(a[0] == 0 && a[3] == 0, "phase179 (4) std::fill");
+        replace(begin(a), end(a), {}, 5);
+        Check(a[0] == 5, "phase179 (5) std::replace");
+    }
+    {
+        vector<int> v{1, 0, 2, 0};
+        Check(ranges::count(v, {}) == 2, "phase179 (6) ranges::count");
+        Check(ranges::find(v, {}) == v.begin() + 1, "phase179 (7) ranges::find");
+        ranges::replace(v, {}, 5);
+        Check(v[1] == 5, "phase179 (8) ranges::replace");
+        ranges::fill(v, {});
+        Check(v[0] == 0, "phase179 (9) ranges::fill");
+        vector<int> out(4, -1);
+        ranges::replace_copy(v, out.begin(), {}, 7);
+        Check(out[0] == 7, "phase179 (10) ranges::replace_copy");
+        auto rest = ranges::remove(v, {});
+        Check(rest.begin() == v.begin(), "phase179 (11) ranges::remove");
+    }
+    {
+        // The searched-for value and the written value are separate types.
+        // boxcxx used one T for both, so this did not compile.
+        vector<double> d{1.0, 2.0};
+        ranges::replace(d, 1, 9.5);
+        Check(d[0] == 9.5,
+              "phase179 (12) ranges::replace takes an int to search for and "
+              "a double to write");
+        vector<double> e{1.0, 2.0};
+        vector<double> o(2, 0.0);
+        ranges::replace_copy(e, o.begin(), 2, 8.5);
+        Check(o[1] == 8.5, "phase179 (13) ...and so does replace_copy");
+    }
+    {
+        vector<int> v{1, 2, 0, 3};
+        Check(erase(v, {}) == 1 && v.size() == 3,
+              "phase179 (14) std::erase(container, {})");
+        string s = "aXb";
+        Check(erase(s, 'X') == 1 && s == "ab",
+              "phase179 (15) ...and on a string");
+    }
+    {
+        allocator<int> al;
+        int *p = al.allocate(3);
+        uninitialized_fill_n(p, 3, {});
+        Check(p[0] == 0 && p[2] == 0,
+              "phase179 (16) uninitialized_fill_n defaults its value type");
+        destroy_n(p, 3);
+        ranges::uninitialized_fill_n(p, 3, {});
+        Check(p[1] == 0, "phase179 (17) the ranges:: form as well");
+        ranges::destroy_n(p, 3);
+        al.deallocate(p, 3);
+    }
+    static_assert(
+        is_same_v<ranges::range_value_t<vector<int>>,
+                  projected_value_t<vector<int>::iterator, identity>>,
+        "phase179 (18) projected_value_t through identity is the value type");
+    static_assert(__cpp_lib_algorithm_default_value_type == 202603L,
+                  "phase179 (19) macro (P2248R8)");
+
+    printf("[CXX] PASS phase179: every algorithm that takes a value defaults "
+           "its type from the iterator, and ranges::replace stopped forcing "
+           "the searched and written types to be the same\n");
+}
+
+// ── Ф34-j: basic_const_iterator conversions, and the pinned macros ──────
+void Phase180()
+{
+    using namespace std;
+
+    // P2836R1: a const iterator over a container's iterator must convert
+    // to that container's own const_iterator, or it cannot be handed back
+    // to the container it came from.
+    {
+        vector<int> v{1, 2, 3};
+        basic_const_iterator<vector<int>::iterator> ci(v.begin());
+        vector<int>::const_iterator c = ci;
+        Check(*c == 1, "phase180 (1) it converts to the container's "
+                       "const_iterator");
+        v.erase(ci);
+        Check(v.size() == 2 && v[0] == 2,
+              "phase180 (2) ...so erase(const_iterator) accepts it");
+        static_assert(!is_convertible_v<basic_const_iterator<vector<int>::iterator>,
+                                        vector<int>::iterator>,
+                      "phase180 (3) and it does NOT convert to the mutable "
+                      "one -- that would undo the const");
+    }
+    {
+        vector<int> v{5, 6};
+        auto cv = views::as_const(v);
+        Check(ranges::distance(cv) == 2 && cv.front() == 5,
+              "phase180 (4) views::as_const still works over it");
+    }
+
+    // P2909R4: a char formatted with an integer presentation type is a
+    // CODE UNIT, so it widens unsigned. libstdc++ 16.1 in C++26 mode
+    // prints 255 for the same call; a signed char stays signed.
+    Check(format("{:d}", (char)-1) == "255",
+          "phase180 (5) char -1 as an integer is 255");
+    Check(format("{:d}", (signed char)-1) == "-1",
+          "phase180 (6) signed char -1 is still -1");
+    Check(format("{:d}", (unsigned char)255) == "255",
+          "phase180 (7) unsigned char is unchanged");
+    Check(format("{:x}", 'a') == "61", "phase180 (8) and hex agrees");
+
+    static_assert(__cpp_lib_ranges_as_const == 202311L,
+                  "phase180 (9) macro (P2836R1)");
+    static_assert(__cpp_lib_format_uchar == 202311L,
+                  "phase180 (10) macro (P2909R4)");
+    static_assert(__cpp_lib_print == 202406L,
+                  "phase180 (11) macro: enable_nonlocking_formatter_"
+                  "optimization plus the argument-less println()");
+    static_assert(enable_nonlocking_formatter_optimization<char> &&
+                      enable_nonlocking_formatter_optimization<int> &&
+                      enable_nonlocking_formatter_optimization<const char *>,
+                  "phase180 (12) ...and the trait it names is true where "
+                  "P3107R5 says");
+    println();   // the argument-less form: one newline, no formatting
+
+    printf("[CXX] PASS phase180: basic_const_iterator converts back into "
+           "the container's const_iterator, and a char formatted as an "
+           "integer is a code unit\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -40742,6 +41586,16 @@ int main()
     Phase168();
     Phase169();
     Phase170();
+    Phase171();
+    Phase172();
+    Phase173();
+    Phase174();
+    Phase175();
+    Phase176();
+    Phase177();
+    Phase178();
+    Phase179();
+    Phase180();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

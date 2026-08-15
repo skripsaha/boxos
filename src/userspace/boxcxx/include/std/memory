@@ -145,6 +145,21 @@ const volatile T *start_lifetime_as_array(const volatile void *p,
 }
 
 // ── uninitialized-memory algorithms ([uninitialized]) ────────────────────
+//
+// All ten are usable in a constant expression (C++26 raised
+// __cpp_lib_raw_memory_algorithms to 202411L for exactly this). They were
+// MARKED constexpr long before that and were not: every one of them built
+// its element with a bare placement-new expression, which is a constant
+// expression only inside std::construct_at. So a call from constant
+// evaluation failed on the very first element, quietly, and the keyword
+// said otherwise -- the same shape of defect Ф33 found in <optional>'s
+// engage path. Construction now goes through construct_at (or, for
+// default-initialization, __default_construct_at, whose one documented
+// deviation is described where it is defined).
+//
+// The element type is still iterator_traits<Out>::value_type rather than
+// whatever *cur happens to be: [uninitialized] says value_type, and the
+// two differ for a proxy iterator.
 
 template <class It, class Size>
 constexpr It uninitialized_default_construct_n(It first, Size n)
@@ -158,7 +173,7 @@ constexpr It uninitialized_default_construct_n(It first, Size n)
     } else {
         try {
             for (; n > 0; --n, (void)++cur)
-                ::new (static_cast<void *>(addressof(*cur))) T;
+                __default_construct_at(static_cast<T *>(addressof(*cur)));
             return cur;
         } catch (...) {
             destroy(first, cur);
@@ -171,12 +186,17 @@ constexpr void uninitialized_default_construct(It first, It last)
 {
     using T = typename iterator_traits<It>::value_type;
     It cur  = first;
-    try {
-        for (; cur != last; ++cur)
-            ::new (static_cast<void *>(addressof(*cur))) T;
-    } catch (...) {
-        destroy(first, cur);
-        throw;
+    if constexpr (is_trivially_default_constructible_v<T>) {
+        (void)cur;
+        (void)last;
+    } else {
+        try {
+            for (; cur != last; ++cur)
+                __default_construct_at(static_cast<T *>(addressof(*cur)));
+        } catch (...) {
+            destroy(first, cur);
+            throw;
+        }
     }
 }
 
@@ -187,7 +207,7 @@ constexpr It uninitialized_value_construct_n(It first, Size n)
     It cur  = first;
     try {
         for (; n > 0; --n, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur))) T();
+            construct_at(static_cast<T *>(addressof(*cur)));
         return cur;
     } catch (...) {
         destroy(first, cur);
@@ -201,7 +221,7 @@ constexpr void uninitialized_value_construct(It first, It last)
     It cur  = first;
     try {
         for (; cur != last; ++cur)
-            ::new (static_cast<void *>(addressof(*cur))) T();
+            construct_at(static_cast<T *>(addressof(*cur)));
     } catch (...) {
         destroy(first, cur);
         throw;
@@ -215,7 +235,7 @@ constexpr Out uninitialized_copy(In first, In last, Out d)
     Out cur = d;
     try {
         for (; first != last; ++first, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur))) T(*first);
+            construct_at(static_cast<T *>(addressof(*cur)), *first);
         return cur;
     } catch (...) {
         destroy(d, cur);
@@ -229,7 +249,7 @@ constexpr Out uninitialized_copy_n(In first, Size n, Out d)
     Out cur = d;
     try {
         for (; n > 0; --n, (void)++first, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur))) T(*first);
+            construct_at(static_cast<T *>(addressof(*cur)), *first);
         return cur;
     } catch (...) {
         destroy(d, cur);
@@ -244,8 +264,9 @@ constexpr Out uninitialized_move(In first, In last, Out d)
     Out cur = d;
     try {
         for (; first != last; ++first, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur)))
-                T(static_cast<typename iterator_traits<In>::value_type &&>(
+            construct_at(
+                static_cast<T *>(addressof(*cur)),
+                static_cast<typename iterator_traits<In>::value_type &&>(
                     *first));
         return cur;
     } catch (...) {
@@ -260,8 +281,9 @@ constexpr pair<In, Out> uninitialized_move_n(In first, Size n, Out d)
     Out cur = d;
     try {
         for (; n > 0; --n, (void)++first, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur)))
-                T(static_cast<typename iterator_traits<In>::value_type &&>(
+            construct_at(
+                static_cast<T *>(addressof(*cur)),
+                static_cast<typename iterator_traits<In>::value_type &&>(
                     *first));
         return {first, cur};
     } catch (...) {
@@ -270,27 +292,28 @@ constexpr pair<In, Out> uninitialized_move_n(In first, Size n, Out d)
     }
 }
 
-template <class It, class T>
+template <class It, class T = typename iterator_traits<It>::value_type>
 constexpr void uninitialized_fill(It first, It last, const T &x)
 {
     using V = typename iterator_traits<It>::value_type;
     It cur  = first;
     try {
         for (; cur != last; ++cur)
-            ::new (static_cast<void *>(addressof(*cur))) V(x);
+            construct_at(static_cast<V *>(addressof(*cur)), x);
     } catch (...) {
         destroy(first, cur);
         throw;
     }
 }
-template <class It, class Size, class T>
+template <class It, class Size,
+          class T = typename iterator_traits<It>::value_type>
 constexpr It uninitialized_fill_n(It first, Size n, const T &x)
 {
     using V = typename iterator_traits<It>::value_type;
     It cur  = first;
     try {
         for (; n > 0; --n, (void)++cur)
-            ::new (static_cast<void *>(addressof(*cur))) V(x);
+            construct_at(static_cast<V *>(addressof(*cur)), x);
         return cur;
     } catch (...) {
         destroy(first, cur);
@@ -1225,7 +1248,14 @@ public:
     }
 
     element_type *get() const noexcept { return ptr_; }
-    T            &operator*() const noexcept
+    // The return types go through add_lvalue_reference_t, and that is the
+    // whole reason shared_ptr<void> compiles: a requires-clause does not
+    // stop the DECLARATION from being instantiated with the class, so
+    // spelling these T& and element_type& made "reference to void" a hard
+    // error for the single most common type-erased owner in the language.
+    // add_lvalue_reference_t<void> is void, which is a perfectly good
+    // return type for a member that no program can call.
+    add_lvalue_reference_t<T> operator*() const noexcept
         requires(!is_array_v<T> && !is_void_v<T>)
     {
         return *ptr_;
@@ -1235,7 +1265,7 @@ public:
     {
         return ptr_;
     }
-    element_type &operator[](ptrdiff_t i) const
+    add_lvalue_reference_t<element_type> operator[](ptrdiff_t i) const
         requires is_array_v<T>
     {
         return ptr_[i];
@@ -1252,6 +1282,29 @@ public:
     bool owner_before(const weak_ptr<U> &o) const noexcept
     {
         return ctrl_ < o.ctrl_;
+    }
+
+    // Ownership-based hash and equality ([util.smartptr.shared.obs]).
+    // owner_before already gave a strict weak ordering over control blocks;
+    // these give the equivalence relation directly, which is what an
+    // unordered container needs -- owner_less made shared_ptr usable as a
+    // map key, and only these make it usable as an unordered_map key.
+    // Two pointers that own the same object hash the same even when their
+    // stored pointers differ (aliasing constructor), and an empty pointer
+    // hashes like every other empty one.
+    size_t owner_hash() const noexcept
+    {
+        return hash<const void *>()(static_cast<const void *>(ctrl_));
+    }
+    template <class U>
+    bool owner_equal(const shared_ptr<U> &o) const noexcept
+    {
+        return ctrl_ == o.ctrl_;
+    }
+    template <class U>
+    bool owner_equal(const weak_ptr<U> &o) const noexcept
+    {
+        return ctrl_ == o.ctrl_;
     }
 
     template <class D, class U>
@@ -1383,6 +1436,25 @@ public:
     bool owner_before(const shared_ptr<U> &o) const noexcept
     {
         return ctrl_ < o.ctrl_;
+    }
+
+    // [util.smartptr.weak.obs] — same pair as shared_ptr's, and the reason
+    // the feature exists: a weak_ptr is the natural key for a cache keyed
+    // on "which object", and hashing the stored pointer would have been
+    // wrong (an expired weak_ptr still identifies its control block).
+    size_t owner_hash() const noexcept
+    {
+        return hash<const void *>()(static_cast<const void *>(ctrl_));
+    }
+    template <class U>
+    bool owner_equal(const weak_ptr<U> &o) const noexcept
+    {
+        return ctrl_ == o.ctrl_;
+    }
+    template <class U>
+    bool owner_equal(const shared_ptr<U> &o) const noexcept
+    {
+        return ctrl_ == o.ctrl_;
     }
 };
 
@@ -1719,6 +1791,51 @@ struct owner_less<void> {
     // unreachable through an associative container — map<shared_ptr<T>, …,
     // owner_less<>>::find(weak_ptr) does not compile, and that pairing is the
     // entire reason P0074R0 added owner_less<void>.
+    using is_transparent = void;
+};
+
+// [util.smartptr.hash] / [util.smartptr.owner.equal] — the unordered
+// counterpart of owner_less. Both are transparent from the start (there is
+// no non-void form to be compatible with), so an
+// unordered_map<shared_ptr<T>, V, owner_hash, owner_equal> accepts a
+// weak_ptr as a lookup key without materialising a shared_ptr first --
+// which is the point: locking the weak_ptr to look it up would resurrect
+// an object the cache is trying to decide about.
+struct owner_hash {
+    template <class T>
+    size_t operator()(const shared_ptr<T> &p) const noexcept
+    {
+        return p.owner_hash();
+    }
+    template <class T>
+    size_t operator()(const weak_ptr<T> &p) const noexcept
+    {
+        return p.owner_hash();
+    }
+    using is_transparent = void;
+};
+
+struct owner_equal {
+    template <class T, class U>
+    bool operator()(const shared_ptr<T> &a, const shared_ptr<U> &b) const noexcept
+    {
+        return a.owner_equal(b);
+    }
+    template <class T, class U>
+    bool operator()(const shared_ptr<T> &a, const weak_ptr<U> &b) const noexcept
+    {
+        return a.owner_equal(b);
+    }
+    template <class T, class U>
+    bool operator()(const weak_ptr<T> &a, const shared_ptr<U> &b) const noexcept
+    {
+        return a.owner_equal(b);
+    }
+    template <class T, class U>
+    bool operator()(const weak_ptr<T> &a, const weak_ptr<U> &b) const noexcept
+    {
+        return a.owner_equal(b);
+    }
     using is_transparent = void;
 };
 
@@ -2171,8 +2288,10 @@ bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_algorithm_default_value_type
 #define BOXCXX_OWNS_atomic_value_initialization
 #include <__bits/version_atomic>
+#include <__bits/version_algorithm>   // algorithm_default_value_type
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #include <__bits/version_containers>
 #define BOXCXX_OWNS_addressof_constexpr
@@ -2189,6 +2308,7 @@ bool atomic_compare_exchange_weak_explicit(shared_ptr<T> *p, shared_ptr<T> *v,
 #define BOXCXX_OWNS_shared_ptr_arrays
 #define BOXCXX_OWNS_shared_ptr_weak_type
 #define BOXCXX_OWNS_smart_ptr_for_overwrite
+#define BOXCXX_OWNS_smart_ptr_owner_equality
 #define BOXCXX_OWNS_start_lifetime_as
 #define BOXCXX_OWNS_to_address
 #define BOXCXX_OWNS_transparent_operators

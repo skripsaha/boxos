@@ -39,6 +39,14 @@
 #  define __cpp_lib_constant_wrapper 202606L   // P2781R9 + LWG 4383/4500
 #endif
 #undef BOXCXX_OWNS_constant_wrapper
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constrained_equality)) && \
+    !defined(__cpp_lib_constrained_equality)
+// P2944R3. 202411L rather than 202403L because the later value is the one
+// that includes <expected>, and expected's three operator== overloads are
+// constrained here too.
+#  define __cpp_lib_constrained_equality 202411L
+#endif
+#undef BOXCXX_OWNS_constrained_equality
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_utility)) && \
     !defined(__cpp_lib_constexpr_utility)
 #  define __cpp_lib_constexpr_utility 201811L
@@ -61,7 +69,7 @@
 #undef BOXCXX_OWNS_integer_comparison_functions
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_integer_sequence)) && \
     !defined(__cpp_lib_integer_sequence)
-#  define __cpp_lib_integer_sequence 201304L
+#  define __cpp_lib_integer_sequence 202511L   // + structured bindings
 #endif
 #undef BOXCXX_OWNS_integer_sequence
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_to_underlying)) && \
@@ -76,7 +84,7 @@
 #undef BOXCXX_OWNS_tuples_by_type
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_tuple_like)) && \
     !defined(__cpp_lib_tuple_like)
-#  define __cpp_lib_tuple_like 202207L
+#  define __cpp_lib_tuple_like 202311L   // + P2819R2 (complex)
 #endif
 #undef BOXCXX_OWNS_tuple_like
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_unreachable)) && \

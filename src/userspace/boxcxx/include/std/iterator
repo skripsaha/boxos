@@ -1573,6 +1573,29 @@ public:
     constexpr const Iterator &base() const & noexcept { return __cur; }
     constexpr Iterator base() && { return std::move(__cur); }
 
+    // P2836R1 ([const.iterators.iterator]) — convert to whatever the
+    // underlying iterator converts to, as long as the target is itself a
+    // constant iterator. Without these, a basic_const_iterator over a
+    // container's iterator could not be handed back to that container:
+    // v.erase(std::as_const_iterator) did not compile, because
+    // vector::const_iterator is a different type and the only bridge --
+    // the underlying iterator's own conversion -- was hidden behind
+    // base(). The constant-iterator requirement is what keeps this from
+    // silently converting a const view back into a mutable iterator.
+    template <__iter_impl::NotAConstIterator T>
+        requires __iter_impl::ConstantIterator<T> &&
+                 convertible_to<const Iterator &, T>
+    constexpr operator T() const &
+    {
+        return __cur;
+    }
+    template <__iter_impl::NotAConstIterator T>
+        requires __iter_impl::ConstantIterator<T> && convertible_to<Iterator, T>
+    constexpr operator T() &&
+    {
+        return std::move(__cur);
+    }
+
     constexpr reference operator*() const
     {
         return static_cast<reference>(*__cur);

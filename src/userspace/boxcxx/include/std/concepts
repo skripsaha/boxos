@@ -160,14 +160,10 @@ concept swappable_with =
 
 // ── comparison concepts ─────────────────────────────────────────────────
 
-namespace __bits {
-template <class T>
-concept BooleanTestableImpl = convertible_to<T, bool>;
-template <class T>
-concept BooleanTestable = BooleanTestableImpl<T> && requires(T &&t) {
-    { !static_cast<T &&>(t) } -> BooleanTestableImpl;
-};
-} // namespace __bits
+// boolean-testable itself lives in <utility>, not here: [pairs.spec]'s
+// constrained operator== needs it and <utility> sits BELOW this header
+// (this one includes it), so the definition has to be on the lower side of
+// that edge. It is the same concept, defined once.
 
 template <class T>
 concept equality_comparable = __cmp::WeaklyEqCmpWith<T, T>;

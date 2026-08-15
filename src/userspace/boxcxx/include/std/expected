@@ -32,8 +32,10 @@
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constrained_equality
 #define BOXCXX_OWNS_expected
 #include <__bits/version_expected>
+#include <__bits/version_utility>   // constrained_equality is defined there
 
 namespace std {
 
@@ -910,8 +912,12 @@ public:
         a.swap(b);
     }
 
+    // P2944R3 turned these Mandates into Constraints: an expected whose
+    // value type has no operator== must not SATISFY equality_comparable
+    // and then fail inside the body, where no concept can see it.
     template <class U2, class E2>
-        requires(!is_void_v<U2>)
+        requires(!is_void_v<U2>) && __bits::EqComparableWith<T, U2> &&
+                __bits::EqComparableWith<E, E2>
     friend constexpr bool operator==(const expected &a,
                                      const expected<U2, E2> &b)
     {
@@ -919,12 +925,22 @@ public:
         return a.has_value() ? static_cast<bool>(*a == *b)
                              : static_cast<bool>(a.error() == b.error());
     }
+    // [expected.object.eq]/3's own "T2 is not a specialization of expected"
+    // has to come FIRST: without it this candidate is considered for
+    // expected-vs-expected too, and its constraint then asks whether
+    // T == expected<...> compares -- which re-enters this same check.
+    // GCC reports that as "satisfaction of atomic constraint depends on
+    // itself", and it is not a compiler quirk: the recursion is real.
     template <class U2>
+        requires(!__expected::IsExpected<U2>) &&
+                (!__expected::IsUnexpected<U2>) &&
+                __bits::EqComparableWith<T, U2>
     friend constexpr bool operator==(const expected &a, const U2 &v)
     {
         return a.has_value() && static_cast<bool>(*a == v);
     }
     template <class E2>
+        requires __bits::EqComparableWith<E, E2>
     friend constexpr bool operator==(const expected &a,
                                      const unexpected<E2> &u)
     {
@@ -1210,7 +1226,7 @@ public:
     }
 
     template <class U2, class E2>
-        requires is_void_v<U2>
+        requires is_void_v<U2> && __bits::EqComparableWith<E, E2>
     friend constexpr bool operator==(const expected &a,
                                      const expected<U2, E2> &b)
     {
@@ -1219,6 +1235,7 @@ public:
                static_cast<bool>(a.error() == b.error());
     }
     template <class E2>
+        requires __bits::EqComparableWith<E, E2>
     friend constexpr bool operator==(const expected &a,
                                      const unexpected<E2> &u)
     {

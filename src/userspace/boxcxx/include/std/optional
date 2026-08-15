@@ -30,8 +30,10 @@
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constrained_equality
 #define BOXCXX_OWNS_optional
 #include <__bits/version_optional>
+#include <__bits/version_utility>   // constrained_equality is defined there
 
 namespace std {
 

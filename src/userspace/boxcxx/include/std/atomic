@@ -365,6 +365,15 @@ struct atomic : __atomic_impl::DifferenceType<T> {
                       is_move_constructible_v<T> && is_copy_assignable_v<T> &&
                       is_move_assignable_v<T>,
                   "std::atomic<T> requires a trivially copyable type");
+    // P3323R1: atomic<cv T> is ill-formed. atomic OWNS its object, so a
+    // const one could never be stored to and a volatile one would have the
+    // library reading it more times than the program wrote -- the mistake
+    // it catches is reaching for atomic<const T> when atomic_ref<const T>
+    // was meant.
+    static_assert(!is_const_v<T> && !is_volatile_v<T>,
+                  "std::atomic<T> requires a cv-unqualified T "
+                  "(use std::atomic_ref<const T> to observe someone "
+                  "else's object)");
 
     using value_type = T;
 
@@ -936,198 +945,292 @@ private:
 // Atomic operations applied to a plain object the caller owns — the
 // BoxOS-native fit for Bay shared-memory cells. Precondition: the
 // referenced object is aligned to required_alignment for its lifetime.
+//
+// T may be volatile-qualified (P3323R1), which is what makes this usable
+// over an MMIO cell: the operations are the same, and the static_assert
+// below refuses the case where they would not be atomic at all. A
+// const-qualified T selects the read-only specialization further down.
 
 template <typename T>
-struct atomic_ref : __atomic_impl::DifferenceType<T> {
-    static_assert(is_trivially_copyable_v<T>,
+struct atomic_ref : __atomic_impl::DifferenceType<remove_cv_t<T>> {
+    static_assert(is_trivially_copyable_v<remove_cv_t<T>>,
                   "std::atomic_ref<T> requires a trivially copyable type");
 
-    using value_type = T;
+    using value_type = remove_cv_t<T>;
 
     static constexpr size_t required_alignment =
-        __atomic_impl::StorageAlign(sizeof(T), alignof(T));
+        __atomic_impl::StorageAlign(sizeof(value_type), alignof(value_type));
     static constexpr bool is_always_lock_free =
-        __atomic_impl::LockFreeSize(sizeof(T));
+        __atomic_impl::LockFreeSize(sizeof(value_type));
+
+    // [atomics.ref.generic]: a volatile object can only be operated on
+    // atomically if the operations are lock-free -- a lock-pool fallback
+    // would read and write the object more than once, which is exactly
+    // what volatile forbids.
+    static_assert(is_always_lock_free || !is_volatile_v<T>,
+                  "atomic operations on a volatile T must be lock-free");
 
     explicit atomic_ref(T &obj) noexcept : __p(&obj) {}
+    // LWG 4472: without this an rvalue would bind to the const
+    // specialization's reference parameter and leave the ref pointing at a
+    // temporary. Declared on every specialization so the diagnosis is the
+    // same one everywhere.
+    explicit atomic_ref(T &&) = delete;
     atomic_ref(const atomic_ref &) noexcept = default;
     atomic_ref &operator=(const atomic_ref &) = delete;
 
+    // P3323R1's qualification conversion: atomic_ref<T> -> atomic_ref<const
+    // T> / <volatile T> / <const volatile T>, and nothing else. The
+    // array-pointer spelling is the standard's own, and it is what rejects
+    // the reverse direction (const T* does not convert to T*) as well as
+    // unrelated types.
+    template <typename U>
+        requires is_convertible_v<U (*)[1], T (*)[1]>
+    atomic_ref(atomic_ref<U> other) noexcept : __p(other.address())
+    {
+    }
+
+    // P2835R6: the address the reference was built over. Returns T*, not
+    // value_type* -- a ref over a const object hands back a const pointer,
+    // which is the whole point of it being observable.
+    T *address() const noexcept { return __p; }
+
     bool is_lock_free() const noexcept { return is_always_lock_free; }
 
-    void store(T v, memory_order m = memory_order_seq_cst) const noexcept
+    void store(value_type v, memory_order m = memory_order_seq_cst) const noexcept
     {
         __atomic_impl::Store(__p, v, m);
     }
-    T load(memory_order m = memory_order_seq_cst) const noexcept
+    value_type load(memory_order m = memory_order_seq_cst) const noexcept
     {
-        return __atomic_impl::Load<T, T>(__p, m);
+        return __atomic_impl::Load<T, value_type>(__p, m);
     }
-    operator T() const noexcept { return load(); }
-    T operator=(T v) const noexcept
+    operator value_type() const noexcept { return load(); }
+    value_type operator=(value_type v) const noexcept
     {
         store(v);
         return v;
     }
-    T exchange(T v, memory_order m = memory_order_seq_cst) const noexcept
+    value_type exchange(value_type v, memory_order m = memory_order_seq_cst) const noexcept
     {
         return __atomic_impl::Exchange(__p, v, m);
     }
 
-    bool compare_exchange_weak(T &expected, T desired, memory_order success,
+    bool compare_exchange_weak(value_type &expected, value_type desired, memory_order success,
                                memory_order failure) const noexcept
     {
         return __atomic_impl::Cas(__p, expected, desired, true, success,
                                   failure);
     }
     bool compare_exchange_weak(
-        T &expected, T desired,
+        value_type &expected, value_type desired,
         memory_order m = memory_order_seq_cst) const noexcept
     {
         return compare_exchange_weak(expected, desired, m,
                                      __atomic_impl::FailOrder(m));
     }
-    bool compare_exchange_strong(T &expected, T desired, memory_order success,
+    bool compare_exchange_strong(value_type &expected, value_type desired, memory_order success,
                                  memory_order failure) const noexcept
     {
         return __atomic_impl::Cas(__p, expected, desired, false, success,
                                   failure);
     }
     bool compare_exchange_strong(
-        T &expected, T desired,
+        value_type &expected, value_type desired,
         memory_order m = memory_order_seq_cst) const noexcept
     {
         return compare_exchange_strong(expected, desired, m,
                                        __atomic_impl::FailOrder(m));
     }
 
-    void wait(T old, memory_order m = memory_order_seq_cst) const noexcept
+    void wait(value_type old, memory_order m = memory_order_seq_cst) const noexcept
     {
-        __atomic_impl::Wait<T, T>(__p, old, m);
+        __atomic_impl::Wait<T, value_type>(__p, old, m);
     }
     void notify_one() const noexcept { __boxcxx_atomic_notify(__p, false); }
     void notify_all() const noexcept { __boxcxx_atomic_notify(__p, true); }
 
-    // integral / floating extras, same constraint style as atomic<T>
-    T fetch_add(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    // integral / floating extras, same constraint style as atomic<value_type>
+    value_type fetch_add(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_fetch_add(__p, d, __atomic_impl::Order(m));
     }
-    T fetch_sub(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_sub(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_fetch_sub(__p, d, __atomic_impl::Order(m));
     }
-    T fetch_and(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_and(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_fetch_and(__p, d, __atomic_impl::Order(m));
     }
-    T fetch_or(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_or(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_fetch_or(__p, d, __atomic_impl::Order(m));
     }
-    T fetch_xor(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_xor(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_fetch_xor(__p, d, __atomic_impl::Order(m));
     }
-    // P0493R5 ([atomics.ref.int]) — the same loop as atomic<T>'s, and this is
+    // P0493R5 ([atomics.ref.int]) — the same loop as atomic<value_type>'s, and this is
     // where a lockless high-water mark over a caller-owned cell actually
     // reaches for it.
-    T fetch_max(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_max(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_impl::FetchMinMax<true>(__p, d, m);
     }
-    T fetch_min(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type fetch_min(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_impl::FetchMinMax<false>(__p, d, m);
     }
-    T fetch_add(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires is_floating_point_v<T>
+    value_type fetch_add(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires is_floating_point_v<value_type>
     {
-        T old = load(memory_order_relaxed);
+        value_type old = load(memory_order_relaxed);
         while (!compare_exchange_weak(old, old + d, m, memory_order_relaxed)) {
         }
         return old;
     }
-    T fetch_sub(T d, memory_order m = memory_order_seq_cst) const noexcept
-        requires is_floating_point_v<T>
+    value_type fetch_sub(value_type d, memory_order m = memory_order_seq_cst) const noexcept
+        requires is_floating_point_v<value_type>
     {
-        T old = load(memory_order_relaxed);
+        value_type old = load(memory_order_relaxed);
         while (!compare_exchange_weak(old, old - d, m, memory_order_relaxed)) {
         }
         return old;
     }
 
-    T operator++() const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator++() const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
-        return __atomic_add_fetch(__p, T(1), __ATOMIC_SEQ_CST);
+        return __atomic_add_fetch(__p, value_type(1), __ATOMIC_SEQ_CST);
     }
-    T operator++(int) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator++(int) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
-        return fetch_add(T(1));
+        return fetch_add(value_type(1));
     }
-    T operator--() const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator--() const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
-        return __atomic_sub_fetch(__p, T(1), __ATOMIC_SEQ_CST);
+        return __atomic_sub_fetch(__p, value_type(1), __ATOMIC_SEQ_CST);
     }
-    T operator--(int) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator--(int) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
-        return fetch_sub(T(1));
+        return fetch_sub(value_type(1));
     }
     // [atomics.ref.int] and [atomics.ref.float] give atomic_ref the same
     // compound-assignment set as atomic. All five were absent, and with them
-    // difference_type (now inherited, exactly as atomic<T> inherits it), so
+    // difference_type (now inherited, exactly as atomic<value_type> inherits it), so
     // atomic_ref<int>::difference_type was ill-formed and `r += 1` on a
     // reference to a caller-owned cell -- the Bay shared-cell shape this type
     // exists for -- did not compile.
-    T operator+=(T d) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator+=(value_type d) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_add_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
-    T operator+=(T d) const noexcept
-        requires is_floating_point_v<T>
+    value_type operator+=(value_type d) const noexcept
+        requires is_floating_point_v<value_type>
     {
         return fetch_add(d) + d;
     }
-    T operator-=(T d) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator-=(value_type d) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_sub_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
-    T operator-=(T d) const noexcept
-        requires is_floating_point_v<T>
+    value_type operator-=(value_type d) const noexcept
+        requires is_floating_point_v<value_type>
     {
         return fetch_sub(d) - d;
     }
-    T operator&=(T d) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator&=(value_type d) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_and_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
-    T operator|=(T d) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator|=(value_type d) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_or_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
-    T operator^=(T d) const noexcept
-        requires(is_integral_v<T> && !is_same_v<T, bool>)
+    value_type operator^=(value_type d) const noexcept
+        requires(is_integral_v<value_type> && !is_same_v<value_type, bool>)
     {
         return __atomic_xor_fetch(__p, d, __ATOMIC_SEQ_CST);
     }
 
 private:
     T *__p;
+};
+
+// ── atomic_ref<const T> ─────────────────────────────────────────────────
+// P3323R1's read-only reference: the operations that do not modify the
+// object, and only those. This is not a lesser atomic_ref -- it is the one
+// that fits a cell some other cabin owns and this one only observes, and
+// the reason it exists as a type rather than as a convention is that the
+// compiler now refuses store/exchange/fetch_* on it instead of the
+// reviewer having to.
+//
+// const volatile lands here too (T is then volatile-qualified), which is
+// the shape of a hardware register that is read but never written.
+//
+// notify_one/notify_all are deliberately absent, matching the standard: a
+// notification announces a change, and nothing reachable through this
+// reference can make one.
+
+template <typename T>
+struct atomic_ref<const T> {
+    static_assert(is_trivially_copyable_v<remove_cv_t<T>>,
+                  "std::atomic_ref<T> requires a trivially copyable type");
+
+    using value_type = remove_cv_t<T>;
+
+    static constexpr size_t required_alignment =
+        __atomic_impl::StorageAlign(sizeof(value_type), alignof(value_type));
+    static constexpr bool is_always_lock_free =
+        __atomic_impl::LockFreeSize(sizeof(value_type));
+
+    static_assert(is_always_lock_free || !is_volatile_v<T>,
+                  "atomic operations on a volatile T must be lock-free");
+
+    explicit atomic_ref(const T &obj) noexcept : __p(&obj) {}
+    explicit atomic_ref(const T &&) = delete;   // LWG 4472
+    atomic_ref(const atomic_ref &) noexcept = default;
+    atomic_ref &operator=(const atomic_ref &) = delete;
+
+    template <typename U>
+        requires is_convertible_v<U (*)[1], const T (*)[1]>
+    atomic_ref(atomic_ref<U> other) noexcept : __p(other.address())
+    {
+    }
+
+    const T *address() const noexcept { return __p; }
+
+    bool is_lock_free() const noexcept { return is_always_lock_free; }
+
+    value_type load(memory_order m = memory_order_seq_cst) const noexcept
+    {
+        return __atomic_impl::Load<const T, value_type>(__p, m);
+    }
+    operator value_type() const noexcept { return load(); }
+
+    void wait(value_type old,
+              memory_order m = memory_order_seq_cst) const noexcept
+    {
+        __atomic_impl::Wait<const T, value_type>(__p, old, m);
+    }
+
+private:
+    const T *__p;
 };
 
 template <typename T>
@@ -1139,8 +1242,11 @@ struct atomic_ref<T *> {
     static constexpr bool is_always_lock_free  = true;
 
     explicit atomic_ref(T *&obj) noexcept : __p(&obj) {}
+    explicit atomic_ref(T *&&) = delete;   // LWG 4472
     atomic_ref(const atomic_ref &) noexcept = default;
     atomic_ref &operator=(const atomic_ref &) = delete;
+
+    T **address() const noexcept { return __p; }
 
     bool is_lock_free() const noexcept { return true; }
 
@@ -1585,6 +1691,26 @@ using atomic_int32_t  = atomic<int32_t>;
 using atomic_uint32_t = atomic<uint32_t>;
 using atomic_int64_t  = atomic<int64_t>;
 using atomic_uint64_t = atomic<uint64_t>;
+
+// [atomics.syn] lists the least/fast families too, and has since C++11;
+// they were simply missing here until now. <stdatomic.h> re-exports the
+// whole set into the global namespace, which is how the gap surfaced.
+using atomic_int_least8_t    = atomic<int_least8_t>;
+using atomic_uint_least8_t   = atomic<uint_least8_t>;
+using atomic_int_least16_t   = atomic<int_least16_t>;
+using atomic_uint_least16_t  = atomic<uint_least16_t>;
+using atomic_int_least32_t   = atomic<int_least32_t>;
+using atomic_uint_least32_t  = atomic<uint_least32_t>;
+using atomic_int_least64_t   = atomic<int_least64_t>;
+using atomic_uint_least64_t  = atomic<uint_least64_t>;
+using atomic_int_fast8_t     = atomic<int_fast8_t>;
+using atomic_uint_fast8_t    = atomic<uint_fast8_t>;
+using atomic_int_fast16_t    = atomic<int_fast16_t>;
+using atomic_uint_fast16_t   = atomic<uint_fast16_t>;
+using atomic_int_fast32_t    = atomic<int_fast32_t>;
+using atomic_uint_fast32_t   = atomic<uint_fast32_t>;
+using atomic_int_fast64_t    = atomic<int_fast64_t>;
+using atomic_uint_fast64_t   = atomic<uint_fast64_t>;
 
 using atomic_intptr_t  = atomic<intptr_t>;
 using atomic_uintptr_t = atomic<uintptr_t>;

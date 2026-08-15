@@ -11,6 +11,7 @@
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_apply
 #define BOXCXX_OWNS_constexpr_tuple
+#define BOXCXX_OWNS_constrained_equality
 #define BOXCXX_OWNS_make_from_tuple
 #define BOXCXX_OWNS_tuple_element_t
 #include <__bits/version_tuple>
@@ -719,8 +720,13 @@ constexpr Cat TupleCmp(const T &a, const U &b, index_sequence<I0, Is...>)
 }
 } // namespace __bits
 
+// P2944R3: the element-wise == must be a valid, boolean-testable
+// expression for EVERY position before this operator exists at all --
+// otherwise equality_comparable<tuple<NoEq>> answers true and the failure
+// surfaces later, inside TupleEq, where no concept can see it.
 template <class... Ts, class... Us>
-    requires(sizeof...(Ts) == sizeof...(Us))
+    requires(sizeof...(Ts) == sizeof...(Us)) &&
+            (__bits::EqComparableWith<Ts, Us> && ...)
 [[nodiscard]] constexpr bool operator==(const tuple<Ts...> &a,
                                         const tuple<Us...> &b)
 {

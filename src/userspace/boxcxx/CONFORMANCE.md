@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **76** — 74 of C++23 (31 absent, §1) plus two of C++26, `<inplace_vector>` and `<debugging>` |
-| Internal implementation leaves (`include/std/__bits/`) | 110 |
+| Standard headers provided | **79** — 75 of C++23 (30 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 114 |
 | Header source | ~80 000 lines |
-| Feature-test macros defined | 186 (164 C++23 + 22 C++26) |
+| Feature-test macros defined | 194 — 154 at their C++23 value, 40 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 166 phases, 4 946 runtime checks, 1 601 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 195 phases (176 of them the numbered `PhaseN` series), 5 050 runtime checks, 1 670 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -51,10 +51,15 @@ here it is: headers and leaves are `ls -1` of `include/std` and
 translation unit containing only `#include <version>`; phases are `Phase*();`
 call sites in `main`; checks and `static_assert`s are occurrences of those two
 tokens in `cxxtest.cpp`. `tools/cxx_ftm_audit.sh` re-derives the macro count and
-checks it against [version.syn] on every run. The phase count moved DOWN at Ф33
-(178 → 166) without a phase being removed: the older figure had drifted from the
-rule, which counts `Phase*();` call sites in `main` and finds exactly as many as
-there are `void PhaseN()` definitions.
+checks it against [version.syn] on every run.
+
+The phase count has drifted twice, in both directions, so it is now stated
+with the rule that produces it: `Phase*();` call sites in `main`, of which
+there are exactly as many as there are phase definitions. That is **195**. The
+166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
+alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
+other suffixed ones -- so both numbers are given above and neither can drift
+without the other contradicting it.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -82,27 +87,32 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (31)
+## 1.1 Headers that do not exist (30)
 
-74 of the C++23 headers are provided and 31 are absent, which accounts for the
-whole C++23 header list apart from the deprecated `<codecvt>`. Two C++26 headers
-are provided on top of that — `<inplace_vector>` (§2) and `<debugging>` (§2) —
-so the tree holds 76 standard headers in all.
+75 of the C++23 headers are provided and 30 are absent, which accounts for the
+whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
+headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 79 standard
+headers in all.
 
-### C library wrappers — 18
+### C library wrappers — 17
 
 `<cassert>` `<cctype>` `<cerrno>` `<cfenv>` `<cfloat>` `<cinttypes>`
 `<climits>` `<clocale>` `<csetjmp>` `<csignal>` `<cstdarg>` `<cstdio>`
-`<cstdlib>` `<cstring>` `<cuchar>` `<cwchar>` `<cwctype>` `<stdatomic.h>`
+`<cstdlib>` `<cstring>` `<cuchar>` `<cwchar>` `<cwctype>`
 
 BoxOS has no libc. Userspace links `boxlib`, the native BoxOS library, whose
 vocabulary is Manifests, Crates, Touch and TagFS rather than POSIX. A `<cstdio>`
 would have to invent a `FILE*` that nothing below it implements.
 
-`<stdatomic.h>` belongs to this group rather than to the atomics: C++23 specifies
-it as a compatibility header that makes `_Atomic(T)` mean `std::atomic<T>`. boxcxx
-does not provide it, and the compiler's C version is not usable from C++
-(`_Atomic` is not a C++ type specifier). `<atomic>` itself is fully implemented.
+`<stdatomic.h>` used to be listed here as absent. It is **provided** as of Ф34:
+it is a pure using-declaration header over `<atomic>`, so `_Atomic(T)` means
+`std::atomic<T>` and every name [atomics.syn] declares is reachable from the
+global namespace — there is no second implementation to keep in step. Writing
+it is what surfaced the missing `atomic_int_least*_t` / `atomic_int_fast*_t`
+aliases, which [atomics.syn] has listed since C++11 and `<atomic>` never had.
+The two C23 headers C++26 adopts, `<stdbit.h>` and `<stdckdint.h>`, are
+provided for the same reason and on the same terms (§2).
 
 Two of the C wrappers **are** provided — `<cstddef>` and `<cstdint>` — because
 they are pure type and macro headers with no runtime behind them. Independently,
@@ -150,16 +160,18 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **186** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **194** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are thirty so far.
+  section; there are forty so far, measured rather than counted by hand: every
+  macro whose value here exceeds what libstdc++ 16.1 reports at `-std=c++23`,
+  plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 186 macros × 76 headers by
+  checked over the full cross-product of 194 macros × 79 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -173,7 +185,7 @@ the whole set, not sampled:
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 153 of the 186 macros are also
+- **The converse does not hold, and cannot.** 158 of the 194 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -188,10 +200,14 @@ the whole set, not sampled:
   macros live in headers that half the library includes (`<utility>`,
   `<functional>`, `<type_traits>`, `<optional>`, `<ranges>`, `<string>`), and
   the other five do not leak at all because nothing else includes their
-  headers.
+  headers. Ф34 re-pinned it 153 → 158 on the same accounting: `constrained_
+  equality`, `algorithm_default_value_type`, `copyable_function`,
+  `smart_ptr_owner_equality` and `format_uchar` each own a widely-included
+  header; `stdatomic_h`, `stdbit_h` and `stdckdint_h` leak nowhere, because no
+  header in the tree includes a C-compatibility header.
 
-**21 of the C++23 macros are not defined**, and `<version>` lists every one by
-name with its specific reason — that list, not this section, is the authoritative
+**18 of the macros [version.syn] names are not defined**, and `<version>` lists
+every one by name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
 checking that the headline function exists. That has two consequences worth
@@ -206,10 +222,15 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of the 21, nine belong to features whose owning header does not exist at all
-(`execution`, `filesystem`, `mdspan`, `spanstream`, `stacktrace`, `stdatomic.h`,
-`syncbuf`, plus `modules` and `parallel_algorithm`, which follow from two of
-them); the rest belong to headers that exist. The in-tree suite pins the absences
+Of those, the largest single group is the freestanding-subset markers
+(`__cpp_lib_freestanding_*`): they do not name a feature at all but an
+assertion that a header meets the standard's freestanding subset, which is a
+separate audit against [compliance] and has not been done. `__cpp_lib_ratio`
+and `__cpp_lib_out_ptr`'s C++26 value are held back for the same reason. The
+rest belong to features whose owning header does not exist (`execution`,
+`filesystem`, `mdspan`, `spanstream`, `stacktrace`, `syncbuf`) or to
+whole-clause requirements relaxations (`__cpp_lib_ranges`,
+`__cpp_lib_algorithm_iterator_requirements`). The in-tree suite pins the absences
 as well as the values, so a macro cannot quietly appear — and when one is closed,
 the guard fires and forces the pin to be flipped in the same commit.
 
@@ -303,6 +324,16 @@ nothing has been found since.
 
 ## `<algorithm>`
 
+- `✓` Added in Ф34: **P2248R8 default value types.** Every algorithm that takes
+  a value now defaults that parameter's type from the iterator (or, for the
+  projected ranges forms, from `projected_value_t`), so `ranges::find(v, {})`
+  and `std::fill(f, l, {})` name the element type once instead of twice. Eight
+  headers co-own `__cpp_lib_algorithm_default_value_type`; the containers'
+  `std::erase(c, {})` is part of it.
+- `✓` Closed by the same work: **`ranges::replace` and `ranges::replace_copy`
+  forced the searched-for and written values to be the SAME type.**
+  [alg.replace] has spelled them `T1` and `T2` since C++20, so
+  `ranges::replace(v, 1, 9.5)` over a `vector<double>` did not compile.
 - `✓` Closed in Ф31e-b-1: `mismatch` had no four-iterator overloads — the unsafe
   shape N3346 added them to replace, where the second range's end is never
   consulted. The call was not silently accepted, but the diagnostic was poor: the
@@ -354,6 +385,19 @@ nothing has been found since.
 
 ## `<atomic>`
 
+- `✓` Added in Ф34: **`atomic_ref<const T>` and `atomic_ref<volatile T>`**
+  (P3323R1) and `address()` (P2835R6). The read-only form carries exactly the
+  operations that do not modify — `load`, `wait`, `is_lock_free`, `address`,
+  `operator value_type` — so a cell another cabin owns and this one only
+  observes is a *type*, not a convention, and `store` on it is a compile error
+  rather than a review comment. The volatile form is the MMIO shape and keeps
+  the full set; a `static_assert` refuses it when the operations would not be
+  lock-free, since a lock-pool fallback reads the object more times than the
+  program wrote. `atomic<cv T>` is now ill-formed, as the same paper requires.
+- `✓` Closed in Ф34: the **`atomic_int_least*_t` / `atomic_int_fast*_t` alias
+  families were missing entirely**, all sixteen of them. [atomics.syn] has listed
+  them since C++11; writing `<stdatomic.h>`, which re-exports the whole set, is
+  what surfaced it.
 - `✓` Closed in Ф31e-d: **the volatile half of the arithmetic surface did not
   exist.** [atomics.types.int], [atomics.types.float] and [atomics.types.pointer]
   each declare every compound assignment and every `++`/`--` twice, volatile and
@@ -551,6 +595,19 @@ nothing has been found since.
   the `<=>` overloads the paper asks for were re-measured before the macro was
   released, rather than taken from the note claiming they were there.
 
+## `<complex>`
+
+- `✓` Added in Ф34: the **tuple protocol** (P2819R2) — `tuple_size`,
+  `tuple_element` and four `get<I>` overloads. Unlike `integer_sequence`'s
+  protocol in `<utility>`, this one puts `complex` INTO the tuple-like set, so a
+  `complex` is a valid source for `pair`/`tuple`'s tuple-like constructor and for
+  `views::elements`. `get<>` returns a reference to the part, which is the whole
+  point: `real()`/`imag()` return by value and always have.
+- `~` The accessor the four `get` overloads go through, `__part(size_t)`, is a
+  public member with a reserved name, for the same reason libstdc++'s
+  `__get_part` is: a free function template cannot be befriended without
+  repeating `complex`'s own requires-clause on every declaration.
+
 ## `<debugging>`
 
 - `~` `is_debugger_present()` always returns `false`, and that is the true
@@ -646,6 +703,14 @@ nothing has been found since.
 
 ## `<functional>`
 
+- `✓` Added in Ф34: **`std::copyable_function`** (P2548R6), all twelve
+  cv/ref/noexcept specializations. It is the type `std::function` should have
+  been: the qualifiers are part of the type, so a `copyable_function<void()
+  const>` accepts only targets callable through a const reference — where
+  `std::function`'s `const` operator() calls a mutable target anyway — and there
+  is no `target()`/`target_type()`, which is what keeps the whole type free of
+  RTTI. A heap-held target is deep-copied, never shared: sharing would make two
+  functions one, and a non-const row may mutate.
 - `✓` Closed in Ф31e-g-3: P2655R3's two `basic_common_reference` specializations
   for `reference_wrapper` were absent, so
   `common_reference_t<reference_wrapper<int>&, int&>` had **no type at all** —
@@ -711,6 +776,13 @@ nothing has been found since.
 
 ## `<iterator>`
 
+- `✓` Added in Ф34: **`basic_const_iterator`'s two conversion operators**
+  (P2836R1). Without them a const iterator over a container's iterator could not
+  be handed back to that container — `v.erase(ci)` did not compile, because
+  `vector::const_iterator` is a different type and the only bridge, the
+  underlying iterator's own conversion, was hidden behind `base()`. The
+  constant-iterator requirement on the target is what stops the conversion from
+  running the other way and undoing the const.
 - `✓` Closed in Ф31e-g: `std::empty` and `std::data` had no `initializer_list`
   overloads. The generic ones cannot cover it — `initializer_list` has
   `begin`/`end`/`size` but no `empty()` and no `data()` member — so
@@ -816,6 +888,40 @@ nothing has been found since.
 
 ## `<memory>`
 
+- `✓` Closed in Ф34, and it was a `constexpr` that had never been true: **all ten
+  `uninitialized_*` algorithms were marked `constexpr` and none of them worked in
+  a constant expression.** Each built its element with a bare placement-new,
+  which is a constant expression only inside `std::construct_at`, so the first
+  element of the first constant-evaluated call failed. They now construct through
+  `construct_at`, and the suite calls every one of them from a `static_assert`
+  (phase173). `__cpp_lib_raw_memory_algorithms` carries 202411L as a result.
+- `✓` Closed in Ф34, one level down and the same defect: **`ranges::construct_at`
+  was `constexpr` and unusable in a constant expression.** GCC accepts a
+  placement-new in constant evaluation only inside a function it recognises by
+  name as `std::construct_at`; `ranges::construct_at` is a call operator on a
+  type in `std::ranges::__uninit`, which it does not. It now delegates, which is
+  what makes the whole `ranges::uninitialized_*` family constexpr too.
+- `~` One deviation follows from that, and it is the only one: in constant
+  evaluation `uninitialized_default_construct[_n]` VALUE-initializes a
+  non-trivially-default-constructible element where the standard says
+  default-initialize. Default-initialization of a trivial member cannot be
+  expressed in a constant expression without P2747R2's constexpr placement new,
+  and GCC 15.2 reports `__cpp_constexpr 202211L`. No conforming program can
+  observe the difference: reading an indeterminate value during constant
+  evaluation is itself ill-formed, so the only programs that could tell the two
+  apart are ones a conforming implementation must reject anyway. The runtime path
+  is unchanged and still default-initializes.
+- `✓` Closed in Ф34: **`shared_ptr<void>` did not compile at all** — `operator*`
+  was declared `T&` and `operator[]` `element_type&`, and a requires-clause does
+  not stop a member *declaration* from being instantiated with the class, so the
+  most common type-erased owner in the language was a hard "forming reference to
+  void". Both now go through `add_lvalue_reference_t`, which is `void` for
+  `void`: a perfectly good return type for a member no program can call.
+- `✓` Added in Ф34: `owner_hash` / `owner_equal`, and the `owner_hash()` /
+  `owner_equal()` members behind them (P1901R2). `owner_less` made a shared_ptr
+  usable as a `map` key; only these make it usable as an `unordered_map` key, and
+  a `weak_ptr` can now be a lookup key without being locked first — locking it to
+  look it up would resurrect the object the cache is deciding about.
 - `✓` Closed in Ф31e-b-1: `owner_less<void>` had no `is_transparent` member, so
   its four heterogeneous call operators were unreachable through an associative
   container — `map<shared_ptr<T>, …, owner_less<>>::find(weak_ptr)` did not
@@ -1244,8 +1350,47 @@ nothing has been found since.
   first half (measured in its `<sstream>`), so boxcxx rejects a source the
   standard also means to keep out of these overloads and libstdc++ accepts.
 
+## `<stdbit.h>` and `<stdckdint.h>`
+
+The two C23 headers C++26 adopts, added in Ф34. Both are thin: `<stdbit.h>` is
+fourteen families of one-line wrappers over `<bit>`, `<stdckdint.h>` is three
+functions over `__builtin_*_overflow`. Two things are worth recording.
+
+- `!` **`stdc_bit_ceil` disagrees with libstdc++ 16.1, and the disagreement is
+  measured.** The unrepresentable case returns 0 rather than being undefined —
+  but "unrepresentable" means strictly *above* the top bit, and the top bit
+  itself is a power of two that fits. libstdc++ tests `value & msb` and so
+  returns 0 for `stdc_bit_ceil_uc(0x80)` and `stdc_bit_ceil_ui(0x80000000)`,
+  where C23 7.18.15.3 asks for the value back. boxcxx tests `value > msb`. Both
+  results were printed from a host binary, not read off a page.
+- `~` Nothing in either header is `constexpr`, even though every `std::`
+  function underneath is. [constexpr.functions] forbids declaring a standard
+  library signature `constexpr` unless the standard says so, and
+  [stdbit.h.syn] does not. A caller who wants the constant-expression form has
+  `<bit>`.
+
+## `<stdatomic.h>`
+
+- `~` Provided in Ф34 as a pure using-declaration header over `<atomic>`:
+  `_Atomic(T)` expands to `::std::atomic<T>`, and every name [atomics.syn]
+  declares is re-exported into the global namespace. There is no second
+  implementation — C code carrying atomics into BoxOS's C++ userspace gets the
+  same objects the C++ side uses. The `ATOMIC_*_LOCK_FREE` and
+  `ATOMIC_FLAG_INIT` macros need no re-export: `<atomic>` already defines them
+  as macros, which have no namespace.
+
 ## `<string>`
 
+- `✓` Closed in Ф34: **`s + sv` did not compile.** P2591R5's four
+  `basic_string` + `basic_string_view` operators are provided;
+  `type_identity_t` on the view parameter is what keeps them from hijacking
+  `s + "literal"`, which must still pick the `const charT*` overload.
+- `✓` Closed in Ф34: the **four `operator+` overloads whose RIGHT operand is the
+  rvalue** were missing ([string.op.plus] lists twelve; boxcxx had eight). Every
+  call still compiled by falling back to the `const&`/`const&` form, so nothing
+  broke — what was lost was the point of the overloads: `"x" + std::move(s)` now
+  prepends into the buffer that is about to be discarded instead of allocating a
+  third string.
 - `✓` Closed in Ф31e-g: `resize_and_overwrite` (P1072R10) did not exist. It is
   the one way to grow a string and fill the raw tail without first
   value-initializing characters the caller is about to overwrite. A callable
@@ -1376,6 +1521,22 @@ nothing has been found since.
 
 ## `<utility>`
 
+- `✓` Closed in Ф34: **`pair`'s comparisons were same-type only**, so
+  `pair<int,double> == pair<long,float>` did not compile and neither did the
+  `<=>`. [pairs.spec] has specified both as heterogeneous since C++11.
+- `✓` Closed in Ф34 (P2944R3): the `operator==` of `pair`, `tuple`, `variant`
+  and `expected` were **unconstrained**, so `equality_comparable<tuple<T>>`
+  answered *true* for a `T` with no `operator==` and the failure arrived later,
+  inside the operator, where no concept could see it. `optional` was already
+  constrained. `expected`'s value-comparison overload also needed
+  [expected.object.eq]'s "not a specialization of expected" constraint, without
+  which the check re-enters itself — GCC reports that as "satisfaction of atomic
+  constraint depends on itself", and the recursion is real, not a quirk.
+- `✓` Added in Ф34: structured bindings for `integer_sequence`
+  (`tuple_size`/`tuple_element`/`get`). It is deliberately NOT tuple-like:
+  [tuple.like] stays the closed set, so `pair`'s tuple-like constructor still
+  rejects it. `get` returns by value, and `tuple_element` does not add `const`
+  for a const sequence — the elements are values, not members.
 - `~` `in_range<char>(1)` compiles. [utility.intcmp]/5 makes the integer-comparison
   functions ill-formed for `char`, `bool` and the character types; both reference
   libraries diagnose it.

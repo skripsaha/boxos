@@ -85,6 +85,11 @@
 // one to be assigned to a non-noexcept one. Both are implemented; the
 // second is the reason this says 202604L where libstdc++ 16.1 says
 // 202603L.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_copyable_function)) && \
+    !defined(__cpp_lib_copyable_function)
+#  define __cpp_lib_copyable_function 202306L   // P2548R6
+#endif
+#undef BOXCXX_OWNS_copyable_function
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_function_ref)) && \
     !defined(__cpp_lib_function_ref)
 #  define __cpp_lib_function_ref 202604L

@@ -64,6 +64,7 @@ __cpp_lib_constexpr_typeinfo|typeinfo
 __cpp_lib_constexpr_utility|utility
 __cpp_lib_constrained_equality|utility,tuple,optional,variant,expected
 __cpp_lib_containers_ranges|vector,list,forward_list,map,set,unordered_map,unordered_set,deque,queue,stack,string
+__cpp_lib_copyable_function|functional
 __cpp_lib_coroutine|coroutine
 __cpp_lib_debugging|debugging
 __cpp_lib_destroying_delete|new
@@ -76,6 +77,7 @@ __cpp_lib_expected|expected
 __cpp_lib_flat_map|flat_map
 __cpp_lib_flat_set|flat_set
 __cpp_lib_format_ranges|format
+__cpp_lib_format_uchar|format
 __cpp_lib_forward_like|utility
 __cpp_lib_freestanding_charconv|charconv
 __cpp_lib_freestanding_cstdlib|cstdlib,cmath
@@ -191,6 +193,9 @@ __cpp_lib_ssize|iterator
 __cpp_lib_sstream_from_string_view|sstream
 __cpp_lib_start_lifetime_as|memory
 __cpp_lib_starts_ends_with|string,string_view
+__cpp_lib_stdatomic_h|stdatomic.h
+__cpp_lib_stdbit_h|stdbit.h
+__cpp_lib_stdckdint_h|stdckdint.h
 __cpp_lib_string_contains|string,string_view
 __cpp_lib_string_resize_and_overwrite|string
 __cpp_lib_string_subview|string,string_view
@@ -205,7 +210,7 @@ __cpp_lib_to_underlying|utility
 __cpp_lib_transformation_trait_aliases|type_traits
 __cpp_lib_transparent_operators|memory,functional
 __cpp_lib_tuple_element_t|tuple
-__cpp_lib_tuple_like|utility,tuple,map,unordered_map
+__cpp_lib_tuple_like|utility,tuple,map,unordered_map,complex
 __cpp_lib_tuples_by_type|utility,tuple
 __cpp_lib_type_identity|type_traits
 __cpp_lib_type_trait_variable_templates|type_traits

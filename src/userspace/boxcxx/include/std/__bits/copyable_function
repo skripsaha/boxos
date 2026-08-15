@@ -1,0 +1,363 @@
+// boxcxx — <__bits/copyable_function>
+// std::copyable_function, the 12 [func.wrap.copy] specializations
+// (cv-qualifier x ref-qualifier x noexcept-specifier), P2548R6.
+//
+// The type std::function should have been. Three things it fixes, and each
+// one is a bug std::function can only paper over:
+//
+//   * const-correctness. std::function's operator() is const and calls a
+//     target it holds by value, so a mutable lambda stored in a const
+//     std::function is called anyway -- the const is a lie. Here the
+//     qualifiers are part of the TYPE: copyable_function<void() const>
+//     accepts only targets callable through a const reference.
+//   * no target()/target_type(). Those are the only members of
+//     std::function that need RTTI, and dropping them is what lets this
+//     type exist unchanged with -fno-rtti.
+//   * a call on an empty object is a precondition violation, not a thrown
+//     bad_function_call. Nothing here allocates an exception to report a
+//     bug in the caller.
+//
+// It shares the small-buffer parameters with std::function,
+// move_only_function and std::any (<__bits/callable_sbo>) and mirrors
+// move_only_function's structure exactly -- one ops table per target type,
+// one macro that stamps out the twelve rows. The one row that differs is
+// Copy: move_only_function has no such op at all, and its absence is what
+// makes that type move-only. Everything else, including the fact that the
+// heap path deep-copies rather than sharing, follows from that.
+#ifndef BOXCXX_BITS_COPYABLE_FUNCTION
+#define BOXCXX_BITS_COPYABLE_FUNCTION
+
+#include <__bits/callable_sbo>
+#include <__bits/invoke>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+#include <utility>
+
+namespace std::__bits {
+
+// ── CofOps: the per-target dispatch table (Move, Copy, Destroy) ─────────
+
+template <class R, class... Args>
+struct CofOps {
+    bool kInline;
+    R    (*Invoke)(void *buf, Args &&...);
+    void (*Copy)(void *dstBuf, const void *srcBuf);
+    void (*Move)(void *dstBuf, void *srcBuf) noexcept;
+    void (*Destroy)(void *buf) noexcept;
+};
+
+template <class F>
+inline F &CofRecover(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        return *launder(reinterpret_cast<F *>(buf));
+    } else {
+        F *heapPtr = *reinterpret_cast<F **>(buf);
+        return *launder(heapPtr);
+    }
+}
+
+// The heap case allocates a SECOND target rather than sharing the first.
+// Sharing would make two copyable_functions alias one mutable target, and
+// a non-const row is allowed to mutate it.
+template <class F>
+void CofCopyThunk(void *dstBuf, const void *srcBuf)
+{
+    if constexpr (FitsInline<F>) {
+        const F &srcF = *launder(reinterpret_cast<const F *>(srcBuf));
+        ::new (dstBuf) F(srcF);
+    } else {
+        F *const *srcSlot = reinterpret_cast<F *const *>(srcBuf);
+        *reinterpret_cast<F **>(dstBuf) = ::new F(*launder(*srcSlot));
+    }
+}
+
+template <class F>
+void CofMoveThunk(void *dstBuf, void *srcBuf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        F &srcF = *launder(reinterpret_cast<F *>(srcBuf));
+        ::new (dstBuf) F(static_cast<F &&>(srcF));
+        srcF.~F();
+    } else {
+        *reinterpret_cast<F **>(dstBuf) = *reinterpret_cast<F **>(srcBuf);
+    }
+}
+
+template <class F>
+void CofDestroyThunk(void *buf) noexcept
+{
+    if constexpr (FitsInline<F>) {
+        launder(reinterpret_cast<F *>(buf))->~F();
+    } else {
+        delete *reinterpret_cast<F **>(buf);
+    }
+}
+
+// FD is the stored target's decayed type; Cast is the row's inv-quals
+// (the exact cv/ref cast INVOKE uses -- distinct per row, see CofCallable).
+template <class FD, class Cast, class R, class... Args>
+R CofInvokeThunk(void *buf, Args &&...args)
+{
+    return invoke_r<R>(static_cast<Cast>(CofRecover<FD>(buf)),
+                       forward<Args>(args)...);
+}
+
+template <class FD, class Cast, class R, class... Args>
+const CofOps<R, Args...> *CofOpsFor() noexcept
+{
+    static constexpr CofOps<R, Args...> table{
+        FitsInline<FD>, &CofInvokeThunk<FD, Cast, R, Args...>,
+        &CofCopyThunk<FD>, &CofMoveThunk<FD>, &CofDestroyThunk<FD>};
+    return &table;
+}
+
+// ── CofBase: storage + verbs shared by all 12 specializations ───────────
+
+template <class R, class... Args>
+class CofBase {
+protected:
+    alignas(kCallableSboAlign) unsigned char __buf[kCallableSboSize];
+    const CofOps<R, Args...> *__ops = nullptr;
+
+    template <class TargetType, class Cast, class... CtorArgs>
+    void Emplace(CtorArgs &&...args)
+    {
+        __ops = CofOpsFor<TargetType, Cast, R, Args...>();
+        if constexpr (FitsInline<TargetType>)
+            ::new (static_cast<void *>(__buf)) TargetType(forward<CtorArgs>(args)...);
+        else
+            *reinterpret_cast<TargetType **>(__buf) =
+                ::new TargetType(forward<CtorArgs>(args)...);
+    }
+
+    void Reset() noexcept
+    {
+        if (__ops) {
+            __ops->Destroy(__buf);
+            __ops = nullptr;
+        }
+    }
+
+    void Swap(CofBase &other) noexcept
+    {
+        if (this == &other) return;
+        alignas(kCallableSboAlign) unsigned char scratch[kCallableSboSize];
+        const CofOps<R, Args...> *opsA = __ops;
+        const CofOps<R, Args...> *opsB = other.__ops;
+        if (opsA) opsA->Move(scratch, __buf);
+        if (opsB) opsB->Move(__buf, other.__buf);
+        if (opsA) opsA->Move(other.__buf, scratch);
+        __ops       = opsB;
+        other.__ops = opsA;
+    }
+
+    bool Engaged() const noexcept { return __ops != nullptr; }
+
+    // Calling this while disengaged is a precondition violation (UB), not
+    // a thrown error -- copyable_function has no bad_function_call path.
+    R Call(Args... args) const
+    {
+        return __ops->Invoke(const_cast<unsigned char *>(__buf),
+                             forward<Args>(args)...);
+    }
+
+    CofBase() noexcept = default;
+
+    // The copy constructor is the whole difference from MofBase, and it is
+    // the one operation here that can throw: the target's own copy
+    // constructor may, and if it does this object must stay empty rather
+    // than half-built. __ops is assigned only after Copy returns.
+    CofBase(const CofBase &other)
+    {
+        if (!other.__ops) return;
+        other.__ops->Copy(__buf, other.__buf);
+        __ops = other.__ops;
+    }
+    CofBase &operator=(const CofBase &other)
+    {
+        if (this == &other) return *this;
+        // Copy into scratch storage FIRST: if the target's copy throws,
+        // this object must keep the value it already had.
+        alignas(kCallableSboAlign) unsigned char scratch[kCallableSboSize];
+        if (other.__ops) other.__ops->Copy(scratch, other.__buf);
+        Reset();
+        if (other.__ops) {
+            other.__ops->Move(__buf, scratch);
+            __ops = other.__ops;
+        }
+        return *this;
+    }
+
+    CofBase(CofBase &&other) noexcept
+    {
+        if (!other.__ops) return;
+        other.__ops->Move(__buf, other.__buf);
+        __ops       = other.__ops;
+        other.__ops = nullptr;
+    }
+    CofBase &operator=(CofBase &&other) noexcept
+    {
+        if (this == &other) return *this;
+        Reset();
+        if (other.__ops) {
+            other.__ops->Move(__buf, other.__buf);
+            __ops       = other.__ops;
+            other.__ops = nullptr;
+        }
+        return *this;
+    }
+
+    ~CofBase() { Reset(); }
+};
+
+// ── constructor SFINAE gate: [func.wrap.copy.ctor]'s is-callable-from ───
+// Identical in shape to MofCallable (see <__bits/move_only_function> for
+// why it takes two forms of the target type), plus the copy-constructible
+// requirement that gives this type its name.
+
+template <class PlainT, class InvT, class R, bool Noex, class... Args>
+inline constexpr bool CofCallable =
+    Noex ? (is_nothrow_invocable_r_v<R, PlainT, Args...> &&
+            is_nothrow_invocable_r_v<R, InvT, Args...>)
+         : (is_invocable_r_v<R, PlainT, Args...> &&
+            is_invocable_r_v<R, InvT, Args...>);
+
+} // namespace std::__bits
+
+namespace std {
+
+template <class T> class copyable_function;
+
+} // namespace std
+
+// ── the 12 specializations (6 cv/ref rows x 2 noexcept) ─────────────────
+// CVQ/REFQ are the row's own qualifiers (pasted verbatim after R(Args...));
+// COREFQ is the coalesced ref-qualifier used for InvT ("&" whenever REFQ is
+// empty or "&", "&&" when REFQ is "&&") -- see [func.wrap.copy.class]'s
+// inv-quals rule this mirrors.
+
+#define BOXCXX_COF_DEFINE(CVQ, REFQ, COREFQ, NOEXQ, NOEXBOOL)                 \
+    template <class R, class... Args>                                        \
+    class copyable_function<R(Args...) CVQ REFQ NOEXQ>                       \
+        : private __bits::CofBase<R, Args...> {                              \
+        template <class XX> using RowPlainT = CVQ XX REFQ;                    \
+        template <class XX> using RowInvT   = CVQ XX COREFQ;                  \
+                                                                              \
+    public:                                                                   \
+        using result_type = R;                                                \
+                                                                              \
+        copyable_function() noexcept                          = default;      \
+        copyable_function(nullptr_t) noexcept {}                              \
+        copyable_function(const copyable_function &)          = default;      \
+        copyable_function(copyable_function &&) noexcept      = default;      \
+                                                                              \
+        template <class F, class FD = decay_t<F>>                             \
+            requires(!is_same_v<FD, copyable_function> &&                     \
+                     !__bits::IsInPlaceType<FD> &&                            \
+                     is_copy_constructible_v<FD> &&                           \
+                     __bits::CofCallable<RowPlainT<FD>, RowInvT<FD>, R,       \
+                                         NOEXBOOL, Args...>)                  \
+        copyable_function(F &&f)                                              \
+        {                                                                     \
+            static_assert(is_constructible_v<FD, F>,                          \
+                          "copyable_function target must be "                 \
+                          "constructible from F");                            \
+            this->template Emplace<FD, RowInvT<FD>>(forward<F>(f));           \
+        }                                                                     \
+                                                                              \
+        template <class T, class... CtorArgs>                                 \
+            requires(is_constructible_v<decay_t<T>, CtorArgs...> &&           \
+                     is_copy_constructible_v<decay_t<T>> &&                   \
+                     __bits::CofCallable<RowPlainT<decay_t<T>>,               \
+                                         RowInvT<decay_t<T>>, R, NOEXBOOL,    \
+                                         Args...>)                            \
+        explicit copyable_function(in_place_type_t<T>, CtorArgs &&...a)       \
+        {                                                                     \
+            static_assert(is_same_v<T, decay_t<T>>,                           \
+                          "copyable_function in_place_type_t<T> requires "    \
+                          "T to already be its own decayed type");            \
+            this->template Emplace<T, RowInvT<T>>(forward<CtorArgs>(a)...);   \
+        }                                                                     \
+                                                                              \
+        template <class T, class U, class... CtorArgs>                        \
+            requires(is_constructible_v<decay_t<T>, initializer_list<U> &,    \
+                                        CtorArgs...> &&                       \
+                     is_copy_constructible_v<decay_t<T>> &&                   \
+                     __bits::CofCallable<RowPlainT<decay_t<T>>,               \
+                                         RowInvT<decay_t<T>>, R, NOEXBOOL,    \
+                                         Args...>)                            \
+        explicit copyable_function(in_place_type_t<T>,                        \
+                                   initializer_list<U> il, CtorArgs &&...a)   \
+        {                                                                     \
+            static_assert(is_same_v<T, decay_t<T>>,                           \
+                          "copyable_function in_place_type_t<T> requires "    \
+                          "T to already be its own decayed type");            \
+            this->template Emplace<T, RowInvT<T>>(il, forward<CtorArgs>(a)...); \
+        }                                                                     \
+                                                                              \
+        template <class F, class FD = decay_t<F>>                             \
+            requires(!is_same_v<FD, copyable_function> &&                     \
+                     !__bits::IsInPlaceType<FD> &&                            \
+                     is_copy_constructible_v<FD> &&                           \
+                     __bits::CofCallable<RowPlainT<FD>, RowInvT<FD>, R,       \
+                                         NOEXBOOL, Args...>)                  \
+        copyable_function &operator=(F &&f)                                   \
+        {                                                                     \
+            copyable_function(forward<F>(f)).swap(*this);                     \
+            return *this;                                                     \
+        }                                                                     \
+                                                                              \
+        copyable_function &operator=(const copyable_function &)  = default;   \
+        copyable_function &operator=(copyable_function &&) noexcept = default; \
+        copyable_function &operator=(nullptr_t) noexcept                      \
+        {                                                                     \
+            this->Reset();                                                    \
+            return *this;                                                     \
+        }                                                                     \
+                                                                              \
+        ~copyable_function() = default;                                       \
+                                                                              \
+        void swap(copyable_function &other) noexcept { this->Swap(other); }   \
+        friend void swap(copyable_function &a, copyable_function &b) noexcept \
+        {                                                                     \
+            a.swap(b);                                                        \
+        }                                                                     \
+                                                                              \
+        explicit operator bool() const noexcept { return this->Engaged(); }   \
+        [[nodiscard]] friend bool operator==(const copyable_function &f,      \
+                                             nullptr_t) noexcept              \
+        {                                                                     \
+            return !f;                                                        \
+        }                                                                     \
+                                                                              \
+        R operator()(Args... args) CVQ REFQ NOEXQ                             \
+        {                                                                     \
+            return this->Call(forward<Args>(args)...);                        \
+        }                                                                     \
+    };
+
+namespace std {
+
+BOXCXX_COF_DEFINE(     ,   ,  &,          , false)
+BOXCXX_COF_DEFINE(     ,   ,  &, noexcept , true)
+BOXCXX_COF_DEFINE(const,   ,  &,          , false)
+BOXCXX_COF_DEFINE(const,   ,  &, noexcept , true)
+BOXCXX_COF_DEFINE(     ,  &,  &,          , false)
+BOXCXX_COF_DEFINE(     ,  &,  &, noexcept , true)
+BOXCXX_COF_DEFINE(const,  &,  &,          , false)
+BOXCXX_COF_DEFINE(const,  &,  &, noexcept , true)
+BOXCXX_COF_DEFINE(     , &&, &&,          , false)
+BOXCXX_COF_DEFINE(     , &&, &&, noexcept , true)
+BOXCXX_COF_DEFINE(const, &&, &&,          , false)
+BOXCXX_COF_DEFINE(const, &&, &&, noexcept , true)
+
+} // namespace std
+
+#undef BOXCXX_COF_DEFINE
+
+// No deduction guides, for the same reason move_only_function has none:
+// CTAD would silently pick a cv/ref/noexcept row the caller did not mean.
+
+#endif // BOXCXX_BITS_COPYABLE_FUNCTION
