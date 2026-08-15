@@ -13,8 +13,14 @@
 #ifndef BOXCXX_BITS_VERSION_STRING
 #define BOXCXX_BITS_VERSION_STRING
 
+// 201803L is this macro's C++23 value, and its C++20 one — C++23 never bumped
+// it, even though [string.view.synop] gained the It/End and range constructors
+// in that cycle. It used to read 202106L here, which is not a value this macro
+// has ever carried in any revision (libstdc++ knows only 201803L and C++26's
+// 202403L); it was a transcription error, not a claim. Corrected in Ф32-i,
+// together with the two constructors that were genuinely missing.
 #ifndef __cpp_lib_string_view
-#  define __cpp_lib_string_view 202106L
+#  define __cpp_lib_string_view 201803L
 #endif
 #ifndef __cpp_lib_string_resize_and_overwrite
 #  define __cpp_lib_string_resize_and_overwrite 202110L

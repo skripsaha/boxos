@@ -15,12 +15,15 @@
 
 #include <__bits/char_traits>
 #include <__bits/iterator_core>
+#include <__bits/pointer>     // to_address, for the It/End constructor
+#include <__bits/ranges_core> // contiguous_range/sized_range, for the range one
 #include <__bits/throw_helpers>
 #include <compare>
 #include <cstddef>
 #include <functional>
 #include <iosfwd>
 #include <type_traits>
+
 #include <__bits/version_string>
 
 namespace std {
@@ -66,10 +69,43 @@ public:
     constexpr basic_string_view(const C *s, size_type n) : __data(s), __size(n)
     {
     }
-    constexpr basic_string_view(const C *first, const C *last)
-        : __data(first), __size(static_cast<size_type>(last - first))
+    // [string.view.cons] — P1391R4. A raw pointer pair used to be the only
+    // form this took, which meant a contiguous range whose iterator is a class
+    // type could not build a view of itself at all. The is_convertible_v<End,
+    // size_type> exclusion is what keeps sv(p, 5) on the (pointer, count)
+    // constructor above rather than reading 5 as a sentinel.
+    template <typename It, typename End>
+        requires contiguous_iterator<It> && sized_sentinel_for<End, It> &&
+                 is_same_v<iter_value_t<It>, C> &&
+                 (!is_convertible_v<End, size_type>)
+    constexpr basic_string_view(It first, End last)
+        : __data(std::to_address(first)),
+          __size(static_cast<size_type>(last - first))
     {
     }
+
+    // [string.view.cons] — P1989R2, and explicit per P2499R0. Implicit was the
+    // original design and was pulled back before C++23 shipped: it let any
+    // contiguous range of C decay to a view of itself at every call boundary,
+    // including the temporaries that then died at the semicolon. The
+    // operator-basic_string_view exclusion is what keeps basic_string on its
+    // own conversion operator instead of matching here as well.
+    template <typename R>
+        requires(!is_same_v<remove_cvref_t<R>, basic_string_view>) &&
+                ranges::contiguous_range<R> && ranges::sized_range<R> &&
+                is_same_v<ranges::range_value_t<R>, C> &&
+                (!is_convertible_v<R, const C *>) &&
+                (!requires(remove_cvref_t<R> &__d) {
+                    __d.operator basic_string_view<C, Traits>();
+                }) &&
+                (!requires { typename remove_reference_t<R>::traits_type; } ||
+                 is_same_v<typename remove_reference_t<R>::traits_type, Traits>)
+    constexpr explicit basic_string_view(R &&r)
+        : __data(ranges::data(r)),
+          __size(static_cast<size_type>(ranges::size(r)))
+    {
+    }
+
     basic_string_view(nullptr_t) = delete;
 
     // ── iterators ───────────────────────────────────────────────────────
@@ -427,6 +463,15 @@ operator<=>(basic_string_view<C, T> a,
            : r > 0  ? strong_ordering::greater
                     : strong_ordering::equal;
 }
+
+// [string.view.synop] — the two guides that make the constructors above
+// reachable without naming the character type. Without them `basic_string_view
+// sv(v)` deduces nothing and the constructors are only usable through an
+// explicit specialization, which is most of the point of having them.
+template <typename It, typename End>
+basic_string_view(It, End) -> basic_string_view<iter_value_t<It>>;
+template <typename R>
+basic_string_view(R &&) -> basic_string_view<ranges::range_value_t<R>>;
 
 // ── aliases / literals / hashing ────────────────────────────────────────
 
