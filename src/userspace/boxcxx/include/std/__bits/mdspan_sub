@@ -1,0 +1,754 @@
+// boxcxx — <__bits/mdspan_sub>  ([mdspan.sub])
+//
+// submdspan takes an mdspan and a slice specifier per rank, and gives back
+// an mdspan over a subset of the same memory. A slice specifier is one of
+// four things:
+//
+//   an index          the rank is FIXED at that index and disappears from
+//                     the result (a "collapsing" slice)
+//   full_extent       the rank is kept whole
+//   extent_slice      offset, count and step: keep `extent` indices
+//                     starting at `offset`, every `stride`th one
+//   range_slice       the same set written as first/last/stride, plus any
+//                     pair-like {first, last}
+//
+// The result's layout is chosen to be as strong as the slicing allows: a
+// row-major array sliced along its trailing ranks stays layout_right; one
+// sliced along a leading rank becomes layout_right_padded, keeping the row
+// pitch of the original; anything else falls back to layout_stride. That
+// staircase is the whole substance of [mdspan.sub.map], and it is why a
+// sub-rectangle of a framebuffer still knows it has contiguous rows.
+//
+// Two things make the implementation manageable. First, every slice is
+// CANONICALIZED before any layout sees it: submdspan turns each specifier
+// into full_extent_t, an index_type, a constant_wrapper, or an
+// extent_slice of those, so [mdspan.sub.map] has exactly four shapes to
+// consider rather than every convertible type. Second, whatever was known
+// at compile time stays known: a constant_wrapper offset or extent
+// survives canonicalization and comes out the far side as a STATIC extent
+// of the result.
+#ifndef BOXCXX_BITS_MDSPAN_SUB
+#define BOXCXX_BITS_MDSPAN_SUB
+
+#include <__bits/constant_wrapper>
+#include <__bits/mdspan_extents>
+#include <__bits/mdspan_layout>
+#include <__bits/mdspan_layout_padded>
+#include <array>
+#include <concepts>
+#include <cstddef>
+#include <span>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+// ── slice specifier types ([mdspan.sub.range.slices]) ────────────────────
+
+template <class OffsetType, class ExtentType, class StrideType>
+struct extent_slice {
+    using offset_type = OffsetType;
+    using extent_type = ExtentType;
+    using stride_type = StrideType;
+
+    [[no_unique_address]] offset_type offset{};
+    [[no_unique_address]] extent_type extent{};
+    [[no_unique_address]] stride_type stride{};
+};
+
+template <class FirstType, class LastType,
+          class StrideType = constant_wrapper<size_t(1)>>
+struct range_slice {
+    [[no_unique_address]] FirstType  first{};
+    [[no_unique_address]] LastType   last{};
+    [[no_unique_address]] StrideType stride{};
+};
+
+struct full_extent_t {
+    explicit full_extent_t() = default;
+};
+inline constexpr full_extent_t full_extent{};
+
+// ── submdspan_mapping_result ([mdspan.sub.map.result]) ───────────────────
+
+template <class LayoutMapping>
+struct submdspan_mapping_result {
+    [[no_unique_address]] LayoutMapping mapping = LayoutMapping();
+    size_t                              offset{};
+};
+
+namespace __mdsp {
+
+template <class T> inline constexpr bool IsExtentSlice = false;
+template <class O, class E, class S>
+inline constexpr bool IsExtentSlice<extent_slice<O, E, S>> = true;
+
+template <class T> inline constexpr bool IsRangeSlice = false;
+template <class F, class L, class S>
+inline constexpr bool IsRangeSlice<range_slice<F, L, S>> = true;
+
+template <class T> inline constexpr bool IsSubmdspanResult = false;
+template <class M>
+inline constexpr bool IsSubmdspanResult<submdspan_mapping_result<M>> = true;
+
+template <class T>
+inline constexpr bool IsCw = __cw::IsConstantWrapper<remove_cvref_t<T>>;
+
+// A pair-like slice: exactly two elements, both convertible to the index
+// type. This is what lets submdspan(m, std::pair{2, 5}) and
+// submdspan(m, std::array{2, 5}) mean the same as a range_slice.
+template <class T, class IndexType>
+concept IndexPairLike =
+    tuple_size<remove_cvref_t<T>>::value == 2 &&
+    convertible_to<tuple_element_t<0, remove_cvref_t<T>>, IndexType> &&
+    convertible_to<tuple_element_t<1, remove_cvref_t<T>>, IndexType>;
+
+// "S is a submdspan slice type for IndexType" ([mdspan.sub.overview]/2).
+template <class S, class IndexType>
+concept SliceTypeFor =
+    is_convertible_v<S, full_extent_t> || is_convertible_v<S, IndexType> ||
+    IsExtentSlice<S> || IsRangeSlice<S> ||
+    requires { requires IndexPairLike<S, IndexType>; };
+
+// ── canonical forms ([mdspan.sub.helpers]) ───────────────────────────────
+
+// canonical-index: a compile-time constant stays a compile-time constant,
+// re-wrapped in the index type; anything else becomes a plain index.
+template <class IndexType, class S>
+constexpr auto CanonicalIndex(S s)
+{
+    if constexpr (__span_impl::IntegralConstantLike<S>)
+        return cw<static_cast<IndexType>(S::value)>;
+    else
+        return static_cast<IndexType>(std::move(s));
+}
+
+// canonical-range-slice: turn (offset, span, stride) into the equivalent
+// extent_slice, computing the COUNT from the span. Whether the count comes
+// out static or dynamic is the crux: it is static exactly when both the
+// span and the stride were, which is what carries a compile-time slice
+// through to a compile-time extent of the result.
+// The nesting below is not style: `if constexpr (IsCw<S> && S::value == 0)`
+// instantiates BOTH operands, so it is a hard error the moment S is a plain
+// integer. Every test of a member has to sit inside an if constexpr that has
+// already established the member exists.
+template <class IndexType, class OffsetType, class SpanType, class StrideT>
+constexpr auto CanonicalRangeSlice(OffsetType offset, SpanType span, StrideT stride)
+{
+    if constexpr (IsCw<StrideT>)
+        static_assert(static_cast<size_t>(StrideT::value) > 0,
+                      "submdspan: a compile-time stride must be positive");
+
+    if constexpr (IsCw<SpanType>) {
+        if constexpr (static_cast<size_t>(SpanType::value) == 0) {
+            // A statically empty range: the stride cannot matter, so it is
+            // normalized to a static 1 rather than kept as whatever came in.
+            (void)stride;
+            return extent_slice<OffsetType, constant_wrapper<IndexType(0)>,
+                                constant_wrapper<IndexType(1)>>{
+                offset, cw<IndexType(0)>, cw<IndexType(1)>};
+        } else if constexpr (IsCw<StrideT>) {
+            // Both known: the count is known too, and becomes a STATIC
+            // extent of the sliced mdspan.
+            constexpr IndexType kStride = static_cast<IndexType>(StrideT::value);
+            constexpr IndexType kSpan   = static_cast<IndexType>(SpanType::value);
+            constexpr IndexType kCount =
+                static_cast<IndexType>(1 + (kSpan - 1) / kStride);
+            return extent_slice<OffsetType, constant_wrapper<kCount>, StrideT>{
+                offset, cw<kCount>, StrideT()};
+        } else {
+            const IndexType sp = static_cast<IndexType>(SpanType::value);
+            const IndexType st = static_cast<IndexType>(stride);
+            return extent_slice<OffsetType, IndexType, IndexType>{
+                offset, static_cast<IndexType>(1 + (sp - 1) / st), st};
+        }
+    } else if constexpr (IsCw<StrideT>) {
+        // The common case for a window into a framebuffer: run-time bounds,
+        // compile-time step of one. Keeping the stride's TYPE static is what
+        // later lets the layout staircase answer layout_*_padded rather than
+        // layout_stride.
+        constexpr IndexType kStride = static_cast<IndexType>(StrideT::value);
+        const IndexType     sp      = static_cast<IndexType>(span);
+        const IndexType     count =
+            sp != 0 ? static_cast<IndexType>(1 + (sp - 1) / kStride) : IndexType(0);
+        return extent_slice<OffsetType, IndexType, StrideT>{offset, count, StrideT()};
+    } else {
+        const IndexType sp = static_cast<IndexType>(span);
+        const IndexType st = sp == 0 ? IndexType(1) : static_cast<IndexType>(stride);
+        const IndexType count =
+            sp != 0 ? static_cast<IndexType>(1 + (sp - 1) / st) : IndexType(0);
+        return extent_slice<OffsetType, IndexType, IndexType>{offset, count, st};
+    }
+}
+
+template <class IndexType, class OffsetType, class SpanType>
+constexpr auto CanonicalRangeSlice(OffsetType offset, SpanType span)
+{
+    return CanonicalRangeSlice<IndexType>(offset, span, cw<IndexType(1)>);
+}
+
+// canonical-slice: the one entry point that maps any accepted specifier
+// onto one of the four canonical shapes.
+template <class IndexType, class S>
+constexpr auto CanonicalSlice(S s)
+{
+    // [mdspan.sub.sub]'s Mandates, stated where a violation actually lands.
+    // Left to the four-way if constexpr below, a specifier that is none of
+    // the accepted shapes falls into the pair-like branch and fails inside a
+    // structured binding, which says nothing useful.
+    static_assert(SliceTypeFor<S, IndexType>,
+                  "submdspan: every slice specifier must be an index, "
+                  "full_extent, an extent_slice, a range_slice, or a "
+                  "pair-like of two indices");
+    if constexpr (is_convertible_v<S, full_extent_t>) {
+        return static_cast<full_extent_t>(std::move(s));
+    } else if constexpr (is_convertible_v<S, IndexType>) {
+        return CanonicalIndex<IndexType>(std::move(s));
+    } else if constexpr (IsExtentSlice<S>) {
+        auto o = CanonicalIndex<IndexType>(std::move(s.offset));
+        auto e = CanonicalIndex<IndexType>(std::move(s.extent));
+        auto t = CanonicalIndex<IndexType>(std::move(s.stride));
+        return extent_slice<decltype(o), decltype(e), decltype(t)>{o, e, t};
+    } else if constexpr (IsRangeSlice<S>) {
+        auto f = CanonicalIndex<IndexType>(std::move(s.first));
+        auto l = CanonicalIndex<IndexType>(std::move(s.last));
+        // l - f is where constant_wrapper earns its keep: two static bounds
+        // subtract into a static span, so the result's extent is static too.
+        return CanonicalRangeSlice<IndexType>(
+            f, CanonicalIndex<IndexType>(l - f),
+            CanonicalIndex<IndexType>(std::move(s.stride)));
+    } else {
+        auto [sf, sl] = std::move(s);
+        auto f        = CanonicalIndex<IndexType>(std::move(sf));
+        auto l        = CanonicalIndex<IndexType>(std::move(sl));
+        return CanonicalRangeSlice<IndexType>(f,
+                                              CanonicalIndex<IndexType>(l - f));
+    }
+}
+
+// ── properties of a CANONICAL slice type ─────────────────────────────────
+
+// A collapsing slice removes its rank from the result: everything that is
+// not full_extent and not an extent_slice, i.e. every plain index.
+template <class S>
+inline constexpr bool IsCollapsing =
+    !is_same_v<S, full_extent_t> && !IsExtentSlice<S>;
+
+template <class S>
+inline constexpr bool IsFullExtent = is_same_v<S, full_extent_t>;
+
+// Every one of the three predicates below has to be a FUNCTION with
+// if constexpr, not a variable template with a short-circuiting &&: the
+// operands of && in a variable template's initializer are all instantiated,
+// so `IsExtentSlice<S> && IsCw<typename S::stride_type>` is a hard error the
+// moment S is full_extent_t. Measured, not assumed -- that is exactly how
+// the first version of this file failed.
+template <class St>
+constexpr bool IsStaticOne() noexcept
+{
+    if constexpr (IsCw<St>)
+        return static_cast<size_t>(St::value) == 1;
+    else
+        return false;
+}
+
+// A unit-stride slice keeps its rank AND steps by one, so the ranks below
+// it stay contiguous. That is the property the layout staircase turns on.
+template <class S>
+constexpr bool IsUnitStrideSlice() noexcept
+{
+    if constexpr (is_same_v<S, full_extent_t>)
+        return true;
+    else if constexpr (IsExtentSlice<S>)
+        return IsStaticOne<typename S::stride_type>();
+    else
+        return false;
+}
+
+// The static extent a non-collapsing canonical slice contributes.
+template <class S, class E, size_t K>
+constexpr size_t SliceStaticExtent() noexcept
+{
+    if constexpr (IsFullExtent<S>)
+        return E::static_extent(K);
+    else if constexpr (IsExtentSlice<S>) {
+        if constexpr (IsCw<typename S::extent_type>)
+            return static_cast<size_t>(S::extent_type::value);
+        else
+            return dynamic_extent;
+    } else
+        return dynamic_extent;
+}
+
+// The lower bound of a canonical slice's index range.
+template <class I, class S>
+constexpr I SliceLowerBound(const S &s) noexcept
+{
+    if constexpr (is_same_v<S, full_extent_t>)
+        return I(0);
+    else if constexpr (IsExtentSlice<S>)
+        return static_cast<I>(s.offset);
+    else
+        return static_cast<I>(s);
+}
+
+// The number of indices a non-collapsing canonical slice keeps.
+template <class I, class E, class S>
+constexpr I SliceExtentValue(const E &src, size_t k, const S &s) noexcept
+{
+    if constexpr (IsExtentSlice<S>)
+        return static_cast<I>(s.extent);
+    else if constexpr (is_same_v<S, full_extent_t>)
+        return static_cast<I>(src.extent(k));
+    else
+        return I(0);   // never reached: a collapsing slice has no extent
+}
+
+// ── the sub-extents type ([mdspan.sub.extents]) ──────────────────────────
+
+template <size_t... Vs> struct SizeList {};
+
+template <class I, class E, size_t K, class Acc, class... Rest>
+struct SubExtBuild;
+
+template <class I, class E, size_t K, size_t... Vs>
+struct SubExtBuild<I, E, K, SizeList<Vs...>> {
+    using type = extents<I, Vs...>;
+};
+
+template <bool Collapsing, class I, class E, size_t K, class Acc, class S,
+          class... Rest>
+struct SubExtStep;
+
+template <class I, class E, size_t K, size_t... Vs, class S, class... Rest>
+struct SubExtStep<true, I, E, K, SizeList<Vs...>, S, Rest...> {
+    using type = typename SubExtBuild<I, E, K + 1, SizeList<Vs...>, Rest...>::type;
+};
+
+template <class I, class E, size_t K, size_t... Vs, class S, class... Rest>
+struct SubExtStep<false, I, E, K, SizeList<Vs...>, S, Rest...> {
+    using type =
+        typename SubExtBuild<I, E, K + 1,
+                             SizeList<Vs..., SliceStaticExtent<S, E, K>()>,
+                             Rest...>::type;
+};
+
+template <class I, class E, size_t K, size_t... Vs, class S, class... Rest>
+struct SubExtBuild<I, E, K, SizeList<Vs...>, S, Rest...> {
+    using type =
+        typename SubExtStep<IsCollapsing<S>, I, E, K, SizeList<Vs...>, S,
+                            Rest...>::type;
+};
+
+template <class I, class E, class... CS>
+using SubExtentsType = typename SubExtBuild<I, E, 0, SizeList<>, CS...>::type;
+
+template <class Sub, class E, class... CS, size_t... K>
+constexpr Sub MakeSubExtents(const E &src, index_sequence<K...>, const CS &...cs)
+{
+    using I = typename Sub::index_type;
+    array<I, Sub::rank()> vals{};
+    size_t                w = 0;
+    ((void)(IsCollapsing<CS> ? void()
+                             : void(vals[w++] = SliceExtentValue<I>(src, K, cs))),
+     ...);
+    return Sub(vals);
+}
+
+// ── the pieces every submdspan_mapping shares ([mdspan.sub.map.common]) ──
+
+template <class M, class... CS, size_t... K>
+constexpr size_t SubOffset(const M &m, index_sequence<K...>, const CS &...cs)
+{
+    using I = typename M::index_type;
+    if constexpr (sizeof...(CS) == 0) {
+        return static_cast<size_t>(m());
+    } else {
+        const I ls[] = {SliceLowerBound<I>(cs)...};
+        // A slice that starts exactly at the end of its extent selects
+        // nothing, and m(ls...) would be out of range; the whole span size
+        // is the sanctioned answer for that case.
+        for (size_t k = 0; k < sizeof...(CS); ++k)
+            if (ls[k] == m.extents().extent(k))
+                return static_cast<size_t>(m.required_span_size());
+        return static_cast<size_t>(m(ls[K]...));
+    }
+}
+
+template <class M, class S>
+constexpr typename M::index_type SubStrideFor(const M &m, size_t k, const S &s) noexcept
+{
+    using I = typename M::index_type;
+    if constexpr (IsExtentSlice<S>) {
+        if (static_cast<I>(s.extent) > I(1))
+            return static_cast<I>(m.stride(k) * static_cast<I>(s.stride));
+        return m.stride(k);
+    } else {
+        return m.stride(k);
+    }
+}
+
+template <class Sub, class M, class... CS, size_t... K>
+constexpr array<typename Sub::index_type, Sub::rank()>
+SubStrides(const M &m, index_sequence<K...>, const CS &...cs)
+{
+    using I = typename Sub::index_type;
+    array<I, Sub::rank()> out{};
+    size_t                w = 0;
+    ((void)(IsCollapsing<CS>
+                ? void()
+                : void(out[w++] = static_cast<I>(SubStrideFor(m, K, cs)))),
+     ...);
+    return out;
+}
+
+// ── which layout the result gets ([mdspan.sub.map.left] and friends) ─────
+
+enum class SubKind { Plain, Padded, Strided };
+
+struct SubChoice {
+    SubKind kind;
+    size_t  u;
+};
+
+// The u-search both left staircases share: u + 1 is the smallest positive
+// rank whose slice steps by one, and the ranks it skips over become padding.
+constexpr SubChoice LeftPaddedCase(const bool *full, const bool *unit, size_t R,
+                                   size_t SR) noexcept
+{
+    size_t p = 1;
+    while (p < R && !unit[p]) ++p;
+    if (p < R && unit[0]) {
+        const size_t u  = p - 1;
+        bool         ok = true;
+        for (size_t k = u + 1; k + 1 < u + SR; ++k) ok = ok && (k < R) && full[k];
+        ok = ok && (u + SR - 1 < R) && unit[u + SR - 1];
+        if (ok) return {SubKind::Padded, u};
+    }
+    return {SubKind::Strided, 0};
+}
+
+// The mirror: rank_ - u - 2 is the LARGEST rank below the last one whose
+// slice steps by one.
+constexpr SubChoice RightPaddedCase(const bool *full, const bool *unit, size_t R,
+                                    size_t SR) noexcept
+{
+    if (unit[R - 1]) {
+        size_t p   = R - 1;
+        bool   any = false;
+        while (p-- > 0) {
+            if (unit[p]) {
+                any = true;
+                break;
+            }
+        }
+        if (any) {
+            const size_t u = R - p - 2;
+            if (R >= SR + u) {
+                const size_t k0 = R - SR - u;
+                bool         ok = unit[k0];
+                for (size_t k = k0 + 1; k + 1 < R - u; ++k) ok = ok && full[k];
+                if (ok) return {SubKind::Padded, u};
+            }
+        }
+    }
+    return {SubKind::Strided, 0};
+}
+
+template <class E, class SubE, class... CS>
+constexpr SubChoice ChooseLeft()
+{
+    constexpr size_t R  = sizeof...(CS);
+    constexpr size_t SR = SubE::rank();
+    if constexpr (R == 0 || SR == 0) {
+        return {SubKind::Plain, 0};
+    } else {
+        constexpr bool full[R] = {IsFullExtent<CS>...};
+        constexpr bool unit[R] = {IsUnitStrideSlice<CS>()...};
+
+        // Plain: every kept rank but the last is whole, and the last steps
+        // by one -- so the result is exactly a smaller left-major array.
+        bool plain = unit[SR - 1];
+        for (size_t k = 0; k + 1 < SR; ++k) plain = plain && full[k];
+        if (plain) return {SubKind::Plain, 0};
+
+        // Padded: the same shape, but starting after some leading ranks
+        // have been collapsed. Those ranks become the padding of the first
+        // kept one.
+        return LeftPaddedCase(full, unit, R, SR);
+    }
+}
+
+// layout_left_padded's own staircase ([mdspan.sub.map.leftpad]). It differs
+// from layout_left's in exactly one place, and getting that wrong is a
+// silent correctness bug rather than a compile error: a padded mapping
+// whose plain case is taken too eagerly drops the padding and starts
+// reading between the rows. Here the plain case needs the RESULT to be
+// rank 1, not merely "everything but the last kept rank is whole".
+template <class E, class SubE, class... CS>
+constexpr SubChoice ChooseLeftPadded()
+{
+    constexpr size_t R  = sizeof...(CS);
+    constexpr size_t SR = SubE::rank();
+    if constexpr (R <= 1 || SR == 0) {
+        return {SubKind::Plain, 0};
+    } else {
+        constexpr bool full[R] = {IsFullExtent<CS>...};
+        constexpr bool unit[R] = {IsUnitStrideSlice<CS>()...};
+        if (SR == 1 && unit[0]) return {SubKind::Plain, 0};
+        return LeftPaddedCase(full, unit, R, SR);
+    }
+}
+
+template <class E, class SubE, class... CS>
+constexpr SubChoice ChooseRight()
+{
+    constexpr size_t R  = sizeof...(CS);
+    constexpr size_t SR = SubE::rank();
+    if constexpr (R == 0 || SR == 0) {
+        return {SubKind::Plain, 0};
+    } else {
+        constexpr bool full[R] = {IsFullExtent<CS>...};
+        constexpr bool unit[R] = {IsUnitStrideSlice<CS>()...};
+
+        bool plain = unit[R - SR];
+        for (size_t k = R - SR + 1; k < R; ++k) plain = plain && full[k];
+        if (plain) return {SubKind::Plain, 0};
+
+        return RightPaddedCase(full, unit, R, SR);
+    }
+}
+
+// layout_right_padded's staircase ([mdspan.sub.map.rightpad]), the mirror of
+// ChooseLeftPadded and different from ChooseRight in the same one place.
+template <class E, class SubE, class... CS>
+constexpr SubChoice ChooseRightPadded()
+{
+    constexpr size_t R  = sizeof...(CS);
+    constexpr size_t SR = SubE::rank();
+    if constexpr (R <= 1 || SR == 0) {
+        return {SubKind::Plain, 0};
+    } else {
+        constexpr bool full[R] = {IsFullExtent<CS>...};
+        constexpr bool unit[R] = {IsUnitStrideSlice<CS>()...};
+        if (SR == 1 && unit[R - 1]) return {SubKind::Plain, 0};
+        return RightPaddedCase(full, unit, R, SR);
+    }
+}
+
+} // namespace __mdsp
+
+// ── canonical_slices / subextents ([mdspan.sub.canonical], [mdspan.sub.extents])
+
+template <class IndexType, size_t... Extents, class... SliceSpecifiers>
+    requires(sizeof...(SliceSpecifiers) == sizeof...(Extents))
+constexpr auto canonical_slices(const extents<IndexType, Extents...> &src,
+                                SliceSpecifiers... slices)
+{
+    (void)src;
+    return make_tuple(__mdsp::CanonicalSlice<IndexType>(std::move(slices))...);
+}
+
+namespace __mdsp {
+
+template <class IndexType, class E, class... CS>
+constexpr auto SubExtentsFromCanonical(const E &src, const CS &...cs)
+{
+    using Sub = SubExtentsType<IndexType, E, CS...>;
+    return MakeSubExtents<Sub>(src, index_sequence_for<CS...>{}, cs...);
+}
+
+} // namespace __mdsp
+
+template <class IndexType, size_t... Extents, class... SliceSpecifiers>
+    requires(sizeof...(SliceSpecifiers) == sizeof...(Extents))
+constexpr auto subextents(const extents<IndexType, Extents...> &src,
+                          SliceSpecifiers... raw_slices)
+{
+    return __mdsp::SubExtentsFromCanonical<IndexType>(
+        src, __mdsp::CanonicalSlice<IndexType>(std::move(raw_slices))...);
+}
+
+// ── submdspan_mapping specializations ([mdspan.sub.map]) ─────────────────
+
+template <class Extents>
+template <class... SliceSpecifiers>
+constexpr auto
+layout_left::mapping<Extents>::SubmdspanMappingImpl(SliceSpecifiers... slices) const
+{
+    using E                = extents_type;
+    constexpr size_t kRank = E::rank();
+    if constexpr (kRank == 0) {
+        return submdspan_mapping_result<mapping>{*this, 0};
+    } else {
+        auto sub_ext = __mdsp::SubExtentsFromCanonical<index_type>(extents_, slices...);
+        using SubE   = decltype(sub_ext);
+        const size_t off =
+            __mdsp::SubOffset(*this, index_sequence_for<SliceSpecifiers...>{}, slices...);
+        constexpr __mdsp::SubChoice kPick =
+            __mdsp::ChooseLeft<E, SubE, SliceSpecifiers...>();
+
+        if constexpr (kPick.kind == __mdsp::SubKind::Plain) {
+            using RM = layout_left::mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext), off};
+        } else if constexpr (kPick.kind == __mdsp::SubKind::Padded) {
+            constexpr size_t kPad = __mdsp::StaticFwdProd<E>(0, kPick.u + 1);
+            using RM = typename layout_left_padded<kPad>::template mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext, stride(kPick.u + 1)), off};
+        } else {
+            using RM = layout_stride::mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, __mdsp::SubStrides<SubE>(
+                                *this, index_sequence_for<SliceSpecifiers...>{},
+                                slices...)),
+                off};
+        }
+    }
+}
+
+template <class Extents>
+template <class... SliceSpecifiers>
+constexpr auto
+layout_right::mapping<Extents>::SubmdspanMappingImpl(SliceSpecifiers... slices) const
+{
+    using E                = extents_type;
+    constexpr size_t kRank = E::rank();
+    if constexpr (kRank == 0) {
+        return submdspan_mapping_result<mapping>{*this, 0};
+    } else {
+        auto sub_ext = __mdsp::SubExtentsFromCanonical<index_type>(extents_, slices...);
+        using SubE   = decltype(sub_ext);
+        const size_t off =
+            __mdsp::SubOffset(*this, index_sequence_for<SliceSpecifiers...>{}, slices...);
+        constexpr __mdsp::SubChoice kPick =
+            __mdsp::ChooseRight<E, SubE, SliceSpecifiers...>();
+
+        if constexpr (kPick.kind == __mdsp::SubKind::Plain) {
+            using RM = layout_right::mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext), off};
+        } else if constexpr (kPick.kind == __mdsp::SubKind::Padded) {
+            constexpr size_t kPad =
+                __mdsp::StaticFwdProd<E>(kRank - kPick.u - 1, kRank);
+            using RM = typename layout_right_padded<kPad>::template mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, stride(kRank - kPick.u - 2)), off};
+        } else {
+            using RM = layout_stride::mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, __mdsp::SubStrides<SubE>(
+                                *this, index_sequence_for<SliceSpecifiers...>{},
+                                slices...)),
+                off};
+        }
+    }
+}
+
+template <class Extents>
+template <class... SliceSpecifiers>
+constexpr auto
+layout_stride::mapping<Extents>::SubmdspanMappingImpl(SliceSpecifiers... slices) const
+{
+    if constexpr (extents_type::rank() == 0) {
+        return submdspan_mapping_result<mapping>{*this, 0};
+    } else {
+        auto sub_ext = __mdsp::SubExtentsFromCanonical<index_type>(extents_, slices...);
+        using SubE   = decltype(sub_ext);
+        const size_t off =
+            __mdsp::SubOffset(*this, index_sequence_for<SliceSpecifiers...>{}, slices...);
+        using RM = layout_stride::mapping<SubE>;
+        return submdspan_mapping_result<RM>{
+            RM(sub_ext,
+               __mdsp::SubStrides<SubE>(*this, index_sequence_for<SliceSpecifiers...>{},
+                                        slices...)),
+            off};
+    }
+}
+
+template <size_t PaddingValue>
+template <class Extents>
+template <class... SliceSpecifiers>
+constexpr auto
+layout_left_padded<PaddingValue>::mapping<Extents>::SubmdspanMappingImpl(
+    SliceSpecifiers... slices) const
+{
+    using E                = extents_type;
+    constexpr size_t kRank = E::rank();
+    if constexpr (kRank == 0) {
+        return submdspan_mapping_result<mapping>{*this, 0};
+    } else {
+        auto sub_ext = __mdsp::SubExtentsFromCanonical<index_type>(extents_, slices...);
+        using SubE   = decltype(sub_ext);
+        const size_t off =
+            __mdsp::SubOffset(*this, index_sequence_for<SliceSpecifiers...>{}, slices...);
+        constexpr __mdsp::SubChoice kPick =
+            __mdsp::ChooseLeftPadded<E, SubE, SliceSpecifiers...>();
+
+        if constexpr (kPick.kind == __mdsp::SubKind::Plain) {
+            using RM = layout_left::mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext), off};
+        } else if constexpr (kPick.kind == __mdsp::SubKind::Padded) {
+            constexpr size_t kPad =
+                (kStaticPaddingStride == dynamic_extent)
+                    ? dynamic_extent
+                    : __mdsp::MulStatic(kStaticPaddingStride,
+                                        __mdsp::StaticFwdProd<E>(1, kPick.u + 1));
+            using RM = typename layout_left_padded<kPad>::template mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext, stride(kPick.u + 1)), off};
+        } else {
+            using RM = layout_stride::mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, __mdsp::SubStrides<SubE>(
+                                *this, index_sequence_for<SliceSpecifiers...>{},
+                                slices...)),
+                off};
+        }
+    }
+}
+
+template <size_t PaddingValue>
+template <class Extents>
+template <class... SliceSpecifiers>
+constexpr auto
+layout_right_padded<PaddingValue>::mapping<Extents>::SubmdspanMappingImpl(
+    SliceSpecifiers... slices) const
+{
+    using E                = extents_type;
+    constexpr size_t kRank = E::rank();
+    if constexpr (kRank == 0) {
+        return submdspan_mapping_result<mapping>{*this, 0};
+    } else {
+        auto sub_ext = __mdsp::SubExtentsFromCanonical<index_type>(extents_, slices...);
+        using SubE   = decltype(sub_ext);
+        const size_t off =
+            __mdsp::SubOffset(*this, index_sequence_for<SliceSpecifiers...>{}, slices...);
+        constexpr __mdsp::SubChoice kPick =
+            __mdsp::ChooseRightPadded<E, SubE, SliceSpecifiers...>();
+
+        if constexpr (kPick.kind == __mdsp::SubKind::Plain) {
+            using RM = layout_right::mapping<SubE>;
+            return submdspan_mapping_result<RM>{RM(sub_ext), off};
+        } else if constexpr (kPick.kind == __mdsp::SubKind::Padded) {
+            constexpr size_t kPad =
+                (kStaticPaddingStride == dynamic_extent)
+                    ? dynamic_extent
+                    : __mdsp::MulStatic(
+                          kStaticPaddingStride,
+                          __mdsp::StaticFwdProd<E>(kRank - kPick.u - 1, kRank - 1));
+            using RM = typename layout_right_padded<kPad>::template mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, stride(kRank - kPick.u - 2)), off};
+        } else {
+            using RM = layout_stride::mapping<SubE>;
+            return submdspan_mapping_result<RM>{
+                RM(sub_ext, __mdsp::SubStrides<SubE>(
+                                *this, index_sequence_for<SliceSpecifiers...>{},
+                                slices...)),
+                off};
+        }
+    }
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_MDSPAN_SUB

@@ -144,3 +144,17 @@
 #  define __cpp_lib_is_sufficiently_aligned 202411L
 #endif
 #undef BOXCXX_OWNS_is_sufficiently_aligned
+
+// P3019R11 (C++26, Ф35-a): indirect and polymorphic, the two value-semantic
+// owners of [mem.composite.types]. One macro each, both at the paper's own
+// value; the pmr aliases [memory.syn] pairs with them are in <memory> too.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_indirect)) && \
+    !defined(__cpp_lib_indirect)
+#  define __cpp_lib_indirect 202502L
+#endif
+#undef BOXCXX_OWNS_indirect
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_polymorphic)) && \
+    !defined(__cpp_lib_polymorphic)
+#  define __cpp_lib_polymorphic 202502L
+#endif
+#undef BOXCXX_OWNS_polymorphic

@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **79** — 75 of C++23 (30 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 114 |
+| Standard headers provided | **80** — 76 of C++23 (29 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 120 |
 | Header source | ~80 000 lines |
-| Feature-test macros defined | 194 — 154 at their C++23 value, 40 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 199 — 154 at their C++23 value, 45 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 195 phases (176 of them the numbered `PhaseN` series), 5 050 runtime checks, 1 670 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 200 phases (181 of them the numbered `PhaseN` series), 5 141 runtime checks, 1 729 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -55,7 +55,7 @@ checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **195**. The
+there are exactly as many as there are phase definitions. That is **200**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -87,12 +87,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (30)
+## 1.1 Headers that do not exist (29)
 
-75 of the C++23 headers are provided and 30 are absent, which accounts for the
+76 of the C++23 headers are provided and 29 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 79 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 80 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -135,11 +135,10 @@ library itself: `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`,
 `<locale>` are all implemented; what is missing is the three global objects and
 the header that declares them.
 
-### C++23 features not implemented — 8
+### C++23 features not implemented — 7
 
 | Header | Status |
 |---|---|
-| `<mdspan>` | Not implemented. |
 | `<spanstream>` | Not implemented. |
 | `<syncstream>` | Not implemented (its contract is written against `<iostream>`). |
 | `<typeindex>` | Not implemented — there is no `std::type_index`. |
@@ -160,18 +159,18 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **194** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **199** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are forty so far, measured rather than counted by hand: every
+  section; there are forty-five so far, measured rather than counted by hand: every
   macro whose value here exceeds what libstdc++ 16.1 reports at `-std=c++23`,
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 194 macros × 79 headers by
+  checked over the full cross-product of 199 macros × 80 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -185,7 +184,7 @@ the whole set, not sampled:
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 158 of the 194 macros are also
+- **The converse does not hold, and cannot.** 161 of the 199 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -204,7 +203,12 @@ the whole set, not sampled:
   equality`, `algorithm_default_value_type`, `copyable_function`,
   `smart_ptr_owner_equality` and `format_uchar` each own a widely-included
   header; `stdatomic_h`, `stdbit_h` and `stdckdint_h` leak nowhere, because no
-  header in the tree includes a C-compatibility header.
+  header in the tree includes a C-compatibility header. Ф35 re-pinned it
+  158 → 161: `indirect` and `polymorphic` are owned by `<memory>`, and the
+  third is `__cpp_lib_span`, which had never leaked anywhere at all because
+  nothing included `<span>` — `<mdspan>` now does, since `extents` and
+  `mdspan` both take one. The three macros `<mdspan>` itself owns leak
+  nowhere: nothing includes `<mdspan>`.
 
 **18 of the macros [version.syn] names are not defined**, and `<version>` lists
 every one by name with its specific reason — that list, not this section, is the authoritative
@@ -228,7 +232,7 @@ assertion that a header meets the standard's freestanding subset, which is a
 separate audit against [compliance] and has not been done. `__cpp_lib_ratio`
 and `__cpp_lib_out_ptr`'s C++26 value are held back for the same reason. The
 rest belong to features whose owning header does not exist (`execution`,
-`filesystem`, `mdspan`, `spanstream`, `stacktrace`, `syncbuf`) or to
+`filesystem`, `spanstream`, `stacktrace`, `syncbuf`) or to
 whole-clause requirements relaxations (`__cpp_lib_ranges`,
 `__cpp_lib_algorithm_iterator_requirements`). The in-tree suite pins the absences
 as well as the values, so a macro cannot quietly appear — and when one is closed,
@@ -886,7 +890,78 @@ nothing has been found since.
   bound to the `const&` overload and was silently **copied** where
   [set.overview] and its siblings call for a move.
 
+## `<mdspan>`
+
+- `✓` Added in Ф35, whole: `extents` / `dextents` / `dims`, all five layout
+  mapping policies (`layout_left`, `layout_right`, `layout_stride`,
+  `layout_left_padded`, `layout_right_padded`), both accessors
+  (`default_accessor`, `aligned_accessor`), `mdspan` with its eight deduction
+  guides, and the complete `submdspan` family — `extent_slice`, `range_slice`,
+  `full_extent`, `submdspan_mapping_result`, `canonical_slices`, `subextents`,
+  `submdspan_mapping` for each of the five layouts, and `submdspan` itself.
+  Three macros: `__cpp_lib_mdspan` 202406L (P0009R18 plus P2389R2's `dims`),
+  `__cpp_lib_aligned_accessor` 202411L (P2897R7, whose other half
+  `is_sufficiently_aligned` had been in `<memory>` since Ф32-e), and
+  `__cpp_lib_submdspan` 202603L — claimed only because all five of the papers
+  behind that value are here: P2630R4, P2642R6 (the padded layouts), P3355R1,
+  P3663R3 and P3982R1.
+- **The result is genuinely free.** `extents` stores only its dynamic extents;
+  a fully static one is an EMPTY type, `mdspan<int, extents<int, 4, 6>>` is
+  eight bytes — a pointer, nothing more — and
+  `layout_right_padded<8>::mapping<extents<int, 5, 6>>` is two. The
+  `[[no_unique_address]]` on the extents member is what makes that true and is
+  marked as load-bearing at the definition; without it `array<index_type, 0>`
+  still costs a byte, that byte stops `extents` from being empty, and the
+  mdspan above doubles to sixteen. Measured against libstdc++ 16.1 for three
+  representative specializations: identical footprints.
+  (Two `[[no_unique_address]]` members do NOT collapse into one another when
+  they contain a subobject of the same type — both padded-mapping members hold
+  an `array<index_type, 0>` — which is why that mapping is two bytes and not
+  one. libstdc++ lands on two for the same reason.)
+- **The layout staircase is implemented, not approximated.** `submdspan` gives
+  back the strongest layout the slicing allows — trimming whole rows off a
+  row-major array yields `layout_right` again, trimming columns yields
+  `layout_right_padded` carrying the ORIGINAL row pitch, and only a non-unit
+  step falls back to `layout_stride`. Always answering `layout_stride` would
+  pass every value test and still cost a multiply per index; the suite pins the
+  chosen layout TYPE for ten representative slicings (phase185), and all of
+  them were cross-checked against libstdc++ 16.1, which answers identically for
+  each — same layout, same extents, same strides.
+- **Compile-time slice bounds survive into the type.** A `range_slice` whose
+  bounds are `constant_wrapper`s (Ф33) subtracts into a static span, and the
+  result's extent is static: `submdspan(m, range_slice{cw<1zu>, cw<4zu>},
+  full_extent)` has `static_extent(0) == 3`.
+- `~` `std::copy` and `std::fill` over mdspans ([mdspan.copy]) are provided, but
+  **`__cpp_lib_mdspan_copy` is not claimed**: the macro also names the
+  `ExecutionPolicy` overloads, and there is no `<execution>` — the same reason
+  `__cpp_lib_parallel_algorithm` is absent. The traversal order is unspecified
+  by the standard; boxcxx walks in layout_right order, which keeps the writes
+  to the destination contiguous.
+- `~` `__cpp_lib_hardened_mdspan` is **not** claimed. `operator[]` does not
+  check its indices; `at()` does, and throws `out_of_range`. That is the whole
+  difference, and `at()` is the reason this header is not entirely
+  freestanding.
+- **A defect in libstdc++ 16.1, found by measuring:** it declares
+  `layout_left_padded` and `layout_right_padded` **without the default template
+  argument** `= dynamic_extent` that [mdspan.syn] specifies, so
+  `std::layout_right_padded<>` — the spelling for a run-time pitch, which is
+  the common case for a framebuffer — does not compile there. It does here.
+
 ## `<memory>`
+
+- `✓` Added in Ф35: **`indirect` and `polymorphic`** ([mem.composite.types],
+  P3019R11), with `hash<indirect<T, A>>` and the `pmr::indirect` /
+  `pmr::polymorphic` aliases [memory.syn] pairs with them.
+  `__cpp_lib_indirect` and `__cpp_lib_polymorphic` both carry 202502L. Both
+  work in constant evaluation on this toolchain — including `polymorphic`'s
+  clone, which dispatches through a vtable at compile time.
+- `~` One documented deviation in those two, and it is in the safe direction:
+  `indirect`'s `operator==` and its comparison against a bare `U` state the
+  "the comparison is well-formed" half of their contract as a **Constraint**
+  where [indirect.relops] states it as a **Mandates**. Unconstrained, they make
+  `equality_comparable<indirect<NoEq>>` answer `true` and then fail inside the
+  operator — the exact defect Ф34 removed from `pair`, `tuple`, `variant` and
+  `expected`. libstdc++ constrains them for the same reason.
 
 - `✓` Closed in Ф34, and it was a `constexpr` that had never been true: **all ten
   `uninitialized_*` algorithms were marked `constexpr` and none of them worked in
@@ -1321,6 +1396,16 @@ nothing has been found since.
   entire content of the paper.
 
 ## `<span>`
+
+- `✓` Closed in Ф35, found while building `<mdspan>`: the **(iterator, sentinel)
+  deduction guide dropped the static extent**. [span.deduct] puts the second
+  argument through *maybe-static-ext*, so `span(p, integral_constant<size_t,
+  4>{})` must deduce `span<int, 4>`; boxcxx hardcoded `dynamic_extent`, making
+  the static-extent half of that guide unreachable. The two exposition-only
+  entities [span.syn] owns — *integral-constant-like* and *maybe-static-ext* —
+  now exist in this header, which is also where `<mdspan>` reads them from. As
+  a side effect `span(p, cw<4zu>)` deduces a static extent too, since Ф33's
+  `constant_wrapper` models the concept.
 
 - `✓` Closed in Ф31e-g: the iterator constructors took **pointers**, not an
   iterator and a sentinel, and were **not** `explicit(extent != dynamic_extent)`.

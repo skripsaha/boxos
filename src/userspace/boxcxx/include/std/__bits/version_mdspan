@@ -1,0 +1,61 @@
+// boxcxx — <__bits/version_mdspan>
+//
+// The feature-test macros [version.syn] owns for <mdspan>.
+//
+// mdspan 202406L is the C++26 value: the C++23 feature (P0009R18) plus
+// P2389R2's dims alias, which is the whole of the delta from 202207L.
+//
+// aligned_accessor 202411L is P2897R7. Its other half, is_sufficiently_
+// aligned, has been in <memory> since Ф32-e; the paper is only complete now
+// that the accessor exists to use it.
+//
+// submdspan 202603L is the accumulated value of five papers, and it is
+// claimed only because all five are here: P2630R4 (submdspan itself),
+// P2642R6 (the padded layouts -- without them the value would be 202306L),
+// P3355R1 (submdspan of a padded layout), P3663R3 (submdspan_mapping found
+// by ADL through a hidden friend, which is how it is spelled in
+// <__bits/mdspan_layout>) and P3982R1 (strided_slice split into
+// extent_slice and range_slice). The last of those is why <mdspan> depends
+// on constant_wrapper: range_slice's default stride is cw<1zu>.
+//
+// NOT defined here, and why:
+//
+//   __cpp_lib_mdspan_copy      copy and fill exist, but the macro names the
+//                              ExecutionPolicy overloads too, and boxcxx has
+//                              no <execution> -- the same reason
+//                              __cpp_lib_parallel_algorithm is absent.
+//   __cpp_lib_freestanding_mdspan
+//                              a [compliance] claim about the freestanding
+//                              subset, not an API. boxcxx is freestanding,
+//                              but saying so per-header needs the audit Ф34
+//                              deferred, not an assumption.
+//   __cpp_lib_hardened_mdspan  the hardened preconditions of P3471R4 are not
+//                              implemented: operator[] does not check its
+//                              indices. at() does, and is the checked form.
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// A header that answers for a feature it does not provide is answering a
+// question it was not asked, so it no longer does. <version> defines
+// BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_mdspan)) && \
+    !defined(__cpp_lib_mdspan)
+#  define __cpp_lib_mdspan 202406L
+#endif
+#undef BOXCXX_OWNS_mdspan
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_aligned_accessor)) && \
+    !defined(__cpp_lib_aligned_accessor)
+#  define __cpp_lib_aligned_accessor 202411L
+#endif
+#undef BOXCXX_OWNS_aligned_accessor
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_submdspan)) && \
+    !defined(__cpp_lib_submdspan)
+#  define __cpp_lib_submdspan 202603L
+#endif
+#undef BOXCXX_OWNS_submdspan

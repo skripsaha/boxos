@@ -80,6 +80,7 @@
 #include <__bits/version_iostreams>       // <ios>/<streambuf>/<iomanip>
 #include <__bits/version_inplace_vector>  // <inplace_vector>
 #include <__bits/version_iterator>        // <iterator> (+ <array>)
+#include <__bits/version_mdspan>          // <mdspan>
 #include <__bits/version_memory>          // <memory>
 #include <__bits/version_memory_resource> // <memory_resource>
 #include <__bits/version_mutex>           // <mutex>
@@ -202,7 +203,6 @@
 //                          std::start_lifetime_as ships without enforcing
 //                          that half of its Mandates for the same reason,
 //                          and says so at the call site.
-// mdspan                   no <mdspan> header.
 // modules                  no `import std;` — boxcxx ships headers only.
 // parallel_algorithm       no <execution>, so no ExecutionPolicy overloads.
 // ranges                   the widest macro in [version.syn] — it stands for

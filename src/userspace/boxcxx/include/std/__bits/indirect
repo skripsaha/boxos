@@ -1,0 +1,816 @@
+// boxcxx — <__bits/indirect>  ([mem.composite.types], P3019R11)
+//
+// Two vocabulary types for building composite classes out of parts that
+// live somewhere else: indirect<T> owns exactly one T behind a pointer,
+// polymorphic<T> owns exactly one object of T or of anything derived from
+// it. Both are VALUE types -- copying one copies what it owns -- which is
+// the whole point, and the thing unique_ptr and shared_ptr cannot be.
+//
+// Why a kernel-adjacent library wants these:
+//
+//  - A structure with a recursive or incomplete member (a node that holds a
+//    subtree, a descriptor that holds the next descriptor) needs indirection
+//    to have a size at all. unique_ptr gives that but poisons copying,
+//    const-propagation and comparison; every such structure then hand-rolls
+//    a clone(). indirect is that hand-rolled clone, written once and right.
+//
+//  - A structure that holds "some driver", "some layout", "some policy"
+//    wants an interface member with value semantics. polymorphic is that:
+//    it clones through the vtable, so copying the owner deep-copies the
+//    derived object without the owner ever naming its type.
+//
+// Three properties worth knowing before reading the code:
+//
+//  - Neither type is ever null in a program that does not move from one.
+//    "valueless" exists only as the state a moved-from object is left in,
+//    which is why the observer is spelled valueless_after_move(). Nothing
+//    else can produce it: there is no default-constructed empty state, and
+//    every constructor that can fail either throws or leaves an owned
+//    object behind.
+//
+//  - const propagates. indirect<T>'s operator* on a const object returns
+//    const T&, unlike every raw or smart pointer, where const means the
+//    pointer is const and the pointee is not. That is what makes these
+//    members instead of pointers.
+//
+//  - The allocator is honoured in full, including the propagate_on_*
+//    traits, which is why the assignment operators are as long as they are.
+//    Element construction always goes through allocator_traits::construct,
+//    so pmr::indirect<T> really does hand its memory_resource down to a
+//    uses-allocator T -- the reason to have pmr aliases at all.
+#ifndef BOXCXX_BITS_INDIRECT
+#define BOXCXX_BITS_INDIRECT
+
+#include <__bits/allocator_core>   // allocator_traits, allocator_arg_t
+#include <__bits/pointer>          // to_address, pointer_traits
+#include <compare>                 // __cmp::SynthThreeWay
+#include <concepts>                // derived_from
+#include <cstddef>
+#include <initializer_list>
+#include <type_traits>
+#include <utility>                 // in_place_t, in_place_type_t, forward
+
+namespace std {
+
+template <class T> struct hash;
+
+namespace __comp {
+
+// "Is this a specialization of X" for the three templates the constraints
+// below have to exclude. Written as variable templates rather than concepts
+// because every use is a plain boolean inside a larger requires-clause.
+template <class> inline constexpr bool IsInPlaceType = false;
+template <class U> inline constexpr bool IsInPlaceType<in_place_type_t<U>> = true;
+
+// [indirect.general]/5 and [polymorphic.general]/5 both name the same list
+// of T that must not be instantiated. Neither needs T to be complete, so
+// this can be asserted at class scope, where the diagnostic points at the
+// declaration the programmer actually wrote.
+template <class T>
+inline constexpr bool ValidOwnedType =
+    is_object_v<T> && !is_array_v<T> && !is_const_v<T> && !is_volatile_v<T> &&
+    !is_same_v<T, in_place_t> && !IsInPlaceType<T>;
+
+} // namespace __comp
+
+template <class T, class Allocator> class indirect;
+
+namespace __comp {
+template <class> inline constexpr bool IsIndirect = false;
+template <class T, class A> inline constexpr bool IsIndirect<indirect<T, A>> = true;
+} // namespace __comp
+
+// ── indirect ([indirect]) ────────────────────────────────────────────────
+
+template <class T, class Allocator = allocator<T>>
+class indirect {
+    static_assert(__comp::ValidOwnedType<T>,
+                  "std::indirect<T>: T must be a non-array, non-cv-qualified "
+                  "object type other than in_place_t or in_place_type_t<U>");
+    using ATr = allocator_traits<Allocator>;
+    static_assert(is_same_v<typename ATr::value_type, T>,
+                  "std::indirect<T, Allocator>: the allocator's value_type "
+                  "must be T");
+
+public:
+    using value_type     = T;
+    using allocator_type = Allocator;
+    using pointer        = typename ATr::pointer;
+    using const_pointer  = typename ATr::const_pointer;
+
+private:
+    pointer   p_{};
+    [[no_unique_address]] Allocator alloc_ = Allocator();
+
+    // Allocate one T from `a` and construct it there. Strongly exception
+    // safe on its own: a throwing constructor gives the storage back before
+    // the exception leaves, so no caller has to remember to.
+    template <class... Args>
+    static constexpr pointer Make(Allocator &a, Args &&...args)
+    {
+        pointer q = ATr::allocate(a, 1);
+        try {
+            ATr::construct(a, to_address(q), static_cast<Args &&>(args)...);
+        } catch (...) {
+            ATr::deallocate(a, q, 1);
+            throw;
+        }
+        return q;
+    }
+
+    // Destroy and release whatever `q` owns, using `a`. Never throws: both
+    // halves are required not to.
+    static constexpr void Unmake(Allocator &a, pointer q) noexcept
+    {
+        if (q) {
+            ATr::destroy(a, to_address(q));
+            ATr::deallocate(a, q, 1);
+        }
+    }
+
+    constexpr void Reset() noexcept
+    {
+        Unmake(alloc_, p_);
+        p_ = pointer();
+    }
+
+    template <class U, class A> friend class indirect;
+
+public:
+    // ── [indirect.ctor] ──────────────────────────────────────────────────
+
+    constexpr explicit indirect()
+        requires is_default_constructible_v<Allocator>
+    {
+        static_assert(is_default_constructible_v<T>,
+                      "std::indirect<T>(): T must be default constructible");
+        p_ = Make(alloc_);
+    }
+
+    constexpr explicit indirect(allocator_arg_t, const Allocator &a)
+        : alloc_(a)
+    {
+        static_assert(is_default_constructible_v<T>,
+                      "std::indirect<T>(allocator_arg, a): T must be default "
+                      "constructible");
+        p_ = Make(alloc_);
+    }
+
+    constexpr indirect(const indirect &other)
+        : alloc_(ATr::select_on_container_copy_construction(other.alloc_))
+    {
+        static_assert(is_copy_constructible_v<T>,
+                      "std::indirect<T>(const indirect&): T must be copy "
+                      "constructible");
+        if (!other.valueless_after_move()) p_ = Make(alloc_, *other);
+    }
+
+    constexpr indirect(allocator_arg_t, const Allocator &a,
+                       const indirect &other)
+        : alloc_(a)
+    {
+        static_assert(is_copy_constructible_v<T>,
+                      "std::indirect<T>(allocator_arg, a, const indirect&): T "
+                      "must be copy constructible");
+        if (!other.valueless_after_move()) p_ = Make(alloc_, *other);
+    }
+
+    constexpr indirect(indirect &&other) noexcept
+        : p_(other.p_), alloc_(std::move(other.alloc_))
+    {
+        other.p_ = pointer();
+    }
+
+    constexpr indirect(allocator_arg_t, const Allocator &a,
+                       indirect &&other) noexcept(ATr::is_always_equal::value)
+        : alloc_(a)
+    {
+        if (other.valueless_after_move()) return;
+        if (alloc_ == other.alloc_) {
+            p_       = other.p_;
+            other.p_ = pointer();
+            return;
+        }
+        // Different allocators: the object cannot simply change hands, so it
+        // is rebuilt here and torn down there. [indirect.ctor]/16 still
+        // requires `other` to end up valueless, which is why the source is
+        // released rather than left holding a moved-from T.
+        p_ = Make(alloc_, std::move(*other));
+        other.Reset();
+    }
+
+    template <class U = T>
+        requires(!is_same_v<remove_cvref_t<U>, indirect> &&
+                 !is_same_v<remove_cvref_t<U>, in_place_t> &&
+                 is_constructible_v<T, U> && is_default_constructible_v<Allocator>)
+    constexpr explicit indirect(U &&u)
+    {
+        p_ = Make(alloc_, static_cast<U &&>(u));
+    }
+
+    template <class U = T>
+        requires(!is_same_v<remove_cvref_t<U>, indirect> &&
+                 !is_same_v<remove_cvref_t<U>, in_place_t> &&
+                 is_constructible_v<T, U>)
+    constexpr explicit indirect(allocator_arg_t, const Allocator &a, U &&u)
+        : alloc_(a)
+    {
+        p_ = Make(alloc_, static_cast<U &&>(u));
+    }
+
+    template <class... Us>
+        requires(is_constructible_v<T, Us...> &&
+                 is_default_constructible_v<Allocator>)
+    constexpr explicit indirect(in_place_t, Us &&...us)
+    {
+        p_ = Make(alloc_, static_cast<Us &&>(us)...);
+    }
+
+    template <class... Us>
+        requires(is_constructible_v<T, Us...>)
+    constexpr explicit indirect(allocator_arg_t, const Allocator &a, in_place_t,
+                                Us &&...us)
+        : alloc_(a)
+    {
+        p_ = Make(alloc_, static_cast<Us &&>(us)...);
+    }
+
+    template <class I, class... Us>
+        requires(is_constructible_v<T, initializer_list<I> &, Us...> &&
+                 is_default_constructible_v<Allocator>)
+    constexpr explicit indirect(in_place_t, initializer_list<I> ilist,
+                                Us &&...us)
+    {
+        p_ = Make(alloc_, ilist, static_cast<Us &&>(us)...);
+    }
+
+    template <class I, class... Us>
+        requires(is_constructible_v<T, initializer_list<I> &, Us...>)
+    constexpr explicit indirect(allocator_arg_t, const Allocator &a, in_place_t,
+                                initializer_list<I> ilist, Us &&...us)
+        : alloc_(a)
+    {
+        p_ = Make(alloc_, ilist, static_cast<Us &&>(us)...);
+    }
+
+    // ── [indirect.dtor] ──────────────────────────────────────────────────
+
+    constexpr ~indirect() { Unmake(alloc_, p_); }
+
+    // ── [indirect.assign] ────────────────────────────────────────────────
+
+    constexpr indirect &operator=(const indirect &other)
+    {
+        static_assert(is_copy_assignable_v<T> && is_copy_constructible_v<T>,
+                      "std::indirect<T>::operator=(const indirect&): T must be "
+                      "copy constructible and copy assignable");
+        if (this == addressof(other)) return *this;
+
+        constexpr bool kUpdate =
+            ATr::propagate_on_container_copy_assignment::value;
+
+        if (other.valueless_after_move()) {
+            Reset();
+            if constexpr (kUpdate) alloc_ = other.alloc_;
+            return *this;
+        }
+        if (p_ && alloc_ == other.alloc_) {
+            // Both sides hold an object and the storage is interchangeable,
+            // so the cheap path is legal: assign through, keep the block.
+            **this = *other;
+            if constexpr (kUpdate) alloc_ = other.alloc_;
+            return *this;
+        }
+        // The new object is built BEFORE the old one is torn down, so a
+        // throwing copy constructor leaves *this exactly as it was --
+        // [indirect.assign]/4's "no effect".
+        if constexpr (kUpdate) {
+            Allocator na = other.alloc_;
+            pointer   np = Make(na, *other);
+            Reset();
+            p_     = np;
+            alloc_ = other.alloc_;
+        } else {
+            pointer np = Make(alloc_, *other);
+            Reset();
+            p_ = np;
+        }
+        return *this;
+    }
+
+    constexpr indirect &operator=(indirect &&other) noexcept(
+        ATr::propagate_on_container_move_assignment::value ||
+        ATr::is_always_equal::value)
+    {
+        if (this == addressof(other)) return *this;
+
+        constexpr bool kUpdate =
+            ATr::propagate_on_container_move_assignment::value;
+
+        if (other.valueless_after_move()) {
+            Reset();
+            if constexpr (kUpdate) alloc_ = std::move(other.alloc_);
+            return *this;
+        }
+        if (kUpdate || alloc_ == other.alloc_) {
+            pointer old = p_;
+            p_          = other.p_;
+            other.p_    = pointer();
+            Unmake(alloc_, old);            // the OLD allocator owns `old`
+            if constexpr (kUpdate) alloc_ = std::move(other.alloc_);
+            return *this;
+        }
+        static_assert(kUpdate || ATr::is_always_equal::value ||
+                          is_move_constructible_v<T>,
+                      "std::indirect<T>::operator=(indirect&&): with a "
+                      "stateful allocator that does not propagate, T must be "
+                      "move constructible");
+        pointer np = Make(alloc_, std::move(*other));
+        Reset();
+        p_ = np;
+        other.Reset();                      // /7: other ends up valueless
+        return *this;
+    }
+
+    template <class U = T>
+        requires(!is_same_v<remove_cvref_t<U>, indirect> &&
+                 is_constructible_v<T, U> && is_assignable_v<T &, U>)
+    constexpr indirect &operator=(U &&u)
+    {
+        if (p_)
+            **this = static_cast<U &&>(u);
+        else
+            p_ = Make(alloc_, static_cast<U &&>(u));
+        return *this;
+    }
+
+    // ── [indirect.obs] ───────────────────────────────────────────────────
+
+    constexpr const T &operator*() const & noexcept { return *p_; }
+    constexpr T       &operator*() & noexcept { return *p_; }
+    constexpr const T &&operator*() const && noexcept { return std::move(*p_); }
+    constexpr T       &&operator*() && noexcept { return std::move(*p_); }
+
+    constexpr const_pointer operator->() const noexcept { return p_; }
+    constexpr pointer       operator->() noexcept { return p_; }
+
+    constexpr bool valueless_after_move() const noexcept
+    {
+        return p_ == pointer();
+    }
+
+    constexpr allocator_type get_allocator() const noexcept { return alloc_; }
+
+    // ── [indirect.swap] ──────────────────────────────────────────────────
+
+    constexpr void swap(indirect &other) noexcept(
+        ATr::propagate_on_container_swap::value || ATr::is_always_equal::value)
+    {
+        // Note the owned objects are never swapped directly: only the two
+        // pointers change hands, so T need not even be swappable.
+        pointer tmp = p_;
+        p_          = other.p_;
+        other.p_    = tmp;
+        if constexpr (ATr::propagate_on_container_swap::value) {
+            using std::swap;
+            swap(alloc_, other.alloc_);
+        }
+    }
+
+    friend constexpr void swap(indirect &lhs, indirect &rhs) noexcept(
+        noexcept(lhs.swap(rhs)))
+    {
+        lhs.swap(rhs);
+    }
+
+    // ── [indirect.relops] / [indirect.comp.with.t] ───────────────────────
+    //
+    // The standard states the "*lhs == *rhs is well-formed" half of these
+    // as Mandates, i.e. a hard error. boxcxx states it as a CONSTRAINT
+    // instead, matching libstdc++: an unconstrained operator== is what
+    // makes equality_comparable<indirect<NoEq>> answer true and then fail
+    // inside the operator, which is exactly the defect Ф34 removed from
+    // pair, tuple, variant and expected. A constrained one answers false.
+
+    template <class U, class AA>
+        requires requires(const T &a, const U &b) { a == b; }
+    friend constexpr bool operator==(const indirect &lhs,
+                                     const indirect<U, AA> &rhs)
+        noexcept(noexcept(bool(*lhs == *rhs)))
+    {
+        if (lhs.valueless_after_move() || rhs.valueless_after_move())
+            return lhs.valueless_after_move() == rhs.valueless_after_move();
+        return *lhs == *rhs;
+    }
+
+    template <class U, class AA>
+    friend constexpr __cmp::synth_three_way_result_t<T, U>
+    operator<=>(const indirect &lhs, const indirect<U, AA> &rhs)
+    {
+        if (lhs.valueless_after_move() || rhs.valueless_after_move())
+            return !lhs.valueless_after_move() <=> !rhs.valueless_after_move();
+        return __cmp::SynthThreeWay{}(*lhs, *rhs);
+    }
+
+    // The !IsIndirect guard is not decoration: without it GCC picks this
+    // template over the pair above for indirect-vs-indirect in some
+    // instantiation orders (the same shape as GCC PR c++/99599), and the
+    // valueless comparison silently changes meaning.
+    template <class U>
+        requires(!__comp::IsIndirect<U> &&
+                 requires(const T &a, const U &b) { a == b; })
+    friend constexpr bool operator==(const indirect &lhs, const U &rhs)
+        noexcept(noexcept(bool(*lhs == rhs)))
+    {
+        if (lhs.valueless_after_move()) return false;
+        return *lhs == rhs;
+    }
+
+    template <class U>
+        requires(!__comp::IsIndirect<U>)
+    friend constexpr __cmp::synth_three_way_result_t<T, U>
+    operator<=>(const indirect &lhs, const U &rhs)
+    {
+        if (lhs.valueless_after_move()) return strong_ordering::less;
+        return __cmp::SynthThreeWay{}(*lhs, rhs);
+    }
+};
+
+template <class Value>
+indirect(Value) -> indirect<Value>;
+template <class Allocator, class Value>
+indirect(allocator_arg_t, Allocator, Value)
+    -> indirect<Value,
+                typename allocator_traits<Allocator>::template rebind_alloc<Value>>;
+
+// [indirect.hash]: enabled exactly when hash<T> is. A valueless indirect
+// hashes to a fixed value that is not any plausible hash of a real T, in
+// the same spirit as the optional/variant sentinels next door.
+template <class T, class Allocator>
+struct hash<indirect<T, Allocator>> {
+    constexpr size_t operator()(const indirect<T, Allocator> &i) const
+        noexcept(noexcept(hash<T>{}(declval<const T &>())))
+        requires requires(const T &t) { hash<T>{}(t); }
+    {
+        return i.valueless_after_move() ? static_cast<size_t>(-9871)
+                                        : hash<T>{}(*i);
+    }
+};
+
+// ── polymorphic ([polymorphic]) ──────────────────────────────────────────
+
+namespace __comp {
+
+// The control block. polymorphic's own storage is one pointer to this plus
+// the allocator; everything that depends on the DERIVED type -- how to copy
+// it, how to move it, how to destroy it, and which rebound allocator its
+// block came from -- lives behind these three virtual functions.
+//
+// `value` is kept as a T* rather than recomputed by a virtual getter
+// because operator* and operator-> are the hot path and a base-class
+// pointer adjustment is a compile-time constant per derived type.
+template <class T, class Allocator>
+struct PolyBlock {
+    T *value;
+
+    constexpr explicit PolyBlock(T *v) noexcept : value(v) {}
+    constexpr virtual ~PolyBlock() = default;
+
+    PolyBlock(const PolyBlock &)            = delete;
+    PolyBlock &operator=(const PolyBlock &) = delete;
+
+    // Build another block of the SAME derived type out of `a`, copying (or
+    // moving out of) the object this one owns.
+    constexpr virtual PolyBlock *CopyInto(Allocator &a) const = 0;
+    constexpr virtual PolyBlock *MoveInto(Allocator &a)       = 0;
+    // Destroy the owned object and give the block's storage back to `a`.
+    // Ends the lifetime of *this, so nothing may touch it afterwards.
+    constexpr virtual void Dispose(Allocator &a) noexcept = 0;
+};
+
+template <class T, class Allocator, class U>
+struct PolyImpl final : PolyBlock<T, Allocator> {
+    using ATr    = allocator_traits<Allocator>;
+    using ABlock = typename ATr::template rebind_alloc<PolyImpl>;
+    using BTr    = allocator_traits<ABlock>;
+
+    // No active member until Construct() starts one, and none after
+    // Dispose() ends it. A union rather than a raw byte buffer is what
+    // makes the whole thing usable in constant evaluation: construct_at on
+    // a union member activates it, and a reinterpret_cast never could.
+    union {
+        U held;
+    };
+
+    constexpr PolyImpl() noexcept : PolyBlock<T, Allocator>(nullptr) {}
+    constexpr ~PolyImpl() {}   // `held` is ended explicitly, in Dispose()
+
+    // One place that knows how to get a block of this exact type out of an
+    // allocator and hand back the storage if the element throws.
+    template <class... Args>
+    static constexpr PolyImpl *Create(Allocator &a, Args &&...args)
+    {
+        ABlock ba(a);
+        auto   q = BTr::allocate(ba, 1);
+        PolyImpl *self = to_address(q);
+        BTr::construct(ba, self);
+        try {
+            ATr::construct(a, addressof(self->held),
+                           static_cast<Args &&>(args)...);
+        } catch (...) {
+            BTr::destroy(ba, self);
+            BTr::deallocate(ba, q, 1);
+            throw;
+        }
+        self->value = static_cast<T *>(addressof(self->held));
+        return self;
+    }
+
+    constexpr PolyBlock<T, Allocator> *CopyInto(Allocator &a) const override
+    {
+        return Create(a, held);
+    }
+
+    constexpr PolyBlock<T, Allocator> *MoveInto(Allocator &a) override
+    {
+        return Create(a, std::move(held));
+    }
+
+    constexpr void Dispose(Allocator &a) noexcept override
+    {
+        ABlock ba(a);
+        ATr::destroy(a, addressof(held));
+        // Reconstitute the allocator's own pointer type from `this`: the
+        // fancy pointer BTr::allocate handed out is not stored anywhere,
+        // and for every pointer type that is not a raw pointer this is the
+        // sanctioned way back.
+        auto q = pointer_traits<typename BTr::pointer>::pointer_to(*this);
+        BTr::destroy(ba, this);
+        BTr::deallocate(ba, q, 1);
+    }
+};
+
+} // namespace __comp
+
+template <class T, class Allocator = allocator<T>>
+class polymorphic {
+    static_assert(__comp::ValidOwnedType<T>,
+                  "std::polymorphic<T>: T must be a non-array, non-cv-"
+                  "qualified object type other than in_place_t or "
+                  "in_place_type_t<U>");
+    using ATr   = allocator_traits<Allocator>;
+    using Block = __comp::PolyBlock<T, Allocator>;
+    static_assert(is_same_v<typename ATr::value_type, T>,
+                  "std::polymorphic<T, Allocator>: the allocator's value_type "
+                  "must be T");
+
+public:
+    using value_type     = T;
+    using allocator_type = Allocator;
+    using pointer        = typename ATr::pointer;
+    using const_pointer  = typename ATr::const_pointer;
+
+private:
+    Block *block_ = nullptr;
+    [[no_unique_address]] Allocator alloc_ = Allocator();
+
+    template <class U, class... Args>
+    static constexpr Block *MakeOf(Allocator &a, Args &&...args)
+    {
+        return __comp::PolyImpl<T, Allocator, U>::Create(
+            a, static_cast<Args &&>(args)...);
+    }
+
+    constexpr void Reset() noexcept
+    {
+        if (block_) {
+            block_->Dispose(alloc_);
+            block_ = nullptr;
+        }
+    }
+
+    template <class U, class A> friend class polymorphic;
+
+public:
+    // ── [polymorphic.ctor] ───────────────────────────────────────────────
+
+    constexpr explicit polymorphic()
+        requires is_default_constructible_v<Allocator>
+    {
+        static_assert(is_default_constructible_v<T> && is_copy_constructible_v<T>,
+                      "std::polymorphic<T>(): T must be default constructible "
+                      "and copy constructible");
+        block_ = MakeOf<T>(alloc_);
+    }
+
+    constexpr explicit polymorphic(allocator_arg_t, const Allocator &a)
+        : alloc_(a)
+    {
+        static_assert(is_default_constructible_v<T> && is_copy_constructible_v<T>,
+                      "std::polymorphic<T>(allocator_arg, a): T must be default "
+                      "constructible and copy constructible");
+        block_ = MakeOf<T>(alloc_);
+    }
+
+    constexpr polymorphic(const polymorphic &other)
+        : alloc_(ATr::select_on_container_copy_construction(other.alloc_))
+    {
+        if (other.block_) block_ = other.block_->CopyInto(alloc_);
+    }
+
+    constexpr polymorphic(allocator_arg_t, const Allocator &a,
+                          const polymorphic &other)
+        : alloc_(a)
+    {
+        if (other.block_) block_ = other.block_->CopyInto(alloc_);
+    }
+
+    constexpr polymorphic(polymorphic &&other) noexcept
+        : block_(other.block_), alloc_(std::move(other.alloc_))
+    {
+        other.block_ = nullptr;
+    }
+
+    constexpr polymorphic(allocator_arg_t, const Allocator &a,
+                          polymorphic &&other)
+        noexcept(ATr::is_always_equal::value)
+        : alloc_(a)
+    {
+        if (!other.block_) return;
+        if (alloc_ == other.alloc_) {
+            block_       = other.block_;
+            other.block_ = nullptr;
+            return;
+        }
+        // Unequal allocators: the block cannot change hands. Unlike
+        // indirect's counterpart, [polymorphic.ctor]/11 does NOT require the
+        // source to end up valueless here, so it keeps its moved-from
+        // object and stays a usable polymorphic.
+        block_ = other.block_->MoveInto(alloc_);
+    }
+
+    template <class U = T, class UU = remove_cvref_t<U>>
+        requires(!is_same_v<UU, polymorphic> && derived_from<UU, T> &&
+                 is_constructible_v<UU, U> && is_copy_constructible_v<UU> &&
+                 !__comp::IsInPlaceType<UU> &&
+                 is_default_constructible_v<Allocator>)
+    constexpr explicit polymorphic(U &&u)
+    {
+        block_ = MakeOf<UU>(alloc_, static_cast<U &&>(u));
+    }
+
+    template <class U = T, class UU = remove_cvref_t<U>>
+        requires(!is_same_v<UU, polymorphic> && derived_from<UU, T> &&
+                 is_constructible_v<UU, U> && is_copy_constructible_v<UU> &&
+                 !__comp::IsInPlaceType<UU>)
+    constexpr explicit polymorphic(allocator_arg_t, const Allocator &a, U &&u)
+        : alloc_(a)
+    {
+        block_ = MakeOf<UU>(alloc_, static_cast<U &&>(u));
+    }
+
+    template <class U, class... Ts>
+        requires(is_same_v<remove_cvref_t<U>, U> && derived_from<U, T> &&
+                 is_constructible_v<U, Ts...> && is_copy_constructible_v<U> &&
+                 is_default_constructible_v<Allocator>)
+    constexpr explicit polymorphic(in_place_type_t<U>, Ts &&...ts)
+    {
+        block_ = MakeOf<U>(alloc_, static_cast<Ts &&>(ts)...);
+    }
+
+    template <class U, class... Ts>
+        requires(is_same_v<remove_cvref_t<U>, U> && derived_from<U, T> &&
+                 is_constructible_v<U, Ts...> && is_copy_constructible_v<U>)
+    constexpr explicit polymorphic(allocator_arg_t, const Allocator &a,
+                                   in_place_type_t<U>, Ts &&...ts)
+        : alloc_(a)
+    {
+        block_ = MakeOf<U>(alloc_, static_cast<Ts &&>(ts)...);
+    }
+
+    template <class U, class I, class... Us>
+        requires(is_same_v<remove_cvref_t<U>, U> && derived_from<U, T> &&
+                 is_constructible_v<U, initializer_list<I> &, Us...> &&
+                 is_copy_constructible_v<U> &&
+                 is_default_constructible_v<Allocator>)
+    constexpr explicit polymorphic(in_place_type_t<U>, initializer_list<I> ilist,
+                                   Us &&...us)
+    {
+        block_ = MakeOf<U>(alloc_, ilist, static_cast<Us &&>(us)...);
+    }
+
+    template <class U, class I, class... Us>
+        requires(is_same_v<remove_cvref_t<U>, U> && derived_from<U, T> &&
+                 is_constructible_v<U, initializer_list<I> &, Us...> &&
+                 is_copy_constructible_v<U>)
+    constexpr explicit polymorphic(allocator_arg_t, const Allocator &a,
+                                   in_place_type_t<U>,
+                                   initializer_list<I> ilist, Us &&...us)
+        : alloc_(a)
+    {
+        block_ = MakeOf<U>(alloc_, ilist, static_cast<Us &&>(us)...);
+    }
+
+    // ── [polymorphic.dtor] ───────────────────────────────────────────────
+
+    constexpr ~polymorphic() { Reset(); }
+
+    // ── [polymorphic.assign] ─────────────────────────────────────────────
+
+    constexpr polymorphic &operator=(const polymorphic &other)
+    {
+        if (this == addressof(other)) return *this;
+
+        constexpr bool kUpdate =
+            ATr::propagate_on_container_copy_assignment::value;
+
+        // The copy is made first, so a throwing element copy leaves *this
+        // untouched -- [polymorphic.assign]/4's "no effects on *this".
+        if constexpr (kUpdate) {
+            Allocator na = other.alloc_;
+            Block    *nb = other.block_ ? other.block_->CopyInto(na) : nullptr;
+            Reset();
+            block_ = nb;
+            alloc_ = other.alloc_;
+        } else {
+            Block *nb = other.block_ ? other.block_->CopyInto(alloc_) : nullptr;
+            Reset();
+            block_ = nb;
+        }
+        return *this;
+    }
+
+    constexpr polymorphic &operator=(polymorphic &&other) noexcept(
+        ATr::propagate_on_container_move_assignment::value ||
+        ATr::is_always_equal::value)
+    {
+        if (this == addressof(other)) return *this;
+
+        constexpr bool kUpdate =
+            ATr::propagate_on_container_move_assignment::value;
+
+        if (!other.block_) {
+            Reset();
+            if constexpr (kUpdate) alloc_ = std::move(other.alloc_);
+            return *this;
+        }
+        if (kUpdate || alloc_ == other.alloc_) {
+            Block *old   = block_;
+            block_       = other.block_;
+            other.block_ = nullptr;
+            if (old) old->Dispose(alloc_);       // the OLD allocator owns it
+            if constexpr (kUpdate) alloc_ = std::move(other.alloc_);
+            return *this;
+        }
+        Block *nb = other.block_->MoveInto(alloc_);
+        Reset();
+        block_ = nb;
+        other.Reset();                           // /7 leaves other valueless
+        return *this;
+    }
+
+    // ── [polymorphic.obs] ────────────────────────────────────────────────
+
+    constexpr const T &operator*() const noexcept { return *block_->value; }
+    constexpr T       &operator*() noexcept { return *block_->value; }
+
+    constexpr const_pointer operator->() const noexcept
+    {
+        return pointer_traits<const_pointer>::pointer_to(*block_->value);
+    }
+    constexpr pointer operator->() noexcept
+    {
+        return pointer_traits<pointer>::pointer_to(*block_->value);
+    }
+
+    constexpr bool valueless_after_move() const noexcept
+    {
+        return block_ == nullptr;
+    }
+
+    constexpr allocator_type get_allocator() const noexcept { return alloc_; }
+
+    // ── [polymorphic.swap] ───────────────────────────────────────────────
+
+    constexpr void swap(polymorphic &other) noexcept(
+        ATr::propagate_on_container_swap::value || ATr::is_always_equal::value)
+    {
+        Block *tmp   = block_;
+        block_       = other.block_;
+        other.block_ = tmp;
+        if constexpr (ATr::propagate_on_container_swap::value) {
+            using std::swap;
+            swap(alloc_, other.alloc_);
+        }
+    }
+
+    friend constexpr void swap(polymorphic &lhs, polymorphic &rhs) noexcept(
+        noexcept(lhs.swap(rhs)))
+    {
+        lhs.swap(rhs);
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_INDIRECT

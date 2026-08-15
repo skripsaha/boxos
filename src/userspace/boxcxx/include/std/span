@@ -24,6 +24,33 @@ inline constexpr size_t dynamic_extent = size_t(-1);
 
 namespace __span_impl {
 
+// integral-constant-like and maybe-static-ext ([span.syn]). They are
+// exposition-only members of THIS header even though <mdspan> is their
+// heaviest user: [span.deduct] needs them for the (iterator, sentinel)
+// guide, and <mdspan> includes <span> anyway.
+//
+// The remove_cvref_t on decltype(T::value) is LWG 4351: without it a type
+// whose `value` is a reference (integral_constant's own `value` is not, but
+// a user's need not be) fell out of the concept.
+//
+// The last two conjuncts are the ones that carry weight: they demand that a
+// default-constructed T actually COMPARE EQUAL to T::value, which is what
+// separates a genuine compile-time constant from any random type that
+// happens to have a static `value` member.
+template <class T>
+concept IntegralConstantLike =
+    is_integral_v<remove_cvref_t<decltype(T::value)>> &&
+    !is_same_v<bool, remove_cvref_t<decltype(T::value)>> &&
+    convertible_to<T, decltype(T::value)> &&
+    equality_comparable_with<T, decltype(T::value)> &&
+    bool_constant<T() == T::value>::value &&
+    bool_constant<static_cast<decltype(T::value)>(T()) == T::value>::value;
+
+template <class T>
+inline constexpr size_t MaybeStaticExt = dynamic_extent;
+template <IntegralConstantLike T>
+inline constexpr size_t MaybeStaticExt<T> = {T::value};
+
 template <size_t Extent>
 struct ExtentCarrier {
     constexpr ExtentCarrier(size_t) noexcept {}
@@ -254,9 +281,16 @@ template <typename T, size_t N>
 span(const std::array<T, N> &) -> span<const T, N>;
 // [span.deduct]'s guides for the iterator forms are stated over an ITERATOR,
 // so they also cover the two pointer spellings that used to be the only ones
-// here.
+// here. The second argument is put through maybe-static-ext, which is what
+// makes `span(p, integral_constant<size_t, 4>{})` -- and, since Ф33,
+// `span(p, cw<4zu>)` -- deduce span<T, 4> with no runtime size at all
+// rather than a dynamic span. Dropping that was measured, not assumed: the
+// guide used to hardcode the dynamic extent, so the static-extent half of
+// [span.deduct] was unreachable.
 template <contiguous_iterator It, typename EndOrSize>
-span(It, EndOrSize) -> span<remove_reference_t<iter_reference_t<It>>>;
+span(It, EndOrSize)
+    -> span<remove_reference_t<iter_reference_t<It>>,
+            __span_impl::MaybeStaticExt<EndOrSize>>;
 // The range guide, which was absent: `std::span(v)` over a vector could not
 // deduce, so every call had to spell the element type by hand.
 template <ranges::contiguous_range R>
