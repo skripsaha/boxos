@@ -38,12 +38,19 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | C++23 headers provided | **74**; 31 absent (§1) |
-| Internal implementation leaves (`include/std/__bits/`) | 95 |
+| Internal implementation leaves (`include/std/__bits/`) | 104 |
 | Header source | ~81 000 lines |
-| Feature-test macros defined | 171 (164 C++23 + 7 C++26) |
+| Feature-test macros defined | 175 (164 C++23 + 11 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 175 phases, 4 775 runtime checks, 1 488 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 177 phases, 4 824 runtime checks, 1 513 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
+
+The four counted rows drifted three times before the rule was written down, so
+here it is: headers and leaves are `ls -1` of `include/std` and
+`include/std/__bits`; macros are `#define __cpp_lib_` lines from `-dM -E` on a
+translation unit containing only `#include <version>`; phases are `Phase*();`
+call sites in `main`; checks and `static_assert`s are occurrences of those two
+tokens in `cxxtest.cpp`.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -137,13 +144,13 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **171** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **175** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are thirteen so far.
+  section; there are eighteen so far.
 - **Every one is visible both from `<version>` and from the header that owns the
   feature**, as [support.limits.general] requires — checked over the full
   cross-product of macros and headers, in both directions, with no failures. This
@@ -215,12 +222,17 @@ constructors) — the library simply stayed silent about them.
 | `__cpp_lib_bind_back` | 202306 | P2714R1 | Ф32-f |
 | `__cpp_lib_not_fn` | 202306 | P2714R1 | Ф32-f |
 | `__cpp_lib_exception_ptr_cast` | 202506 | P2927R3 | Ф32-f |
+| `__cpp_lib_ranges_cache_latest` | 202411 | P3138R5 | Ф32-g |
+| `__cpp_lib_ranges_as_input` | 202502 | P3137R3 | Ф32-g |
+| `__cpp_lib_atomic_min_max` | 202403 | P0493R5 | Ф32-h |
 
-Two of those carry a value the current working draft has already moved past,
+Three of those carry a value the current working draft has already moved past,
 and deliberately: `__cpp_lib_to_chars` is at P2497R0's 202306 rather than the
-draft's 202606, and `__cpp_lib_saturation_arithmetic` at P0543R3's 202311 rather
-than 202603. A macro names the newest feature actually present, so a later
-paper that is not implemented does not get to raise it.
+draft's 202606, `__cpp_lib_saturation_arithmetic` at P0543R3's 202311 rather
+than 202603, and `__cpp_lib_atomic_min_max` at P0493R5's 202403 rather than
+202506, which would additionally promise P3309's constexpr atomics. A macro
+names the newest feature actually present, so a later paper that is not
+implemented does not get to raise it.
 
 `<ratio>`'s C++26 addition (P2734R0's quetta / ronna / ronto / quecto) is
 **not** implemented and its macro is not claimed, because on this target there
@@ -316,6 +328,43 @@ nothing has been found since.
 - `~` Atomics that are not lock-free (any size outside 1/2/4/8/16) go through a
   **cabin-private lock pool**. Cross-cabin shared memory therefore supports only
   the lock-free sizes; the header states this contract.
+
+### P0493R5 — atomic fetch_max / fetch_min (Ф32-h)
+
+- `✓` `fetch_max` and `fetch_min` on the integral and pointer specializations of
+  both `atomic` and `atomic_ref`, in every cv-form the synopsis lists twice, plus
+  `atomic_fetch_max` / `atomic_fetch_min` and their `_explicit` forms. Floating
+  point deliberately has none: R5 dropped the `[atomics.types.float]` wording
+  outright, because NaN and signed zero do not survive `max` and `min`. `bool`
+  has none either — it is not an *integral-type* in `[atomics.types.int]`'s
+  sense — and the generic `atomic<T>` never had them.
+- `✓` Signed types compare **signed**. Every other `fetch_key` on a signed type
+  is computed as if converted to unsigned, and this paper amended that sentence
+  to read "except for `fetch_max` and `fetch_min`". Applying the old rule would
+  make `-1` the largest number there is; the emitted code is `jle` for
+  `atomic<int>` and `jnb` for `atomic<unsigned>` and `atomic<T*>`.
+- `+` **The store is conditional below a release, and unconditional at or above
+  one.** x86-64 has no max/min instruction and GCC 15 has no builtin, so both
+  are a CAS loop, and §5 of the paper is largely about which loop. Skipping the
+  store whenever the value already wins is *read-and-conditional-store*, which
+  §5.1 writes out and rejects — these are read-modify-write operations like every
+  other `fetch_key`. The one relaxation §5.3 grants is that a store is only
+  *required* when the caller asked for a release, since a release that stores
+  nothing releases nothing; below that the omitted store would only have added a
+  modification-order entry carrying the value that was already there. boxcxx takes
+  exactly that split, and implements the release side as a single unconditional
+  CAS rather than the paper's sketch, which primes with a dummy no-op
+  read-modify-write and can then take a second one on top. So
+  `fetch_max(v, relaxed)` on a value that already wins executes **no locked
+  instruction at all**, and `fetch_max(v, seq_cst)` always executes exactly one —
+  which is what keeps a many-core high-water mark off a cache line it never
+  needed. libstdc++ 16's fallback loop stores unconditionally for every order.
+- `~` The macro is `__cpp_lib_atomic_min_max 202403L`, not the draft's current
+  `202506L`. The later value also promises P3309's constexpr atomics, which this
+  library does not have; the value names the revision that is implemented, which
+  is what a feature-test macro is for. libstdc++ 16 defines 202403L for the same
+  reason. `store_max` / `store_min` are a different paper (P3111, under
+  `__cpp_lib_atomic_reductions`) and are absent.
 
 ## `<barrier>`
 
@@ -945,6 +994,44 @@ nothing has been found since.
   dispatch is an `if constexpr` recursion over `I` with `tuple_element_t` in
   place of pack indexing. Same semantics, no dependency on a C++26 language
   feature.
+
+### P3138R5 / P3137R3 — cache_latest and to_input (Ф32-g)
+
+- `✓` `views::cache_latest`. A `transform_view` recomputes on every dereference
+  by design, so a `filter` above one calls the transform twice per surviving
+  element — once for the predicate and once for the caller. This remembers the
+  last value produced; the suite proves it by *counting* the calls (six instead
+  of ten over six elements, same answer), which is the only way the difference is
+  observable. A reference element is cached as a **pointer**, a prvalue as the
+  value itself, so writing through `*it` reaches the original element rather than
+  a copy of it. The cast to take that address is to an *lvalue*, not to
+  `range_reference_t<V>`: the reference may legally be `T&&`
+  (`views::as_rvalue`, `move_iterator`), and there is no address of an xvalue.
+  The value branch constructs in place, so an element type that is constructible
+  but not assignable still works.
+- `✓` `views::to_input`. A range that could be walked twice, told not to be:
+  the category drops to input and common-ness goes with it, so the adaptors above
+  stop paying for a guarantee the consumer never collects. `size` and
+  `reserve_hint` survive — only the *category* drops. Over a range that is
+  already input-only and not common it is `views::all`, not a second wrapper.
+- `+` Both views carry `reserve_hint`, which the draft gives them and
+  libstdc++ 16 has not caught up with for `cache_latest_view`.
+- `!` **Both iterators are move-only, and that exposed two adaptors in this
+  library that had been quietly demanding more of an iterator than `[iterator.
+  concept.input]` allows.** Neither defect was reachable before, because until
+  these views there was no move-only iterator in the tree to reach them with.
+  - `filter_view::iterator::operator++` handed the base iterator to `find_next`
+    **by value from an lvalue**, which requires it to be *copyable*. An input
+    iterator only has to be `movable`; copyable is a forward-iterator
+    requirement. Fixed by moving.
+  - `drop_while_view` held its cached `begin()` as a plain member with a default
+    initializer, which requires the base iterator to be **default-constructible**
+    — something `[range.drop.while]` never asks of `V`. The cache is only
+    meaningful for a forward range, whose iterator is `semiregular` and therefore
+    does supply one, so it is now present only in that case. This is the same
+    conditional-member shape the tree already uses in `join`, `join_with`,
+    `slide` and `split`; the helper moved from `<__bits/ranges_join>` up to
+    `<__bits/ranges_views>` so this earlier file can reach it.
 
 ### P2714R1 / P2927R3 — callables by template argument, and looking inside an exception_ptr (Ф32-f)
 

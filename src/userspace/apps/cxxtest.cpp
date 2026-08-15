@@ -39345,6 +39345,172 @@ void Phase161()
            "demanding a copyable and a default-constructible iterator\n");
 }
 
+// ── Ф32-h ───────────────────────────────────────────────────────────────
+static int g_p162_cells[8];
+
+// The shapes P0493R5 deliberately leaves out have to stay out: bool is not an
+// integral-type in [atomics.types.int]'s sense, R5 dropped the floating-point
+// wording outright (NaN and signed zero do not survive max and min), and the
+// generic atomic<T> never had these at all.
+template <typename T>
+concept P162HasFetchMax = requires(std::atomic<T> a, T v) { a.fetch_max(v); };
+template <typename T>
+concept P162RefHasFetchMin = requires(std::atomic_ref<T> a, T v) { a.fetch_min(v); };
+
+struct P162Pod {
+    int a, b;
+};
+
+void Phase162()
+{
+    using namespace std;
+
+    // P0493R5. An old idiom with no instruction behind it on x86-64 and no
+    // builtin in this compiler, so both are a CAS loop -- and the paper is
+    // largely about the half of the hand-written loops that skip the store
+    // whenever the value already wins. That is read-and-conditional-store;
+    // these are read-modify-write, and the store may only be skipped when no
+    // release was asked for, because a release that stores nothing releases
+    // nothing.
+    {
+        atomic<int> a{5};
+        Check(a.fetch_max(3) == 5 && a.load() == 5,
+              "phase162 (1) fetch_max returns the OLD value and leaves a larger one alone");
+        Check(a.fetch_max(9) == 5 && a.load() == 9, "phase162 (2) ...and takes a larger one");
+        Check(a.fetch_min(12) == 9 && a.load() == 9, "phase162 (3) fetch_min leaves a smaller one");
+        Check(a.fetch_min(2) == 9 && a.load() == 2, "phase162 (4) ...and takes a smaller one");
+        Check(a.fetch_max(2) == 2 && a.load() == 2,
+              "phase162 (5) equal is not larger, so the object keeps its own value");
+    }
+    {
+        // Signedness is the one place the wording had to be amended. Every
+        // other fetch_key on a signed type is computed as if converted to
+        // unsigned; [atomics.types.int] now says "except for fetch_max and
+        // fetch_min". Apply the old rule and -1 is the largest number there is.
+        atomic<int> s{-1};
+        Check(s.fetch_max(1) == -1 && s.load() == 1,
+              "phase162 (6) a signed fetch_max compares SIGNED -- -1 loses to 1");
+        atomic<long long> l{-5};
+        Check(l.fetch_min(-9) == -5 && l.load() == -9,
+              "phase162 (7) ...and a signed fetch_min goes down past zero");
+        Check(l.fetch_max(-9) == -9 && l.load() == -9,
+              "phase162 (8) ...and stays put when the two are equal");
+        atomic<unsigned> u{0u};
+        Check(u.fetch_min(~0u) == 0u && u.load() == 0u,
+              "phase162 (9) while an unsigned type compares unsigned, so ~0u is the largest");
+        Check(u.fetch_max(~0u) == 0u && u.load() == ~0u, "phase162 (10) ...both ways round");
+    }
+    {
+        // All six orders, over both branches: the three that carry a release
+        // take an unconditional read-modify-write, the other three take a
+        // plain load and only touch the line when the value actually moves.
+        // The answers have to be identical.
+        bool ok = true;
+        for (memory_order m : {memory_order_relaxed, memory_order_consume, memory_order_acquire,
+                               memory_order_release, memory_order_acq_rel, memory_order_seq_cst}) {
+            atomic<int> a{4};
+            ok = ok && a.fetch_max(7, m) == 4 && a.load() == 7;
+            ok = ok && a.fetch_max(1, m) == 7 && a.load() == 7;
+            ok = ok && a.fetch_min(1, m) == 7 && a.load() == 1;
+            ok = ok && a.fetch_min(9, m) == 1 && a.load() == 1;
+        }
+        Check(ok, "phase162 (11) all six memory orders agree, on the branch that must "
+                  "store and on the branch that need not");
+    }
+    {
+        // Pointers. P0493R5 covers them; only floating point was dropped. No
+        // scaling by the pointee, unlike fetch_add: max and min compare
+        // addresses, they do not walk.
+        int *const  base = g_p162_cells;
+        atomic<int *> p{base + 2};
+        Check(p.fetch_max(base + 5) == base + 2 && p.load() == base + 5,
+              "phase162 (12) a pointer fetch_max takes the higher address");
+        Check(p.fetch_max(base + 1) == base + 5 && p.load() == base + 5,
+              "phase162 (13) ...and leaves it alone for a lower one");
+        Check(p.fetch_min(base + 1) == base + 5 && p.load() == base + 1,
+              "phase162 (14) pointer fetch_min goes the other way");
+        Check(p.fetch_add(1) == base + 1 && p.load() == base + 2,
+              "phase162 (15) fetch_add still scales by the pointee -- max and min "
+              "are the two that do not");
+        int              *raw = base + 3;
+        atomic_ref<int *> r(raw);
+        Check(r.fetch_max(base + 7) == base + 3 && raw == base + 7,
+              "phase162 (16) atomic_ref<T*>::fetch_max writes through to the cell");
+        Check(r.fetch_min(base) == base + 7 && raw == base,
+              "phase162 (17) ...and fetch_min with it");
+    }
+    {
+        // atomic_ref over a cell the caller owns -- which is where a lockless
+        // high-water mark actually reaches for this -- and the free functions.
+        int             raw = 10;
+        atomic_ref<int> r(raw);
+        Check(r.fetch_max(20) == 10 && raw == 20, "phase162 (18) atomic_ref::fetch_max");
+        Check(r.fetch_min(5) == 20 && raw == 5, "phase162 (19) atomic_ref::fetch_min");
+        atomic<int> a{1};
+        Check(atomic_fetch_max(&a, 4) == 1 && a.load() == 4, "phase162 (20) free atomic_fetch_max");
+        Check(atomic_fetch_min_explicit(&a, 2, memory_order_seq_cst) == 4 && a.load() == 2,
+              "phase162 (21) ...and the _explicit form");
+        volatile atomic<int> va{3};
+        Check(atomic_fetch_max(&va, 8) == 3 && va.load() == 8,
+              "phase162 (22) ...and the volatile overloads, which [atomics.types.int] "
+              "lists separately for every one of these");
+    }
+    static_assert(P162HasFetchMax<int>, "phase162 (23) integral atomics have it");
+    static_assert(P162HasFetchMax<int *>, "phase162 (24) so do pointer atomics");
+    static_assert(!P162HasFetchMax<bool>,
+                  "phase162 (25) bool is not an integral-type in [atomics.types.int]");
+    static_assert(!P162HasFetchMax<double>,
+                  "phase162 (26) and R5 dropped the floating-point wording outright");
+    static_assert(!P162HasFetchMax<P162Pod>,
+                  "phase162 (27) the generic atomic<T> never had these");
+    static_assert(P162RefHasFetchMin<int> && P162RefHasFetchMin<int *>,
+                  "phase162 (28) atomic_ref gets the same two specializations");
+    static_assert(!P162RefHasFetchMin<double> && !P162RefHasFetchMin<P162Pod>,
+                  "phase162 (29) ...and the same exclusions");
+    static_assert(__cpp_lib_atomic_min_max == 202403L, "phase162 (30) P0493R5 claimed");
+
+    // The loop under real parallelism. Four strands publish disjoint,
+    // interleaved values into one high-water mark. Whatever the interleaving
+    // the final value is the global maximum, and no strand can ever have seen
+    // the object move backwards -- a dropped CAS retry fails the first, and a
+    // lost update fails the second. Both are exact equalities over exact
+    // arithmetic, so there is nothing here that can flake under load.
+    if (cpu_has_fsgsbase()) {
+        constexpr int kT = 4, kN = 512;
+        for (memory_order m : {memory_order_relaxed, memory_order_seq_cst}) {
+            atomic<int> hi{0};
+            atomic<int> wentBack{0};
+            thread      ts[kT];
+            for (int t = 0; t < kT; ++t)
+                ts[t] = thread([&hi, &wentBack, t, m] {
+                    int seen = 0;
+                    for (int i = 0; i < kN; ++i) {
+                        const int val = i * kT + t + 1;
+                        const int old = hi.fetch_max(val, m);
+                        if (old < seen) wentBack.fetch_add(1, memory_order_relaxed);
+                        seen = old > val ? old : val;
+                    }
+                });
+            for (auto &th : ts) th.join();
+            Check(hi.load() == kN * kT,
+                  "phase162 (31) four strands hammering one high-water mark end at the "
+                  "global maximum -- a dropped CAS retry would lose an update");
+            Check(wentBack.load() == 0,
+                  "phase162 (32) ...and no strand ever saw the value move backwards");
+        }
+    } else {
+        printf("[CXX] note phase162: strands need FSGSBASE — skipping the concurrent "
+               "high-water mark\n");
+    }
+
+    printf("[CXX] PASS phase162: Ф32-h — P0493R5 atomic fetch_max / fetch_min on the "
+           "integral and pointer specializations of atomic and atomic_ref plus the "
+           "free functions, as read-modify-write operations: the store is skipped "
+           "only when no release was asked for, which is the one relaxation the "
+           "paper grants and the reason a relaxed high-water mark never touches an "
+           "exclusive cache line it does not need\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -39528,6 +39694,7 @@ int main()
     Phase159();
     Phase160();
     Phase161();
+    Phase162();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
