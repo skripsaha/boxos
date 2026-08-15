@@ -14,6 +14,7 @@
 #define BOXCXX_OWNS_constant_wrapper
 #define BOXCXX_OWNS_constexpr_algorithms
 #define BOXCXX_OWNS_constexpr_utility
+#define BOXCXX_OWNS_constrained_equality
 #define BOXCXX_OWNS_exchange_function
 #define BOXCXX_OWNS_forward_like
 #define BOXCXX_OWNS_integer_comparison_functions
@@ -272,6 +273,45 @@ struct tuple_element<I, const T> {
 template <size_t I, class T>
 using tuple_element_t = typename tuple_element<I, T>::type;
 
+// ── structured bindings for integer_sequence ([intseq.general]) ─────────
+// C++26 gives integer_sequence a tuple protocol, so "auto [a, b, c] = seq"
+// names the values a pack was carrying. It does NOT make integer_sequence
+// tuple-like: [tuple.like] stays the closed set array/complex/pair/tuple/
+// subrange, so IsTupleLikeType is deliberately not specialized here --
+// structured bindings need only tuple_size/tuple_element/get.
+//
+// tuple_element is specialized for both the plain and the const type. The
+// const partial specialization above would otherwise add a const that the
+// standard does not ask for: an integer_sequence carries values, not
+// members, so element i of a const sequence is still T, not const T.
+//
+// get returns by value for the same reason -- there is no object to bind a
+// reference to. The value is read out of a local array rather than with
+// pack indexing (Is...[I]), which GCC 15 does not have.
+template <class T, T... Is>
+struct tuple_size<integer_sequence<T, Is...>>
+    : integral_constant<size_t, sizeof...(Is)> {};
+
+template <size_t I, class T, T... Is>
+struct tuple_element<I, integer_sequence<T, Is...>> {
+    static_assert(I < sizeof...(Is), "integer_sequence index out of range");
+    using type = T;
+};
+
+template <size_t I, class T, T... Is>
+struct tuple_element<I, const integer_sequence<T, Is...>> {
+    static_assert(I < sizeof...(Is), "integer_sequence index out of range");
+    using type = T;
+};
+
+template <size_t I, class T, T... Is>
+[[nodiscard]] constexpr T get(integer_sequence<T, Is...>) noexcept
+{
+    static_assert(I < sizeof...(Is), "integer_sequence index out of range");
+    constexpr T kValues[] = {Is...};
+    return kValues[I];
+}
+
 // ── tuple-like / pair-like ([tuple.like]) ────────────────────────────────
 // Both are exposition-only in the standard (hyphens make the real spelling
 // unwritable), so boxcxx names them under __bits. [tuple.like]/1: T is
@@ -288,6 +328,27 @@ using tuple_element_t = typename tuple_element<I, T>::type;
 // "true" for exactly the tuple-like types whose header it actually
 // included.
 namespace __bits {
+
+// [concept.booleantestable], defined here rather than in <concepts>
+// because <concepts> includes THIS header: the constrained comparison
+// operators below are the lowest use of it in the tree. <concepts> picks
+// it up from here.
+template <class T>
+concept BooleanTestableImpl = is_convertible_v<T, bool>;
+template <class T>
+concept BooleanTestable = BooleanTestableImpl<T> && requires(T &&t) {
+    { !static_cast<T &&>(t) } -> BooleanTestableImpl;
+};
+
+// P2944R3's constraint, named once and used by every wrapper whose
+// operator== forwards to its members' ([pairs.spec], [tuple.rel],
+// [variant.relops], [expected.object.eq], [optional.relops]). Named rather
+// than written inline because a fold over an inline requires-expression is
+// where GCC and clang start disagreeing (Ф33 hit that twice).
+template <class T, class U>
+concept EqComparableWith = requires(const T &a, const U &b) {
+    { a == b } -> BooleanTestable;
+};
 
 template <class T> inline constexpr bool IsTupleLikeType = false;
 template <class T> inline constexpr bool IsSubrangeType  = false;
@@ -579,17 +640,31 @@ struct pair {
 template <class T1, class T2>
 pair(T1, T2) -> pair<T1, T2>;
 
-template <class T1, class T2>
+// [pairs.spec]'s comparisons are HETEROGENEOUS -- and always have been.
+// boxcxx had only the same-type forms, so pair<int,double> ==
+// pair<long,float> did not compile at all, and neither did the <=>. Two
+// pairs whose members compare are comparable; nothing about the pair types
+// matching is part of that.
+//
+// The requires-clause is P2944R3 (constrained equality): without it
+// equality_comparable<pair<NoEq,int>> answered TRUE and the error only
+// arrived later, inside the operator, where no concept could catch it.
+// boolean-testable rather than plain bool is the standard's own wording --
+// a member whose operator== returns a proxy still counts.
+template <class T1, class T2, class U1, class U2>
+    requires __bits::EqComparableWith<T1, U1> &&
+             __bits::EqComparableWith<T2, U2>
 [[nodiscard]] constexpr bool operator==(const pair<T1, T2> &a,
-                                        const pair<T1, T2> &b)
+                                        const pair<U1, U2> &b)
 {
     return a.first == b.first && a.second == b.second;
 }
 
-template <class T1, class T2>
+template <class T1, class T2, class U1, class U2>
 [[nodiscard]] constexpr common_comparison_category_t<
-    __cmp::synth_three_way_result_t<T1>, __cmp::synth_three_way_result_t<T2>>
-operator<=>(const pair<T1, T2> &a, const pair<T1, T2> &b)
+    __cmp::synth_three_way_result_t<T1, U1>,
+    __cmp::synth_three_way_result_t<T2, U2>>
+operator<=>(const pair<T1, T2> &a, const pair<U1, U2> &b)
 {
     if (auto c = __cmp::SynthThreeWay{}(a.first, b.first); c != 0) return c;
     return __cmp::SynthThreeWay{}(a.second, b.second);

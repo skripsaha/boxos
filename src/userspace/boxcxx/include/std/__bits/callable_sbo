@@ -9,8 +9,15 @@
 #define BOXCXX_BITS_CALLABLE_SBO
 
 #include <type_traits>
+#include <utility>
 
 namespace std::__bits {
+
+// Shared by move_only_function and copyable_function: both must exclude
+// in_place_type_t from their perfect-forwarding constructor, or
+// f(in_place_type<T>, args...) would try to store the TAG as the target.
+template <class T> inline constexpr bool IsInPlaceType = false;
+template <class T> inline constexpr bool IsInPlaceType<in_place_type_t<T>> = true;
 
 inline constexpr size_t kCallableSboSize  = 24;
 inline constexpr size_t kCallableSboAlign = alignof(void *);

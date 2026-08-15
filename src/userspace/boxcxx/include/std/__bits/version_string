@@ -28,7 +28,7 @@
 // together with the two constructors that were genuinely missing.
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_view)) && \
     !defined(__cpp_lib_string_view)
-#  define __cpp_lib_string_view 201803L
+#  define __cpp_lib_string_view 202403L   // + P2591R5 (string + string_view)
 #endif
 #undef BOXCXX_OWNS_string_view
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_string_resize_and_overwrite)) && \

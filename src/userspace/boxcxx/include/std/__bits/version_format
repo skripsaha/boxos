@@ -17,6 +17,18 @@
 // question it was not asked, so it no longer does. <version> defines
 // BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format_uchar)) && \
+    !defined(__cpp_lib_format_uchar)
+// P2909R4 "Fix formatting of code units as integers". A char formatted
+// with an integer presentation type is a CODE UNIT, so it widens through
+// unsigned char: format("{:d}", char(-1)) is 255, not -1, while
+// signed char(-1) stays -1. boxcxx's formatter<char, char> has always
+// done exactly that ((unsigned long long)(unsigned char)value), which is
+// why this is a macro and not a code change -- verified against
+// libstdc++ 16.1 in C++26 mode, which prints 255 for the same call.
+#  define __cpp_lib_format_uchar 202311L
+#endif
+#undef BOXCXX_OWNS_format_uchar
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format_ranges)) && \
     !defined(__cpp_lib_format_ranges)
 #  define __cpp_lib_format_ranges 202207L

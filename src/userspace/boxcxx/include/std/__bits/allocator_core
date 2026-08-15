@@ -24,10 +24,40 @@ constexpr T *addressof(T &r) noexcept
 template <typename T>
 const T *addressof(const T &&) = delete;
 
+// The cv-stripping cast is [specialized.construct]'s voidify: it lets
+// construct_at build an object at a const- or volatile-qualified address,
+// which a plain static_cast<void*> rejects outright. ranges::construct_at
+// forwards here (it must -- see its own comment), and it always accepted
+// those, so the cast has to live here now.
 template <typename T, typename... Args>
 constexpr T *construct_at(T *p, Args &&...args)
 {
-    return ::new (static_cast<void *>(p)) T(std::forward<Args>(args)...);
+    return ::new (const_cast<void *>(static_cast<const volatile void *>(p)))
+        T(std::forward<Args>(args)...);
+}
+
+// Default-initialization of one element, the form the uninitialized_*
+// algorithms need and construct_at cannot express: `::new (p) T` leaves a
+// trivial member indeterminate, `construct_at(p)` value-initializes it.
+//
+// The runtime path must keep default-init (that is what
+// [specialized.algorithms] says, and zeroing a big POD nobody reads is not
+// free). The constant-evaluated path CANNOT: a placement-new expression is
+// a constant expression only inside std::construct_at, and that is exactly
+// what P2747R2's constexpr placement new would fix -- GCC 15.2 reports
+// __cpp_constexpr 202211, so it is not available here. Value-initializing
+// instead is the one deviation, and no conforming program can observe it:
+// reading an indeterminate value during constant evaluation is itself
+// ill-formed, so the only programs that can tell the two apart are the
+// ones a conforming implementation must reject anyway. Recorded in
+// CONFORMANCE.md.
+template <typename T>
+constexpr void __default_construct_at(T *p)
+{
+    if (is_constant_evaluated())
+        construct_at(p);
+    else
+        ::new (static_cast<void *>(p)) T;
 }
 
 template <typename T>

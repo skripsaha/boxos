@@ -4,9 +4,13 @@
 // with <ostream> -- hence a leaf, for the same [support.limits.general]
 // reason as every other version_* file (see <__bits/version_any>).
 //
-// 202207L is N4950's own value. libstdc++ reports 202211L under -std=c++23;
-// this library pins what C++23 specifies, the same policy that keeps
-// __cpp_lib_out_ptr at 202106L (see <version>).
+// 202406L is the C++26 value, and both of the things it stands for are
+// here: P3107R5's enable_nonlocking_formatter_optimization, specialized
+// true for every type <format> ships a formatter for (including charT
+// itself, which is what the paper actually needs), and P3142R0's
+// argument-less println(), which boxcxx already had because writing "\n"
+// through the format machinery to emit one byte was never the point.
+// The pin was 202207L, N4950's value, while those were unimplemented.
 //
 // The console half of [print.fun] shipped in Ф9B-2 and the macro still could
 // not be defined: P2539R4's four ostream-taking overloads did not exist, and
@@ -25,6 +29,6 @@
 
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_print)) && \
     !defined(__cpp_lib_print)
-#  define __cpp_lib_print 202207L
+#  define __cpp_lib_print 202406L
 #endif
 #undef BOXCXX_OWNS_print

@@ -21,8 +21,7 @@
 // __cpp_lib_ranges itself is NOT here: it is the widest macro in
 // [version.syn], covering the whole of [ranges] plus the specialized-memory
 // algorithms, and boxcxx is missing 23 of the entities it promises. See
-// <version>'s omission list for the enumeration. Neither is
-// __cpp_lib_ranges_as_const, for the reason recorded there.
+// <version>'s omission list for the enumeration.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -47,9 +46,12 @@
     !defined(__cpp_lib_ranges_as_const)
 // P2278R4. Claimable since Ф31e-b added the paper's last four names:
 // ranges::cbegin / ranges::cend (in <iterator>, beside make_const_iterator)
-// and view_interface::cbegin / cend. N4950's value is taken, not the 202311L
-// libstdc++ reports -- that is the later P2836R1 DR, which is not built here.
-#  define __cpp_lib_ranges_as_const 202207L
+// and view_interface::cbegin / cend. The value moved from N4950's 202207L
+// to 202311L when Ф34 built P2836R1 as well: basic_const_iterator now has
+// the two conversion operators that let it convert to whatever its base
+// converts to, so handing one back to the container it came from -- the
+// v.erase(const_iterator) case -- compiles.
+#  define __cpp_lib_ranges_as_const 202311L
 #endif
 #undef BOXCXX_OWNS_ranges_as_const
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ranges_join_with)) && \

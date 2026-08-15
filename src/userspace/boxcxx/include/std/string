@@ -40,10 +40,12 @@
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_algorithm_default_value_type
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #define BOXCXX_OWNS_containers_ranges
 #define BOXCXX_OWNS_erase_if
 #include <__bits/version_containers>
+#include <__bits/version_algorithm>   // algorithm_default_value_type
 #define BOXCXX_OWNS_nonmember_container_access
 #include <__bits/version_iterator>
 #define BOXCXX_OWNS_starts_ends_with
@@ -999,6 +1001,88 @@ basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, C ch)
     return std::move(a);
 }
 
+// [string.op.plus] lists twelve overloads; these four -- the ones whose
+// RIGHT operand is the rvalue -- were missing. Every call still compiled
+// without them (it fell back to the const&/const& form), which is why
+// nothing noticed: what was lost was the point of the overloads, namely
+// reusing the buffer that is about to be thrown away. `sv + std::move(s)`
+// and `"x" + std::move(s)` prepend in place instead of allocating a third
+// string.
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                basic_string<C, T, A>      &&b)
+{
+    b.insert(0, a);
+    return std::move(b);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
+                                basic_string<C, T, A> &&b)
+{
+    // Two buffers to choose from: appending to the left one keeps the
+    // result in place unless b is the one with room to spare.
+    if (b.capacity() >= a.size() + b.size() && a.capacity() < a.size() + b.size()) {
+        b.insert(0, a);
+        return std::move(b);
+    }
+    a.append(b);
+    return std::move(a);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const C *a, basic_string<C, T, A> &&b)
+{
+    b.insert(0, a);
+    return std::move(b);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(C ch, basic_string<C, T, A> &&b)
+{
+    b.insert(b.begin(), ch);
+    return std::move(b);
+}
+
+// ── P2591R5: string + string_view ───────────────────────────────────────
+// The gap this closes is narrow but sharp: `s + sv` did not compile at all
+// before, because string_view converts to nothing that operator+ accepted
+// and string has no implicit conversion FROM a view (deliberately -- that
+// one would allocate silently). type_identity_t on the view parameter is
+// what keeps the overload from hijacking `s + "literal"`: the view side is
+// a non-deduced context, so the const charT* overload still wins there.
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(const basic_string<C, T, A>      &a,
+                                type_identity_t<basic_string_view<C, T>> b)
+{
+    basic_string<C, T, A> r(a.get_allocator());
+    r.reserve(a.size() + b.size());
+    r.append(a);
+    r.append(b.data(), b.size());
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(basic_string<C, T, A>           &&a,
+                                type_identity_t<basic_string_view<C, T>> b)
+{
+    a.append(b.data(), b.size());
+    return std::move(a);
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(type_identity_t<basic_string_view<C, T>> a,
+                                const basic_string<C, T, A>             &b)
+{
+    basic_string<C, T, A> r(b.get_allocator());
+    r.reserve(a.size() + b.size());
+    r.append(a.data(), a.size());
+    r.append(b);
+    return r;
+}
+template <typename C, typename T, typename A>
+basic_string<C, T, A> operator+(type_identity_t<basic_string_view<C, T>> a,
+                                basic_string<C, T, A>                  &&b)
+{
+    b.insert(0, a.data(), a.size());
+    return std::move(b);
+}
+
 template <typename C, typename T, typename A>
 bool operator==(const basic_string<C, T, A> &a,
                 const basic_string<C, T, A> &b) noexcept
@@ -1029,7 +1113,7 @@ void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept(noexcept(
 }
 
 // C++20 uniform erasure.
-template <typename C, typename T, typename A, typename V>
+template <typename C, typename T, typename A, typename V = C>
 typename basic_string<C, T, A>::size_type erase(basic_string<C, T, A> &s,
                                                 const V &value)
 {

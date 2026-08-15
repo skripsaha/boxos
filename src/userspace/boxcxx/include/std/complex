@@ -32,6 +32,13 @@
 #define BOXCXX_OWNS_complex_udls
 #define BOXCXX_OWNS_constexpr_complex
 #include <__bits/version_complex>
+// P2819R2 made <complex> a co-owner of __cpp_lib_tuple_like, whose single
+// definition site is <utility>'s leaf; <utility> above has already defined
+// it, so this include only clears the ownership flag -- but declaring the
+// ownership is what tools/cxx_ftm_audit.sh reads as "this header answers
+// for that macro".
+#define BOXCXX_OWNS_tuple_like
+#include <__bits/version_utility>
 
 namespace std {
 
@@ -157,6 +164,19 @@ public:
     constexpr T imag() const noexcept { return __im_; }
     constexpr void imag(T val) noexcept { __im_ = val; }
 
+    // [complex.tuple]'s get needs a REFERENCE to a part; real()/imag()
+    // return by value and always did (the standard says so). This is the
+    // reserved-name accessor the four get overloads below go through -- it
+    // is public for the same reason libstdc++'s __get_part is: a free
+    // function template cannot be befriended without repeating complex's
+    // own requires-clause on every declaration, and a name that starts
+    // with two underscores is already off-limits to user code.
+    constexpr T &__part(size_t i) noexcept { return i == 0 ? __re_ : __im_; }
+    constexpr const T &__part(size_t i) const noexcept
+    {
+        return i == 0 ? __re_ : __im_;
+    }
+
     // [complex.member.ops]: assigning a scalar RESETS the imaginary part.
     constexpr complex &operator=(const T &rhs) noexcept
     {
@@ -236,6 +256,59 @@ private:
     T __re_;
     T __im_;
 };
+
+// ── tuple protocol ([complex.tuple]) ────────────────────────────────────
+// C++26 lets "auto [re, im] = z" work, and -- unlike integer_sequence's
+// protocol in <utility> -- it also puts complex INTO the tuple-like set,
+// so complex<T> is a valid source for pair/tuple's tuple-like constructor
+// and for views::elements. That is why IsTupleLikeType is specialized here
+// and not there.
+//
+// tuple_element deliberately has no const partial specialization: the one
+// in <utility> already adds const to T, which is exactly right for a type
+// whose elements are real members (unlike integer_sequence, whose elements
+// are values).
+
+template <class T>
+struct tuple_size<complex<T>> : integral_constant<size_t, 2> {};
+
+template <size_t I, class T>
+struct tuple_element<I, complex<T>> {
+    static_assert(I < 2, "complex has exactly two elements");
+    using type = T;
+};
+
+namespace __bits {
+template <class T> inline constexpr bool IsTupleLikeType<complex<T>> = true;
+} // namespace __bits
+
+template <size_t I, class T>
+[[nodiscard]] constexpr T &get(complex<T> &z) noexcept
+{
+    static_assert(I < 2, "complex has exactly two elements");
+    return z.__part(I);
+}
+
+template <size_t I, class T>
+[[nodiscard]] constexpr T &&get(complex<T> &&z) noexcept
+{
+    static_assert(I < 2, "complex has exactly two elements");
+    return static_cast<T &&>(z.__part(I));
+}
+
+template <size_t I, class T>
+[[nodiscard]] constexpr const T &get(const complex<T> &z) noexcept
+{
+    static_assert(I < 2, "complex has exactly two elements");
+    return z.__part(I);
+}
+
+template <size_t I, class T>
+[[nodiscard]] constexpr const T &&get(const complex<T> &&z) noexcept
+{
+    static_assert(I < 2, "complex has exactly two elements");
+    return static_cast<const T &&>(z.__part(I));
+}
 
 namespace __cplx {
 

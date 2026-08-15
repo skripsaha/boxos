@@ -161,9 +161,6 @@ protected:
 // used as a reference (no-ref-qualifier coalesces to "&", matching what
 // the thunk actually casts to). For ref-qualified rows PlainT == InvT.
 
-template <class T> inline constexpr bool IsInPlaceType = false;
-template <class T> inline constexpr bool IsInPlaceType<in_place_type_t<T>> = true;
-
 template <class PlainT, class InvT, class R, bool Noex, class... Args>
 inline constexpr bool MofCallable =
     Noex ? (is_nothrow_invocable_r_v<R, PlainT, Args...> &&

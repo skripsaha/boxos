@@ -103,7 +103,7 @@
 #undef BOXCXX_OWNS_out_ptr
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_raw_memory_algorithms)) && \
     !defined(__cpp_lib_raw_memory_algorithms)
-#  define __cpp_lib_raw_memory_algorithms 201606L
+#  define __cpp_lib_raw_memory_algorithms 202411L   // constexpr
 #endif
 #undef BOXCXX_OWNS_raw_memory_algorithms
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_shared_ptr_arrays)) && \
@@ -121,6 +121,11 @@
 #  define __cpp_lib_smart_ptr_for_overwrite 202002L
 #endif
 #undef BOXCXX_OWNS_smart_ptr_for_overwrite
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_smart_ptr_owner_equality)) && \
+    !defined(__cpp_lib_smart_ptr_owner_equality)
+#  define __cpp_lib_smart_ptr_owner_equality 202306L   // P1901R2
+#endif
+#undef BOXCXX_OWNS_smart_ptr_owner_equality
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_start_lifetime_as)) && \
     !defined(__cpp_lib_start_lifetime_as)
 #  define __cpp_lib_start_lifetime_as 202207L

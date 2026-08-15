@@ -164,6 +164,7 @@ template <class T> void cref(const T &&) = delete;
 // it must follow it.
 #include <__bits/function>
 #include <__bits/move_only_function>
+#include <__bits/copyable_function>
 #include <__bits/bind>
 #include <__bits/bind_partial>
 #include <__bits/mem_fn>
@@ -187,6 +188,7 @@ template <class T> void cref(const T &&) = delete;
 #define BOXCXX_OWNS_boyer_moore_searcher
 #define BOXCXX_OWNS_common_reference_wrapper
 #define BOXCXX_OWNS_constexpr_functional
+#define BOXCXX_OWNS_copyable_function
 #define BOXCXX_OWNS_function_ref
 #define BOXCXX_OWNS_invoke
 #define BOXCXX_OWNS_invoke_r

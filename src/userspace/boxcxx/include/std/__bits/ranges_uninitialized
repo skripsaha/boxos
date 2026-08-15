@@ -148,14 +148,22 @@ struct ConstructAt {
     // [specialized.construct]/1's own constraint, spelled as the standard
     // spells it: the placement-new expression must be well-formed as an
     // unevaluated operand.
+    //
+    // The body DELEGATES to std::construct_at rather than repeating the
+    // placement-new. That is not tidiness: a placement-new expression is a
+    // constant expression only inside a function GCC recognises by name as
+    // std::construct_at, and ranges::construct_at is a call operator on a
+    // type in std::ranges::__uninit, which it does not. Written out here,
+    // the function carried a constexpr keyword it could never honour --
+    // every constant-evaluated call failed with "call to non-constexpr
+    // function operator new(size_t, void*)". Measured, not read.
     template <class T, class... Args>
         requires requires(void *p, Args &&...a) {
             ::new (p) T(std::forward<Args>(a)...);
         }
     constexpr T *operator()(T *p, Args &&...args) const
     {
-        return ::new (const_cast<void *>(static_cast<const volatile void *>(p)))
-            T(std::forward<Args>(args)...);
+        return std::construct_at(p, std::forward<Args>(args)...);
     }
 };
 
@@ -188,20 +196,18 @@ namespace __uninit {
 struct UninitDefaultConstruct {
     template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S>
         requires default_initializable<iter_value_t<I>>
-    I operator()(I first, S last) const
+    constexpr I operator()(I first, S last) const
     {
-        using T = remove_reference_t<iter_reference_t<I>>;
         I               cur = first;
         RollBack<I>     rb{first, &cur};
         for (; cur != last; ++cur)
-            ::new (const_cast<void *>(static_cast<const volatile void *>(
-                addressof(*cur)))) T;
+            std::__default_construct_at(addressof(*cur));
         rb.Release();
         return cur;
     }
     template <__nothrow_forward_range R>
         requires default_initializable<range_value_t<R>>
-    borrowed_iterator_t<R> operator()(R &&r) const
+    constexpr borrowed_iterator_t<R> operator()(R &&r) const
     {
         return (*this)(ranges::begin(r), ranges::end(r));
     }
@@ -210,14 +216,12 @@ struct UninitDefaultConstruct {
 struct UninitDefaultConstructN {
     template <__nothrow_forward_iterator I>
         requires default_initializable<iter_value_t<I>>
-    I operator()(I first, iter_difference_t<I> n) const
+    constexpr I operator()(I first, iter_difference_t<I> n) const
     {
-        using T = remove_reference_t<iter_reference_t<I>>;
         I           cur = first;
         RollBack<I> rb{first, &cur};
         for (; n > 0; ++cur, (void)--n)
-            ::new (const_cast<void *>(static_cast<const volatile void *>(
-                addressof(*cur)))) T;
+            std::__default_construct_at(addressof(*cur));
         rb.Release();
         return cur;
     }
@@ -231,20 +235,17 @@ struct UninitDefaultConstructN {
 struct UninitValueConstruct {
     template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S>
         requires default_initializable<iter_value_t<I>>
-    I operator()(I first, S last) const
+    constexpr I operator()(I first, S last) const
     {
-        using T = remove_reference_t<iter_reference_t<I>>;
         I           cur = first;
         RollBack<I> rb{first, &cur};
-        for (; cur != last; ++cur)
-            ::new (const_cast<void *>(static_cast<const volatile void *>(
-                addressof(*cur)))) T();
+        for (; cur != last; ++cur) ranges::construct_at(addressof(*cur));
         rb.Release();
         return cur;
     }
     template <__nothrow_forward_range R>
         requires default_initializable<range_value_t<R>>
-    borrowed_iterator_t<R> operator()(R &&r) const
+    constexpr borrowed_iterator_t<R> operator()(R &&r) const
     {
         return (*this)(ranges::begin(r), ranges::end(r));
     }
@@ -253,14 +254,11 @@ struct UninitValueConstruct {
 struct UninitValueConstructN {
     template <__nothrow_forward_iterator I>
         requires default_initializable<iter_value_t<I>>
-    I operator()(I first, iter_difference_t<I> n) const
+    constexpr I operator()(I first, iter_difference_t<I> n) const
     {
-        using T = remove_reference_t<iter_reference_t<I>>;
         I           cur = first;
         RollBack<I> rb{first, &cur};
-        for (; n > 0; ++cur, (void)--n)
-            ::new (const_cast<void *>(static_cast<const volatile void *>(
-                addressof(*cur)))) T();
+        for (; n > 0; ++cur, (void)--n) ranges::construct_at(addressof(*cur));
         rb.Release();
         return cur;
     }
@@ -285,7 +283,7 @@ struct UninitCopy {
     template <input_iterator I, sentinel_for<I> S1, __nothrow_forward_iterator O,
               __nothrow_sentinel_for<O> S2>
         requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
-    uninitialized_copy_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
+    constexpr uninitialized_copy_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
                                                S2 olast) const
     {
         O           cur = ofirst;
@@ -297,7 +295,7 @@ struct UninitCopy {
     }
     template <input_range IR, __nothrow_forward_range OR>
         requires constructible_from<range_value_t<OR>, range_reference_t<IR>>
-    uninitialized_copy_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+    constexpr uninitialized_copy_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
     operator()(IR &&in, OR &&out) const
     {
         return (*this)(ranges::begin(in), ranges::end(in), ranges::begin(out),
@@ -309,7 +307,7 @@ struct UninitCopyN {
     template <input_iterator I, __nothrow_forward_iterator O,
               __nothrow_sentinel_for<O> S>
         requires constructible_from<iter_value_t<O>, iter_reference_t<I>>
-    uninitialized_copy_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
+    constexpr uninitialized_copy_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
                                                  O ofirst, S olast) const
     {
         O           cur = ofirst;
@@ -325,7 +323,7 @@ struct UninitMove {
     template <input_iterator I, sentinel_for<I> S1, __nothrow_forward_iterator O,
               __nothrow_sentinel_for<O> S2>
         requires constructible_from<iter_value_t<O>, iter_rvalue_reference_t<I>>
-    uninitialized_move_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
+    constexpr uninitialized_move_result<I, O> operator()(I ifirst, S1 ilast, O ofirst,
                                                S2 olast) const
     {
         O           cur = ofirst;
@@ -338,7 +336,7 @@ struct UninitMove {
     template <input_range IR, __nothrow_forward_range OR>
         requires constructible_from<range_value_t<OR>,
                                     range_rvalue_reference_t<IR>>
-    uninitialized_move_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
+    constexpr uninitialized_move_result<borrowed_iterator_t<IR>, borrowed_iterator_t<OR>>
     operator()(IR &&in, OR &&out) const
     {
         return (*this)(ranges::begin(in), ranges::end(in), ranges::begin(out),
@@ -350,7 +348,7 @@ struct UninitMoveN {
     template <input_iterator I, __nothrow_forward_iterator O,
               __nothrow_sentinel_for<O> S>
         requires constructible_from<iter_value_t<O>, iter_rvalue_reference_t<I>>
-    uninitialized_move_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
+    constexpr uninitialized_move_n_result<I, O> operator()(I ifirst, iter_difference_t<I> n,
                                                  O ofirst, S olast) const
     {
         O           cur = ofirst;
@@ -365,9 +363,10 @@ struct UninitMoveN {
 // ── uninitialized_fill / _fill_n ─────────────────────────────────────────
 
 struct UninitFill {
-    template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S, class T>
+    template <__nothrow_forward_iterator I, __nothrow_sentinel_for<I> S,
+              class T = iter_value_t<I>>
         requires constructible_from<iter_value_t<I>, const T &>
-    I operator()(I first, S last, const T &x) const
+    constexpr I operator()(I first, S last, const T &x) const
     {
         I           cur = first;
         RollBack<I> rb{first, &cur};
@@ -375,18 +374,18 @@ struct UninitFill {
         rb.Release();
         return cur;
     }
-    template <__nothrow_forward_range R, class T>
+    template <__nothrow_forward_range R, class T = range_value_t<R>>
         requires constructible_from<range_value_t<R>, const T &>
-    borrowed_iterator_t<R> operator()(R &&r, const T &x) const
+    constexpr borrowed_iterator_t<R> operator()(R &&r, const T &x) const
     {
         return (*this)(ranges::begin(r), ranges::end(r), x);
     }
 };
 
 struct UninitFillN {
-    template <__nothrow_forward_iterator I, class T>
+    template <__nothrow_forward_iterator I, class T = iter_value_t<I>>
         requires constructible_from<iter_value_t<I>, const T &>
-    I operator()(I first, iter_difference_t<I> n, const T &x) const
+    constexpr I operator()(I first, iter_difference_t<I> n, const T &x) const
     {
         I           cur = first;
         RollBack<I> rb{first, &cur};

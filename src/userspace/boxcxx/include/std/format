@@ -1903,6 +1903,7 @@ size_t formatted_size(format_string<Args...> fmt, Args &&...args)
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_format_ranges
+#define BOXCXX_OWNS_format_uchar
 #include <__bits/version_format>
 
 #endif // BOXCXX_FORMAT

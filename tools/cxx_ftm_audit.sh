@@ -32,12 +32,21 @@
 #           their headers. When re-pinning, account for the delta macro by
 #           macro: it must be new macros, not a header that started including
 #           more than it used to.
+#
+#           Ф34 raised it 153 -> 158, again macro by macro: constrained_
+#           equality (<utility> and four more), algorithm_default_value_type
+#           (<algorithm>/<memory>/five containers), copyable_function
+#           (<functional>), smart_ptr_owner_equality (<memory>) and
+#           format_uchar (<format>) each own a widely-included header. The
+#           other three macros Ф34 added -- stdatomic_h, stdbit_h and
+#           stdckdint_h -- leak nowhere at all, because no header in the
+#           tree includes a C-compatibility header.
 #   SYNOPSIS every macro is visible from <version> itself
 #
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=153
+LEAK_BUDGET=158
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

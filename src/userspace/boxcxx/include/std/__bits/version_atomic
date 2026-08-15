@@ -53,7 +53,7 @@
 #undef BOXCXX_OWNS_atomic_lock_free_type_aliases
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_ref)) && \
     !defined(__cpp_lib_atomic_ref)
-#  define __cpp_lib_atomic_ref 201806L
+#  define __cpp_lib_atomic_ref 202603L   // + P3323R1 cv, P2835R6 address()
 #endif
 #undef BOXCXX_OWNS_atomic_ref
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_atomic_value_initialization)) && \

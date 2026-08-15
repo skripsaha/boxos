@@ -29,8 +29,10 @@
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_constrained_equality
 #define BOXCXX_OWNS_variant
 #include <__bits/version_variant>
+#include <__bits/version_utility>   // constrained_equality is defined there
 
 namespace std {
 
@@ -825,7 +827,10 @@ constexpr R visit(Vis &&vis, Vars &&...vars)
 
 // ── comparisons ──────────────────────────────────────────────────────────
 
+// P2944R3, same reasoning as tuple's: every alternative has to be
+// comparable for the variant to be.
 template <class... Ts>
+    requires(__bits::EqComparableWith<Ts, Ts> && ...)
 constexpr bool operator==(const variant<Ts...> &a, const variant<Ts...> &b)
 {
     if (a.index() != b.index()) return false;
