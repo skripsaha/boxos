@@ -1,0 +1,381 @@
+// boxcxx — <__bits/ranges_input_views>
+//
+// The two C++26 views that SHAPE a range into an input range rather than
+// transforming its elements: cache_latest_view (P3138R5) and to_input_view
+// (P3137R3). They are here rather than in <__bits/ranges_adaptor_simple>, where
+// reverse/as_rvalue/as_const live, for one mechanical reason: cache_latest_view
+// needs non-propagating-cache, which is defined in <__bits/ranges_join>, and
+// ranges_adaptor_simple is included before it.
+//
+// Both views make their iterators MOVE-ONLY. That is not an oversight in the
+// papers: a copyable iterator is a forward-iterator requirement, and the whole
+// point of both of these is to be honestly input-only.
+#ifndef BOXCXX_BITS_RANGES_INPUT_VIEWS
+#define BOXCXX_BITS_RANGES_INPUT_VIEWS
+
+#include <__bits/ranges_core>
+#include <__bits/ranges_join>  // __views_detail::NonPropagatingCache
+#include <__bits/ranges_views> // MaybeConst / SimpleView / view_interface / all_t
+#include <compare>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+namespace ranges {
+
+// ── cache_latest_view ([range.cache.latest]) ─────────────────────────────
+//
+// `v | views::transform(expensive) | views::filter(pred)` calls expensive
+// TWICE per surviving element: once for filter's predicate and once when the
+// caller dereferences. Nothing in the pipeline is allowed to assume otherwise,
+// because a transform_view iterator recomputes on every dereference by design.
+// cache_latest_view remembers the last value it produced, so the second
+// dereference is free -- and the price of that promise is exactly what makes
+// the view input-only: two iterators into it would disagree about what the
+// cache holds.
+template <input_range V>
+    requires view<V>
+class cache_latest_view : public view_interface<cache_latest_view<V>> {
+    // A reference is cached as a POINTER, a prvalue as the value itself. The
+    // distinction is the whole reason the cache type is computed rather than
+    // just being range_reference_t: caching a reference by value would copy the
+    // element, which for a view over an lvalue range is both wasteful and
+    // observably wrong (writes through *it would go to the copy).
+    using CacheT = conditional_t<is_reference_v<range_reference_t<V>>,
+                                 add_pointer_t<range_reference_t<V>>, range_reference_t<V>>;
+
+    V                                          __base = V();
+    __views_detail::NonPropagatingCache<CacheT> __cache;
+
+    class Iterator;
+    class Sentinel;
+
+public:
+    cache_latest_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit cache_latest_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin() { return Iterator(*this); }
+    constexpr auto end() { return Sentinel(*this); }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+    // P2846R6 gave this view a reserve_hint in the same draft that adopted it.
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+};
+
+template <class R>
+cache_latest_view(R &&) -> cache_latest_view<views::all_t<R>>;
+
+template <input_range V>
+    requires view<V>
+class cache_latest_view<V>::Iterator {
+    friend class cache_latest_view;
+    friend class cache_latest_view::Sentinel;
+
+    cache_latest_view *__parent = nullptr;
+    iterator_t<V>      __current;
+
+    constexpr explicit Iterator(cache_latest_view &parent)
+        : __parent(std::addressof(parent)), __current(ranges::begin(parent.__base))
+    {
+    }
+
+public:
+    using difference_type  = range_difference_t<V>;
+    using value_type       = range_value_t<V>;
+    using iterator_concept = input_iterator_tag;
+
+    // Move-only, deliberately: a copyable iterator would be a forward iterator,
+    // and two of them sharing one cache is precisely the thing that cannot work.
+    Iterator(Iterator &&)            = default;
+    Iterator &operator=(Iterator &&) = default;
+
+    constexpr iterator_t<V> base() && { return std::move(__current); }
+    constexpr const iterator_t<V> &base() const & noexcept { return __current; }
+
+    constexpr range_reference_t<V> &operator*() const
+    {
+        if constexpr (is_reference_v<range_reference_t<V>>) {
+            // as-lvalue, not a cast to range_reference_t: that reference may
+            // legally be T&& (views::as_rvalue, move_iterator), and addressof
+            // does not take an xvalue. The cache holds a POINTER here, so a
+            // write through the returned reference reaches the element itself
+            // instead of a copy of it.
+            if (!__parent->__cache.has_value())
+                __parent->__cache =
+                    std::addressof(__views_detail::AsLvalue(*__current));
+            return **__parent->__cache;
+        } else {
+            // emplace-deref, not assignment: a prvalue element type only has
+            // to be constructible from *it, and optional's value-assignment
+            // would additionally demand that it be assignable.
+            if (!__parent->__cache.has_value())
+                __parent->__cache.EmplaceDeref(__current);
+            return *__parent->__cache;
+        }
+    }
+
+    constexpr Iterator &operator++()
+    {
+        // The cache belongs to the element just left behind, so it dies with
+        // the step. Forgetting this is how a cached view starts handing out
+        // the previous element forever.
+        __parent->__cache.reset();
+        ++__current;
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr range_rvalue_reference_t<V> iter_move(const Iterator &it)
+        noexcept(noexcept(ranges::iter_move(it.__current)))
+    {
+        return ranges::iter_move(it.__current);
+    }
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        noexcept(noexcept(ranges::iter_swap(x.__current, y.__current)))
+        requires indirectly_swappable<iterator_t<V>>
+    {
+        ranges::iter_swap(x.__current, y.__current);
+    }
+};
+
+template <input_range V>
+    requires view<V>
+class cache_latest_view<V>::Sentinel {
+    friend class cache_latest_view;
+
+    sentinel_t<V> __end = sentinel_t<V>();
+
+    constexpr explicit Sentinel(cache_latest_view &parent) : __end(ranges::end(parent.__base)) {}
+
+public:
+    Sentinel() = default;
+
+    constexpr sentinel_t<V> base() const { return __end; }
+
+    friend constexpr bool operator==(const Iterator &x, const Sentinel &y)
+    {
+        return x.__current == y.__end;
+    }
+    friend constexpr range_difference_t<V> operator-(const Iterator &x, const Sentinel &y)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return x.__current - y.__end;
+    }
+    friend constexpr range_difference_t<V> operator-(const Sentinel &x, const Iterator &y)
+        requires sized_sentinel_for<sentinel_t<V>, iterator_t<V>>
+    {
+        return x.__end - y.__current;
+    }
+};
+
+// ── to_input_view ([range.to.input]) ─────────────────────────────────────
+//
+// The opposite favour: a range that COULD be walked twice, told not to be.
+// Adaptors pay for the strongest category they are given -- join over a
+// forward range keeps the outer iterator so it can back up, zip over
+// random-access computes sizes -- and when the consumer only ever makes one
+// pass, that is work bought and thrown away. to_input_view drops the category
+// to input and drops common-ness, so the adaptors above it take their cheap
+// path.
+template <input_range V>
+    requires view<V>
+class to_input_view : public view_interface<to_input_view<V>> {
+    V __base = V();
+
+    template <bool Const>
+    class Iterator;
+
+public:
+    to_input_view()
+        requires default_initializable<V>
+    = default;
+    constexpr explicit to_input_view(V base) : __base(std::move(base)) {}
+
+    constexpr V base() const &
+        requires copy_constructible<V>
+    {
+        return __base;
+    }
+    constexpr V base() && { return std::move(__base); }
+
+    constexpr auto begin()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return Iterator<false>(ranges::begin(__base));
+    }
+    constexpr auto begin() const
+        requires range<const V>
+    {
+        return Iterator<true>(ranges::begin(__base));
+    }
+    constexpr auto end()
+        requires(!__views_detail::SimpleView<V>)
+    {
+        return ranges::end(__base);
+    }
+    constexpr auto end() const
+        requires range<const V>
+    {
+        return ranges::end(__base);
+    }
+
+    constexpr auto size()
+        requires sized_range<V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto size() const
+        requires sized_range<const V>
+    {
+        return ranges::size(__base);
+    }
+    constexpr auto reserve_hint()
+        requires approximately_sized_range<V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+    constexpr auto reserve_hint() const
+        requires approximately_sized_range<const V>
+    {
+        return ranges::reserve_hint(__base);
+    }
+};
+
+template <class R>
+to_input_view(R &&) -> to_input_view<views::all_t<R>>;
+
+template <input_range V>
+    requires view<V>
+template <bool Const>
+class to_input_view<V>::Iterator {
+    friend class to_input_view;
+    template <bool>
+    friend class Iterator;
+
+    using Base = __views_detail::MaybeConst<Const, V>;
+
+    iterator_t<Base> __current = iterator_t<Base>();
+
+    constexpr explicit Iterator(iterator_t<Base> current) : __current(std::move(current)) {}
+
+public:
+    using difference_type  = range_difference_t<Base>;
+    using value_type       = range_value_t<Base>;
+    using iterator_concept = input_iterator_tag;
+
+    Iterator()
+        requires default_initializable<iterator_t<Base>>
+    = default;
+    Iterator(Iterator &&)            = default;
+    Iterator &operator=(Iterator &&) = default;
+
+    constexpr Iterator(Iterator<!Const> i)
+        requires Const && convertible_to<iterator_t<V>, iterator_t<Base>>
+        : __current(std::move(i.__current))
+    {
+    }
+
+    constexpr iterator_t<Base> base() && { return std::move(__current); }
+    constexpr const iterator_t<Base> &base() const & noexcept { return __current; }
+
+    constexpr decltype(auto) operator*() const { return *__current; }
+    constexpr Iterator &operator++()
+    {
+        ++__current;
+        return *this;
+    }
+    constexpr void operator++(int) { ++*this; }
+
+    friend constexpr bool operator==(const Iterator &x, const sentinel_t<Base> &y)
+    {
+        return x.__current == y;
+    }
+    friend constexpr difference_type operator-(const sentinel_t<Base> &x, const Iterator &y)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return x - y.__current;
+    }
+    friend constexpr difference_type operator-(const Iterator &x, const sentinel_t<Base> &y)
+        requires sized_sentinel_for<sentinel_t<Base>, iterator_t<Base>>
+    {
+        return x.__current - y;
+    }
+    friend constexpr range_rvalue_reference_t<Base> iter_move(const Iterator &it)
+        noexcept(noexcept(ranges::iter_move(it.__current)))
+    {
+        return ranges::iter_move(it.__current);
+    }
+    friend constexpr void iter_swap(const Iterator &x, const Iterator &y)
+        noexcept(noexcept(ranges::iter_swap(x.__current, y.__current)))
+        requires indirectly_swappable<iterator_t<Base>>
+    {
+        ranges::iter_swap(x.__current, y.__current);
+    }
+};
+
+namespace views {
+namespace __detail {
+
+struct CacheLatestFn : range_adaptor_closure<CacheLatestFn> {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        return cache_latest_view(std::forward<R>(r));
+    }
+};
+
+struct ToInputFn : range_adaptor_closure<ToInputFn> {
+    template <viewable_range R>
+    constexpr auto operator()(R &&r) const
+    {
+        // Already input-only and not common: there is nothing left to give up,
+        // so wrapping would only cost an indirection.
+        if constexpr (input_range<R> && !common_range<R> && !forward_range<R>) {
+            return views::all(std::forward<R>(r));
+        } else {
+            return to_input_view(std::forward<R>(r));
+        }
+    }
+};
+
+} // namespace __detail
+
+inline constexpr __detail::CacheLatestFn cache_latest{};
+inline constexpr __detail::ToInputFn     to_input{};
+
+} // namespace views
+
+} // namespace ranges
+
+namespace views = ranges::views;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_RANGES_INPUT_VIEWS

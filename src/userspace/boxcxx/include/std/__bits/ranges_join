@@ -57,24 +57,10 @@ constexpr T &AsLvalue(T &&t) noexcept
     return static_cast<T &>(t);
 }
 
-// PresentIf<Present,T> — conditional-member helper for a data member that
-// the standard specifies as "present only if <condition>". Mirrors
-// SubrangeSize<Store> in ranges_views exactly: the primary template is the
-// empty/absent case, the <true,T> specialization holds the real value.
-template <bool Present, typename T>
-struct PresentIf {
-    constexpr PresentIf() = default;
-    constexpr PresentIf(T) noexcept {}
-};
-template <typename T>
-struct PresentIf<true, T> {
-    T __value{};
-    constexpr PresentIf() = default;
-    constexpr PresentIf(T v) noexcept(is_nothrow_move_constructible_v<T>)
-        : __value(std::move(v))
-    {
-    }
-};
+// PresentIf<Present,T> — the conditional-member helper — moved to
+// <__bits/ranges_views> next to SubrangeSize, which it mirrors: drop_while_view
+// needs it and that file is included ahead of this one. Same namespace, so
+// every user here still spells it __views_detail::PresentIf.
 
 // non-propagating-cache ([range.nonprop.cache]) — behaves exactly like
 // optional<T> except copies/moves never carry the cached value along; only

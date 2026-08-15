@@ -80,4 +80,18 @@
 #  define __cpp_lib_ranges_concat 202403L
 #endif
 
+// P3138R5 (C++26, Ф32-g): views::cache_latest. A transform_view recomputes on
+// every dereference by design, so a filter above one calls the transform twice
+// per surviving element; this remembers the last value produced.
+#ifndef __cpp_lib_ranges_cache_latest
+#  define __cpp_lib_ranges_cache_latest 202411L
+#endif
+
+// P3137R3 (C++26, Ф32-g): views::to_input, the opposite favour -- a range that
+// COULD be walked twice, told not to be, so the adaptors above it stop paying
+// for a guarantee the consumer never uses.
+#ifndef __cpp_lib_ranges_as_input
+#  define __cpp_lib_ranges_as_input 202502L
+#endif
+
 #endif // BOXCXX_BITS_VERSION_RANGES
