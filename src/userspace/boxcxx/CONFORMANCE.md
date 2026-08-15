@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~81 000 lines |
 | Feature-test macros defined | 175 (164 C++23 + 11 C++26) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 177 phases, 4 824 runtime checks, 1 513 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 178 phases, 4 834 runtime checks, 1 527 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -50,7 +50,8 @@ here it is: headers and leaves are `ls -1` of `include/std` and
 `include/std/__bits`; macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are `Phase*();`
 call sites in `main`; checks and `static_assert`s are occurrences of those two
-tokens in `cxxtest.cpp`.
+tokens in `cxxtest.cpp`. `tools/cxx_ftm_audit.sh` re-derives the macro count and
+checks it against [version.syn] on every run.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -151,11 +152,33 @@ the whole set, not sampled:
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
   section; there are eighteen so far.
-- **Every one is visible both from `<version>` and from the header that owns the
-  feature**, as [support.limits.general] requires — checked over the full
-  cross-product of macros and headers, in both directions, with no failures. This
-  is the part that breaks most easily, because a macro added to a shared leaf
-  tends to become visible from every header that includes it and from no other.
+- **Every one is visible both from `<version>` and from every header
+  [version.syn] names as an owner**, as [support.limits.general] requires —
+  checked over the full cross-product of 175 macros × 74 headers by
+  `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
+  lists kept beside it in `tools/version_syn_owners.txt`.
+
+  This entry used to claim the same thing without the tool, on the strength of
+  one hand-check. **By Ф32-i it was false**: `__cpp_lib_nonmember_container_access`
+  was missing from seven of the twelve headers that own it — `<forward_list>`,
+  `<list>`, `<map>`, `<set>`, `<string>`, `<unordered_map>`, `<unordered_set>` —
+  because it lives in the `<iterator>` leaf and those seven include only the
+  container one. A claim nothing re-checks has a shelf life, so it is now
+  re-checked; the macros are declared by name at the top of each owning header
+  (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
+  including header declared.
+
+- **The converse does not hold, and cannot.** 147 of the 175 macros are also
+  reachable from some header that does not own them. That is not a conformance
+  defect — [support.limits.general] sets a floor, not a ceiling — and it is not
+  fixable by gating: a header that includes another inherits its macros, so
+  `<vector>` sees `__cpp_lib_allocate_at_least` because it includes `<memory>`.
+  libstdc++ leaks for exactly the same reason and is only lower because its
+  headers include less of each other; its `<vector>` exposes 52 macros where
+  ours exposes 101. The gating still narrowed it (161 → 147, and `<string>`
+  81 → 73), but the floor is set by the include graph, and closing that is a
+  different piece of work than this one. The number is pinned in the audit
+  script as a ratchet: if it grows, the gate fails.
 
 **21 of the C++23 macros are not defined**, and `<version>` lists every one by
 name with its specific reason — that list, not this section, is the authoritative
@@ -1112,6 +1135,40 @@ nothing has been found since.
   translation unit that includes only `<string>` cannot see `pmr::string`. The
   aliases themselves are all present and correct.
 
+
+## `<string_view>`
+
+### P1391R4 / P1989R2 — the two constructors, and a macro value that never existed (Ф32-i)
+
+- `!` **`__cpp_lib_string_view` read 202106L, which is not a value this macro has
+  ever carried in any revision.** N4950 says 201803L, and so does libstdc++,
+  which knows only that and C++26's 202403L. It was a transcription error rather
+  than a claim, and it had been pinned at the wrong number in the suite since the
+  header was written, so the pin confirmed it rather than catching it. Corrected
+  to 201803L. C++23 never bumped this macro, even in the cycle that added the two
+  constructors below — so the value is right at 201803L either way, and fixing
+  the value and fixing the header were genuinely separate jobs.
+- `✓` `template<class It, class End> basic_string_view(It, End)` (P1391R4). Only
+  a raw pointer pair was accepted before, which meant a contiguous range whose
+  iterator is a **class type** could not build a view of itself at all —
+  `string_view(v.begin(), v.end())` over a `vector<char>` did not compile. The
+  `is_convertible_v<End, size_type>` exclusion in its constraints is what keeps
+  `sv(p, 4)` on the `(pointer, count)` constructor instead of reading 4 as a
+  sentinel; with pointer iterators `sized_sentinel_for` already excludes it, so
+  the suite reaches that constraint with a purpose-built sentinel type that is
+  *both* a valid sized sentinel and convertible to `size_type`, where the
+  exclusion is the only thing choosing.
+- `✓` `template<class R> explicit basic_string_view(R&&)` (P1989R2), explicit per
+  P2499R0. Implicit was the original design and was pulled back before C++23
+  shipped: it let any contiguous range of the character type decay to a view of
+  itself at every call boundary, temporaries included, and those die at the
+  semicolon. `basic_string` keeps its own conversion operator and stays implicit,
+  which is what the `operator basic_string_view` exclusion in the constraints is
+  for — the suite proves that one with a type whose operator deliberately returns
+  a different length than its buffer.
+- `✓` Both deduction guides from [string.view.synop]. Without them the two
+  constructors are only reachable by naming the character type, which is most of
+  the point of having them.
 ## `<tuple>`
 
 - `✓` Closed in Ф31e-g-3: `apply`, `tuple_cat` and `make_from_tuple` were not
