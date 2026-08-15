@@ -385,6 +385,21 @@ struct Iota {
     }
 };
 inline constexpr Iota iota{};
+
+// views::indices(n) — iota from a zero of n's own type up to n. The type
+// matters: indices(v.size()) yields size_t indices, so comparing them
+// against another size_t needs no conversion and triggers no signedness
+// warning, which is the entire reason the paper exists rather than telling
+// people to write iota(0uz, n).
+struct Indices {
+    template <__views_detail::IotaIntegerLike W>
+        requires requires(W w) { iota_view<W, W>(W(), w); }
+    [[nodiscard]] constexpr auto operator()(W w) const noexcept
+    {
+        return iota(W(), w);
+    }
+};
+inline constexpr Indices indices{};
 } // namespace views
 
 // ── repeat_view ([range.repeat]) ────────────────────────────────────────

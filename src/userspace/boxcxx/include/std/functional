@@ -7,6 +7,7 @@
 #define BOXCXX_FUNCTIONAL
 
 #include <__bits/callable_sbo>
+#include <__bits/invoke>
 #include <compare>   // __cmp::SynthThreeWay — reference_wrapper's <=> (P2944R3)
 #include <concepts>
 #include <type_traits>
@@ -14,71 +15,10 @@
 
 namespace std {
 
-template <class T> class reference_wrapper;
-
-// ── invoke / invoke_r ([func.invoke]) ───────────────────────────────────
-
-namespace __bits {
-
-template <class T> struct IsRefWrapper : false_type {};
-template <class T> struct IsRefWrapper<reference_wrapper<T>> : true_type {};
-
-template <class F, class... Args>
-constexpr decltype(auto) InvokeRt(F &&f, Args &&...args) noexcept(
-    is_nothrow_invocable_v<F, Args...>)
-{
-    using Fn = remove_cvref_t<F>;
-    if constexpr (is_member_function_pointer_v<Fn>) {
-        return [&]<class O, class... Rest>(
-                   O &&o, Rest &&...rest) constexpr -> decltype(auto) {
-            using OBare = remove_cvref_t<O>;
-            if constexpr (IsRefWrapper<OBare>::value)
-                return (o.get().*f)(forward<Rest>(rest)...);
-            else if constexpr (requires {
-                                   (static_cast<O &&>(o).*
-                                    f)(forward<Rest>(rest)...);
-                               })
-                return (static_cast<O &&>(o).*f)(forward<Rest>(rest)...);
-            else
-                return ((*static_cast<O &&>(o)).*f)(forward<Rest>(rest)...);
-        }(forward<Args>(args)...);
-    } else if constexpr (is_member_object_pointer_v<Fn>) {
-        static_assert(sizeof...(Args) == 1,
-                      "data-member pointer takes exactly one operand");
-        return [&]<class O>(O &&o) constexpr -> decltype(auto) {
-            using OBare = remove_cvref_t<O>;
-            if constexpr (IsRefWrapper<OBare>::value)
-                return o.get().*f;
-            else if constexpr (requires { static_cast<O &&>(o).*f; })
-                return static_cast<O &&>(o).*f;
-            else
-                return (*static_cast<O &&>(o)).*f;
-        }(forward<Args>(args)...);
-    } else {
-        return forward<F>(f)(forward<Args>(args)...);
-    }
-}
-
-} // namespace __bits
-
-template <class F, class... Args>
-    requires is_invocable_v<F, Args...>
-constexpr invoke_result_t<F, Args...>
-invoke(F &&f, Args &&...args) noexcept(is_nothrow_invocable_v<F, Args...>)
-{
-    return __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
-}
-
-template <class R, class F, class... Args>
-    requires is_invocable_r_v<R, F, Args...>
-constexpr R invoke_r(F &&f, Args &&...args) noexcept(
-    is_nothrow_invocable_r_v<R, F, Args...>)
-{
-    if constexpr (is_void_v<R>)
-        __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
-    else
-        return __bits::InvokeRt(forward<F>(f), forward<Args>(args)...);
-}
+// invoke / invoke_r ([func.invoke]) moved to <__bits/invoke> — <utility>
+// needs INVOKE for constant_wrapper and sits upstream of this header. The
+// leaf is included above, through <utility>; naming it here as well is
+// what keeps this header honest about what it provides.
 
 // ── reference_wrapper ───────────────────────────────────────────────────
 
@@ -235,6 +175,11 @@ template <class T> void cref(const T &&) = delete;
 // below.
 #include <__bits/searcher>
 
+// function_ref needs invoke_r and constant_wrapper and nothing else from
+// this header, so it could have gone anywhere after those two; it sits
+// with the other call wrappers.
+#include <__bits/function_ref>
+
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_bind_back
@@ -242,6 +187,7 @@ template <class T> void cref(const T &&) = delete;
 #define BOXCXX_OWNS_boyer_moore_searcher
 #define BOXCXX_OWNS_common_reference_wrapper
 #define BOXCXX_OWNS_constexpr_functional
+#define BOXCXX_OWNS_function_ref
 #define BOXCXX_OWNS_invoke
 #define BOXCXX_OWNS_invoke_r
 #define BOXCXX_OWNS_move_only_function

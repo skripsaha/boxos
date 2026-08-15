@@ -83,6 +83,17 @@ template <ranges::input_range R>
     requires same_as<R, remove_cvref_t<R>>
 constexpr range_format format_kind<R> = __format::ComputeFmtKind<R>();
 
+// [optional.syn] (P3168R2). optional became a range of zero or one element,
+// and without this line `format("{}", optional<int>{7})` would silently
+// start printing `[7]` instead of failing to compile. The paper disables it
+// deliberately: an optional prints as a value or as nothing, and deciding
+// which of those two spellings is right is a separate question from this
+// one. Declared here, next to format_kind itself, for the same reason
+// enable_view<optional<T>> is declared in <ranges>.
+template <class T> class optional;
+template <class T>
+constexpr auto format_kind<optional<T>> = range_format::disabled;
+
 namespace __format {
 
 // [format.syn]'s exposition-only const-formattable-range / fmt-maybe-const.

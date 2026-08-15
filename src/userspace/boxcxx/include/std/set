@@ -16,6 +16,7 @@
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_allocator_traits_is_always_equal
 #define BOXCXX_OWNS_associative_heterogeneous_erasure
+#define BOXCXX_OWNS_associative_heterogeneous_insertion
 #define BOXCXX_OWNS_containers_ranges
 #define BOXCXX_OWNS_erase_if
 #define BOXCXX_OWNS_generic_associative_lookup
@@ -160,6 +161,38 @@ public:
         return {iterator(it.__n), ok};
     }
     iterator insert(const_iterator, const Key &v) { return insert(v).first; }
+    // [set.overview] lists the rvalue hint form too, and it was absent: an
+    // rvalue bound to the const& overload above and was COPIED, silently.
+    iterator insert(const_iterator, Key &&v)
+    {
+        return insert(std::move(v)).first;
+    }
+
+    // ── heterogeneous insertion (P2363R5, C++26) ────────────────────────
+    // With a transparent comparator this container has been able to LOOK UP
+    // by a type that merely compares with the key since C++14; inserting
+    // still forced the conversion, even in the case where the element is
+    // already there and the converted key gets thrown away. Excluded when K
+    // converts to an iterator, so insert(hint, k) keeps its meaning.
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    pair<iterator, bool> insert(K &&x)
+    {
+        iterator hit = find(x);
+        if (hit != end()) return {hit, false};
+        auto [it, ok] = __t.EmplaceUnique(std::forward<K>(x));
+        return {iterator(it.__n), ok};
+    }
+    template <typename K>
+        requires(__detail::TransparentComparator<Comp> &&
+                 !is_convertible_v<K &&, iterator> &&
+                 !is_convertible_v<K &&, const_iterator>)
+    iterator insert(const_iterator, K &&x)
+    {
+        return insert(std::forward<K>(x)).first;
+    }
     template <typename It>
     void insert(It first, It last)
     {
@@ -443,6 +476,10 @@ public:
     iterator insert(const_iterator, const Key &v)
     {
         return iterator(__t.EmplaceMulti(v).__n); // hint accepted, not exploited
+    }
+    iterator insert(const_iterator, Key &&v)
+    {
+        return iterator(__t.EmplaceMulti(std::move(v)).__n);
     }
     template <typename It>
     void insert(It first, It last)

@@ -1,0 +1,1002 @@
+// boxcxx — <inplace_vector>  ([inplace.vector], P0843R14)
+//
+// A sequence container with vector's interface and array's storage: the
+// elements live inside the object, the capacity is a template parameter,
+// and nothing is ever allocated. For a kernel-adjacent library this is the
+// container that was always missing — the one you can put in a static, in
+// an interrupt-reachable structure, or in a page you own, without a heap
+// behind it.
+//
+// Three design points worth knowing before reading the code:
+//
+//  - Storage is `union { T elems_[N]; }` with NO active member. That is
+//    what keeps the class usable with a T that has no default constructor,
+//    and what keeps a default-constructed inplace_vector free: no element
+//    is touched. The size field is the narrowest unsigned type that can
+//    hold N without costing alignment padding, so inplace_vector<char, 8>
+//    is nine bytes rather than sixteen.
+//
+//  - Every special member is DOUBLED: one `= default` under a triviality
+//    requires-clause, one hand-written for everything else. [inplace.
+//    vector.overview] mandates that a trivially copyable T give a trivially
+//    copyable container, and a trivially copyable container is what lets
+//    the compiler move one with a couple of SSE stores instead of a loop.
+//
+//  - Constant evaluation works for trivial T only, and this is inherent
+//    rather than a shortcut: a union member whose lifetime has not begun
+//    cannot be written through in a constant expression, so the compile-
+//    time path value-initializes all N slots up front and then ASSIGNS,
+//    while the run-time path constructs in place and leaves the rest of
+//    the buffer untouched. For a T that is not trivially default
+//    constructible there is no way to do the first, and libstdc++ 16 has
+//    the same limit; reaching for it is diagnosed at the call rather than
+//    silently mis-evaluated (see NeedsTrivialTypeAtCompileTime below).
+#ifndef BOXCXX_INPLACE_VECTOR
+#define BOXCXX_INPLACE_VECTOR
+
+#include <__bits/allocator_core>   // construct_at / destroy_at / addressof
+#include <__bits/ranges_core>      // ContainerCompatibleRange, ranges::begin
+#include <__bits/throw_helpers>
+#include <compare>
+#include <cstddef>
+#include <initializer_list>
+#include <iterator>
+#include <new>                     // bad_alloc
+#include <optional>                // try_push_back returns optional<T&>
+#include <type_traits>
+#include <utility>
+
+// [version.syn] names this header as the owner of the macro below.
+#define BOXCXX_OWNS_inplace_vector
+#include <__bits/version_inplace_vector>
+
+namespace std {
+
+namespace __iv {
+
+// Declared, never defined, and deliberately not constexpr: a call to it is
+// the diagnostic for "this element type cannot be used at compile time".
+void NeedsTrivialTypeAtCompileTime();
+
+// The narrowest size type that holds N. A narrower type is only worth
+// taking when it actually shrinks the object: if the elements are already
+// aligned to 8, a one-byte size field just becomes seven bytes of padding,
+// and a full-width field is the cheaper access.
+template <class T, size_t N>
+consteval auto PickSizeType()
+{
+    if constexpr (N <= 0xFFu && alignof(T) <= sizeof(unsigned char))
+        return static_cast<unsigned char>(0);
+    else if constexpr (N <= 0xFFFFu && alignof(T) <= sizeof(unsigned short))
+        return static_cast<unsigned short>(0);
+    else if constexpr (N <= 0xFFFFFFFFu && alignof(T) <= sizeof(unsigned int))
+        return 0u;
+    else
+        return static_cast<size_t>(0);
+}
+
+template <class T, size_t N>
+using SizeType = decltype(PickSizeType<T, N>());
+
+} // namespace std::__iv
+
+template <class T, size_t N>
+class inplace_vector {
+    static_assert(is_object_v<T> && !is_array_v<T>,
+                  "inplace_vector<T, N> requires a non-array object type");
+    static_assert(is_destructible_v<T>,
+                  "inplace_vector<T, N> requires a destructible T");
+
+    // Whether the compile-time path (value-initialize everything, then
+    // assign) is available for this T.
+    static constexpr bool kFoldable = is_trivially_default_constructible_v<T> &&
+                                      is_trivially_destructible_v<T> &&
+                                      is_assignable_v<T &, T &&>;
+
+public:
+    using value_type             = T;
+    using pointer                = T *;
+    using const_pointer          = const T *;
+    using reference              = value_type &;
+    using const_reference        = const value_type &;
+    using size_type              = size_t;
+    using difference_type        = ptrdiff_t;
+    using iterator               = T *;
+    using const_iterator         = const T *;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+private:
+    union {
+        T elems_[N];
+    };
+    __iv::SizeType<T, N> size_ = 0;
+
+    // Begin the lifetime of the whole buffer when — and only when — the
+    // evaluation is a constant one. At run time the elements come into
+    // existence one construct_at at a time, which is the entire point of
+    // the union.
+    constexpr void InitCells() noexcept
+    {
+        if (__builtin_is_constant_evaluated()) {
+            if constexpr (kFoldable)
+                for (size_type i = 0; i != N; ++i) elems_[i] = T();
+            else
+                __iv::NeedsTrivialTypeAtCompileTime();
+        }
+    }
+
+    template <class... A>
+    constexpr T &Make(size_type i, A &&...a)
+    {
+        if constexpr (kFoldable) {
+            if (__builtin_is_constant_evaluated()) {
+                elems_[i] = T(static_cast<A &&>(a)...);
+                return elems_[i];
+            }
+        }
+        return *construct_at(__builtin_addressof(elems_[i]),
+                             static_cast<A &&>(a)...);
+    }
+
+    constexpr void Unmake(size_type i) noexcept
+    {
+        if constexpr (!is_trivially_destructible_v<T>)
+            destroy_at(__builtin_addressof(elems_[i]));
+    }
+
+    // Drop everything from index n upwards.
+    constexpr void Shrink(size_type n) noexcept
+    {
+        while (size_ > n) Unmake(--size_);
+    }
+
+    // Write at index i, which may or may not already hold a live element.
+    // The single-argument case assigns DIRECTLY rather than through a
+    // temporary: not only is it one construction and one destruction
+    // cheaper (and lets a string reuse its buffer), it is also what the
+    // requirements say -- assign(n, u) asks for CopyAssignable, and going
+    // through T(u) would additionally demand MoveAssignable.
+    template <class... A>
+    constexpr void Put(size_type i, size_type live, A &&...a)
+    {
+        if (i >= live) {
+            Make(i, static_cast<A &&>(a)...);
+        } else if constexpr (sizeof...(A) == 1) {
+            AssignOne(elems_[i], static_cast<A &&>(a)...);
+        } else {
+            elems_[i] = T(static_cast<A &&>(a)...);
+        }
+    }
+
+    template <class U>
+    static constexpr void AssignOne(T &dst, U &&src)
+    {
+        dst = static_cast<U &&>(src);
+    }
+
+    static constexpr void SwapOne(T &a, T &b)
+    {
+        T tmp(static_cast<T &&>(a));
+        a = static_cast<T &&>(b);
+        b = static_cast<T &&>(tmp);
+    }
+
+    static constexpr void ReverseSpan(T *first, T *last)
+    {
+        while (first < last) SwapOne(*first++, *--last);
+    }
+
+    // Three reverses. A tail that was appended at the end walks back to
+    // `mid`'s position without any extra storage, which is what makes
+    // insert_range work for a range that cannot be measured in advance.
+    static constexpr void RotateSpan(T *first, T *mid, T *last)
+    {
+        if (first == mid || mid == last) return;
+        ReverseSpan(first, mid);
+        ReverseSpan(mid, last);
+        ReverseSpan(first, last);
+    }
+
+    [[noreturn]] static void Overflow() { throw bad_alloc(); }
+
+    // Every element-building constructor funnels through this. If T's
+    // constructor throws partway, the elements already built sit in a
+    // union inside an object whose destructor will NOT run — a
+    // half-constructed object destroys its members, and the union has
+    // none to destroy. Without this they simply leak.
+    template <class Fn>
+    constexpr void BuildGuarded(Fn fn)
+    {
+        try {
+            fn();
+        } catch (...) {
+            Shrink(0);
+            throw;
+        }
+    }
+
+    static constexpr void WantRoom(size_type have, size_type want)
+    {
+        if (want > N - have) Overflow();
+    }
+
+public:
+    // ── construct / copy / destroy ───────────────────────────────────────
+    constexpr inplace_vector() noexcept { InitCells(); }
+
+    constexpr explicit inplace_vector(size_type n)
+    {
+        InitCells();
+        if (n > N) Overflow();
+        BuildGuarded([&] {
+            while (size_ < n) {
+                Make(size_);
+                ++size_;
+            }
+        });
+    }
+
+    constexpr inplace_vector(size_type n, const T &value)
+    {
+        InitCells();
+        if (n > N) Overflow();
+        BuildGuarded([&] {
+            while (size_ < n) {
+                Make(size_, value);
+                ++size_;
+            }
+        });
+    }
+
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr inplace_vector(InputIterator first, InputIterator last)
+    {
+        InitCells();
+        BuildGuarded([&] {
+            for (; first != last; ++first) {
+                if (size_ == N) Overflow();
+                Make(size_, *first);
+                ++size_;
+            }
+        });
+    }
+
+    template <ContainerCompatibleRange<T> R>
+    constexpr inplace_vector(from_range_t, R &&rg)
+    {
+        InitCells();
+        BuildGuarded([&] {
+            auto       it   = ranges::begin(rg);
+            const auto stop = ranges::end(rg);
+            for (; it != stop; ++it) {
+                if (size_ == N) Overflow();
+                Make(size_, *it);
+                ++size_;
+            }
+        });
+    }
+
+    constexpr inplace_vector(initializer_list<T> il)
+        : inplace_vector(il.begin(), il.end())
+    {
+    }
+
+    inplace_vector(const inplace_vector &)
+        requires is_trivially_copy_constructible_v<T>
+    = default;
+
+    constexpr inplace_vector(const inplace_vector &other) noexcept(
+        is_nothrow_copy_constructible_v<T>)
+    {
+        InitCells();
+        BuildGuarded([&] {
+            while (size_ < other.size_) {
+                Make(size_, other.elems_[size_]);
+                ++size_;
+            }
+        });
+    }
+
+    inplace_vector(inplace_vector &&)
+        requires is_trivially_move_constructible_v<T>
+    = default;
+
+    constexpr inplace_vector(inplace_vector &&other) noexcept(
+        N == 0 || is_nothrow_move_constructible_v<T>)
+    {
+        InitCells();
+        BuildGuarded([&] {
+            while (size_ < other.size_) {
+                Make(size_, static_cast<T &&>(other.elems_[size_]));
+                ++size_;
+            }
+        });
+    }
+
+    constexpr ~inplace_vector()
+        requires is_trivially_destructible_v<T>
+    = default;
+
+    constexpr ~inplace_vector() { Shrink(0); }
+
+    inplace_vector &operator=(const inplace_vector &)
+        requires is_trivially_copy_constructible_v<T> &&
+                 is_trivially_copy_assignable_v<T> &&
+                 is_trivially_destructible_v<T>
+    = default;
+
+    constexpr inplace_vector &operator=(const inplace_vector &other)
+    {
+        if (this != __builtin_addressof(other))
+            AssignN(other.size_, [&](size_type i) -> const T & {
+                return other.elems_[i];
+            });
+        return *this;
+    }
+
+    inplace_vector &operator=(inplace_vector &&)
+        requires is_trivially_move_constructible_v<T> &&
+                 is_trivially_move_assignable_v<T> &&
+                 is_trivially_destructible_v<T>
+    = default;
+
+    constexpr inplace_vector &operator=(inplace_vector &&other) noexcept(
+        N == 0 || (is_nothrow_move_assignable_v<T> &&
+                   is_nothrow_move_constructible_v<T>))
+    {
+        if (this != __builtin_addressof(other))
+            AssignN(other.size_, [&](size_type i) -> T && {
+                return static_cast<T &&>(other.elems_[i]);
+            });
+        return *this;
+    }
+
+    constexpr inplace_vector &operator=(initializer_list<T> il)
+    {
+        assign(il.begin(), il.end());
+        return *this;
+    }
+
+private:
+    // The shared body of every assign: n elements produced by gen(i),
+    // overwriting what is there and constructing or destroying the
+    // difference. Kept private because the standard has no such member --
+    // it is only here so the five assigning entry points cannot drift.
+    template <class Gen>
+    constexpr void AssignN(size_type n, Gen gen)
+    {
+        if (n > N) Overflow();
+        const size_type live = size_;
+        for (size_type i = 0; i != n; ++i) {
+            Put(i, live, gen(i));
+            // size_ has to advance WITH the loop, not after it: if T's
+            // constructor throws while growing, the destructor is the only
+            // thing that can destroy what was built, and it destroys
+            // exactly size_ elements.
+            if (i >= live) size_ = static_cast<__iv::SizeType<T, N>>(i + 1);
+        }
+        if (n < live) Shrink(n);
+    }
+
+public:
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr void assign(InputIterator first, InputIterator last)
+    {
+        const size_type live = size_;
+        size_type       i    = 0;
+        for (; first != last; ++first, ++i) {
+            if (i == N) Overflow();
+            Put(i, live, *first);
+            if (i >= live) size_ = static_cast<__iv::SizeType<T, N>>(i + 1);
+        }
+        if (i < live) Shrink(i);
+    }
+
+    template <ContainerCompatibleRange<T> R>
+    constexpr void assign_range(R &&rg)
+    {
+        assign(ranges::begin(rg), ranges::end(rg));
+    }
+
+    constexpr void assign(size_type n, const T &u)
+    {
+        AssignN(n, [&](size_type) -> const T & { return u; });
+    }
+
+    constexpr void assign(initializer_list<T> il)
+    {
+        assign(il.begin(), il.end());
+    }
+
+    // ── iterators ────────────────────────────────────────────────────────
+    constexpr iterator       begin() noexcept { return data(); }
+    constexpr const_iterator begin() const noexcept { return data(); }
+    constexpr iterator       end() noexcept { return data() + size_; }
+    constexpr const_iterator end() const noexcept { return data() + size_; }
+    constexpr reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+    constexpr const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    constexpr reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+    constexpr const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+    constexpr const_iterator         cbegin() const noexcept { return begin(); }
+    constexpr const_iterator         cend() const noexcept { return end(); }
+    constexpr const_reverse_iterator crbegin() const noexcept
+    {
+        return rbegin();
+    }
+    constexpr const_reverse_iterator crend() const noexcept { return rend(); }
+
+    // ── capacity ─────────────────────────────────────────────────────────
+    constexpr bool      empty() const noexcept { return size_ == 0; }
+    constexpr size_type size() const noexcept { return size_; }
+    static constexpr size_type max_size() noexcept { return N; }
+    static constexpr size_type capacity() noexcept { return N; }
+
+    // [inplace.vector.capacity] asks for more than the other modifiers do:
+    // "if an exception is thrown there are no effects on *this". Growing is
+    // therefore rolled back element by element, not left half-done.
+    constexpr void resize(size_type sz)
+    {
+        if (sz < size_) return Shrink(sz);
+        if (sz > N) Overflow();
+        const size_type old = size_;
+        try {
+            while (size_ < sz) {
+                Make(size_);
+                ++size_;
+            }
+        } catch (...) {
+            Shrink(old);
+            throw;
+        }
+    }
+
+    constexpr void resize(size_type sz, const T &c)
+    {
+        if (sz < size_) return Shrink(sz);
+        if (sz > N) Overflow();
+        const size_type old = size_;
+        try {
+            while (size_ < sz) {
+                Make(size_, c);
+                ++size_;
+            }
+        } catch (...) {
+            Shrink(old);
+            throw;
+        }
+    }
+
+    // Static, and they still have to answer for the argument: reserve(n)
+    // with n > N is the one case where a fixed-capacity container must
+    // report failure rather than quietly do nothing.
+    static constexpr void reserve(size_type n)
+    {
+        if (n > N) Overflow();
+    }
+    static constexpr void shrink_to_fit() noexcept {}
+
+    // ── element access ───────────────────────────────────────────────────
+    constexpr reference operator[](size_type n) { return data()[n]; }
+    constexpr const_reference operator[](size_type n) const
+    {
+        return data()[n];
+    }
+    constexpr reference at(size_type n)
+    {
+        if (n >= size_) boxcxx::ThrowOutOfRange("inplace_vector::at");
+        return data()[n];
+    }
+    constexpr const_reference at(size_type n) const
+    {
+        if (n >= size_) boxcxx::ThrowOutOfRange("inplace_vector::at");
+        return data()[n];
+    }
+    constexpr reference       front() { return data()[0]; }
+    constexpr const_reference front() const { return data()[0]; }
+    constexpr reference       back() { return data()[size_ - 1]; }
+    constexpr const_reference back() const { return data()[size_ - 1]; }
+
+    constexpr T *data() noexcept { return elems_; }
+    constexpr const T *data() const noexcept { return elems_; }
+
+    // ── modifiers ────────────────────────────────────────────────────────
+    template <class... Args>
+    constexpr reference emplace_back(Args &&...args)
+    {
+        if (size_ == N) Overflow();
+        return unchecked_emplace_back(static_cast<Args &&>(args)...);
+    }
+    constexpr reference push_back(const T &x) { return emplace_back(x); }
+    constexpr reference push_back(T &&x)
+    {
+        return emplace_back(static_cast<T &&>(x));
+    }
+
+    // A range that turns out to be too long must leave *this untouched
+    // ([inplace.vector.modifiers]: bad_alloc is not one of the exceptions
+    // the weaker guarantee excuses), and for an input range there is no
+    // way to know it is too long until the element after the last that
+    // fits. Hence the rollback rather than an up-front size check.
+    template <ContainerCompatibleRange<T> R>
+    constexpr void append_range(R &&rg)
+    {
+        const size_type old  = size_;
+        auto            it   = ranges::begin(rg);
+        const auto      stop = ranges::end(rg);
+        for (; it != stop; ++it) {
+            if (size_ == N) {
+                Shrink(old);
+                Overflow();
+            }
+            Make(size_, *it);
+            ++size_;
+        }
+    }
+
+    constexpr void pop_back() { Unmake(--size_); }
+
+    template <class... Args>
+    constexpr optional<reference> try_emplace_back(Args &&...args)
+    {
+        if (size_ == N) return nullopt;
+        return optional<reference>(
+            in_place, unchecked_emplace_back(static_cast<Args &&>(args)...));
+    }
+    constexpr optional<reference> try_push_back(const T &x)
+    {
+        return try_emplace_back(x);
+    }
+    constexpr optional<reference> try_push_back(T &&x)
+    {
+        return try_emplace_back(static_cast<T &&>(x));
+    }
+
+    template <class... Args>
+    constexpr reference unchecked_emplace_back(Args &&...args)
+    {
+        T &r = Make(size_, static_cast<Args &&>(args)...);
+        ++size_;
+        return r;
+    }
+    constexpr reference unchecked_push_back(const T &x)
+    {
+        return unchecked_emplace_back(x);
+    }
+    constexpr reference unchecked_push_back(T &&x)
+    {
+        return unchecked_emplace_back(static_cast<T &&>(x));
+    }
+
+    // Every insertion in the middle is "append at the end, then rotate the
+    // appended run into place". The obvious alternative -- shift the tail
+    // right and fill the hole -- cannot be made exception-safe with a
+    // single size_: while the hole is open the live elements are not a
+    // prefix, so no count describes them, and a throw from T would leave
+    // the destructor about to run over slots that were never constructed.
+    // Appending keeps size_ exact at every step and the rotate that
+    // follows only ever move-ASSIGNS between live elements, so the worst a
+    // throwing T can do is leave a valid container in a permuted order.
+    // It also removes a second hazard for free: an argument that names an
+    // element of THIS vector stays valid, because appending moves nothing.
+    // The cost is about three moves per element where a shift costs one --
+    // the right side of the trade for a container whose capacity is a
+    // compile-time constant.
+    template <class... Args>
+    constexpr iterator emplace(const_iterator position, Args &&...args)
+    {
+        const size_type idx = static_cast<size_type>(position - cbegin());
+        if (size_ == N) Overflow();
+        const size_type old = size_;
+        unchecked_emplace_back(static_cast<Args &&>(args)...);
+        RotateSpan(begin() + idx, begin() + old, end());
+        return begin() + idx;
+    }
+
+    constexpr iterator insert(const_iterator position, const T &x)
+    {
+        return emplace(position, x);
+    }
+    constexpr iterator insert(const_iterator position, T &&x)
+    {
+        return emplace(position, static_cast<T &&>(x));
+    }
+
+    constexpr iterator insert(const_iterator position, size_type n, const T &x)
+    {
+        const size_type idx = static_cast<size_type>(position - cbegin());
+        WantRoom(size_, n);
+        const size_type old = size_;
+        for (size_type i = 0; i != n; ++i) {
+            Make(size_, x);
+            ++size_;
+        }
+        RotateSpan(begin() + idx, begin() + old, end());
+        return begin() + idx;
+    }
+
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr iterator insert(const_iterator position, InputIterator first,
+                              InputIterator last)
+    {
+        const size_type idx = static_cast<size_type>(position - cbegin());
+        const size_type old = size_;
+        for (; first != last; ++first) {
+            if (size_ == N) {
+                Shrink(old);
+                Overflow();
+            }
+            Make(size_, *first);
+            ++size_;
+        }
+        RotateSpan(begin() + idx, begin() + old, end());
+        return begin() + idx;
+    }
+
+    template <ContainerCompatibleRange<T> R>
+    constexpr iterator insert_range(const_iterator position, R &&rg)
+    {
+        const size_type idx = static_cast<size_type>(position - cbegin());
+        const size_type old = size_;
+        append_range(static_cast<R &&>(rg));
+        RotateSpan(begin() + idx, begin() + old, end());
+        return begin() + idx;
+    }
+
+    constexpr iterator insert(const_iterator position, initializer_list<T> il)
+    {
+        return insert(position, il.begin(), il.end());
+    }
+
+    constexpr iterator erase(const_iterator position)
+    {
+        return erase(position, position + 1);
+    }
+
+    constexpr iterator erase(const_iterator first, const_iterator last)
+    {
+        const size_type idx = static_cast<size_type>(first - cbegin());
+        const size_type k   = static_cast<size_type>(last - first);
+        if (k != 0) {
+            for (size_type i = idx + k; i != size_; ++i)
+                elems_[i - k] = static_cast<T &&>(elems_[i]);
+            Shrink(size_ - k);
+        }
+        return begin() + idx;
+    }
+
+    constexpr void swap(inplace_vector &x) noexcept(
+        N == 0 ||
+        (is_nothrow_swappable_v<T> && is_nothrow_move_constructible_v<T>))
+    {
+        inplace_vector &shorter = size_ < x.size_ ? *this : x;
+        inplace_vector &longer  = size_ < x.size_ ? x : *this;
+        const size_type common  = shorter.size_;
+        for (size_type i = 0; i != common; ++i)
+            SwapOne(shorter.elems_[i], longer.elems_[i]);
+        for (size_type i = common; i != longer.size_; ++i) {
+            shorter.Make(i, static_cast<T &&>(longer.elems_[i]));
+            ++shorter.size_;
+        }
+        longer.Shrink(common);
+    }
+
+    constexpr void clear() noexcept { Shrink(0); }
+
+    friend constexpr bool operator==(const inplace_vector &x,
+                                     const inplace_vector &y)
+    {
+        if (x.size_ != y.size_) return false;
+        for (size_type i = 0; i != x.size_; ++i)
+            if (!(x.elems_[i] == y.elems_[i])) return false;
+        return true;
+    }
+
+    friend constexpr auto operator<=>(const inplace_vector &x,
+                                      const inplace_vector &y)
+        requires requires(const T t) { __cmp::SynthThreeWay{}(t, t); }
+    {
+        using Ord = decltype(__cmp::SynthThreeWay{}(x.elems_[0], y.elems_[0]));
+        const size_type n = x.size_ < y.size_ ? x.size_ : y.size_;
+        for (size_type i = 0; i != n; ++i)
+            if (auto c = __cmp::SynthThreeWay{}(x.elems_[i], y.elems_[i]);
+                c != 0)
+                return c;
+        return static_cast<Ord>(x.size_ <=> y.size_);
+    }
+
+    friend constexpr void swap(inplace_vector &x, inplace_vector &y) noexcept(
+        N == 0 ||
+        (is_nothrow_swappable_v<T> && is_nothrow_move_constructible_v<T>))
+    {
+        x.swap(y);
+    }
+};
+
+// ── inplace_vector<T, 0> ─────────────────────────────────────────────────
+// Not an optimization but a mandate: [inplace.vector.overview] requires the
+// zero-capacity specialization to be empty, trivially copyable and
+// trivially default constructible for EVERY T, including one that is
+// neither. Nothing here may name a T operation, because none of them have
+// to exist.
+
+template <class T>
+class inplace_vector<T, 0> {
+public:
+    using value_type             = T;
+    using pointer                = T *;
+    using const_pointer          = const T *;
+    using reference              = value_type &;
+    using const_reference        = const value_type &;
+    using size_type              = size_t;
+    using difference_type        = ptrdiff_t;
+    using iterator               = T *;
+    using const_iterator         = const T *;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+
+private:
+    [[noreturn]] static void Overflow() { throw bad_alloc(); }
+
+public:
+    constexpr inplace_vector() noexcept = default;
+    constexpr explicit inplace_vector(size_type n)
+    {
+        if (n != 0) Overflow();
+    }
+    constexpr inplace_vector(size_type n, const T &)
+    {
+        if (n != 0) Overflow();
+    }
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr inplace_vector(InputIterator first, InputIterator last)
+    {
+        if (first != last) Overflow();
+    }
+    template <ContainerCompatibleRange<T> R>
+    constexpr inplace_vector(from_range_t, R &&rg)
+    {
+        if (ranges::begin(rg) != ranges::end(rg)) Overflow();
+    }
+    constexpr inplace_vector(initializer_list<T> il)
+    {
+        if (il.size() != 0) Overflow();
+    }
+
+    constexpr inplace_vector(const inplace_vector &)            = default;
+    constexpr inplace_vector(inplace_vector &&)                 = default;
+    constexpr ~inplace_vector()                                 = default;
+    constexpr inplace_vector &operator=(const inplace_vector &) = default;
+    constexpr inplace_vector &operator=(inplace_vector &&)      = default;
+    constexpr inplace_vector &operator=(initializer_list<T> il)
+    {
+        if (il.size() != 0) Overflow();
+        return *this;
+    }
+
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr void assign(InputIterator first, InputIterator last)
+    {
+        if (first != last) Overflow();
+    }
+    template <ContainerCompatibleRange<T> R>
+    constexpr void assign_range(R &&rg)
+    {
+        if (ranges::begin(rg) != ranges::end(rg)) Overflow();
+    }
+    constexpr void assign(size_type n, const T &)
+    {
+        if (n != 0) Overflow();
+    }
+    constexpr void assign(initializer_list<T> il)
+    {
+        if (il.size() != 0) Overflow();
+    }
+
+    constexpr iterator       begin() noexcept { return nullptr; }
+    constexpr const_iterator begin() const noexcept { return nullptr; }
+    constexpr iterator       end() noexcept { return nullptr; }
+    constexpr const_iterator end() const noexcept { return nullptr; }
+    constexpr reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+    constexpr const_reverse_iterator rbegin() const noexcept
+    {
+        return const_reverse_iterator(end());
+    }
+    constexpr reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+    constexpr const_reverse_iterator rend() const noexcept
+    {
+        return const_reverse_iterator(begin());
+    }
+    constexpr const_iterator         cbegin() const noexcept { return nullptr; }
+    constexpr const_iterator         cend() const noexcept { return nullptr; }
+    constexpr const_reverse_iterator crbegin() const noexcept
+    {
+        return rbegin();
+    }
+    constexpr const_reverse_iterator crend() const noexcept { return rend(); }
+
+    constexpr bool             empty() const noexcept { return true; }
+    constexpr size_type        size() const noexcept { return 0; }
+    static constexpr size_type max_size() noexcept { return 0; }
+    static constexpr size_type capacity() noexcept { return 0; }
+    constexpr void             resize(size_type sz)
+    {
+        if (sz != 0) Overflow();
+    }
+    constexpr void resize(size_type sz, const T &)
+    {
+        if (sz != 0) Overflow();
+    }
+    static constexpr void reserve(size_type n)
+    {
+        if (n != 0) Overflow();
+    }
+    static constexpr void shrink_to_fit() noexcept {}
+
+    constexpr reference       operator[](size_type) { return *begin(); }
+    constexpr const_reference operator[](size_type) const { return *begin(); }
+    constexpr reference       at(size_type)
+    {
+        boxcxx::ThrowOutOfRange("inplace_vector<T, 0>::at");
+    }
+    constexpr const_reference at(size_type) const
+    {
+        boxcxx::ThrowOutOfRange("inplace_vector<T, 0>::at");
+    }
+    constexpr reference       front() { return *begin(); }
+    constexpr const_reference front() const { return *begin(); }
+    constexpr reference       back() { return *begin(); }
+    constexpr const_reference back() const { return *begin(); }
+
+    constexpr T       *data() noexcept { return nullptr; }
+    constexpr const T *data() const noexcept { return nullptr; }
+
+    template <class... Args>
+    constexpr reference emplace_back(Args &&...)
+    {
+        Overflow();
+    }
+    constexpr reference push_back(const T &) { Overflow(); }
+    constexpr reference push_back(T &&) { Overflow(); }
+    template <ContainerCompatibleRange<T> R>
+    constexpr void append_range(R &&rg)
+    {
+        if (ranges::begin(rg) != ranges::end(rg)) Overflow();
+    }
+    constexpr void pop_back() {}
+
+    template <class... Args>
+    constexpr optional<reference> try_emplace_back(Args &&...)
+    {
+        return nullopt;
+    }
+    constexpr optional<reference> try_push_back(const T &) { return nullopt; }
+    constexpr optional<reference> try_push_back(T &&) { return nullopt; }
+
+    template <class... Args>
+    constexpr iterator emplace(const_iterator, Args &&...)
+    {
+        Overflow();
+    }
+    constexpr iterator insert(const_iterator, const T &) { Overflow(); }
+    constexpr iterator insert(const_iterator, T &&) { Overflow(); }
+    constexpr iterator insert(const_iterator position, size_type n, const T &)
+    {
+        if (n != 0) Overflow();
+        return const_cast<iterator>(position);
+    }
+    template <class InputIterator>
+        requires requires(InputIterator i) {
+            { *i } -> convertible_to<T>;
+            ++i;
+        }
+    constexpr iterator insert(const_iterator position, InputIterator first,
+                              InputIterator last)
+    {
+        if (first != last) Overflow();
+        return const_cast<iterator>(position);
+    }
+    template <ContainerCompatibleRange<T> R>
+    constexpr iterator insert_range(const_iterator position, R &&rg)
+    {
+        if (ranges::begin(rg) != ranges::end(rg)) Overflow();
+        return const_cast<iterator>(position);
+    }
+    constexpr iterator insert(const_iterator position, initializer_list<T> il)
+    {
+        if (il.size() != 0) Overflow();
+        return const_cast<iterator>(position);
+    }
+
+    constexpr iterator erase(const_iterator position)
+    {
+        return const_cast<iterator>(position);
+    }
+    constexpr iterator erase(const_iterator first, const_iterator)
+    {
+        return const_cast<iterator>(first);
+    }
+    constexpr void swap(inplace_vector &) noexcept {}
+    constexpr void clear() noexcept {}
+
+    friend constexpr bool operator==(const inplace_vector &,
+                                     const inplace_vector &)
+    {
+        return true;
+    }
+    friend constexpr strong_ordering operator<=>(const inplace_vector &,
+                                                 const inplace_vector &)
+    {
+        return strong_ordering::equal;
+    }
+    friend constexpr void swap(inplace_vector &, inplace_vector &) noexcept {}
+};
+
+// ── erasure ([inplace.vector.erasure]) ───────────────────────────────────
+
+template <class T, size_t N, class Predicate>
+constexpr size_t erase_if(inplace_vector<T, N> &c, Predicate pred);
+
+template <class T, size_t N, class U = T>
+constexpr size_t erase(inplace_vector<T, N> &c, const U &value)
+{
+    return erase_if(c, [&](const T &e) { return e == value; });
+}
+
+template <class T, size_t N, class Predicate>
+constexpr size_t erase_if(inplace_vector<T, N> &c, Predicate pred)
+{
+    T *const out0 = c.data();
+    T       *out  = out0;
+    for (T *in = c.data(), *stop = c.data() + c.size(); in != stop; ++in)
+        if (!pred(static_cast<const T &>(*in))) {
+            if (out != in) *out = static_cast<T &&>(*in);
+            ++out;
+        }
+    const size_t kept    = static_cast<size_t>(out - out0);
+    const size_t removed = c.size() - kept;
+    c.erase(c.begin() + kept, c.end());
+    return removed;
+}
+
+} // namespace std
+
+#endif // BOXCXX_INPLACE_VECTOR

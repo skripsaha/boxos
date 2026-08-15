@@ -1,4 +1,4 @@
-// boxcxx — <optional>  (C++23, incl. monadic and_then/transform/or_else)
+// boxcxx — <optional>  (C++23 + P2988R12 optional<T&> + P3168R2 range support)
 //
 // Conditional triviality is real: optional<T> is trivially copyable /
 // movable / destructible exactly when T is, via a six-layer storage chain
@@ -6,10 +6,19 @@
 // every layer is `= default` in the trivial branch. Deleted-ness of the
 // copy/move special members is governed orthogonally by the shared
 // __bits::EnableSpecial bases, so the two concerns never tangle.
+//
+// An optional is also a range of zero or one element ([optional.iterators],
+// P3168R2), and there is a reference specialization optional<T&> whose
+// assignment REBINDS rather than assigns through ([optional.optional.ref],
+// P2988R12) — the one place in the library where `o = x` moves the arrow
+// instead of writing through it. Both are C++26; see <version> for why this
+// library claims C++26 macros while compiling as C++23.
 #ifndef BOXCXX_OPTIONAL
 #define BOXCXX_OPTIONAL
 
+#include <__bits/allocator_core>  // construct_at — see Ops::Construct
 #include <__bits/enable_special>
+#include <__bits/ranges_core>     // enable_borrowed_range, for optional<T&>
 #include <compare>
 #include <concepts>
 #include <cstddef>
@@ -150,8 +159,15 @@ struct Ops : Dtor<T> {
     template <class... A>
     constexpr T &Construct(A &&...a)
     {
-        ::new (static_cast<void *>(__builtin_addressof(this->val_)))
-            T(static_cast<A &&>(a)...);
+        // construct_at, not a bare placement-new: a placement-new
+        // expression is only a constant expression when it is lexically
+        // inside std::construct_at (or std::allocator::allocate), so
+        // spelling it here directly made every optional operation that
+        // engages a disengaged optional — emplace, both converting
+        // constructors, all four assignments, the non-trivial copy and
+        // move constructors — unusable in a constant expression, which
+        // [optional] requires them all to be.
+        construct_at(__builtin_addressof(this->val_), static_cast<A &&>(a)...);
         this->eng_ = true;
         return this->val_;
     }
@@ -277,7 +293,8 @@ class optional
                       !is_same_v<remove_cv_t<T>, in_place_t>,
                   "optional<T>: T must not be nullopt_t or in_place_t");
     static_assert(is_destructible_v<T> && !is_reference_v<T>,
-                  "optional<T>: T must be a destructible non-reference type");
+                  "optional<T>: T must be a destructible object type "
+                  "(references go to the optional<T&> specialization)");
 
     using Base = __optional::MoveAssign<T>;
 
@@ -421,6 +438,31 @@ public:
             this->Construct(static_cast<T &&>(o.Get()));
             o.Reset();
         }
+    }
+
+    // iterator support ([optional.iterators], P3168R2) ---------------------
+    // A plain pointer is the iterator. The standard leaves the type
+    // implementation-defined and asks only for a contiguous, constexpr
+    // iterator whose value type is remove_cv_t<T>; T* is all three by
+    // construction, so wrapping it would buy nothing but a longer name in
+    // diagnostics. When disengaged both ends are null — reading the address
+    // of the inactive union member is what a wrapper would have to do
+    // instead, and that is not a constant expression.
+    using iterator       = T *;
+    using const_iterator = const T *;
+
+    constexpr iterator begin() noexcept
+    {
+        return has_value() ? __builtin_addressof(this->Get()) : nullptr;
+    }
+    constexpr const_iterator begin() const noexcept
+    {
+        return has_value() ? __builtin_addressof(this->Get()) : nullptr;
+    }
+    constexpr iterator end() noexcept { return begin() + has_value(); }
+    constexpr const_iterator end() const noexcept
+    {
+        return begin() + has_value();
     }
 
     // observers ----------------------------------------------------------
@@ -605,6 +647,249 @@ private:
 
 template <class T>
 optional(T) -> optional<T>;
+
+// ── optional<T&> ([optional.optional.ref], P2988R12) ─────────────────────
+//
+// A pointer with a nicer interface, and deliberately so: it is trivially
+// copyable, its copy assignment is the pointer's, and `o = x` REBINDS —
+// it makes o refer to x, it does not write x through o. That is the whole
+// design argument of P2988: the alternative (assign-through) makes the
+// meaning of `a = b` depend on whether a is engaged, which is the bug
+// factory boost::optional shipped for years.
+//
+// Every binding goes through ConvertRefInitVal, which binds a real T& to
+// the argument BEFORE taking its address. That is not a stylistic choice:
+// a conversion that would materialise a temporary (optional<const long&>
+// from an int lvalue) has to be caught, and the trait that catches it —
+// reference_constructs_from_temporary_v — describes exactly that binding.
+// Where the trait fires, the standard says the constructor is DELETED, not
+// absent, so each such constructor has a deleted twin under the negated
+// constraint rather than simply constraining the danger away.
+
+template <class T>
+class optional<T &> {
+public:
+    using value_type = T;
+    // [optional.iterators]: value type remove_cv_t<T>, reference T&,
+    // contiguous, constexpr. Same reasoning as the primary template.
+    using iterator = T *;
+
+private:
+    T *val_ = nullptr;
+
+    template <class U>
+    constexpr void ConvertRefInitVal(U &&u)
+    {
+        T &r(static_cast<U &&>(u));
+        val_ = __builtin_addressof(r);
+    }
+
+    template <class>
+    friend class optional;
+
+    static constexpr bool kIterable =
+        is_object_v<T> && !is_unbounded_array_v<T>;
+
+public:
+    // construct / destroy --------------------------------------------------
+    constexpr optional() noexcept                   = default;
+    constexpr optional(nullopt_t) noexcept {}
+    constexpr optional(const optional &) noexcept   = default;
+    constexpr ~optional()                           = default;
+    constexpr optional &operator=(const optional &) noexcept = default;
+
+    template <class Arg>
+        requires(is_constructible_v<T &, Arg> &&
+                 !reference_constructs_from_temporary_v<T &, Arg>)
+    constexpr explicit optional(in_place_t, Arg &&arg)
+    {
+        ConvertRefInitVal(static_cast<Arg &&>(arg));
+    }
+
+    template <class U = T>
+        requires(!is_same_v<remove_cvref_t<U>, optional> &&
+                 !is_same_v<remove_cvref_t<U>, in_place_t> &&
+                 is_constructible_v<T &, U> &&
+                 !reference_constructs_from_temporary_v<T &, U>)
+    constexpr explicit(!is_convertible_v<U, T &>)
+        optional(U &&u) noexcept(is_nothrow_constructible_v<T &, U>)
+    {
+        ConvertRefInitVal(static_cast<U &&>(u));
+    }
+    template <class U = T>
+        requires(!is_same_v<remove_cvref_t<U>, optional> &&
+                 !is_same_v<remove_cvref_t<U>, in_place_t> &&
+                 is_constructible_v<T &, U> &&
+                 reference_constructs_from_temporary_v<T &, U>)
+    constexpr optional(U &&) = delete;
+
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, U &> &&
+                 !reference_constructs_from_temporary_v<T &, U &>)
+    constexpr explicit(!is_convertible_v<U &, T &>)
+        optional(optional<U> &rhs) noexcept(is_nothrow_constructible_v<T &, U &>)
+    {
+        if (rhs.has_value()) ConvertRefInitVal(*rhs);
+    }
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, U &> &&
+                 reference_constructs_from_temporary_v<T &, U &>)
+    constexpr optional(optional<U> &) = delete;
+
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, const U &> &&
+                 !reference_constructs_from_temporary_v<T &, const U &>)
+    constexpr explicit(!is_convertible_v<const U &, T &>)
+        optional(const optional<U> &rhs) noexcept(
+            is_nothrow_constructible_v<T &, const U &>)
+    {
+        if (rhs.has_value()) ConvertRefInitVal(*rhs);
+    }
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, const U &> &&
+                 reference_constructs_from_temporary_v<T &, const U &>)
+    constexpr optional(const optional<U> &) = delete;
+
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, U> &&
+                 !reference_constructs_from_temporary_v<T &, U>)
+    constexpr explicit(!is_convertible_v<U, T &>)
+        optional(optional<U> &&rhs) noexcept(is_nothrow_constructible_v<T &, U>)
+    {
+        if (rhs.has_value()) ConvertRefInitVal(static_cast<U &&>(*rhs));
+    }
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, U> &&
+                 reference_constructs_from_temporary_v<T &, U>)
+    constexpr optional(optional<U> &&) = delete;
+
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, const U> &&
+                 !reference_constructs_from_temporary_v<T &, const U>)
+    constexpr explicit(!is_convertible_v<const U, T &>)
+        optional(const optional<U> &&rhs) noexcept(
+            is_nothrow_constructible_v<T &, const U>)
+    {
+        if (rhs.has_value()) ConvertRefInitVal(static_cast<const U &&>(*rhs));
+    }
+    template <class U>
+        requires(!is_same_v<remove_cv_t<T>, optional<U>> &&
+                 !is_same_v<T &, U> && is_constructible_v<T &, const U> &&
+                 reference_constructs_from_temporary_v<T &, const U>)
+    constexpr optional(const optional<U> &&) = delete;
+
+    // assignment ------------------------------------------------------------
+    // There is no templated operator=. Rebinding from a bare lvalue works
+    // through the converting constructor plus the defaulted copy assignment,
+    // and that is the whole mechanism: `o = x` builds a temporary optional
+    // referring to x and copies the pointer out of it.
+    constexpr optional &operator=(nullopt_t) noexcept
+    {
+        val_ = nullptr;
+        return *this;
+    }
+
+    template <class U>
+        requires(is_constructible_v<T &, U> &&
+                 !reference_constructs_from_temporary_v<T &, U>)
+    constexpr T &emplace(U &&u) noexcept(is_nothrow_constructible_v<T &, U>)
+    {
+        ConvertRefInitVal(static_cast<U &&>(u));
+        return *val_;
+    }
+
+    // swap -------------------------------------------------------------------
+    constexpr void swap(optional &rhs) noexcept
+    {
+        T *tmp   = val_;
+        val_     = rhs.val_;
+        rhs.val_ = tmp;
+    }
+
+    // iterator support ([optional.iterators]) --------------------------------
+    constexpr iterator begin() const noexcept
+        requires kIterable
+    {
+        return val_;
+    }
+    constexpr iterator end() const noexcept
+        requires kIterable
+    {
+        return val_ + (val_ != nullptr);
+    }
+
+    // observers ---------------------------------------------------------------
+    constexpr T *operator->() const noexcept { return val_; }
+    constexpr T &operator*() const noexcept { return *val_; }
+    constexpr explicit operator bool() const noexcept
+    {
+        return val_ != nullptr;
+    }
+    constexpr bool has_value() const noexcept { return val_ != nullptr; }
+
+    constexpr T &value() const
+    {
+        if (!val_) __throw_bad_optional_access();
+        return *val_;
+    }
+
+    template <class U = remove_cv_t<T>>
+    constexpr remove_cv_t<T> value_or(U &&u) const
+    {
+        using X = remove_cv_t<T>;
+        static_assert(is_constructible_v<X, T &> && is_convertible_v<U, X>,
+                      "value_or requires a T& that can initialise "
+                      "remove_cv_t<T>, and a U convertible to it");
+        return val_ ? static_cast<X>(*val_) : static_cast<X>(static_cast<U &&>(u));
+    }
+
+    // monadic ------------------------------------------------------------------
+    template <class F>
+    constexpr auto and_then(F &&f) const
+    {
+        using U = remove_cvref_t<invoke_result_t<F, T &>>;
+        static_assert(__optional::IsOptional<U>,
+                      "and_then: F must return a specialization of optional");
+        if (val_) return invoke(static_cast<F &&>(f), *val_);
+        return U();
+    }
+
+    template <class F>
+    constexpr auto transform(F &&f) const
+    {
+        using U = remove_cv_t<invoke_result_t<F, T &>>;
+        if (val_)
+            return optional<U>(__optional::InvokeTag{}, static_cast<F &&>(f),
+                               *val_);
+        return optional<U>();
+    }
+
+    template <class F>
+        requires invocable<F>
+    constexpr optional or_else(F &&f) const
+    {
+        static_assert(is_same_v<remove_cvref_t<invoke_result_t<F>>, optional>,
+                      "or_else: F must return optional<T&>");
+        return val_ ? *this : static_cast<optional>(invoke(static_cast<F &&>(f)));
+    }
+
+    constexpr void reset() noexcept { val_ = nullptr; }
+};
+
+// [optional.syn]: the referent outlives the optional, so iterators into an
+// optional<T&> rvalue are not dangling. optional<T> (by value) owns its
+// element and is deliberately NOT borrowed.
+namespace ranges {
+template <class T>
+inline constexpr bool enable_borrowed_range<optional<T &>> = true;
+}
 
 // ── comparisons ([optional.relops] / [optional.nullops] / [optional.comp]) ─
 

@@ -1,9 +1,9 @@
 // boxcxx — <__bits/version_bitset>
 //
-// The [support.limits.general] per-header slot for <bitset>, kept even
-// though it currently defines nothing: <bitset> owns exactly one C++23
-// feature-test macro, __cpp_lib_constexpr_bitset, and that one is not
-// claimable yet (see <version>'s omission list -- the string-taking
+// The [support.limits.general] per-header slot for <bitset>. It carries
+// P2697R1's __cpp_lib_bitset -- the string_view constructor -- and not
+// __cpp_lib_constexpr_bitset, the one C++23 macro this header owns, which
+// is not claimable yet (see <version>'s omission list -- the string-taking
 // constructor and both to_string() forms cannot run in constant evaluation
 // because basic_string is not constexpr). Everything else in [template.
 // bitset] IS constexpr, so the moment the constexpr_string blocker lifts
@@ -20,3 +20,13 @@
 // A header that answers for a feature it does not provide is answering a
 // question it was not asked, so it no longer does. <version> defines
 // BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
+
+// P2697R1 -- explicit bitset(basic_string_view<CharT, Traits>, pos, n,
+// zero, one). Independent of the constexpr_bitset blocker above: the new
+// constructor is as constexpr as the rest of the class, it is the string
+// one that is not.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_bitset)) && \
+    !defined(__cpp_lib_bitset)
+#  define __cpp_lib_bitset 202306L
+#endif
+#undef BOXCXX_OWNS_bitset

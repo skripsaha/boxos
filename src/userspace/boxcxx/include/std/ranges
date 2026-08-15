@@ -29,6 +29,8 @@ template <typename T, size_t Extent>
 class span;
 template <typename T>
 class allocator;
+template <typename T>
+class optional;
 
 namespace ranges {
 
@@ -83,6 +85,18 @@ template <typename T, size_t E>
 inline constexpr bool enable_view<span<T, E>> =
     E == size_t(-1) || E == 0; // dynamic_extent (value spelled out — the
                                // constant lives in <span>)
+
+// [optional.syn] (P3168R2). The marker lives here rather than in <optional>
+// for a mechanical reason: enable_view is declared in this file, and
+// <optional> cannot include <ranges> — <ranges> already includes <optional>
+// (join and fold need it), so the dependency only runs one way. Nothing is
+// lost by it, because a program can only ASK about enable_view by including
+// <ranges>, and by then this specialization is in scope. enable_borrowed_
+// range<optional<T&>> is the other half of the same paper and DOES live in
+// <optional>, because that macro's declaration is in <__bits/ranges_core>,
+// which <optional> can include without the cycle.
+template <typename T>
+inline constexpr bool enable_view<optional<T>> = true;
 
 } // namespace ranges
 
@@ -197,6 +211,7 @@ using range_const_reference_t = iter_const_reference_t<iterator_t<R>>;
 #define BOXCXX_OWNS_ranges_as_input
 #define BOXCXX_OWNS_ranges_as_rvalue
 #define BOXCXX_OWNS_ranges_cache_latest
+#define BOXCXX_OWNS_ranges_indices
 #define BOXCXX_OWNS_ranges_cartesian_product
 #define BOXCXX_OWNS_ranges_chunk
 #define BOXCXX_OWNS_ranges_chunk_by

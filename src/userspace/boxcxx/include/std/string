@@ -52,6 +52,7 @@
 #define BOXCXX_OWNS_string_subview
 #define BOXCXX_OWNS_string_udls
 #define BOXCXX_OWNS_string_view
+#define BOXCXX_OWNS_to_string
 #include <__bits/version_string>
 
 namespace std {
@@ -1262,19 +1263,34 @@ inline string to_string(unsigned long long v)
     return __string_impl::UnsignedToString(v);
 }
 
-// Floating-point to_string ([string.conversions]): "as if by sprintf %f" —
-// fixed notation, 6 fractional digits — over <charconv>'s own Ryu/big-int.
-inline string to_string(double v)
+// Floating-point to_string ([string.conversions]). P2587R3 replaced "as if
+// by sprintf %f" with "as if by format(\"{}\", v)", and the difference is
+// not cosmetic: under the old rule to_string(1e-9) was "0.000000" and
+// to_string(1e300) was three hundred digits of noise, neither of which
+// round-trips. The new rule is exactly what to_chars gives with no format
+// argument -- the shortest decimal that reads back as the same value.
+//
+// Buffer sizes are the shortest-round-trip bounds, not guesses: 17
+// significant digits for double and 21 for long double, plus sign, point
+// and a five-character exponent. The float overload converts to double
+// first because a float's shortest form is a double's shortest form when
+// the value is exactly representable, which it is.
+inline string to_string(float v)
 {
-    char buf[400];
-    to_chars_result r = to_chars(buf, buf + sizeof(buf), v, chars_format::fixed, 6);
+    char             buf[64];
+    to_chars_result  r = to_chars(buf, buf + sizeof(buf), v);
     return string(buf, static_cast<size_t>(r.ptr - buf));
 }
-inline string to_string(float v) { return to_string(static_cast<double>(v)); }
+inline string to_string(double v)
+{
+    char             buf[64];
+    to_chars_result  r = to_chars(buf, buf + sizeof(buf), v);
+    return string(buf, static_cast<size_t>(r.ptr - buf));
+}
 inline string to_string(long double v)
 {
-    char buf[4952];   // LDBL_MAX in fixed,6 ≈ 4933 integer digits + ".000000"
-    to_chars_result r = to_chars(buf, buf + sizeof(buf), v, chars_format::fixed, 6);
+    char             buf[128];
+    to_chars_result  r = to_chars(buf, buf + sizeof(buf), v);
     return string(buf, static_cast<size_t>(r.ptr - buf));
 }
 

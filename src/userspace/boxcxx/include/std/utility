@@ -2,6 +2,7 @@
 #ifndef BOXCXX_UTILITY
 #define BOXCXX_UTILITY
 
+#include <__bits/constant_wrapper>
 #include <type_traits>
 #include <compare>
 #include <initializer_list>
@@ -10,6 +11,7 @@
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_as_const
+#define BOXCXX_OWNS_constant_wrapper
 #define BOXCXX_OWNS_constexpr_algorithms
 #define BOXCXX_OWNS_constexpr_utility
 #define BOXCXX_OWNS_exchange_function

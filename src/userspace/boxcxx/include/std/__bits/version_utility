@@ -34,6 +34,11 @@
 #  define __cpp_lib_as_const 201510L
 #endif
 #undef BOXCXX_OWNS_as_const
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constant_wrapper)) && \
+    !defined(__cpp_lib_constant_wrapper)
+#  define __cpp_lib_constant_wrapper 202606L   // P2781R9 + LWG 4383/4500
+#endif
+#undef BOXCXX_OWNS_constant_wrapper
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_utility)) && \
     !defined(__cpp_lib_constexpr_utility)
 #  define __cpp_lib_constexpr_utility 201811L

@@ -1,7 +1,10 @@
 // boxcxx — <__bits/version_optional>
 //
-// The feature-test macro [version.syn] owned by <optional>. 202110L is the
-// C++23 value (P0798 monadic and_then/transform/or_else).
+// The feature-test macros [version.syn] owns for <optional>. 202110L was the
+// C++23 value (P0798 monadic and_then/transform/or_else); 202506L is C++26
+// with P2988R12's optional<T&>, and P3168R2's range support carries its own
+// macro. Both features are complete here, including the deleted-not-absent
+// constructors that reject a binding through a materialised temporary.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -14,6 +17,10 @@
 
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_optional)) && \
     !defined(__cpp_lib_optional)
-#  define __cpp_lib_optional 202110L
+#  define __cpp_lib_optional 202506L        // P2988R12 optional<T&>
+#endif
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_optional)) && \
+    !defined(__cpp_lib_optional_range_support)
+#  define __cpp_lib_optional_range_support 202406L   // P3168R2
 #endif
 #undef BOXCXX_OWNS_optional

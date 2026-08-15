@@ -1,0 +1,309 @@
+// boxcxx — <__bits/function_ref>  ([func.wrap.ref], P0792R14)
+//
+// std::function_ref: two pointers, no ownership, no allocation, no empty
+// state. It is what you pass to a function that will call back DURING the
+// call and never after — the case std::function has always over-served by
+// copying the callable onto the heap.
+//
+// Four specializations (cv x noexcept), generated from one macro the way
+// <__bits/move_only_function> generates its twelve. The stored state is
+// exactly the paper's: a thunk pointer and a bound entity that holds
+// either an object pointer or a function pointer, never both.
+//
+// Two details are easy to get wrong and are load-bearing here:
+//
+//  - operator() is NOT constexpr, and that is not an oversight in this
+//    implementation: recovering a T* from the void* half of the bound
+//    entity is not a constant expression in any C++ before 26. The
+//    CONSTRUCTORS are constexpr, exactly as the synopsis says, so a
+//    function_ref can be built in a constant expression and called at run
+//    time.
+//  - Constructing from ANOTHER function_ref specialization copies the
+//    other's thunk and entity instead of binding to the other object
+//    ([func.wrap.ref.ctor]'s is-convertible-from-specialization). Wrapping
+//    would work and would be one indirection slower, but it would also
+//    make the result dangle when the SOURCE function_ref dies rather than
+//    when the target does, which is a different lifetime contract.
+#ifndef BOXCXX_BITS_FUNCTION_REF
+#define BOXCXX_BITS_FUNCTION_REF
+
+#include <__bits/constant_wrapper>
+#include <__bits/invoke>
+#include <type_traits>
+
+namespace std {
+
+template <class... S> class function_ref; // not defined
+
+namespace __bits {
+
+// The bound entity ([func.wrap.ref.class]): a pointer to an object or a
+// pointer to a function. A union rather than two members because the paper
+// requires a trivially copyable type and a function_ref is meant to fit in
+// two registers.
+union FnRefEntity {
+    const void *obj;
+    void (*fun)();
+};
+
+// Decomposition of a function_ref specialization back into its parts, so a
+// converting constructor can ask what it is converting FROM.
+template <class F>
+struct FnRefTraits {
+    static constexpr bool kIsSpec = false;
+};
+template <class R, class... A>
+struct FnRefTraits<function_ref<R(A...)>> {
+    static constexpr bool kIsSpec = true, kConst = false, kNoex = false;
+    using Sig                     = R(A...);
+};
+template <class R, class... A>
+struct FnRefTraits<function_ref<R(A...) noexcept>> {
+    static constexpr bool kIsSpec = true, kConst = false, kNoex = true;
+    using Sig                     = R(A...);
+};
+template <class R, class... A>
+struct FnRefTraits<function_ref<R(A...) const>> {
+    static constexpr bool kIsSpec = true, kConst = true, kNoex = false;
+    using Sig                     = R(A...);
+};
+template <class R, class... A>
+struct FnRefTraits<function_ref<R(A...) const noexcept>> {
+    static constexpr bool kIsSpec = true, kConst = true, kNoex = true;
+    using Sig                     = R(A...);
+};
+
+// [func.wrap.ref.ctor]'s is-convertible-from-specialization, spelled from
+// the point of view of the specialization being CONSTRUCTED (kCv/kNoex are
+// its own qualifiers, F is the source).
+//   noexcept: R(&)(A...) noexcept(noex2) must convert to R(&)(A...)
+//             noexcept(noex) — a noexcept source may lose the guarantee,
+//             never the other way round.
+//   cv:       int cv& must convert to int cv2& — note the direction. The
+//             CONSTRUCTED type is on the left, so a const source can
+//             become a non-const function_ref (invoking the target more
+//             conservatively than promised is safe) and a non-const source
+//             cannot become a const one.
+template <class Sig, bool kCv, bool kNoex, class F>
+consteval bool FnRefConvertibleFrom()
+{
+    if constexpr (!FnRefTraits<F>::kIsSpec)
+        return false;
+    else
+        return is_same_v<typename FnRefTraits<F>::Sig, Sig> &&
+               (FnRefTraits<F>::kNoex || !kNoex) &&
+               (!kCv || FnRefTraits<F>::kConst);
+}
+
+template <class T>
+inline constexpr bool IsConstantWrapperSpec = __cw::IsConstantWrapper<T>;
+
+// Deduction-guide support ([func.wrap.ref.deduct]/6): drop the first
+// parameter of a callable that takes its object as an explicit first
+// operand, and forget the class.
+template <class F>
+struct FnRefSkipFirst {};
+template <class R, class G, class... A, bool E>
+struct FnRefSkipFirst<R (G::*)(A...) noexcept(E)> {
+    using type = R(A...) noexcept(E);
+};
+template <class R, class G, class... A, bool E>
+struct FnRefSkipFirst<R (G::*)(A...) const noexcept(E)> {
+    using type = R(A...) noexcept(E);
+};
+template <class R, class G, class... A, bool E>
+struct FnRefSkipFirst<R (G::*)(A...) & noexcept(E)> {
+    using type = R(A...) noexcept(E);
+};
+template <class R, class G, class... A, bool E>
+struct FnRefSkipFirst<R (G::*)(A...) const & noexcept(E)> {
+    using type = R(A...) noexcept(E);
+};
+template <class R, class G, class... A, bool E>
+struct FnRefSkipFirst<R (*)(G, A...) noexcept(E)> {
+    using type = R(A...) noexcept(E);
+};
+
+// A pointer to data member invoked on T& yields the member; the guide says
+// the deduced signature takes no arguments and is noexcept.
+template <class F, class T>
+struct FnRefGuideSig : FnRefSkipFirst<F> {};
+template <class M, class G, class T>
+    requires is_member_object_pointer_v<M G::*>   // NOT member functions:
+struct FnRefGuideSig<M G::*, T> {                 // those go through
+    using type = invoke_result_t<M G::*, T &>() noexcept;  // FnRefSkipFirst
+};
+
+} // namespace __bits
+} // namespace std
+
+// ── the four specializations (cv x noexcept) ────────────────────────────
+// CVQ is the row's cv-qualifier, pasted verbatim after R(Args...); CVBOOL
+// says the same thing to the constraint machinery. NOEXQ/NOEXBOOL likewise.
+
+#define BOXCXX_FNREF_DEFINE(CVQ, CVBOOL, NOEXQ, NOEXBOOL)                     \
+    template <class R, class... Args>                                         \
+    class function_ref<R(Args...) CVQ NOEXQ> {                                \
+        using Entity = __bits::FnRefEntity;                                   \
+        using Thunk  = R (*)(Entity, Args &&...) NOEXQ;                       \
+                                                                              \
+        /* [func.wrap.ref.ctor]/1 is-invocable-using */                       \
+        template <class... T>                                                 \
+        static constexpr bool kInvocableUsing =                               \
+            NOEXBOOL ? is_nothrow_invocable_r_v<R, T..., Args...>             \
+                     : is_invocable_r_v<R, T..., Args...>;                    \
+                                                                              \
+        template <class F>                                                    \
+        static constexpr bool kFromSpec =                                     \
+            __bits::FnRefConvertibleFrom<R(Args...), CVBOOL, NOEXBOOL, F>();  \
+                                                                              \
+        Thunk  thunk_;                                                        \
+        Entity bound_;                                                        \
+                                                                              \
+        template <class...> friend class function_ref;                        \
+                                                                              \
+    public:                                                                   \
+        /* Target and bound entity are the function itself. Not constexpr:  */\
+        /* the thunk has to get the function pointer back out of the union. */\
+        template <class F>                                                    \
+            requires(is_function_v<F> && kInvocableUsing<F *>)                \
+        function_ref(F *f) noexcept                                           \
+            : thunk_([](Entity e, Args &&...a) NOEXQ -> R {                   \
+                  return invoke_r<R>(reinterpret_cast<F *>(e.fun),            \
+                                     static_cast<Args &&>(a)...);             \
+              })                                                              \
+        {                                                                     \
+            bound_.fun = reinterpret_cast<void (*)()>(f);                     \
+        }                                                                     \
+                                                                              \
+        /* Target is the referenced object — or, when the argument is       */\
+        /* another function_ref this one can absorb, that one's target.     */\
+        /* A function LVALUE lands here too (identity binding beats the     */\
+        /* function-to-pointer conversion the F* constructor would need),   */\
+        /* and takes the function-pointer half of the entity.               */\
+        template <class F, class T = remove_reference_t<F>>                   \
+            requires(!is_same_v<remove_cvref_t<F>, function_ref> &&           \
+                     !is_member_pointer_v<T> && kInvocableUsing<CVQ T &>)     \
+        constexpr function_ref(F &&f) noexcept : thunk_(nullptr), bound_{}    \
+        {                                                                     \
+            if constexpr (kFromSpec<remove_cv_t<T>>) {                        \
+                thunk_ = f.thunk_;                                            \
+                bound_ = f.bound_;                                            \
+            } else if constexpr (is_function_v<T>) {                          \
+                thunk_ = [](Entity e, Args &&...a) NOEXQ -> R {               \
+                    return invoke_r<R>(reinterpret_cast<T *>(e.fun),          \
+                                       static_cast<Args &&>(a)...);           \
+                };                                                            \
+                bound_.fun = reinterpret_cast<void (*)()>(                    \
+                    __builtin_addressof(f));                                  \
+            } else {                                                          \
+                thunk_ = [](Entity e, Args &&...a) NOEXQ -> R {               \
+                    return invoke_r<R>(                                       \
+                        *static_cast<CVQ T *>(                                \
+                            const_cast<void *>(e.obj)),                       \
+                        static_cast<Args &&>(a)...);                          \
+                };                                                            \
+                bound_.obj = static_cast<const void *>(                       \
+                    __builtin_addressof(f));                                  \
+            }                                                                 \
+        }                                                                     \
+                                                                              \
+        /* Compile-time target, no bound object. */                           \
+        template <auto c, class F>                                            \
+            requires kInvocableUsing<const F &>                               \
+        constexpr function_ref(constant_wrapper<c, F>) noexcept               \
+            : thunk_([](Entity, Args &&...a) NOEXQ -> R {                     \
+                  return invoke_r<R>(constant_wrapper<c, F>::value,           \
+                                     static_cast<Args &&>(a)...);             \
+              })                                                              \
+        {                                                                     \
+            if constexpr (is_pointer_v<F> || is_member_pointer_v<F>)          \
+                static_assert(constant_wrapper<c, F>::value != nullptr,       \
+                              "function_ref: the wrapped pointer is null");   \
+            bound_.obj = nullptr;                                             \
+        }                                                                     \
+                                                                              \
+        /* Compile-time target bound to an lvalue. */                         \
+        template <auto c, class F, class U, class T = remove_reference_t<U>>  \
+            requires(!is_rvalue_reference_v<U &&> &&                          \
+                     kInvocableUsing<const F &, CVQ T &>)                     \
+        constexpr function_ref(constant_wrapper<c, F>, U &&obj) noexcept      \
+            : thunk_([](Entity e, Args &&...a) NOEXQ -> R {                   \
+                  return invoke_r<R>(                                         \
+                      constant_wrapper<c, F>::value,                          \
+                      *static_cast<CVQ T *>(const_cast<void *>(e.obj)),       \
+                      static_cast<Args &&>(a)...);                            \
+              })                                                              \
+        {                                                                     \
+            if constexpr (is_pointer_v<F> || is_member_pointer_v<F>)          \
+                static_assert(constant_wrapper<c, F>::value != nullptr,       \
+                              "function_ref: the wrapped pointer is null");   \
+            bound_.obj = static_cast<const void *>(                           \
+                __builtin_addressof(obj));                                    \
+        }                                                                     \
+                                                                              \
+        /* Compile-time target bound to a pointer (which the target itself  */\
+        /* receives as its first operand, so it may legitimately be null    */\
+        /* unless the target is a pointer to member).                       */\
+        template <auto c, class F, class T>                                   \
+            requires kInvocableUsing<const F &, CVQ T *>                      \
+        constexpr function_ref(constant_wrapper<c, F>, CVQ T *obj) noexcept   \
+            : thunk_([](Entity e, Args &&...a) NOEXQ -> R {                   \
+                  return invoke_r<R>(                                         \
+                      constant_wrapper<c, F>::value,                          \
+                      static_cast<CVQ T *>(const_cast<void *>(e.obj)),        \
+                      static_cast<Args &&>(a)...);                            \
+              })                                                              \
+        {                                                                     \
+            if constexpr (is_pointer_v<F> || is_member_pointer_v<F>)          \
+                static_assert(constant_wrapper<c, F>::value != nullptr,       \
+                              "function_ref: the wrapped pointer is null");   \
+            bound_.obj = static_cast<const void *>(obj);                      \
+        }                                                                     \
+                                                                              \
+        constexpr function_ref(const function_ref &) noexcept = default;      \
+        constexpr function_ref &operator=(const function_ref &) noexcept =    \
+            default;                                                          \
+                                                                              \
+        /* Deleted, not absent: `fr = some_lambda` would bind to a           */\
+        /* temporary that dies at the semicolon, and the paper wants that    */\
+        /* diagnosed rather than quietly routed through the converting       */\
+        /* constructor. Assignment from a pointer, from a constant_wrapper,  */\
+        /* or from an absorbable function_ref stays available.               */\
+        template <class T>                                                    \
+            requires(!kFromSpec<T> && !is_pointer_v<T> &&                     \
+                     !__bits::IsConstantWrapperSpec<T>)                       \
+        function_ref &operator=(T) = delete;                                  \
+                                                                              \
+        R operator()(Args... args) const NOEXQ                                \
+        {                                                                     \
+            return thunk_(bound_, static_cast<Args &&>(args)...);             \
+        }                                                                     \
+    };
+
+namespace std {
+
+BOXCXX_FNREF_DEFINE(, false, , false)
+BOXCXX_FNREF_DEFINE(, false, noexcept, true)
+BOXCXX_FNREF_DEFINE(const, true, , false)
+BOXCXX_FNREF_DEFINE(const, true, noexcept, true)
+
+// ── deduction guides ([func.wrap.ref.deduct]) ───────────────────────────
+
+template <class F>
+    requires is_function_v<F>
+function_ref(F *) -> function_ref<F>;
+
+template <auto c, class F0>
+    requires is_function_v<remove_pointer_t<F0>>
+function_ref(constant_wrapper<c, F0>) -> function_ref<remove_pointer_t<F0>>;
+
+template <auto c, class F, class T>
+function_ref(constant_wrapper<c, F>, T &&)
+    -> function_ref<typename __bits::FnRefGuideSig<F, remove_reference_t<T>>::type>;
+
+} // namespace std
+
+#undef BOXCXX_FNREF_DEFINE
+
+#endif // BOXCXX_BITS_FUNCTION_REF

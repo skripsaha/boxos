@@ -1,0 +1,48 @@
+// boxcxx — <debugging>  ([debugging], P2546R5)
+//
+// Three functions, and on BoxOS each of them has an honest answer rather
+// than a portable shrug:
+//
+//   breakpoint()              INT3. The kernel's IDT vector 3 is wired
+//                             (isr.asm, "Breakpoint"), and a user-mode #BP
+//                             takes the generic "kill the faulting
+//                             process" path in idt.c. That IS the standard's
+//                             "otherwise the behavior is unspecified": with
+//                             nothing attached, hitting a breakpoint stops
+//                             the program, which is the same thing an
+//                             un-caught SIGTRAP does elsewhere. Call it
+//                             when you mean it.
+//
+//   is_debugger_present()     false. Not a placeholder — BoxOS has no
+//                             debugger-attachment protocol at all, so there
+//                             is nothing that could ever be attached, and
+//                             saying "maybe" would be the lie. When one is
+//                             built, this function is the single place that
+//                             learns about it: it should ask the kernel,
+//                             not read a global a debugger might have
+//                             forgotten to set.
+//
+//   breakpoint_if_debugging() consequently a no-op today, and SAFE to leave
+//                             in shipping code — which is the whole reason
+//                             the paper separates it from breakpoint().
+#ifndef BOXCXX_DEBUGGING
+#define BOXCXX_DEBUGGING
+
+// [version.syn] names this header as the owner of the macro below.
+#define BOXCXX_OWNS_debugging
+#include <__bits/version_debugging>
+
+namespace std {
+
+inline bool is_debugger_present() noexcept { return false; }
+
+inline void breakpoint() noexcept { __asm__ volatile("int3"); }
+
+inline void breakpoint_if_debugging() noexcept
+{
+    if (is_debugger_present()) breakpoint();
+}
+
+} // namespace std
+
+#endif // BOXCXX_DEBUGGING

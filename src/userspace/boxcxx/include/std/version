@@ -70,6 +70,7 @@
 #include <__bits/version_complex>         // <complex>
 #include <__bits/version_containers>      // container family (+ <memory>)
 #include <__bits/version_cstddef>         // <cstddef>
+#include <__bits/version_debugging>       // <debugging>
 #include <__bits/version_exception>       // <exception>
 #include <__bits/version_expected>        // <expected>
 #include <__bits/version_flat_map>        // <flat_map>
@@ -77,6 +78,7 @@
 #include <__bits/version_format>          // <format>
 #include <__bits/version_functional>      // <functional>
 #include <__bits/version_iostreams>       // <ios>/<streambuf>/<iomanip>
+#include <__bits/version_inplace_vector>  // <inplace_vector>
 #include <__bits/version_iterator>        // <iterator> (+ <array>)
 #include <__bits/version_memory>          // <memory>
 #include <__bits/version_memory_resource> // <memory_resource>
@@ -86,6 +88,7 @@
 #include <__bits/version_numeric>         // <numeric>
 #include <__bits/version_optional>        // <optional>
 #include <__bits/version_print>           // <print> (+ <ostream>)
+#include <__bits/version_random>          // <random>
 #include <__bits/version_ranges>          // <ranges>
 #include <__bits/version_source_location> // <source_location>
 #include <__bits/version_span>            // <span>

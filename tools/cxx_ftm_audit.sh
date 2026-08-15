@@ -20,12 +20,24 @@
 #           reason and is only lower because its headers include less of each
 #           other. So the number is pinned: growing it fails, shrinking it
 #           means re-pin lower. Measured with the BOXCXX_OWNS_ gating in place.
+#
+#           One legitimate way to grow it: ADDING a macro whose owning header
+#           is itself widely included. Ф33 raised the pin from 147 to 153 for
+#           exactly six of those -- constant_wrapper and function_ref
+#           (<utility> / <functional>, which nearly everything pulls in),
+#           is_virtual_base_of (<type_traits>), optional_range_support
+#           (<optional>), ranges_indices (<ranges>) and to_string (<string>).
+#           Four other new macros -- bitset, debugging, inplace_vector,
+#           philox_engine -- do not leak at all, because nothing else includes
+#           their headers. When re-pinning, account for the delta macro by
+#           macro: it must be new macros, not a header that started including
+#           more than it used to.
 #   SYNOPSIS every macro is visible from <version> itself
 #
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=147
+LEAK_BUDGET=153
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 
