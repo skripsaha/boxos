@@ -58,7 +58,13 @@ MODE=${MODE:-${1:-full}}
 #
 # The loop still exits the instant the marker appears, so a fast test costs
 # nothing and only a genuinely stuck one pays the ceiling.
-POLL_SECONDS=300
+# 300 s was too small, and the way it failed is worth recording: on UEFI 16c
+# cxxtest overran it, the burst typed the next command into a shell still
+# parked on cxxtest, and the config reported zeros for every remaining test.
+# The suite was fine; the budget was not. 900 s is above the slowest observed
+# cxxtest (it completed inside a 450 s ceiling on that same configuration)
+# and still a real ceiling rather than "wait forever".
+POLL_SECONDS=900
 
 run_config() {
     cfg_name=$1
@@ -80,6 +86,7 @@ run_config() {
 
     # Per-test counters (cumulative pattern matches over serial.log).
     mt_seen=0; fl_seen=0; bn_seen=0
+    TIMED_OUT_CMD=""
     # Single-run tests reuse `want=1` against the first appearance of
     # their pattern. Fast mode drops historical-regression duplicates
     # and the long-tail tests (write_stress ~30 s, touch_stress ~30 s
@@ -105,7 +112,13 @@ run_config() {
                 pat="^Files:"; want=$fl_seen ;;
             bench)
                 bn_seen=$((bn_seen+1))
-                pat="create+write64+delete (TagFS+disk)"; want=$bn_seen ;;
+                # Escaped for grep -E: the '+' and the parens in bench's banner
+                # are ERE metacharacters, so the unescaped form asked for
+                # "TagFSdisk" and never matched ANYTHING. The poll therefore ran
+                # to its deadline on every bench of every config, and nobody
+                # noticed because a timeout used to be a no-op and the summary
+                # line below counts with plain grep, where '+' is a literal.
+                pat="create\+write64\+delete \(TagFS\+disk\)"; want=$bn_seen ;;
             mtest)            pat="\[mtest\] PASS";           want=1 ;;
             chain)            pat="\[chain\] PASS";           want=1 ;;
             htest)            pat="\[htest\] PASS";           want=1 ;;
@@ -128,12 +141,26 @@ run_config() {
                 pat="\[STRESS\] Done";                        want=1 ;;
         esac
 
+        # A command that never printed its marker leaves the shell PARKED on
+        # its child. Typing the next command into a parked shell is not a
+        # neutral act: the keystrokes land with no prompt to receive them, the
+        # rest of the burst never runs, and the config reports zeros for every
+        # later test — which reads as "twelve tests failed" when one timed out.
+        # So a timeout ENDS this config's burst and says so by name.
+        timed_out=""
         deadline=$(( $(date +%s) + POLL_SECONDS ))
         while :; do
             [ "$(grep -cE "$pat" build/serial.log)" -ge "$want" ] && break
-            [ "$(date +%s)" -ge "$deadline" ] && break
+            [ "$(date +%s)" -ge "$deadline" ] && { timed_out=1; break; }
             sleep 0.5
         done
+        if [ -n "$timed_out" ]; then
+            echo "  TIMEOUT: '$c' never printed its marker within ${POLL_SECONDS}s"
+            echo "  (burst stopped here — the shell is parked on it; typing"
+            echo "   past a parked shell only manufactures further failures)"
+            TIMED_OUT_CMD=$c
+            break
+        fi
     done
     sleep 2
 
@@ -220,9 +247,17 @@ run_config() {
     # inside legitimate identifiers don't trip it.
     app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
 
+    # The kernel's own boot self-test (TagFS core, BCDC, journal, snapshot,
+    # CoW, BoxHash, integrity, dedup). It runs on EVERY boot in EVERY config
+    # and its verdict used to gate nothing at all — a config where the
+    # filesystem's own suite failed still came out green here.
+    selftest_ok=$(grep -c   "\[TESTS\] All tests PASSED"   build/serial.log)
+    selftest_bad=$(grep -c  "\[TESTS\] Some tests FAILED"  build/serial.log)
+
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p"
+    echo "  selftest: kernel=$selftest_ok bad=$selftest_bad"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail TSC=~1GHz:$tsc_good/$bn"
 
     ok=1
@@ -262,6 +297,11 @@ run_config() {
     fi
 
     [ "$app_fail" -gt 0 ] && ok=0
+
+    [ "$selftest_bad" -gt 0 ] && ok=0
+    [ "$selftest_ok"  -lt 1 ] && ok=0
+
+    [ -n "$TIMED_OUT_CMD" ] && ok=0
 
     if [ "$ok" = "1" ]; then
         echo "  RESULT: PASS"
