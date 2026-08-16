@@ -1015,6 +1015,7 @@ clean:
 	@echo "Cleaning build..."
 	@rm -rf $(BUILDDIR)
 	@rm -f $(TAGFS_TOOL)
+	@rm -f tools/nameplate
 	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(SHELL_DIR) && $(MAKE) clean

@@ -40,8 +40,11 @@ BOXLIB_START = ../build/boxlib_start.o
 
 all: display.elf
 
-display.elf: $(BOXLIB_START) display.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) display.o $(BOXLIB)
+# After `all`: the fragment's first rule would otherwise become the default goal.
+include ../nameplate.mk
+
+display.elf: $(BOXLIB_START) display.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) display.o $(BOXLIB))
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

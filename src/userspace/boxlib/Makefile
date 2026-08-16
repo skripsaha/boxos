@@ -61,6 +61,7 @@ SRCS = src/core/notify.c \
        src/pku.c \
        src/hw.c \
        src/debug.c \
+       src/nameplate.c \
        src/string.c \
        src/convert.c \
        src/runtime_init.c \

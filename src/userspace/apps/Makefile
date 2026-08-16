@@ -66,101 +66,41 @@ BOXLIB_START = ../build/boxlib_start.o
 
 all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf
 
+# Included AFTER `all`, never before: the fragment's first rule is the tool,
+# and whatever rule make reads first becomes the default goal — an include at
+# the top quietly turns `make` into "build the tool and stop".
+include ../nameplate.mk
+
 # ---- ELF binaries (stored in TagFS) ----
-proca.elf: $(BOXLIB_START) proca.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) proca.o $(BOXLIB)
+# Twenty-five apps that link the same way: one object, boxlib, done. They were
+# twenty-five identical rules until every image started carrying a Nameplate,
+# which made each of them five lines instead of one — the same pattern rule
+# utils/Makefile has always used says it once. The C++ binaries below need a
+# different driver and extra objects, so they keep explicit rules (which
+# override this one).
+%.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
-strandtest.elf: $(BOXLIB_START) strandtest.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) strandtest.o $(BOXLIB)
+brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
-brookstrand.elf: $(BOXLIB_START) brookstrand.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) brookstrand.o $(BOXLIB)
-
-strandpark.elf: $(BOXLIB_START) strandpark.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) strandpark.o $(BOXLIB)
-
-childspin.elf: $(BOXLIB_START) childspin.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) childspin.o $(BOXLIB)
-
-print_stress.elf: $(BOXLIB_START) print_stress.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) print_stress.o $(BOXLIB)
-
-brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
-	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) -lgcc
-
-currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
-	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc
-
-procb.elf: $(BOXLIB_START) procb.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) procb.o $(BOXLIB)
-
-today.elf: $(BOXLIB_START) today.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) today.o $(BOXLIB)
-
-memtest.elf: $(BOXLIB_START) memtest.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) memtest.o $(BOXLIB)
-
-mtest.elf: $(BOXLIB_START) mtest.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) mtest.o $(BOXLIB)
-
-chain.elf: $(BOXLIB_START) chain.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) chain.o $(BOXLIB)
-
-decks.elf: $(BOXLIB_START) decks.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) decks.o $(BOXLIB)
-
-bench.elf: $(BOXLIB_START) bench.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) bench.o $(BOXLIB)
-
-touch_test.elf: $(BOXLIB_START) touch_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) touch_test.o $(BOXLIB)
-
-touch_stress.elf: $(BOXLIB_START) touch_stress.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) touch_stress.o $(BOXLIB)
-
-lifecycle.elf: $(BOXLIB_START) lifecycle.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) lifecycle.o $(BOXLIB)
-
-persist.elf: $(BOXLIB_START) persist.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) persist.o $(BOXLIB)
-
-write_stress.elf: $(BOXLIB_START) write_stress.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_stress.o $(BOXLIB)
-
-write_concurrent.elf: $(BOXLIB_START) write_concurrent.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_concurrent.o $(BOXLIB)
-
-write_observer.elf: $(BOXLIB_START) write_observer.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) write_observer.o $(BOXLIB)
-
-cow_test.elf: $(BOXLIB_START) cow_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) cow_test.o $(BOXLIB)
-
-anchor_test.elf: $(BOXLIB_START) anchor_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) anchor_test.o $(BOXLIB)
-
-bay_test.elf: $(BOXLIB_START) bay_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) bay_test.o $(BOXLIB)
-
-brook_test.elf: $(BOXLIB_START) brook_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) brook_test.o $(BOXLIB)
-
-current_test.elf: $(BOXLIB_START) current_test.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) current_test.o $(BOXLIB)
-
-htest.elf: $(BOXLIB_START) htest.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) htest.o $(BOXLIB)
+currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
 # ---- C++ binaries (linked with the g++ driver) ----
 # Link order matters: libboxcxx.a BEFORE libbox.a (boxcxx pulls
 # _malloc_impl/printf from boxlib) and before any future libgcc so our
 # runtime symbols always win.
-cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld
-	$(CXX) $(CXXLDFLAGS) -o $@ $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc
-	@# Drop .debug_* (keeps .symtab for backtraces): the correctly-rounded cmath
-	@# suite bakes tens of thousands of MPFR-reference vectors, whose -g debug info
-	@# bloats the ELF ~10x and overflows the 16 MB TagFS image. Mirrors shell.elf.
-	@x86_64-elf-objcopy --strip-debug $@
+cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc)
+	@# Drop .debug_* AND the symbol table. The debug info has to go because the
+	@# correctly-rounded cmath suite bakes tens of thousands of MPFR-reference
+	@# vectors, whose -g info bloats the ELF ~10x past the 16 MB TagFS image.
+	@# .symtab used to be kept "for backtraces" — the Nameplate linked in above
+	@# now carries that, in 3.7 MB where .symtab + .strtab took 6.9 MB, so this
+	@# image comes out SMALLER than it was while gaining names at runtime. The
+	@# offline answer nm used to give is `tools/nameplate list cxxtest.elf`.
+	@x86_64-elf-objcopy --strip-all $@
 	@align=$$(x86_64-elf-readelf -lW $@ | awk '$$1=="TLS"{print $$NF}'); \
 	if [ -n "$$align" ] && [ $$((align)) -gt 64 ]; then \
 		echo "ERROR: $@ PT_TLS p_align=$$align > 64 — boxcxx tls_init layout contract broken (alignas(>64) thread_local?)"; \

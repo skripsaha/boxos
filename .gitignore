@@ -28,3 +28,6 @@ build/
 *.bin
 *.elf
 *.backup
+
+# Host build tool (compiled from tools/nameplate.c)
+tools/nameplate

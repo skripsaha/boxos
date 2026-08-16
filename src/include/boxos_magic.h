@@ -19,6 +19,9 @@
 // Process
 #define PROCESS_MAGIC          0x50524F43  // "PROC"
 
+// Nameplate — the in-image "address -> name" table (nameplate_format.h)
+#define NAMEPLATE_MAGIC        0x4E504C54  // "NPLT"
+
 // Kernel boot
 #define KERNEL_HEADER_MAGIC    0x4E52454B  // "KERN"
 #define KERNEL_HEADER_MAGIC_HI 0x4C45      // "EL"
