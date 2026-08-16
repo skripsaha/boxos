@@ -425,6 +425,52 @@ void exception_handler(interrupt_frame_t *frame)
                         frame->r13, frame->r14, frame->r15);
             }
 
+            /* Who called the faulting code.
+             *
+             * The registers above name the instruction that died; they never
+             * name the caller, so a fault inside a shared leaf like memcpy or
+             * memset says nothing about which call site passed the bad
+             * pointer — and those are exactly the faults worth catching.
+             *
+             * Apps and the shell are compiled without -O, so RBP is a genuine
+             * frame pointer: [RBP] is the caller's RBP and [RBP+8] its return
+             * address. get_user_u64 reads through the SMAP bracket with
+             * page-fault fixup, so a wild RBP — the very thing this dump
+             * exists to report — ends the walk with -1 instead of faulting
+             * the kernel inside its own exception handler.
+             *
+             * boxlib, though, is built at -O2 and omits frame pointers, so a
+             * fault inside one of its leaves (memcpy, memset, strlen) reports
+             * the chain starting at ITS caller's caller — the leaf's immediate
+             * caller owns the RBP we start from and therefore names itself
+             * only through the call instruction just before the first address
+             * printed. Verified against a two-deep probe whose answer was
+             * known in advance; do not read the first entry as "the function
+             * that faulted".
+             *
+             * Addresses only. Naming them is userspace's job, and the same
+             * ELF .symtab the shipped images carry answers it offline:
+             *   x86_64-elf-nm -n <app>.elf | awk '$1 <= addr'  */
+            {
+                uint64_t fp = frame->rbp;
+                kprintf("[EXCEPTION]  called from:");
+                for (int depth = 0; depth < 8; depth++) {
+                    uint64_t next = 0, ret = 0;
+                    if (fp == 0 || (fp & 7) != 0) break;
+                    if (get_user_u64(&next, (const uint64_t *)(uintptr_t)fp) != 0)
+                        break;
+                    if (get_user_u64(&ret, (const uint64_t *)(uintptr_t)(fp + 8)) != 0)
+                        break;
+                    if (ret == 0) break;
+                    kprintf(" 0x%lx", ret);
+                    /* Frames march toward higher addresses. A chain that
+                     * stalls or reverses is a smashed stack, not a caller. */
+                    if (next <= fp) break;
+                    fp = next;
+                }
+                kprintf("\n");
+            }
+
             kprintf("[EXCEPTION] Killing PID %u and scheduling next process\n", proc->pid);
 
             // Mark process as crashed so scheduler won't pick it again
