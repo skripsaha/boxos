@@ -196,6 +196,7 @@ __cpp_lib_spans|span
 __cpp_lib_span|span
 __cpp_lib_ssize|iterator
 __cpp_lib_sstream_from_string_view|sstream
+__cpp_lib_stacktrace|stacktrace
 __cpp_lib_start_lifetime_as|memory
 __cpp_lib_starts_ends_with|string,string_view
 __cpp_lib_stdatomic_h|stdatomic.h

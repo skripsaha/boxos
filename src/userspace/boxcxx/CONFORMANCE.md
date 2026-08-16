@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **82** — 78 of C++23 (27 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 120 |
-| Header source | ~81 000 lines |
-| Feature-test macros defined | 200 — 154 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Standard headers provided | **83** — 79 of C++23 (26 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 121 |
+| Header source | ~87 000 lines |
+| Feature-test macros defined | 201 — 155 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 203 phases (184 of them the numbered `PhaseN` series), 5 256 runtime checks, 1 732 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 205 phases (186 of them the numbered `PhaseN` series), 5 292 runtime checks, 1 750 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -55,7 +55,7 @@ checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **203**. The
+there are exactly as many as there are phase definitions. That is **205**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -90,12 +90,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (27)
+## 1.1 Headers that do not exist (26)
 
-78 of the C++23 headers are provided and 27 are absent, which accounts for the
+79 of the C++23 headers are provided and 26 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 82 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 83 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -150,17 +150,27 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 7
+### C++23 features not implemented — 6
 
 | Header | Status |
 |---|---|
 | `<spanstream>` | Not implemented. |
 | `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
 | `<typeindex>` | Not implemented — there is no `std::type_index`. |
-| `<stacktrace>` | Deferred against a named blocker: symbolization needs the running image's `.symtab`, which is cross-layer kernel/boxlib work. The unwinder half already exists — `_Unwind_Backtrace` works today. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
 | `<scoped_allocator>` | Not implemented. |
 | `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<stacktrace>` used to be on that list, and no longer is.** Its entry named a
+real blocker rather than an absence: symbolization needs a symbol table in the
+address space, and the loader maps `PT_LOAD` and nothing else, so an image's
+`.symtab` is not in it. Ф37 answered that below C++ — Nameplate
+(`src/include/nameplate_format.h`) is a table generated at link time from the
+image's own symbols and linked back in as an allocatable section, so naming an
+address is a binary search through the process's own memory: no syscall, no
+allocation, no lock, nothing that has to still be working. The header is §2
+`<stacktrace>`, and what it deliberately does not carry — demangled names, file
+and line — is recorded there.
 
 ## 1.2 Excluded by decision inside headers that do exist
 
@@ -179,7 +189,7 @@ refusals are recorded in §2 `<fstream>`.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **200** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **201** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
@@ -190,7 +200,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 200 macros × 82 headers by
+  checked over the full cross-product of 201 macros × 83 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -204,7 +214,7 @@ the whole set, not sampled:
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 161 of the 200 macros are also
+- **The converse does not hold, and cannot.** 161 of the 201 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -235,9 +245,11 @@ the whole set, not sampled:
   `<fstream>` and `<iostream>` seeing everything `<ios>` and `<string>`
   already leaked adds nobody new, and the one macro Ф36 defines,
   `__cpp_lib_fstream_native_handle`, leaks nowhere because nothing in the tree
-  includes `<fstream>`.
+  includes `<fstream>`. Ф37 did not move it either, for the same reason:
+  `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
+  `<stacktrace>`.
 
-**18 of the macros [version.syn] names are not defined**, and `<version>` lists
+**17 of the macros [version.syn] names are not defined**, and `<version>` lists
 every one by name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -259,7 +271,7 @@ assertion that a header meets the standard's freestanding subset, which is a
 separate audit against [compliance] and has not been done. `__cpp_lib_ratio`
 and `__cpp_lib_out_ptr`'s C++26 value are held back for the same reason. The
 rest belong to features whose owning header does not exist (`execution`,
-`filesystem`, `spanstream`, `stacktrace`, `syncbuf`) or to
+`filesystem`, `spanstream`, `syncbuf`) or to
 whole-clause requirements relaxations (`__cpp_lib_ranges`,
 `__cpp_lib_algorithm_iterator_requirements`). The in-tree suite pins the absences
 as well as the values, so a macro cannot quietly appear — and when one is closed,
@@ -1539,6 +1551,59 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   `!is_convertible_v<const T&, const charT*>`. libstdc++ 16.1 writes only the
   first half (measured in its `<sstream>`), so boxcxx rejects a source the
   standard also means to keep out of these overloads and libstdc++ accepts.
+
+## `<stacktrace>`
+
+Added in Ф37, together with the OS capability it needs. The whole of
+[stacktrace] is here: `stacktrace_entry`, `basic_stacktrace<Allocator>` with
+all three `current` overloads and the full allocator-aware surface,
+`pmr::stacktrace`, `to_string`, both `operator<<`, both formatters and both
+`hash` specializations. `__cpp_lib_stacktrace` is 202011L.
+
+- `~` **`description()` returns the MANGLED name**, with `+0xN` appended when
+  the address is not the function's first byte. The standard makes the
+  description implementation-defined, so this is conforming, but it is a real
+  difference from libstdc++, which demangles. There is no demangler in the
+  tree; doing it at image-build time instead was measured and rejected —
+  demangling `cxxtest.elf`'s 32 598 names grows the name blob from 3.67 MB to
+  9.71 MB, with single names reaching 5266 characters, and the TagFS image is
+  16 MB. A demangler is its own piece of work and would serve `typeid().name()`
+  and the shell as much as this header.
+- `~` **`source_file()` is always `""` and `source_line()` always `0`.**
+  [stacktrace.entry.obs] specifies exactly this when the information is
+  unavailable. It is unavailable for a measured reason rather than a chosen
+  one: line numbers live in `.debug_line`, and the C++ images — the only ones
+  that can call this header — must ship with `.debug_*` stripped to fit the
+  image at all (with `-g`, `cxxtest.elf` grows about tenfold).
+- `~` **The description ends where the CFI ends.** C sources build with
+  `-fno-asynchronous-unwind-tables`, so a trace that reaches boxlib or `_start`
+  stops there. That is the same boundary the exception unwinder has had since
+  Ф4, not a new limit.
+- `~` **`to_string(const basic_stacktrace&)` does not end in a newline.** Frames
+  are `%4u# <entry>` joined by `\n`; libstdc++ writes a newline after every
+  frame including the last, so `println("{}", trace)` there ends with a blank
+  line. The whole shape is implementation-defined. An entry prints as
+  `<description> [0x<pc>]`, with `<unknown>` standing in for a description the
+  image cannot give, and an entry holding no address prints just `<unknown>`.
+- `+` **`operator<<` is `os << to_string(x)`, exactly as
+  [stacktrace.basic.nonmem] specifies it.** libstdc++ writes to the stream
+  directly instead, which is observably different when the stream is in a
+  state that makes the two differ.
+- `~` **`native_handle_type` is `uintptr_t`** — the code address itself. BoxOS
+  has no handle table to hand out an opaque token from, and the address is the
+  number every other diagnostic in the system speaks in, the kernel's fault
+  dump included.
+- `+` A trace never allocates behind its allocator's back: the raw frame
+  buffer the walk fills is taken from the same allocator the trace lives in
+  and returned before `current` finishes, so a `pmr::stacktrace` on a
+  monotonic resource touches only that resource. The suite pins it by counting
+  the resource's allocations and frees.
+- `+` The frames belonging to the library itself are dropped by **identity**,
+  not by counting: `current`, its helper, the collector and `_Unwind_Backtrace`
+  each name themselves, and the walk skips frames while it is still inside
+  that set. A count would have been wrong the moment an inlining decision
+  changed — it was, during development, because userspace builds without `-O`
+  and an internal helper that was expected to vanish did not.
 
 ## `<stdbit.h>` and `<stdckdint.h>`
 

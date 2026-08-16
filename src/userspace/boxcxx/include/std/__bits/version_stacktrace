@@ -1,0 +1,24 @@
+// boxcxx — <__bits/version_stacktrace>
+//
+// The feature-test macro [version.syn] owns for <stacktrace>. 202011L is
+// P0881R7's value.
+//
+// It stayed on <version>'s "deliberately not defined" list from the day that
+// list was written until Ф37, for a reason that was never about C++: naming an
+// address needs a symbol table in the address space, and BoxOS's loader maps
+// PT_LOAD and nothing else. Nameplate put the names inside the image, so the
+// header could be built and the macro could be honestly defined.
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// <version> defines BOXCXX_OWNS_ALL and takes the lot. Checked by
+// tools/cxx_ftm_audit.sh.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_stacktrace)) && \
+    !defined(__cpp_lib_stacktrace)
+#  define __cpp_lib_stacktrace 202011L
+#endif
+#undef BOXCXX_OWNS_stacktrace

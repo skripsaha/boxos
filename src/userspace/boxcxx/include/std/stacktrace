@@ -1,0 +1,698 @@
+// boxcxx — <stacktrace>  ([stacktrace], P0881R7)
+//
+// A stacktrace is two capabilities wearing one name: walking the stack, and
+// naming what you find there. BoxOS had the first from the day the DWARF
+// unwinder shipped (_Unwind_Backtrace, Ф4) and did not have the second at all
+// — the loader maps PT_LOAD, so an image's .symtab is not in its own address
+// space, and no amount of C++ could conjure a name out of an address.
+//
+// Ф37 built the missing half as an OS capability rather than a library trick:
+// Nameplate, a table generated at link time from the image's own symbols and
+// linked in as an allocatable section. box/nameplate.h is its face; this
+// header is the standard's face on top of it. That is why a lookup here costs
+// a binary search and touches nothing else — no syscall, no allocation, no
+// lock — which matters, because a stacktrace is usually taken while something
+// is already going wrong.
+//
+// ── What this implementation does not have, and why ────────────────────────
+//
+//   source_file() is always "" and source_line() always 0. The standard
+//   allows exactly this ([stacktrace.entry.obs] returns an empty string /
+//   zero when the information is unavailable), and the reason is measured
+//   rather than chosen: line numbers live in .debug_line, and the C++ images
+//   — the only ones that can call this header — must ship without .debug_*
+//   to fit the 16 MB TagFS image at all (with -g, cxxtest.elf grows about
+//   tenfold). An honest zero everywhere beats line numbers in the images
+//   that do not need them and silence in the ones that do.
+//
+//   description() returns the MANGLED name. There is no demangler in the
+//   tree, and doing it at build time was measured and rejected: demangling
+//   cxxtest's names grows them from 3.67 MB to 9.71 MB, single names reaching
+//   5266 characters. A demangler is its own piece of work and would serve
+//   more than this header.
+//
+//   A trace stops where the CFI stops. C sources build with
+//   -fno-asynchronous-unwind-tables, so a chain that reaches boxlib or _start
+//   ends there — the same boundary the exception unwinder already has.
+#ifndef BOXCXX_STACKTRACE
+#define BOXCXX_STACKTRACE
+
+// [version.syn] names this header as the owner of the macro below.
+#define BOXCXX_OWNS_stacktrace
+#include <__bits/version_stacktrace>
+
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <format>
+#include <iterator>
+#include <memory>
+#include <memory_resource>
+#include <ostream>
+#include <string>
+
+#include <unwind.h>
+
+#include "box/nameplate.h"
+
+namespace std {
+
+namespace __stacktrace {
+
+// One raw frame as the unwinder reports it. `Pc` is a RETURN address: it
+// points at the instruction AFTER the call, so the byte that belongs to the
+// call itself is Pc-1, and that is what must be looked up. Attributing Pc
+// directly would name the NEXT function whenever a call is the last
+// instruction of its own.
+inline constexpr uintptr_t kLookupBias = 1;
+
+// The frames belonging to this machinery are not part of the trace the caller
+// asked for, and there is no reliable NUMBER of them: whether current() and
+// its helper occupy frames of their own depends on inlining and on whether
+// the compiler turned a call into a sibling call. Counting them is guesswork.
+//
+// So they are recognised by IDENTITY instead. Every function that can appear
+// below the caller's own frame names itself here, and the walk drops frames
+// while it is still inside that set — a prefix by construction, since these
+// functions only ever call each other. Whatever the optimizer does to the
+// chain, the answer stays right; the first frame not in the set is the first
+// frame the caller wanted.
+struct Internals {
+    const uintptr_t *Regions;
+    size_t           Count;
+};
+
+inline bool IsInternal(const Internals &in, uintptr_t region) noexcept
+{
+    for (size_t i = 0; i < in.Count; i++)
+        if (in.Regions[i] == region) return true;
+    return false;
+}
+
+struct Collector {
+    uintptr_t       *Out;        // null on the counting pass
+    size_t           Cap;
+    size_t           Seen;
+    const Internals *In;
+    bool             InPrologue; // still walking this library's own frames
+};
+
+extern "C" inline _Unwind_Reason_Code
+BoxcxxStacktraceStep(_Unwind_Context *ctx, void *arg)
+{
+    Collector *c  = static_cast<Collector *>(arg);
+    uintptr_t  pc = static_cast<uintptr_t>(_Unwind_GetIP(ctx));
+
+    if (pc == 0) return _URC_END_OF_STACK;
+
+    if (c->InPrologue) {
+        if (IsInternal(*c->In, static_cast<uintptr_t>(_Unwind_GetRegionStart(ctx))))
+            return _URC_NO_REASON;
+        c->InPrologue = false;
+    }
+
+    if (c->Out) {
+        if (c->Seen >= c->Cap) return _URC_NORMAL_STOP;
+        c->Out[c->Seen] = pc;
+    }
+    c->Seen++;
+    return _URC_NO_REASON;
+}
+
+// Walk the stack, counting only the caller's own frames. Two passes, never a
+// fixed-size scratch array: the first counts what is there and the second
+// fills a buffer sized to fit, so a deep stack is reported in full and a
+// shallow one costs nothing.
+[[gnu::noinline]] inline size_t Collect(uintptr_t *out, size_t cap, const Internals &in)
+{
+    Collector c{out, cap, 0, &in, true};
+
+    _Unwind_Backtrace(&BoxcxxStacktraceStep, &c);
+    return c.Seen;
+}
+
+inline void AppendHex(string &s, uintptr_t v)
+{
+    char buf[2 + sizeof(uintptr_t) * 2];
+    int  n = 0;
+
+    buf[n++] = '0';
+    buf[n++] = 'x';
+    if (v == 0) {
+        buf[n++] = '0';
+    } else {
+        char digits[sizeof(uintptr_t) * 2];
+        int  d = 0;
+        while (v) {
+            digits[d++] = "0123456789abcdef"[v & 0xF];
+            v >>= 4;
+        }
+        while (d) buf[n++] = digits[--d];
+    }
+    s.append(buf, static_cast<size_t>(n));
+}
+
+inline void AppendDec(string &s, unsigned long long v)
+{
+    char buf[20];
+    int  n = 0;
+
+    if (v == 0) {
+        s.push_back('0');
+        return;
+    }
+    while (v) {
+        buf[n++] = static_cast<char>('0' + (v % 10));
+        v /= 10;
+    }
+    while (n) s.push_back(buf[--n]);
+}
+
+} // namespace __stacktrace
+
+// ── [stacktrace.entry] ─────────────────────────────────────────────────────
+
+class stacktrace_entry {
+public:
+    // A plain code address. BoxOS has no handle table to hand out an opaque
+    // token from, and inventing one would only hide the single number that
+    // every other diagnostic in the system — the kernel's fault dump included
+    // — speaks in.
+    using native_handle_type = uintptr_t;
+
+    constexpr stacktrace_entry() noexcept = default;
+    constexpr stacktrace_entry(const stacktrace_entry &) noexcept = default;
+    constexpr stacktrace_entry &operator=(const stacktrace_entry &) noexcept = default;
+    ~stacktrace_entry() = default;
+
+    constexpr native_handle_type native_handle() const noexcept { return pc_; }
+    constexpr explicit operator bool() const noexcept { return pc_ != 0; }
+
+    // The mangled name of the function containing this address, with +0xN
+    // when the address is not its first byte. Empty when the image carries no
+    // name for it — which the standard asks for, and which is the truth for
+    // an address in a leaf that no symbol claims.
+    string description() const
+    {
+        NameplateSite site;
+        string        out;
+
+        if (pc_ == 0) return out;
+        if (!nameplate_lookup(pc_ - __stacktrace::kLookupBias, &site)) return out;
+
+        out.append(site.Name);
+        // Offset from the TRUE pc, not from the biased lookup address: what
+        // the reader compares against a disassembly is the return address.
+        if (uintptr_t off = pc_ - site.Start; off != 0) {
+            out.append("+", 1);
+            __stacktrace::AppendHex(out, off);
+        }
+        return out;
+    }
+
+    // Both empty by design, not by omission — see this header's opening note.
+    string        source_file() const { return string(); }
+    uint_least32_t source_line() const { return 0; }
+
+    friend constexpr bool operator==(const stacktrace_entry &x,
+                                     const stacktrace_entry &y) noexcept
+    {
+        return x.pc_ == y.pc_;
+    }
+
+    friend constexpr strong_ordering operator<=>(const stacktrace_entry &x,
+                                                 const stacktrace_entry &y) noexcept
+    {
+        return x.pc_ <=> y.pc_;
+    }
+
+private:
+    template <class> friend class basic_stacktrace;
+
+    native_handle_type pc_ = 0;
+};
+
+// ── [stacktrace.basic] ─────────────────────────────────────────────────────
+
+template <class Allocator>
+class basic_stacktrace {
+    using ATraits = allocator_traits<Allocator>;
+
+public:
+    using value_type             = stacktrace_entry;
+    using const_reference        = const value_type &;
+    using reference              = value_type &;
+    using const_iterator         = const value_type *;
+    using iterator               = const_iterator;
+    using reverse_iterator       = std::reverse_iterator<iterator>;
+    using const_reverse_iterator = std::reverse_iterator<const_iterator>;
+    using difference_type        = ptrdiff_t;
+    using size_type              = size_t;
+    using allocator_type         = Allocator;
+
+    // ── [stacktrace.basic.cons] ────────────────────────────────────────────
+
+    static basic_stacktrace current(const allocator_type &alloc = allocator_type()) noexcept
+    {
+        return Capture(alloc, 0, static_cast<size_type>(-1));
+    }
+
+    static basic_stacktrace current(size_type                skip,
+                                    const allocator_type &alloc = allocator_type()) noexcept
+    {
+        return Capture(alloc, skip, static_cast<size_type>(-1));
+    }
+
+    static basic_stacktrace current(size_type skip, size_type max_depth,
+                                    const allocator_type &alloc = allocator_type()) noexcept
+    {
+        return Capture(alloc, skip, max_depth);
+    }
+
+    basic_stacktrace() noexcept(is_nothrow_default_constructible_v<allocator_type>) = default;
+
+    explicit basic_stacktrace(const allocator_type &alloc) noexcept : alloc_(alloc) {}
+
+    basic_stacktrace(const basic_stacktrace &other)
+        : basic_stacktrace(other,
+                           ATraits::select_on_container_copy_construction(other.alloc_))
+    {
+    }
+
+    basic_stacktrace(const basic_stacktrace &other, const allocator_type &alloc)
+        : alloc_(alloc)
+    {
+        CopyFrom(other);
+    }
+
+    basic_stacktrace(basic_stacktrace &&other) noexcept
+        : alloc_(std::move(other.alloc_)), data_(other.data_), size_(other.size_)
+    {
+        other.data_ = nullptr;
+        other.size_ = 0;
+    }
+
+    basic_stacktrace(basic_stacktrace &&other, const allocator_type &alloc)
+        : alloc_(alloc)
+    {
+        if (alloc_ == other.alloc_) {
+            data_       = other.data_;
+            size_       = other.size_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        } else {
+            // Different allocator: the buffer cannot change owners, so the
+            // entries are copied. They are trivially copyable addresses.
+            CopyFrom(other);
+        }
+    }
+
+    basic_stacktrace &operator=(const basic_stacktrace &other)
+    {
+        if (this == &other) return *this;
+
+        // The old frames go back to the allocator that made them, before that
+        // allocator can change hands.
+        Release();
+        if constexpr (ATraits::propagate_on_container_copy_assignment::value)
+            alloc_ = other.alloc_;
+        CopyFrom(other);
+        return *this;
+    }
+
+    basic_stacktrace &operator=(basic_stacktrace &&other) noexcept(
+        ATraits::propagate_on_container_move_assignment::value ||
+        ATraits::is_always_equal::value)
+    {
+        if (this == &other) return *this;
+
+        if constexpr (ATraits::propagate_on_container_move_assignment::value) {
+            Release();
+            alloc_      = std::move(other.alloc_);
+            data_       = other.data_;
+            size_       = other.size_;
+            other.data_ = nullptr;
+            other.size_ = 0;
+        } else {
+            if (alloc_ == other.alloc_) {
+                Release();
+                data_       = other.data_;
+                size_       = other.size_;
+                other.data_ = nullptr;
+                other.size_ = 0;
+            } else {
+                Release();
+                CopyFrom(other);
+            }
+        }
+        return *this;
+    }
+
+    ~basic_stacktrace() { Release(); }
+
+    // ── [stacktrace.basic.obs] ─────────────────────────────────────────────
+
+    allocator_type get_allocator() const noexcept { return alloc_; }
+
+    const_iterator begin() const noexcept { return data_; }
+    const_iterator end() const noexcept { return data_ + size_; }
+    const_iterator cbegin() const noexcept { return begin(); }
+    const_iterator cend() const noexcept { return end(); }
+
+    const_reverse_iterator rbegin() const noexcept { return const_reverse_iterator(end()); }
+    const_reverse_iterator rend() const noexcept { return const_reverse_iterator(begin()); }
+    const_reverse_iterator crbegin() const noexcept { return rbegin(); }
+    const_reverse_iterator crend() const noexcept { return rend(); }
+
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    size_type size() const noexcept { return size_; }
+    size_type max_size() const noexcept { return ATraits::max_size(alloc_); }
+
+    const_reference operator[](size_type i) const { return data_[i]; }
+
+    const_reference at(size_type i) const
+    {
+        if (i >= size_) throw out_of_range("basic_stacktrace::at");
+        return data_[i];
+    }
+
+    // ── [stacktrace.basic.cmp] ─────────────────────────────────────────────
+
+    template <class Allocator2>
+    friend bool operator==(const basic_stacktrace &x,
+                           const basic_stacktrace<Allocator2> &y) noexcept
+    {
+        if (x.size() != y.size()) return false;
+        for (size_type i = 0; i < x.size(); i++)
+            if (!(x[i] == y[i])) return false;
+        return true;
+    }
+
+    template <class Allocator2>
+    friend strong_ordering operator<=>(const basic_stacktrace &x,
+                                       const basic_stacktrace<Allocator2> &y) noexcept
+    {
+        if (auto c = x.size() <=> y.size(); c != 0) return c;
+        for (size_type i = 0; i < x.size(); i++)
+            if (auto c = x[i] <=> y[i]; c != 0) return c;
+        return strong_ordering::equal;
+    }
+
+    // ── [stacktrace.basic.mod] ─────────────────────────────────────────────
+
+    void swap(basic_stacktrace &other) noexcept(
+        ATraits::propagate_on_container_swap::value || ATraits::is_always_equal::value)
+    {
+        if constexpr (ATraits::propagate_on_container_swap::value) {
+            allocator_type t = std::move(alloc_);
+            alloc_           = std::move(other.alloc_);
+            other.alloc_     = std::move(t);
+        }
+        value_type *d = data_;
+        size_type   s = size_;
+        data_         = other.data_;
+        size_         = other.size_;
+        other.data_   = d;
+        other.size_   = s;
+    }
+
+private:
+    // Every function of this library that can stand between the caller and
+    // the unwinder, named so the walk can drop its own frames by identity
+    // rather than by counting them. Nothing here depends on how the optimizer
+    // arranged the calls.
+    static __stacktrace::Internals Own(uintptr_t (&slots)[6]) noexcept
+    {
+        using Self = basic_stacktrace;
+
+        slots[0] = reinterpret_cast<uintptr_t>(&_Unwind_Backtrace);
+        slots[1] = reinterpret_cast<uintptr_t>(
+            static_cast<size_t (*)(uintptr_t *, size_t, const __stacktrace::Internals &)>(
+                &__stacktrace::Collect));
+        slots[2] = reinterpret_cast<uintptr_t>(
+            static_cast<basic_stacktrace (*)(const allocator_type &, size_type, size_type)>(
+                &Self::Capture));
+        slots[3] = reinterpret_cast<uintptr_t>(
+            static_cast<basic_stacktrace (*)(const allocator_type &)>(&Self::current));
+        slots[4] = reinterpret_cast<uintptr_t>(
+            static_cast<basic_stacktrace (*)(size_type, const allocator_type &)>(&Self::current));
+        slots[5] = reinterpret_cast<uintptr_t>(
+            static_cast<basic_stacktrace (*)(size_type, size_type, const allocator_type &)>(
+                &Self::current));
+        return __stacktrace::Internals{slots, 6};
+    }
+
+    // current() is noexcept, so every failure — an allocation that could not
+    // be made, a walk that found nothing — is reported as an empty trace
+    // rather than an exception. [stacktrace.basic.cons] says exactly that.
+    [[gnu::noinline]] static basic_stacktrace Capture(const allocator_type &alloc,
+                                                      size_type skip,
+                                                      size_type max_depth) noexcept
+    {
+        using URebind = typename ATraits::template rebind_alloc<uintptr_t>;
+        using UTraits = allocator_traits<URebind>;
+
+        basic_stacktrace out(alloc);
+        uintptr_t        slots[6];
+        const auto       own   = Own(slots);
+        const size_t     total = __stacktrace::Collect(nullptr, 0, own);
+
+        if (total == 0 || skip >= total) return out;
+
+        size_t want = total - skip;
+        if (max_depth < want) want = max_depth;
+        if (want == 0) return out;
+
+        URebind    ualloc(out.alloc_);
+        uintptr_t *raw = nullptr;
+        try {
+            // The raw frames are collected through the same allocator the
+            // trace will live in: a pmr::stacktrace built on a monotonic
+            // resource must not reach for the global heap behind its owner's
+            // back.
+            raw = UTraits::allocate(ualloc, total);
+
+            // The second walk can come back shorter than the first only if
+            // the stack changed underneath, which it cannot here — but it is
+            // clamped rather than trusted.
+            const size_t filled = __stacktrace::Collect(raw, total, own);
+            if (skip < filled) {
+                size_t have = filled - skip;
+                if (have < want) want = have;
+            } else {
+                want = 0;
+            }
+
+            // data_ and size_ are published together, never one before the
+            // other: a half-built buffer that Release() then frees with the
+            // wrong count is the classic way this shape goes wrong. Entries
+            // are trivially constructible here, so the inner catch is
+            // unreachable through std::allocator — it exists for the user
+            // allocator whose construct() throws.
+            if (want != 0) {
+                value_type *mem  = ATraits::allocate(out.alloc_, want);
+                size_t      made = 0;
+                try {
+                    for (; made < want; made++) {
+                        ATraits::construct(out.alloc_, mem + made);
+                        mem[made].pc_ = raw[skip + made];
+                    }
+                } catch (...) {
+                    while (made) ATraits::destroy(out.alloc_, mem + --made);
+                    ATraits::deallocate(out.alloc_, mem, want);
+                    throw;
+                }
+                out.data_ = mem;
+                out.size_ = want;
+            }
+            UTraits::deallocate(ualloc, raw, total);
+        } catch (...) {
+            if (raw) UTraits::deallocate(ualloc, raw, total);
+            out.Release();
+        }
+        return out;
+    }
+
+    void CopyFrom(const basic_stacktrace &other)
+    {
+        if (other.size_ == 0) return;
+        data_ = ATraits::allocate(alloc_, other.size_);
+        for (size_type i = 0; i < other.size_; i++)
+            ATraits::construct(alloc_, data_ + i, other.data_[i]);
+        size_ = other.size_;
+    }
+
+    void Release() noexcept
+    {
+        if (!data_) {
+            size_ = 0;
+            return;
+        }
+        for (size_type i = 0; i < size_; i++) ATraits::destroy(alloc_, data_ + i);
+        ATraits::deallocate(alloc_, data_, size_);
+        data_ = nullptr;
+        size_ = 0;
+    }
+
+    template <class> friend class basic_stacktrace;
+
+    [[no_unique_address]] allocator_type alloc_{};
+    value_type                          *data_ = nullptr;
+    size_type                            size_ = 0;
+};
+
+using stacktrace = basic_stacktrace<allocator<stacktrace_entry>>;
+
+namespace pmr {
+using stacktrace = basic_stacktrace<polymorphic_allocator<stacktrace_entry>>;
+}
+
+// ── [stacktrace.basic.nonmem] ──────────────────────────────────────────────
+
+template <class Allocator>
+inline void swap(basic_stacktrace<Allocator> &a,
+                 basic_stacktrace<Allocator> &b) noexcept(noexcept(a.swap(b)))
+{
+    a.swap(b);
+}
+
+// The shape is libstdc++'s minus what BoxOS does not have: `<description>
+// [0x<pc>]`, with `<unknown>` standing in for a description the image cannot
+// give, and no ` at file:line` because there is no line information to put
+// there. An entry that holds no address at all prints just `<unknown>`.
+inline string to_string(const stacktrace_entry &f)
+{
+    string out;
+
+    if (!f) {
+        out.append("<unknown>");
+        return out;
+    }
+
+    string desc = f.description();
+    if (desc.empty())
+        out.append("<unknown>");
+    else
+        out.append(desc);
+
+    out.append(" [");
+    __stacktrace::AppendHex(out, f.native_handle());
+    out.append("]");
+    return out;
+}
+
+// One frame per line, numbered as libstdc++ numbers them, and NO trailing
+// newline: this is a string, not a report, and `println("{}", trace)` should
+// not end in a blank line. The standard leaves the whole shape
+// implementation-defined.
+template <class Allocator>
+inline string to_string(const basic_stacktrace<Allocator> &st)
+{
+    string out;
+
+    for (typename basic_stacktrace<Allocator>::size_type i = 0; i < st.size(); i++) {
+        if (i != 0) out.push_back('\n');
+
+        string index;
+        __stacktrace::AppendDec(index, static_cast<unsigned long long>(i));
+        for (size_t pad = index.size(); pad < 4; pad++) out.push_back(' ');
+        out.append(index);
+        out.append("# ");
+        out.append(to_string(st[i]));
+    }
+    return out;
+}
+
+inline ostream &operator<<(ostream &os, const stacktrace_entry &f)
+{
+    return os << to_string(f);
+}
+
+template <class Allocator>
+inline ostream &operator<<(ostream &os, const basic_stacktrace<Allocator> &st)
+{
+    return os << to_string(st);
+}
+
+// ── [stacktrace.format] ────────────────────────────────────────────────────
+//
+// The grammar is `fill-and-align_opt width_opt` and nothing else — no
+// precision, no sign, no '#', no '0', no type, no 'L'. ParseSpec reads the
+// full standard spec for every formatter in the tree, so what is left is to
+// refuse everything this grammar does not name.
+
+namespace __stacktrace {
+
+struct SpecParser {
+    __format::StdSpec spec_;
+
+    constexpr typename format_parse_context::iterator parse(format_parse_context &pc)
+    {
+        const char *p = __format::ParseSpec(pc, spec_);
+
+        if (spec_.type != '\0' || spec_.sign_given || spec_.alt || spec_.zero ||
+            spec_.localized || spec_.precision >= 0 || spec_.prec_dynamic)
+            throw format_error("format: invalid spec for stacktrace");
+
+        pc.advance_to(p);
+        return p;
+    }
+};
+
+} // namespace __stacktrace
+
+template <> struct formatter<stacktrace_entry, char> : __stacktrace::SpecParser {
+    void format(const stacktrace_entry &f, format_context &ctx) const
+    {
+        const string s     = to_string(f);
+        const int    width = __format::EffectiveWidth(ctx, spec_);
+        __format::FormatString(ctx, spec_, width, -1, string_view(s.data(), s.size()));
+    }
+};
+
+template <class Allocator>
+struct formatter<basic_stacktrace<Allocator>, char> : __stacktrace::SpecParser {
+    void format(const basic_stacktrace<Allocator> &st, format_context &ctx) const
+    {
+        const string s     = to_string(st);
+        const int    width = __format::EffectiveWidth(ctx, spec_);
+        __format::FormatString(ctx, spec_, width, -1, string_view(s.data(), s.size()));
+    }
+};
+
+// [format.formatter.spec]/3 — the blanket rule. Formatting an entry touches
+// only its own image's read-only table, so there is nothing to lock.
+template <>
+inline constexpr bool enable_nonlocking_formatter_optimization<stacktrace_entry> = true;
+
+template <class Allocator>
+inline constexpr bool
+    enable_nonlocking_formatter_optimization<basic_stacktrace<Allocator>> = true;
+
+// ── [stacktrace.entry.hash] / [stacktrace.basic.hash] ──────────────────────
+
+template <> struct hash<stacktrace_entry> {
+    size_t operator()(const stacktrace_entry &f) const noexcept
+    {
+        return hash<uintptr_t>{}(f.native_handle());
+    }
+};
+
+template <class Allocator> struct hash<basic_stacktrace<Allocator>> {
+    size_t operator()(const basic_stacktrace<Allocator> &st) const noexcept
+    {
+        // Equal traces hash equal, which is all the standard asks. The mixer
+        // is the 64-bit FNV-1a step, chosen so that two traces differing only
+        // in frame ORDER do not collide.
+        size_t h = 1469598103934665603ull;
+        for (const stacktrace_entry &e : st) {
+            h ^= hash<stacktrace_entry>{}(e);
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_STACKTRACE
