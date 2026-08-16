@@ -59,15 +59,18 @@ TARGET = shell.bin
 # Build rules
 all: $(TARGET)
 
+# After `all`: the fragment's first rule would otherwise become the default goal.
+include ../nameplate.mk
+
 $(TARGET): $(TARGET_ELF)
 	@echo "Converting ELF to flat binary..."
 	$(OBJCOPY) -O binary --set-section-flags .bss=alloc,load,contents $< $@
 	@echo "Shell binary created: $(TARGET)"
 	@ls -lh $(TARGET)
 
-$(TARGET_ELF): $(BOXLIB_START) $(OBJS) $(BOXLIB)
+$(TARGET_ELF): $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	@echo "Linking $@..."
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) $(OBJS) $(BOXLIB)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXLIB))
 	@echo "Shell ELF created: $(TARGET_ELF)"
 
 %.o: %.c

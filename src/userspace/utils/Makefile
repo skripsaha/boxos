@@ -42,8 +42,11 @@ UTILS = help create show files tag untag name trash erase \
 
 all: $(addsuffix .elf,$(UTILS))
 
-%.elf: $(BOXLIB_START) %.o $(BOXLIB)
-	$(CC) $(LDFLAGS) -o $@ $(BOXLIB_START) $*.o $(BOXLIB)
+# After `all`: the fragment's first rule would otherwise become the default goal.
+include ../nameplate.mk
+
+%.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
