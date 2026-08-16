@@ -1522,11 +1522,14 @@ error_t TagFS_RunTests(void) {
     
     TestStats stats;
     error_t result = TagFS_RunAllTests(&stats);
-    
-    if (result != OK) {
-        debug_printf("[TagFS] Tests failed: %u failures\n", stats.total_failed);
-    }
-    
+
+    /* kprintf, not debug_printf: the per-test lines inside the runner are
+     * debug_printf and vanish in a normal build, so without these numbers a run
+     * where every single test SKIPPED still printed "All tests PASSED". */
+    kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped\n",
+            stats.total_tests, stats.total_passed,
+            stats.total_failed, stats.total_skipped);
+
     return result;
 }
 
@@ -2693,11 +2696,11 @@ static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
     meta_pool_delete(meta_block, meta_offset);
 
     /* Committed: the dropped blocks are unreachable, so release them.
-     * Unregister each from the dedup index first — dedup holds hash -> block
-     * entries, and a recycled block behind a live hash is exactly how a later
-     * compaction pass would hand one file another's bytes. Then drop them
-     * from the read-ahead cache, so a reallocation cannot serve the old
-     * tenant's content out of memory. */
+     * tagfs_free_blocks settles them with the dedup index on the way out —
+     * a recycled block behind a live content hash is exactly how a later
+     * lookup would hand one file another's bytes. Dropping them from the
+     * read-ahead cache is this loop's own job, so a reallocation cannot serve
+     * the old tenant's content out of memory. */
     for (uint16_t i = 0; i < old_n; i++)
     {
         uint32_t drop_from = 0;
@@ -2715,8 +2718,6 @@ static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
         uint32_t n     = cnt - drop_from;
         for (uint32_t b = 0; b < n; b++)
         {
-            if (TagFS_DedupIsInitialized())
-                TagFS_DedupUnregister(first + b);
             tagfs_readahead_invalidate(first + b);
         }
         tagfs_free_blocks(first, n);
@@ -2833,8 +2834,10 @@ int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
     return result;
 }
 
-// Internal version - caller MUST hold g_state.lock
-static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
+// Reclaim one contiguous run into the bitmap and the free list.
+// Caller holds g_state.lock, and has already settled the run with the dedup
+// index (see tagfs_free_blocks_internal below).
+static void free_run_locked(uint32_t start_block, uint32_t count)
 {
     if (count == 0)
         return;
@@ -2894,6 +2897,55 @@ static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
             g_state.block_bitmap.extent_count++;
         }
     }
+}
+
+// Give blocks back to the allocator. Caller MUST hold g_state.lock.
+//
+// This is the one door out of the allocator, so it is also where a block leaves
+// the dedup index. Nothing used to walk that index on the way out: every
+// deleted file left its blocks behind in it, mapping live content hashes to
+// bytes that now belong to somebody else, and the index grew for the lifetime
+// of the system with no pass able to shrink it.
+//
+// The index also gets a veto. It is the only record that a block has more than
+// one owner, so a block it still counts as shared is not ours to hand back —
+// the run is split around it and the rest is reclaimed.
+//
+// Lock order is g_state.lock -> dedup lock, established here and observed
+// everywhere; TagFS_DedupAllocBlock keeps its allocation outside the dedup lock
+// so the cycle cannot close from the other side.
+static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
+{
+    if (count == 0)
+        return;
+
+    uint32_t run_start = start_block;
+    uint32_t run_len   = 0;
+
+    for (uint32_t i = 0; i < count; i++)
+    {
+        uint32_t block = start_block + i;
+
+        bool may_reclaim = true;
+        TagFS_DedupUnregister(block, &may_reclaim);
+
+        if (may_reclaim)
+        {
+            if (run_len == 0)
+                run_start = block;
+            run_len++;
+            continue;
+        }
+
+        if (run_len)
+        {
+            free_run_locked(run_start, run_len);
+            run_len = 0;
+        }
+    }
+
+    if (run_len)
+        free_run_locked(run_start, run_len);
 }
 
 // Public version - acquires g_state.lock
