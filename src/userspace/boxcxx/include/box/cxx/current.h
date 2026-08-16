@@ -55,6 +55,7 @@ enum class opening : unsigned {
     none     = 0,
     create   = CURRENT_CREATE,    // create the backing if absent (stream / file writer)
     nonblock = CURRENT_NONBLOCK,  // put/take never block: would_block when full / empty
+    truncate = CURRENT_TRUNCATE,  // file writer: discard existing content at open
 };
 constexpr opening operator|(opening a, opening b) noexcept
 {
@@ -280,6 +281,28 @@ public:
         return _detail::from_status(c_ ? current_seek(c_, off) : -ERR_INVALID_ARGUMENT);
     }
     std::uint64_t tell() const noexcept { return c_ ? current_tell(c_) : 0u; }
+
+    // How long the channel is, in bytes. The error arm carries the cause:
+    // invalid_operation on a backing with no knowable extent (a stream, the
+    // screen, the keyboard), invalid_argument on a closed handle.
+    result<std::uint64_t> size() const noexcept
+    {
+        if (!c_) return std::unexpected(error{errc::invalid_argument});
+        std::int64_t n = current_size(c_);
+        if (n < 0) return std::unexpected(error{box_errno_of(static_cast<int>(n))});
+        return static_cast<std::uint64_t>(n);
+    }
+
+    // Discard everything past `n`. SHRINK ONLY — a request to grow lands in
+    // the error arm as invalid_argument, because TagFS does not zero fresh
+    // blocks and growing here would hand back the previous tenant's bytes.
+    // Also refused on a snapshotted file (invalid_operation): a block not yet
+    // copied since the snapshot is still the snapshot's only copy. The byte
+    // cursor is clamped into the new range.
+    status resize(std::uint64_t n) noexcept
+    {
+        return _detail::from_status(c_ ? current_resize(c_, n) : -ERR_INVALID_ARGUMENT);
+    }
 };
 
 using byte_current = current<std::byte>;

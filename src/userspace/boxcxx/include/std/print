@@ -58,12 +58,22 @@ namespace __print {
 // opened once per process and lives for its lifetime; flushing stays with the
 // shared io_buf (exit() / 256-byte threshold), unchanged. Falls back to a
 // direct print_bytes if the channel can't be opened.
+// The one screen channel, opened on first use and held for the process. It
+// is a function rather than a local static inside ToConsole because <iostream>
+// needs the SAME handle: std::cout and std::print sharing one road is what
+// makes their output interleave in call order instead of in the order two
+// buffers happened to drain.
+inline ::Current *Console()
+{
+    static ::Current *screen = ::current_open("screen", CURRENT_WRITE, 0, 0);
+    return screen;
+}
+
 inline void ToConsole(string_view s)
 {
     if (s.empty()) return;
-    static ::Current *screen = ::current_open("screen", CURRENT_WRITE, 0, 0);
-    if (screen) ::current_write(screen, s.data(), s.size());
-    else        print_bytes(s.data(), s.size());
+    if (::Current *screen = Console()) ::current_write(screen, s.data(), s.size());
+    else                               print_bytes(s.data(), s.size());
 }
 } // namespace __print
 

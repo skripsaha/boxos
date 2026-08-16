@@ -74,7 +74,15 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
 #define CUR_FAIL(err) do { if (out_err) *out_err = (err); return NULL; } while (0)
 
     if (!tag) CUR_FAIL(ERR_INVALID_ARGUMENT);
-    if (role != CURRENT_READ && role != CURRENT_WRITE) CUR_FAIL(ERR_INVALID_ARGUMENT);
+    /* One role, except on the file backing, which genuinely is both. A stream
+     * writer and a stream reader are different ends of a pipe and cannot be
+     * the same handle; a file is one object that can be read and written
+     * through one cursor. The honesty rule cuts both ways — a Current must not
+     * claim a capability its backing lacks, and it should not hide one it has.
+     * Every other backing still takes exactly one role, checked per case. */
+    if (role != CURRENT_READ && role != CURRENT_WRITE &&
+        role != (CURRENT_READ | CURRENT_WRITE))
+        CUR_FAIL(ERR_INVALID_ARGUMENT);
 
     const char    *name    = NULL;
     CurrentBackend  backend = ResolveBackend(tag, &name);
@@ -112,7 +120,7 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
         int n = find_file_by_name(name, ids, infos, 4);
         if (n > 0) {
             c->file_id = ids[0];
-        } else if (role == CURRENT_WRITE && (flags & CURRENT_CREATE)) {
+        } else if ((role & CURRENT_WRITE) && (flags & CURRENT_CREATE)) {
             int fid = create(name, "");
             if (fid < 0) { free(c); CUR_FAIL(box_errno_of(fid)); }
             c->file_id = (uint32_t)fid;
@@ -120,14 +128,30 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
             /* read of a missing file, or write w/o CREATE */
             free(c); CUR_FAIL(ERR_FILE_NOT_FOUND);
         }
+        /* CURRENT_TRUNCATE: start the writer from an empty file rather than
+         * over the top of the old one. Without this a shorter rewrite leaves
+         * the previous tail readable past the new content — the hole that
+         * made <fstream>'s ios_base::out impossible to implement honestly.
+         * A refusal is fatal to the open: silently keeping the old bytes is
+         * the one outcome the caller definitely did not ask for. */
+        if ((role & CURRENT_WRITE) && (flags & CURRENT_TRUNCATE)) {
+            int trc = file_truncate(c->file_id, 0);
+            if (trc != 0) { free(c); CUR_FAIL(box_errno_of(trc)); }
+        }
         c->file_pos = 0;
-        c->caps = (role == CURRENT_WRITE ? CURRENT_CAP_WRITE : CURRENT_CAP_READ)
-                | CURRENT_CAP_SEEKABLE | CURRENT_CAP_CLOSEABLE;
+        c->caps = ((role & CURRENT_WRITE) ? CURRENT_CAP_WRITE : 0u)
+                | ((role & CURRENT_READ)  ? CURRENT_CAP_READ  : 0u)
+                | CURRENT_CAP_SEEKABLE | CURRENT_CAP_CLOSEABLE
+                | CURRENT_CAP_RESIZABLE;
         if (out_err) *out_err = OK;
         return c;
     }
 
     case CurStream: {
+        /* A Brook end is a producer or a consumer, never both: the two roles
+         * open different objects. Reject the combined role here rather than
+         * letting it fall through the reader branch below. */
+        if (role == (CURRENT_READ | CURRENT_WRITE)) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         if (item_size == 0 || item_size > BROOK_FRAME_MAX) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         uint32_t frame_bytes = item_size < BROOK_FRAME_MIN ? BROOK_FRAME_MIN : item_size;
 
@@ -370,6 +394,37 @@ uint64_t current_tell(const Current *c)
 {
     if (!c || !(c->caps & CURRENT_CAP_SEEKABLE)) return 0;
     return c->file_pos;
+}
+
+/* --------------------------------------------------------------------------
+ * Extent (file)
+ * ------------------------------------------------------------------------ */
+
+int64_t current_size(const Current *c)
+{
+    if (!c) return -ERR_NULL_POINTER;
+    if (!(c->caps & CURRENT_CAP_RESIZABLE)) return -ERR_INVALID_OPERATION;
+
+    file_info_t info;
+    int rc = file_info(c->file_id, &info);
+    if (rc < 0)  return (int64_t)rc;      /* already a negative -error_t */
+    if (rc != 0) return -ERR_IO;
+    return (int64_t)info.size;
+}
+
+int current_resize(Current *c, uint64_t new_size)
+{
+    if (!c) return -ERR_NULL_POINTER;
+    if (!(c->caps & CURRENT_CAP_RESIZABLE)) return -ERR_INVALID_OPERATION;
+    if (!(c->caps & CURRENT_CAP_WRITE))     return -ERR_INVALID_OPERATION;
+
+    int rc = file_truncate(c->file_id, new_size);
+    if (rc != 0) return rc;
+
+    /* Keep the cursor inside the file. Leaving it past the end would make the
+     * next write re-grow the file through a gap of blocks nobody wrote. */
+    if (c->file_pos > new_size) c->file_pos = new_size;
+    return OK;
 }
 
 /* --------------------------------------------------------------------------

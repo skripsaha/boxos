@@ -1,0 +1,64 @@
+// boxcxx — <iostream>
+// The four narrow standard stream objects [iostream.objects], bound to the
+// BoxOS Current spine.
+//
+// This header was absent on purpose for most of the epic's life, and the
+// reason it was absent is worth stating: BoxOS has no stdin/stdout/stderr.
+// It has no descriptor table to number them in, no shell that inherits them,
+// and no parent that decides where they point. What it has is Current — a
+// channel named by a TAG and resolved when it is opened. So these objects are
+// not a Unix model in C++ clothing; they are the standard's names for three
+// BoxOS channels:
+//
+//   std::cout, std::cerr, std::clog  ->  the "screen" Current
+//   std::cin                         ->  the "keyboard" Current
+//
+// std::print has routed through that same screen channel since the spine
+// landed, and these objects share the very handle it uses (__print::Console),
+// so `std::cout << a; std::print("{}", b);` emits a then b — one road, one
+// order. Mixing them is not merely allowed, it is exact.
+//
+// ── two honest differences from a hosted implementation ─────────────────
+//
+// * std::cin NEVER reaches end of file. The keyboard Current is a live
+//   console: it blocks for the next line and has no terminator, because a
+//   console has no end. There is no Ctrl-D here to make one. Code shaped like
+//   `while (std::getline(std::cin, s))` therefore runs forever rather than
+//   falling out — which is the truth about the channel, not a defect in the
+//   stream. Read a known number of lines, or drive input from a file.
+//
+// * std::cerr and std::clog go to the SCREEN, not to a separate diagnostic
+//   channel. BoxOS does have one — the serial "log" Current, box::current::log
+//   — but a std::cerr that only reached a serial cable would be invisible to
+//   anyone running on real hardware without one, and silently losing an error
+//   message is worse than not distinguishing it. The distinction is available
+//   under its own name; it is not smuggled into cerr.
+//
+// The stream objects are built by a constructor at priority 102 — after the
+// TLS bootstrap at 101, and before every default-priority global in the
+// program, so a user's own global constructor may write to std::cout.
+#ifndef BOXCXX_IOSTREAM
+#define BOXCXX_IOSTREAM
+
+#include <ios>
+#include <istream>
+#include <ostream>
+#include <streambuf>
+
+namespace std {
+
+extern istream cin;
+extern ostream cout;
+extern ostream cerr;
+extern ostream clog;
+
+// [iostream.objects]/1 requires that including this header guarantees the
+// objects are constructed before use. One of these per translation unit; the
+// counter inside it is what flushes the streams on the way out, while they
+// are still alive (they outlive it — they are constructed earlier, so they
+// are destroyed later).
+static ios_base::Init __ioinit;
+
+} // namespace std
+
+#endif // BOXCXX_IOSTREAM

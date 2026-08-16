@@ -648,6 +648,82 @@ static int ObjDelete(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
+ * OBJ_TRUNCATE — params = [u32 file_id][u64 new_size]. Shrink only.
+ *
+ * Guarded like OBJ_DELETE: cutting a "system" or "boot" file down to nothing
+ * destroys it just as thoroughly as deleting it, so the same tags refuse the
+ * same way.
+ *
+ * Publishes the TRUNCATED fan-out on every tag of the file, in the same
+ * 32-byte payload shape ObjWrite uses so one observer can read both:
+ *   op = 3, offset = the cut point (= the new length),
+ *   bytes = how many bytes were discarded, final_size = the new length.
+ * A content change that published nothing would be a hole in the Touch spine
+ * — an observer would have to poll to notice, which is the thing Touch exists
+ * to remove.
+ * ------------------------------------------------------------------------- */
+
+static int ObjTruncate(const ManifestOp *op,
+                       Crate            *crates,
+                       uint16_t          crate_count,
+                       const OpContext  *ctx)
+{
+    (void)crates;
+    (void)crate_count;
+    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+
+    uint32_t file_id  = param_u32(op, 0);
+    uint64_t new_size = param_u64(op, 4);
+
+    TagFSMetadata md;
+    TagFSState   *state    = tagfs_get_state();
+    uint64_t      old_size = 0;
+    bool          have_md  = false;
+    if (tagfs_get_metadata(file_id, &md) == 0) {
+        for (uint16_t i = 0; i < md.tag_count; i++) {
+            const char *key = state ? tag_registry_key(state->registry, md.tag_ids[i]) : NULL;
+            if (key && (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)) {
+                tagfs_metadata_free(&md);
+                return ERR_PERMISSION_DENIED;
+            }
+        }
+        old_size = md.size;
+        have_md  = true;
+    }
+
+    int rc = tagfs_truncate_file(file_id, new_size);
+    if (rc != 0) {
+        if (have_md) tagfs_metadata_free(&md);
+        return (error_t)(-rc);
+    }
+
+    if (have_md) {
+        if (old_size > new_size && TouchHasAnyListeners()) {
+            struct {
+                uint32_t file_id;
+                uint8_t  op;          /* 3 = TRUNCATE */
+                uint8_t  _pad[3];
+                uint64_t offset;
+                uint64_t bytes;
+                uint64_t final_size;
+            } __attribute__((packed)) ev = {
+                .file_id    = file_id,
+                .op         = 3,
+                .offset     = new_size,
+                .bytes      = old_size - new_size,
+                .final_size = new_size,
+            };
+            uint32_t pid = (ctx && ctx->proc) ? ctx->proc->pid : 0;
+            for (uint16_t ti = 0; ti < md.tag_count; ti++) {
+                TouchPublishId(md.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+            }
+        }
+        tagfs_metadata_free(&md);
+    }
+    return OK;
+}
+
+/* -------------------------------------------------------------------------
  * OBJ_RENAME — params carry the new name inline.
  * ------------------------------------------------------------------------- */
 
@@ -1287,6 +1363,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_WRITE,    ObjWrite,        OP_AUTH_APP, "storage.write"    },
         { STORAGE_OBJ_CREATE,   ObjCreate,       OP_AUTH_APP, "storage.create"   },
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
+        { STORAGE_OBJ_TRUNCATE, ObjTruncate,     OP_AUTH_APP, "storage.truncate" },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
         /* Per-process context: app+. */
         { STORAGE_CONTEXT_SET,  ObjContextSet,   OP_AUTH_APP, "storage.ctx.set"  },

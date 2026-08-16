@@ -2577,6 +2577,196 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 }
 
 // ----------------------------------------------------------------------------
+// tagfs_truncate_file — drop everything past `new_size`.
+//
+// The operation TagFS never had. Writes only ever GREW a file (see the
+// `if (handle->offset > handle->file_size)` above), so rewriting a file
+// shorter left the old tail readable behind the new content — every shorter
+// rewrite in the system was silently wrong. Nothing forced the issue until
+// <fstream>, where plain ios_base::out means "w" ([filebuf.members] Table
+// 122) and truncation is not optional.
+//
+// SHRINK ONLY, and a grow request is refused rather than served: TagFS does
+// not zero freshly allocated blocks, so growing here would hand back whatever
+// the allocator's previous tenant left. A primitive that returns another
+// file's bytes is worse than one that says no. Files grow the honest way, by
+// being written.
+//
+// REFUSED ON A SNAPSHOTTED FILE. A block that has not been copied since the
+// snapshot was taken is still the snapshot's only copy, and a CowSnapshot
+// records redirects rather than an extent list of its own — so nothing here
+// can tell "mine alone" from "shared with a frozen view". Freeing such a
+// block would corrupt the snapshot. Refusing costs a rare failed truncate;
+// guessing costs the snapshot.
+//
+// Returns 0, or a negative -ERR_* naming the cause.
+// ----------------------------------------------------------------------------
+
+// Caller holds the file's ofe->write_lock.
+static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
+{
+    uint32_t meta_block, meta_offset;
+    if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
+        return -ERR_FILE_NOT_FOUND;
+
+    /* Read the metadata under the lock rather than trusting the handle.
+     * tagfs_open snapshots extents BEFORE the lock is taken, and a writer
+     * that grew the file in between would leave that snapshot short — and
+     * freeing from a short list frees blocks that are still live. */
+    TagFSMetadata meta;
+    memset(&meta, 0, sizeof(meta));
+    if (meta_pool_read(meta_block, meta_offset, &meta) != 0)
+        return -ERR_IO;
+
+    if (new_size > meta.size)
+    {
+        tagfs_metadata_free(&meta);
+        return -ERR_INVALID_ARGUMENT;   /* growth is not this operation's job */
+    }
+    if (new_size == meta.size)
+    {
+        tagfs_metadata_free(&meta);
+        return 0;
+    }
+
+    FileExtent *old_ex = meta.extents;
+    uint16_t    old_n  = meta.extent_count;
+
+    /* The extent prefix that still holds bytes. Ceil, because a partly filled
+     * last block is still a block the file owns. */
+    uint32_t keep_blocks = (uint32_t)((new_size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE);
+
+    /* Walk the list to find the cut: `kept` extents survive, and at most one
+     * of them — trim_at — straddles the boundary and keeps only trim_to of
+     * its blocks. */
+    uint32_t acc     = 0;
+    uint16_t kept    = 0;
+    uint16_t trim_at = 0xFFFFu;
+    uint32_t trim_to = 0;
+    for (uint16_t i = 0; i < old_n; i++)
+    {
+        uint32_t cnt = old_ex[i].block_count;
+        if (acc >= keep_blocks)
+            break;
+        if (acc + cnt > keep_blocks)
+        {
+            trim_at = i;
+            trim_to = keep_blocks - acc;
+            kept    = (uint16_t)(i + 1);
+            break;
+        }
+        acc += cnt;
+        kept = (uint16_t)(i + 1);
+    }
+
+    /* Build the new list first. A failure here has touched nothing. */
+    FileExtent *new_ex = NULL;
+    if (kept > 0)
+    {
+        new_ex = kmalloc(sizeof(FileExtent) * kept);
+        if (!new_ex)
+        {
+            tagfs_metadata_free(&meta);
+            return -ERR_NO_MEMORY;
+        }
+        memcpy(new_ex, old_ex, sizeof(FileExtent) * kept);
+        if (trim_at != 0xFFFFu)
+            new_ex[trim_at].block_count = (uint16_t)trim_to;
+    }
+
+    meta.extents      = new_ex;
+    meta.extent_count = kept;
+    meta.size         = new_size;
+
+    /* Commit in the same order tagfs_write does: write the new record, point
+     * the file table at it, then drop the old one. A crash between the write
+     * and the update leaves the file at its old length — never at a length
+     * whose blocks have already been handed away. */
+    uint32_t new_mb, new_mo;
+    if (meta_pool_write(&meta, &new_mb, &new_mo) != 0)
+    {
+        tagfs_metadata_free(&meta);   /* frees new_ex */
+        if (old_ex) kfree(old_ex);
+        return -ERR_IO;
+    }
+    file_table_update(file_id, new_mb, new_mo);
+    meta_pool_delete(meta_block, meta_offset);
+
+    /* Committed: the dropped blocks are unreachable, so release them.
+     * Unregister each from the dedup index first — dedup holds hash -> block
+     * entries, and a recycled block behind a live hash is exactly how a later
+     * compaction pass would hand one file another's bytes. Then drop them
+     * from the read-ahead cache, so a reallocation cannot serve the old
+     * tenant's content out of memory. */
+    for (uint16_t i = 0; i < old_n; i++)
+    {
+        uint32_t drop_from = 0;
+        if (i < kept)
+        {
+            if (i != trim_at)
+                continue;               /* wholly kept */
+            drop_from = trim_to;        /* head kept, tail released */
+        }
+        uint32_t cnt = old_ex[i].block_count;
+        if (drop_from >= cnt)
+            continue;
+
+        uint32_t first = old_ex[i].start_block + drop_from;
+        uint32_t n     = cnt - drop_from;
+        for (uint32_t b = 0; b < n; b++)
+        {
+            if (TagFS_DedupIsInitialized())
+                TagFS_DedupUnregister(first + b);
+            tagfs_readahead_invalidate(first + b);
+        }
+        tagfs_free_blocks(first, n);
+    }
+
+    if (old_ex) kfree(old_ex);
+    tagfs_metadata_free(&meta);
+    return 0;
+}
+
+int tagfs_truncate_file(uint32_t file_id, uint64_t new_size)
+{
+    if (!g_state.initialized)
+        return -ERR_INVALID_OPERATION;
+    if (file_id == 0)
+        return -ERR_INVALID_ARGUMENT;
+
+    /* A snapshot may still be reading the blocks this would drop. */
+    if (TagFS_CowIsActive(file_id))
+        return -ERR_INVALID_OPERATION;
+
+    TagFSFileHandle *handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    if (!handle)
+        return -ERR_FILE_NOT_FOUND;
+
+    /* The trylock-with-the-IRQ-window-open dance, for the same reason
+     * tagfs_write does it: this lock is held across meta_pool_write ->
+     * write_block -> ata_dma_sync, which waits on a BMIDE completion IRQ that
+     * lands only on the BSP. A plain spin_lock here would deadlock the BSP
+     * against the holder exactly as described above tagfs_write. */
+    if (handle->ofe)
+    {
+        if (!spin_trylock(&handle->ofe->write_lock)) {
+            uint8_t self_core = amp_get_core_index();
+            while (!spin_trylock(&handle->ofe->write_lock)) {
+                irq_defer_pump(self_core);
+                cpu_pause();
+            }
+        }
+    }
+
+    int rc = tagfs_truncate_locked(file_id, new_size);
+
+    if (handle->ofe)
+        spin_unlock(&handle->ofe->write_lock);
+    tagfs_close(handle);
+    return rc;
+}
+
+// ----------------------------------------------------------------------------
 // Block allocator
 // ----------------------------------------------------------------------------
 

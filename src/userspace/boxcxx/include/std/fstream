@@ -1,0 +1,897 @@
+// boxcxx — <fstream>
+// basic_filebuf<CharT,Traits> [filebuf] and the three stream wrappers over
+// it. The backing is a "file:" Current — the BoxOS I/O spine — not a POSIX
+// descriptor: there is no fd here, no FILE*, and no path. The `s` a filebuf
+// opens is a TagFS NAME, and TagFS is tag-addressed, so there is no directory
+// to walk and no separator to parse. That is also why the C++23
+// filesystem::path overloads of open() and of the stream constructors are
+// absent rather than stubbed — see CONFORMANCE §1.1.
+//
+// ── what made this header possible ──────────────────────────────────────
+// [filebuf.members] Table 122 says plain ios_base::out means "w", and "w"
+// truncates. TagFS could not truncate: tagfs_write only ever grew a file, so
+// rewriting one shorter left the old tail readable behind the new content.
+// Writing this header honestly required building that primitive first, from
+// tagfs_truncate_file up through STORAGE_OBJ_TRUNCATE, file_truncate and
+// current_resize. Every row of Table 122 below is therefore real; none of
+// them is approximated.
+//
+// ── the buffer strategy ─────────────────────────────────────────────────
+// ONE buffer, serving the get area or the put area but never both at once. A
+// file has ONE position, and Table 122's read/write modes are defined around
+// switching between the two rather than running them in parallel: every
+// transition (EnterRead / EnterWrite) flushes what the other side had
+// pending and re-anchors __base. __base is the file BYTE offset of the first
+// character of whichever area is live, so the logical position is always
+// __base + (how far into that area we are) — LogicalPos() is the single
+// place that arithmetic is written.
+//
+// Sizeable transfers skip the buffer entirely (xsgetn / xsputn): routing a
+// megabyte through a 4 KiB window would be hundreds of Manifest round-trips
+// where one will do.
+//
+// Wide characters are a documented exclusion, so no transcoding happens
+// here: a character is moved to and from the file as sizeof(CharT) raw
+// bytes. The class stays generic in CharT so a future wide instantiation is
+// not structurally blocked, exactly as <iosfwd> promises, but only the
+// char-based typedefs are shipped.
+#ifndef BOXCXX_FSTREAM
+#define BOXCXX_FSTREAM
+
+#include <ios>
+#include <istream>
+#include <ostream>
+#include <streambuf>
+#include <string>
+#include <cstddef>
+#include <new>
+#include <utility>
+
+#include "box/current.h"  // the file backing is a Current, not a descriptor
+#include "box/file.h"     // find_file_by_name — the noreplace ("x") question
+
+// [version.syn] names this header as an owner of the macro below.
+#define BOXCXX_OWNS_fstream_native_handle
+#include <__bits/version_iostreams>
+
+namespace std {
+
+// ── basic_filebuf<CharT,Traits> [filebuf] ───────────────────────────────
+
+template <class CharT, class Traits>
+class basic_filebuf : public basic_streambuf<CharT, Traits> {
+public:
+    using char_type   = CharT;
+    using traits_type = Traits;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+
+    // P1759R6. The handle a BoxOS program can actually use for more than a
+    // stream does: the Current itself. Not an int, because BoxOS has no
+    // descriptor table to index into.
+    using native_handle_type = ::Current *;
+
+private:
+    static constexpr streamsize S             = (streamsize)sizeof(char_type);
+    static constexpr streamsize kDefaultBuf   = 4096 / (streamsize)sizeof(char_type);
+
+    static constexpr bool Has(ios_base::openmode m, ios_base::openmode f) noexcept
+    {
+        return (m & f) != ios_base::openmode{};
+    }
+
+    // [filebuf.members] Table 122, plus the noreplace column P2467R1 added.
+    // `binary` is accepted and changes nothing: a Current is a byte channel
+    // and boxcxx does no text translation, so binary and text are one road.
+    struct OpenPlan {
+        bool valid     = false;
+        bool read      = false;   // a get area is permitted
+        bool write     = false;   // a put area is permitted
+        bool create    = false;   // bring the file into being if absent
+        bool truncate  = false;   // discard what is there
+        bool append    = false;   // every write lands at the end
+        bool exclusive = false;   // noreplace: refuse if it already exists
+    };
+
+    static OpenPlan Plan(ios_base::openmode m) noexcept
+    {
+        const bool in    = Has(m, ios_base::in);
+        const bool out   = Has(m, ios_base::out);
+        const bool trunc = Has(m, ios_base::trunc);
+        const bool app   = Has(m, ios_base::app);
+        const bool excl  = Has(m, ios_base::noreplace);
+
+        OpenPlan p;
+        p.read      = in;
+        p.write     = out || app;
+        p.exclusive = excl;
+
+        if (!in && (out || app)) {
+            if (app) {                                   // "a"   — out|app, app
+                p.create = true;
+                p.append = true;
+                p.valid  = !trunc;
+            } else {                                     // "w"   — out, out|trunc
+                p.create   = true;
+                p.truncate = true;
+                p.valid    = true;
+            }
+        } else if (in && !out && !app) {                 // "r"   — must exist
+            p.valid = !trunc;
+        } else if (in && out && !app) {
+            if (trunc) {                                 // "w+"
+                p.create   = true;
+                p.truncate = true;
+                p.valid    = true;
+            } else {                                     // "r+"  — must exist
+                p.valid = true;
+            }
+        } else if (in && app) {                          // "a+"  — in|out|app, in|app
+            p.create = true;
+            p.append = true;
+            p.write  = true;
+            p.valid  = !trunc;
+        }
+
+        // noreplace is the "x" of "wx" / "w+x", and C allows "x" only on the
+        // w-family. On any other row it is not a stricter open, it is a
+        // meaningless one — so it is rejected rather than ignored.
+        if (excl && !p.truncate) p.valid = false;
+        return p;
+    }
+
+public:
+    basic_filebuf() = default;
+
+    basic_filebuf(const basic_filebuf &)            = delete;
+    basic_filebuf &operator=(const basic_filebuf &) = delete;
+
+    // The buffer is always heap- or caller-owned, never a member array, so
+    // the six get/put-area pointers the base copies stay valid across a move
+    // without re-basing. That is why basic_streambuf's protected copy ctor is
+    // exactly the right thing to call here.
+    basic_filebuf(basic_filebuf &&rhs)
+        : basic_streambuf<CharT, Traits>(rhs),
+          __c(rhs.__c), __mode(rhs.__mode),
+          __buf(rhs.__buf), __bufn(rhs.__bufn), __owns(rhs.__owns),
+          __base(rhs.__base), __reading(rhs.__reading), __writing(rhs.__writing),
+          __canRead(rhs.__canRead), __canWrite(rhs.__canWrite), __append(rhs.__append),
+          __userBuf(rhs.__userBuf), __userN(rhs.__userN), __unbufReq(rhs.__unbufReq)
+    {
+        rhs.Disown();
+    }
+    basic_filebuf &operator=(basic_filebuf &&rhs)
+    {
+        if (this == &rhs) return *this;
+        close();
+        basic_streambuf<CharT, Traits>::operator=(rhs);
+        __c        = rhs.__c;
+        __mode     = rhs.__mode;
+        __buf      = rhs.__buf;
+        __bufn     = rhs.__bufn;
+        __owns     = rhs.__owns;
+        __base     = rhs.__base;
+        __reading  = rhs.__reading;
+        __writing  = rhs.__writing;
+        __canRead  = rhs.__canRead;
+        __canWrite = rhs.__canWrite;
+        __append   = rhs.__append;
+        __userBuf  = rhs.__userBuf;
+        __userN    = rhs.__userN;
+        __unbufReq = rhs.__unbufReq;
+        rhs.Disown();
+        return *this;
+    }
+
+    void swap(basic_filebuf &rhs)
+    {
+        if (this == &rhs) return;
+        basic_streambuf<CharT, Traits>::swap(rhs);
+        using std::swap;
+        swap(__c, rhs.__c);
+        swap(__mode, rhs.__mode);
+        swap(__buf, rhs.__buf);
+        swap(__bufn, rhs.__bufn);
+        swap(__owns, rhs.__owns);
+        swap(__base, rhs.__base);
+        swap(__reading, rhs.__reading);
+        swap(__writing, rhs.__writing);
+        swap(__canRead, rhs.__canRead);
+        swap(__canWrite, rhs.__canWrite);
+        swap(__append, rhs.__append);
+        swap(__userBuf, rhs.__userBuf);
+        swap(__userN, rhs.__userN);
+        swap(__unbufReq, rhs.__unbufReq);
+    }
+
+    // [filebuf.cons]: the destructor calls close() and swallows whatever it
+    // throws. Nothing below throws today, but a destructor that could let one
+    // out is a destructor that terminates the program on a failed flush.
+    ~basic_filebuf() override
+    {
+        try {
+            close();
+        } catch (...) {
+        }
+    }
+
+    bool is_open() const noexcept { return __c != nullptr; }
+
+    basic_filebuf *open(const char *s, ios_base::openmode which)
+    {
+        if (is_open() || !s || *s == '\0') return nullptr;
+
+        const OpenPlan p = Plan(which);
+        if (!p.valid) return nullptr;
+
+        // noreplace ("x") has to be asked BEFORE the open: a Current that
+        // creates on demand cannot afterwards tell us whether it created the
+        // file or adopted one that was already there.
+        if (p.exclusive) {
+            uint32_t    ids[1];
+            file_info_t infos[1];
+            if (::find_file_by_name(s, ids, infos, 1) > 0) return nullptr;
+        }
+
+        uint32_t role = 0;
+        if (p.read)  role |= CURRENT_READ;
+        if (p.write) role |= CURRENT_WRITE;
+        uint32_t flags = 0;
+        if (p.create)   flags |= CURRENT_CREATE;
+        if (p.truncate) flags |= CURRENT_TRUNCATE;
+
+        // "file:" is the Current tag scheme for TagFS-backed byte storage.
+        string tag("file:");
+        tag += s;
+
+        ::Current *c = ::current_open(tag.c_str(), role, 0, flags);
+        if (!c) return nullptr;
+
+        char_type  *buf   = nullptr;
+        streamsize  bufn  = 0;
+        bool        owns  = false;
+        if (__userBuf && __userN > 0) {
+            buf  = __userBuf;
+            bufn = __userN;
+        } else {
+            // Unbuffered is a one-character buffer: behaviourally identical,
+            // and it keeps every path below single, so "unbuffered" cannot
+            // rot into a second implementation nobody exercises.
+            bufn = __unbufReq ? 1 : kDefaultBuf;
+            buf  = new (nothrow) char_type[(size_t)bufn];
+            if (!buf) {
+                ::current_release(c);
+                return nullptr;
+            }
+            owns = true;
+        }
+
+        __c        = c;
+        __mode     = which;
+        __buf      = buf;
+        __bufn     = bufn;
+        __owns     = owns;
+        __base     = 0;
+        __reading  = false;
+        __writing  = false;
+        __canRead  = p.read;
+        __canWrite = p.write;
+        __append   = p.append;
+        this->setg(nullptr, nullptr, nullptr);
+        this->setp(nullptr, nullptr);
+
+        // ate is orthogonal to Table 122: the row decides how the file is
+        // opened, ate decides where the position starts afterwards. A seek
+        // that fails leaves the caller pointing nowhere, so the open fails
+        // with it rather than silently starting at the beginning.
+        if (Has(which, ios_base::ate)) {
+            // Seek with the direction the PLAN worked out, not with the raw
+            // `which`. `app` alone means output without ever setting the out
+            // bit, so passing `which` through would hand seekoff a mode that
+            // names neither direction — and it rejects that, correctly, as
+            // not a seek at all. `filebuf.open(name, app|ate)` failed to open
+            // because of it; the three stream wrappers hid the bug by OR-ing
+            // their own direction in before they ever got here.
+            ios_base::openmode dir{};
+            if (p.read)  dir |= ios_base::in;
+            if (p.write) dir |= ios_base::out;
+            if (seekoff(0, ios_base::end, dir) == pos_type(off_type(-1))) {
+                close();
+                return nullptr;
+            }
+        }
+        return this;
+    }
+
+    basic_filebuf *open(const string &s, ios_base::openmode which)
+    {
+        return open(s.c_str(), which);
+    }
+
+    basic_filebuf *close()
+    {
+        if (!__c) return nullptr;
+        bool ok = true;
+        if (__writing && !FlushPut()) ok = false;
+        ::current_flush(__c);
+        ::current_release(__c);
+        __c = nullptr;
+
+        this->setg(nullptr, nullptr, nullptr);
+        this->setp(nullptr, nullptr);
+        if (__owns) delete[] __buf;
+        __buf      = nullptr;
+        __bufn     = 0;
+        __owns     = false;
+        __base     = 0;
+        __reading  = false;
+        __writing  = false;
+        __canRead  = false;
+        __canWrite = false;
+        __append   = false;
+        __mode     = ios_base::openmode{};
+        return ok ? this : nullptr;
+    }
+
+    native_handle_type native_handle() const noexcept { return __c; }
+
+protected:
+    // ── positioning ─────────────────────────────────────────────────────
+
+    basic_streambuf<CharT, Traits> *setbuf(char_type *s, streamsize n) override
+    {
+        // [filebuf.virtuals] only defines setbuf before any I/O has happened.
+        // Recorded as a request and honoured at the next open; applying it to
+        // a live buffer would strand whatever that buffer is holding.
+        if (is_open()) return this;
+        if (!s || n <= 0) {
+            __userBuf  = nullptr;
+            __userN    = 0;
+            __unbufReq = true;
+        } else {
+            __userBuf  = s;
+            __userN    = n;
+            __unbufReq = false;
+        }
+        return this;
+    }
+
+    pos_type seekoff(off_type off, ios_base::seekdir way,
+                     ios_base::openmode which = ios_base::in | ios_base::out) override
+    {
+        const pos_type fail(off_type(-1));
+        if (!__c) return fail;
+        // One file, one position: `which` cannot move the get side and leave
+        // the put side behind, and naming neither is not a seek at all.
+        if (!Has(which, ios_base::in) && !Has(which, ios_base::out)) return fail;
+        if (__writing && !FlushPut()) return fail;
+
+        off_type target = 0;
+        switch (way) {
+        case ios_base::beg:
+            target = off;
+            break;
+        case ios_base::cur:
+            target = LogicalPos() + off;
+            break;
+        case ios_base::end: {
+            const int64_t n = ::current_size(__c);
+            if (n < 0) return fail;
+            target = (off_type)n + off;
+            break;
+        }
+        default:
+            return fail;
+        }
+        if (target < 0) return fail;
+
+        DropAreas();
+        __base = target;
+        return pos_type(target);
+    }
+
+    pos_type seekpos(pos_type sp,
+                     ios_base::openmode which = ios_base::in | ios_base::out) override
+    {
+        return seekoff(off_type(sp), ios_base::beg, which);
+    }
+
+    int sync() override
+    {
+        if (!__c) return -1;
+        if (__writing && !FlushPut()) return -1;
+        // Drop the get area too, so the next read genuinely re-reads. A
+        // sync() that left a stale window would answer from memory a question
+        // the caller asked of the file.
+        if (__reading) DropAreas();
+        ::current_flush(__c);
+        return 0;
+    }
+
+    // ── input ───────────────────────────────────────────────────────────
+
+    streamsize showmanyc() override
+    {
+        if (!__c || !__canRead) return 0;
+        const int64_t n = ::current_size(__c);
+        if (n < 0) return 0;
+        // in_avail() consults this only when the get area is empty, so what
+        // is left in the file from the logical position is the whole answer.
+        const off_type ahead = (off_type)n - LogicalPos();
+        return ahead > 0 ? (streamsize)(ahead / S) : 0;
+    }
+
+    int_type underflow() override
+    {
+        if (!__c || !__canRead) return Traits::eof();
+        if (this->gptr() && this->gptr() < this->egptr())
+            return Traits::to_int_type(*this->gptr());
+
+        // Flush BEFORE asking where we are. In append mode the pending bytes
+        // land at the end of the file, so the position after the flush is the
+        // end — reading LogicalPos() first would answer with where the write
+        // was staged rather than where it went.
+        if (__writing && !FlushPut()) return Traits::eof();
+        const off_type at = LogicalPos();
+        DropAreas();
+        __base = at;
+
+        if (::current_seek(__c, (uint64_t)__base) != 0) return Traits::eof();
+        const int got = ::current_read(__c, __buf, (size_t)(__bufn * S));
+        if (got <= 0) return Traits::eof();
+        const streamsize chars = (streamsize)got / S;
+        if (chars <= 0) return Traits::eof();
+
+        this->setg(__buf, __buf, __buf + chars);
+        __reading = true;
+        return Traits::to_int_type(*this->gptr());
+    }
+
+    streamsize xsgetn(char_type *s, streamsize n) override
+    {
+        if (n <= 0 || !s || !__c || !__canRead) return 0;
+        streamsize done = 0;
+
+        if (__reading) {
+            const streamsize avail = this->egptr() - this->gptr();
+            const streamsize take  = avail < n ? avail : n;
+            if (take > 0) {
+                Traits::copy(s, this->gptr(), (size_t)take);
+                this->gbump((int)take);
+                done += take;
+            }
+        }
+        if (done == n) return done;
+
+        // The rest goes from the file straight into the caller's buffer.
+        if (__writing && !FlushPut()) return done;
+        const off_type at = LogicalPos();
+        DropAreas();
+        __base = at;
+
+        while (done < n) {
+            if (::current_seek(__c, (uint64_t)__base) != 0) break;
+            const int got = ::current_read(__c, s + done, (size_t)((n - done) * S));
+            if (got <= 0) break;
+            const streamsize chars = (streamsize)got / S;
+            if (chars <= 0) break;   // a partial character is no character
+            done   += chars;
+            __base += chars * S;
+        }
+        return done;
+    }
+
+    int_type pbackfail(int_type c = Traits::eof()) override
+    {
+        if (!__c || !__canRead) return Traits::eof();
+        if (__writing && !FlushPut()) return Traits::eof();
+        const off_type at = LogicalPos();
+        if (at < S) return Traits::eof();          // nothing behind us
+
+        DropAreas();
+        __base = at - S;
+        if (Traits::eq_int_type(underflow(), Traits::eof())) return Traits::eof();
+
+        if (Traits::eq_int_type(c, Traits::eof()))
+            return Traits::not_eof(c);             // sungetc: the position is enough
+        if (Traits::eq(Traits::to_char_type(c), *this->gptr()))
+            return c;                              // the file already holds it
+
+        // A character the file does not have. Putting it only in our buffer
+        // would be a lie about the file, so it is written through — and that
+        // is impossible without a writable, non-appending mode.
+        if (!__canWrite || __append) return Traits::eof();
+        const char_type ch = Traits::to_char_type(c);
+        *this->gptr() = ch;
+        if (::current_seek(__c, (uint64_t)__base) != 0) return Traits::eof();
+        if (::current_write(__c, &ch, (size_t)S) != (int)S) return Traits::eof();
+        return c;
+    }
+
+    // ── output ──────────────────────────────────────────────────────────
+
+    int_type overflow(int_type c = Traits::eof()) override
+    {
+        if (!__c || !__canWrite) return Traits::eof();
+        if (!EnterWrite()) return Traits::eof();
+        if (this->pptr() >= this->epptr() && !FlushPut()) return Traits::eof();
+        if (!Traits::eq_int_type(c, Traits::eof())) {
+            *this->pptr() = Traits::to_char_type(c);
+            this->pbump(1);
+            // A one-character buffer IS the unbuffered mode setbuf(nullptr, 0)
+            // asks for, so it has to reach the file now rather than sit here
+            // until something else forces a flush.
+            if (__bufn == 1 && !FlushPut()) return Traits::eof();
+        }
+        return Traits::not_eof(c);
+    }
+
+    streamsize xsputn(const char_type *s, streamsize n) override
+    {
+        if (n <= 0 || !s || !__c || !__canWrite) return 0;
+        if (!EnterWrite()) return 0;
+
+        if (n <= this->epptr() - this->pptr()) {
+            Traits::copy(this->pptr(), s, (size_t)n);
+            this->pbump((int)n);
+            return n;
+        }
+        if (!FlushPut()) return 0;
+        if (n <= this->epptr() - this->pptr()) {   // it fits in an empty buffer
+            Traits::copy(this->pptr(), s, (size_t)n);
+            this->pbump((int)n);
+            return n;
+        }
+
+        const uint64_t at = __append ? EndOffset() : (uint64_t)__base;
+        if (::current_seek(__c, at) != 0) return 0;
+        const int w = ::current_write(__c, s, (size_t)(n * S));
+        if (w <= 0) return 0;
+        const streamsize chars = (streamsize)w / S;
+        __base = (off_type)(at + (uint64_t)(chars * S));
+        return chars;
+    }
+
+private:
+    // The file byte offset the logical position sits at, wherever the live
+    // area happens to be. Every seek, flush and refill is expressed through
+    // this one expression so the two areas cannot drift apart.
+    off_type LogicalPos() const noexcept
+    {
+        if (__reading) return __base + (off_type)((this->gptr() - this->eback()) * S);
+        if (__writing) return __base + (off_type)((this->pptr() - this->pbase()) * S);
+        return __base;
+    }
+
+    uint64_t EndOffset() const noexcept
+    {
+        const int64_t n = ::current_size(__c);
+        return n > 0 ? (uint64_t)n : 0u;
+    }
+
+    void DropAreas() noexcept
+    {
+        this->setg(nullptr, nullptr, nullptr);
+        this->setp(nullptr, nullptr);
+        __reading = false;
+        __writing = false;
+    }
+
+    // Push out whatever the put area holds and leave it empty, with __base
+    // re-anchored at the resulting position. In append mode the write goes to
+    // the end of the file whatever the position was — which is what "a"
+    // means, and why the position after an append is the new end.
+    bool FlushPut()
+    {
+        if (!__writing) return true;
+        const streamsize n = this->pptr() - this->pbase();
+        if (n > 0) {
+            const uint64_t at = __append ? EndOffset() : (uint64_t)__base;
+            if (::current_seek(__c, at) != 0) return false;
+            const int w = ::current_write(__c, this->pbase(), (size_t)(n * S));
+            if (w != (int)(n * S)) return false;
+            __base = (off_type)(at + (uint64_t)(n * S));
+        }
+        this->setp(__buf, __buf + __bufn);
+        return true;
+    }
+
+    bool EnterWrite()
+    {
+        if (__writing) return true;
+        const off_type at = LogicalPos();
+        DropAreas();
+        __base = at;
+        this->setp(__buf, __buf + __bufn);
+        __writing = true;
+        return true;
+    }
+
+    // Hand everything over to a moved-to filebuf and leave this one closed
+    // but usable — a moved-from streambuf must still be destructible and
+    // re-openable, not merely not-crash.
+    void Disown() noexcept
+    {
+        this->setg(nullptr, nullptr, nullptr);
+        this->setp(nullptr, nullptr);
+        __c        = nullptr;
+        __buf      = nullptr;
+        __bufn     = 0;
+        __owns     = false;
+        __base     = 0;
+        __reading  = false;
+        __writing  = false;
+        __canRead  = false;
+        __canWrite = false;
+        __append   = false;
+        __mode     = ios_base::openmode{};
+    }
+
+    ::Current         *__c    = nullptr;
+    ios_base::openmode __mode{};
+    char_type         *__buf  = nullptr;
+    streamsize         __bufn = 0;
+    bool               __owns = false;
+    off_type           __base = 0;
+    bool               __reading  = false;
+    bool               __writing  = false;
+    bool               __canRead  = false;
+    bool               __canWrite = false;
+    bool               __append   = false;
+    // setbuf's request, remembered until the next open.
+    char_type         *__userBuf  = nullptr;
+    streamsize         __userN    = 0;
+    bool               __unbufReq = false;
+};
+
+template <class CharT, class Traits>
+void swap(basic_filebuf<CharT, Traits> &a, basic_filebuf<CharT, Traits> &b)
+{
+    a.swap(b);
+}
+
+// ── basic_ifstream<CharT,Traits> [ifstream] ─────────────────────────────
+// Every constructor and open() forces `mode | ios_base::in`, per the Effects
+// clauses: an ifstream is always at least readable. The move members carry
+// the same rdbuf() fixup <sstream>'s wrappers document — basic_ios::move()
+// nulls the moved-into object's rdbuf() pointer, which is right for a bare
+// basic_istream and wrong for a class that owns its buffer.
+
+template <class CharT, class Traits>
+class basic_ifstream : public basic_istream<CharT, Traits> {
+public:
+    using char_type          = CharT;
+    using traits_type        = Traits;
+    using int_type           = typename Traits::int_type;
+    using pos_type           = typename Traits::pos_type;
+    using off_type           = typename Traits::off_type;
+    using native_handle_type = typename basic_filebuf<CharT, Traits>::native_handle_type;
+
+    basic_ifstream() : basic_istream<CharT, Traits>(&sb_) {}
+
+    explicit basic_ifstream(const char *s, ios_base::openmode mode = ios_base::in)
+        : basic_istream<CharT, Traits>(&sb_)
+    {
+        if (!sb_.open(s, mode | ios_base::in)) this->setstate(ios_base::failbit);
+    }
+    explicit basic_ifstream(const string &s, ios_base::openmode mode = ios_base::in)
+        : basic_ifstream(s.c_str(), mode)
+    {
+    }
+
+    basic_ifstream(const basic_ifstream &)            = delete;
+    basic_ifstream &operator=(const basic_ifstream &) = delete;
+
+    basic_ifstream(basic_ifstream &&rhs)
+        : basic_istream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_ifstream &operator=(basic_ifstream &&rhs)
+    {
+        basic_istream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_ifstream &rhs)
+    {
+        basic_istream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_filebuf<CharT, Traits> *rdbuf() const
+    {
+        return const_cast<basic_filebuf<CharT, Traits> *>(&sb_);
+    }
+    bool is_open() const { return sb_.is_open(); }
+
+    void open(const char *s, ios_base::openmode mode = ios_base::in)
+    {
+        if (sb_.open(s, mode | ios_base::in)) this->clear();
+        else                                  this->setstate(ios_base::failbit);
+    }
+    void open(const string &s, ios_base::openmode mode = ios_base::in)
+    {
+        open(s.c_str(), mode);
+    }
+    void close()
+    {
+        if (!sb_.close()) this->setstate(ios_base::failbit);
+    }
+
+    native_handle_type native_handle() const noexcept { return sb_.native_handle(); }
+
+private:
+    basic_filebuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_ifstream<CharT, Traits> &a, basic_ifstream<CharT, Traits> &b)
+{
+    a.swap(b);
+}
+
+// ── basic_ofstream<CharT,Traits> [ofstream] ─────────────────────────────
+
+template <class CharT, class Traits>
+class basic_ofstream : public basic_ostream<CharT, Traits> {
+public:
+    using char_type          = CharT;
+    using traits_type        = Traits;
+    using int_type           = typename Traits::int_type;
+    using pos_type           = typename Traits::pos_type;
+    using off_type           = typename Traits::off_type;
+    using native_handle_type = typename basic_filebuf<CharT, Traits>::native_handle_type;
+
+    basic_ofstream() : basic_ostream<CharT, Traits>(&sb_) {}
+
+    explicit basic_ofstream(const char *s, ios_base::openmode mode = ios_base::out)
+        : basic_ostream<CharT, Traits>(&sb_)
+    {
+        if (!sb_.open(s, mode | ios_base::out)) this->setstate(ios_base::failbit);
+    }
+    explicit basic_ofstream(const string &s, ios_base::openmode mode = ios_base::out)
+        : basic_ofstream(s.c_str(), mode)
+    {
+    }
+
+    basic_ofstream(const basic_ofstream &)            = delete;
+    basic_ofstream &operator=(const basic_ofstream &) = delete;
+
+    basic_ofstream(basic_ofstream &&rhs)
+        : basic_ostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_ofstream &operator=(basic_ofstream &&rhs)
+    {
+        basic_ostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_ofstream &rhs)
+    {
+        basic_ostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_filebuf<CharT, Traits> *rdbuf() const
+    {
+        return const_cast<basic_filebuf<CharT, Traits> *>(&sb_);
+    }
+    bool is_open() const { return sb_.is_open(); }
+
+    void open(const char *s, ios_base::openmode mode = ios_base::out)
+    {
+        if (sb_.open(s, mode | ios_base::out)) this->clear();
+        else                                   this->setstate(ios_base::failbit);
+    }
+    void open(const string &s, ios_base::openmode mode = ios_base::out)
+    {
+        open(s.c_str(), mode);
+    }
+    void close()
+    {
+        if (!sb_.close()) this->setstate(ios_base::failbit);
+    }
+
+    native_handle_type native_handle() const noexcept { return sb_.native_handle(); }
+
+private:
+    basic_filebuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_ofstream<CharT, Traits> &a, basic_ofstream<CharT, Traits> &b)
+{
+    a.swap(b);
+}
+
+// ── basic_fstream<CharT,Traits> [fstream] ───────────────────────────────
+// The only one of the three that does NOT force a direction: its default is
+// in|out and whatever the caller passes is used verbatim, so `fstream f(name,
+// ios::out)` really is write-only.
+
+template <class CharT, class Traits>
+class basic_fstream : public basic_iostream<CharT, Traits> {
+public:
+    using char_type          = CharT;
+    using traits_type        = Traits;
+    using int_type           = typename Traits::int_type;
+    using pos_type           = typename Traits::pos_type;
+    using off_type           = typename Traits::off_type;
+    using native_handle_type = typename basic_filebuf<CharT, Traits>::native_handle_type;
+
+    basic_fstream() : basic_iostream<CharT, Traits>(&sb_) {}
+
+    explicit basic_fstream(const char *s,
+                           ios_base::openmode mode = ios_base::in | ios_base::out)
+        : basic_iostream<CharT, Traits>(&sb_)
+    {
+        if (!sb_.open(s, mode)) this->setstate(ios_base::failbit);
+    }
+    explicit basic_fstream(const string &s,
+                           ios_base::openmode mode = ios_base::in | ios_base::out)
+        : basic_fstream(s.c_str(), mode)
+    {
+    }
+
+    basic_fstream(const basic_fstream &)            = delete;
+    basic_fstream &operator=(const basic_fstream &) = delete;
+
+    basic_fstream(basic_fstream &&rhs)
+        : basic_iostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_fstream &operator=(basic_fstream &&rhs)
+    {
+        basic_iostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_fstream &rhs)
+    {
+        basic_iostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    basic_filebuf<CharT, Traits> *rdbuf() const
+    {
+        return const_cast<basic_filebuf<CharT, Traits> *>(&sb_);
+    }
+    bool is_open() const { return sb_.is_open(); }
+
+    void open(const char *s, ios_base::openmode mode = ios_base::in | ios_base::out)
+    {
+        if (sb_.open(s, mode)) this->clear();
+        else                   this->setstate(ios_base::failbit);
+    }
+    void open(const string &s, ios_base::openmode mode = ios_base::in | ios_base::out)
+    {
+        open(s.c_str(), mode);
+    }
+    void close()
+    {
+        if (!sb_.close()) this->setstate(ios_base::failbit);
+    }
+
+    native_handle_type native_handle() const noexcept { return sb_.native_handle(); }
+
+private:
+    basic_filebuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_fstream<CharT, Traits> &a, basic_fstream<CharT, Traits> &b)
+{
+    a.swap(b);
+}
+
+} // namespace std
+
+#endif // BOXCXX_FSTREAM

@@ -81,6 +81,7 @@ __cpp_lib_format_ranges|format
 __cpp_lib_format_uchar|format
 __cpp_lib_forward_like|utility
 __cpp_lib_freestanding_charconv|charconv
+__cpp_lib_fstream_native_handle|fstream
 __cpp_lib_freestanding_cstdlib|cstdlib,cmath
 __cpp_lib_freestanding_errc|cerrno,system_error
 __cpp_lib_freestanding_functional|functional

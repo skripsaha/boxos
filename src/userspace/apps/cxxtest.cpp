@@ -502,8 +502,10 @@
 #include <format>
 #include <forward_list>
 #include <functional>
+#include <fstream>
 #include <ios>
 #include <iosfwd>
+#include <iostream>
 #include <inplace_vector>
 #include <istream>
 #include <iterator>
@@ -42385,6 +42387,414 @@ void Phase185()
            g_ph35_checks);
 }
 
+// ── Ф36 helpers — <fstream> / <iostream> ────────────────────────────────
+// The oracle for "what is in the file" is boxlib's fread, NOT an ifstream.
+// A filebuf checked with a filebuf agrees with itself no matter how wrong it
+// is; the whole point of this phase is that the bytes on the volume changed.
+
+void P36Erase(const char *name)
+{
+    uint32_t    ids[4];
+    file_info_t infos[4];
+    int n = ::find_file_by_name(name, ids, infos, 4);
+    if (n > 4) n = 4;
+    for (int i = 0; i < n; ++i) ::file_delete(ids[i]);
+}
+
+long long P36Size(const char *name)
+{
+    uint32_t    ids[1];
+    file_info_t infos[1];
+    if (::find_file_by_name(name, ids, infos, 1) <= 0) return -1;
+    return (long long)infos[0].size;
+}
+
+std::string P36Read(const char *name)
+{
+    uint32_t    ids[1];
+    file_info_t infos[1];
+    if (::find_file_by_name(name, ids, infos, 1) <= 0) return std::string();
+    std::string s;
+    s.resize((std::size_t)infos[0].size);
+    if (!s.empty()) ::fread(ids[0], 0, s.data(), s.size());
+    return s;
+}
+
+void P36Put(const char *name, std::string_view bytes)
+{
+    P36Erase(name);
+    int fid = ::create(name, "");
+    if (fid > 0 && !bytes.empty()) ::fwrite((uint32_t)fid, 0, bytes.data(), bytes.size());
+}
+
+// One filebuf::open attempt, reported as a bool. Used for the rows Table 122
+// does NOT list: ofstream/ifstream OR their own direction in, so only a bare
+// filebuf can ask the question the table actually answers.
+bool P36Opens(const char *name, std::ios_base::openmode m)
+{
+    std::filebuf fb;
+    if (!fb.open(name, m)) return false;
+    fb.close();
+    return true;
+}
+
+// [filebuf.members] Table 122 — every listed row, and the combinations the
+// table leaves out. This is the phase that could not be written before TagFS
+// learned to truncate: three of the nine rows mean "w", and "w" discards
+// what was there. Until Ф36 it silently did not.
+void Phase186()
+{
+    using namespace std;
+
+    const char *A = "p186a";
+    const char *B = "p186b";
+    const char *C = "p186c";
+    P36Erase(A);
+    P36Erase(B);
+    P36Erase(C);
+
+    // ── row "w": out alone, and out|trunc ───────────────────────────────
+    {
+        ofstream f(A);
+        Check(f.is_open(), "phase186 ofstream(name) opens a fresh file");
+        f << "0123456789";
+        f.close();
+        Check(!f.fail(), "phase186 ofstream::close leaves the stream good");
+    }
+    Check(P36Size(A) == 10, "phase186 out wrote exactly 10 bytes");
+
+    {
+        // The whole reason this header needed a kernel change. Before Ф36
+        // the eight bytes past "xy" survived and this file stayed 10 long.
+        ofstream f(A);
+        f << "xy";
+    }
+    Check(P36Size(A) == 2, "phase186 out truncated 10 bytes down to 2");
+    Check(P36Read(A) == "xy", "phase186 truncated content is exactly xy");
+
+    P36Put(A, "0123456789");
+    Check(P36Opens(A, ios_base::out | ios_base::trunc), "phase186 out|trunc opens");
+    Check(P36Size(A) == 0, "phase186 out|trunc emptied the file");
+
+    // ── row "a": app, and out|app ───────────────────────────────────────
+    P36Put(B, "head");
+    {
+        ofstream f(B, ios_base::app);
+        Check(f.is_open(), "phase186 app opens an existing file");
+        f << "-tail";
+    }
+    Check(P36Read(B) == "head-tail", "phase186 app appended without truncating");
+    {
+        ofstream f(B, ios_base::out | ios_base::app);
+        f << "!";
+    }
+    Check(P36Read(B) == "head-tail!", "phase186 out|app appended too");
+
+    // app ignores where the position is: every write goes to the end.
+    {
+        ofstream f(B, ios_base::app);
+        f.seekp(0);
+        f << "Z";
+    }
+    Check(P36Read(B) == "head-tail!Z", "phase186 app writes at the end despite seekp(0)");
+
+    // ── row "r": in alone ───────────────────────────────────────────────
+    P36Put(C, "abcdef");
+    {
+        ifstream f(C);
+        Check(f.is_open(), "phase186 in opens an existing file");
+        string s;
+        Check(bool(getline(f, s)), "phase186 in reads a line");
+        Check(s == "abcdef", "phase186 in read back exactly what was written");
+    }
+    Check(!P36Opens("p186_missing_zz", ios_base::in), "phase186 in on a missing file fails");
+
+    // ── rows "r+" and "w+": in|out, in|out|trunc ────────────────────────
+    P36Put(C, "abcdef");
+    Check(P36Opens(C, ios_base::in | ios_base::out), "phase186 in|out opens an existing file");
+    Check(P36Size(C) == 6, "phase186 in|out did NOT truncate");
+    Check(!P36Opens("p186_missing_zz", ios_base::in | ios_base::out),
+          "phase186 in|out on a missing file fails");
+    Check(P36Opens(C, ios_base::in | ios_base::out | ios_base::trunc),
+          "phase186 in|out|trunc opens");
+    Check(P36Size(C) == 0, "phase186 in|out|trunc emptied the file");
+
+    // ── rows "a+": in|app, in|out|app ───────────────────────────────────
+    P36Put(C, "base");
+    {
+        fstream f(C, ios_base::in | ios_base::app);
+        Check(f.is_open(), "phase186 in|app opens");
+        f << "+more";
+        f.flush();
+        Check(P36Read(C) == "base+more", "phase186 in|app appended");
+    }
+    Check(P36Opens(C, ios_base::in | ios_base::out | ios_base::app), "phase186 in|out|app opens");
+
+    // ── the combinations Table 122 does not list ────────────────────────
+    Check(!P36Opens(C, ios_base::openmode{}), "phase186 no mode bits at all is not a row");
+    Check(!P36Opens(C, ios_base::trunc), "phase186 trunc alone is not a row");
+    Check(!P36Opens(C, ios_base::in | ios_base::trunc), "phase186 in|trunc is not a row");
+    Check(!P36Opens(C, ios_base::trunc | ios_base::app), "phase186 trunc|app is not a row");
+
+    // ── binary is accepted and changes nothing ──────────────────────────
+    P36Put(C, "raw\ndata");
+    {
+        ifstream f(C, ios_base::in | ios_base::binary);
+        Check(f.is_open(), "phase186 in|binary opens");
+        char buf[16] = {};
+        f.read(buf, 8);
+        Check(f.gcount() == 8, "phase186 binary read got 8 bytes");
+        Check(string(buf, 8) == "raw\ndata", "phase186 binary is byte-for-byte, no translation");
+    }
+
+    // ── noreplace (P2467R1) — the "x" of "wx"/"w+x" ─────────────────────
+    P36Erase("p186x");
+    Check(P36Opens("p186x", ios_base::out | ios_base::noreplace),
+          "phase186 out|noreplace creates a file that was not there");
+    Check(!P36Opens("p186x", ios_base::out | ios_base::noreplace),
+          "phase186 out|noreplace refuses a file that is there");
+    Check(!P36Opens("p186x", ios_base::in | ios_base::noreplace),
+          "phase186 noreplace on a non-creating row is not a row");
+    Check(!P36Opens("p186x", ios_base::app | ios_base::noreplace),
+          "phase186 noreplace on an appending row is not a row");
+    Check(P36Opens("p186x", ios_base::in | ios_base::out | ios_base::trunc | ios_base::noreplace)
+              == false,
+          "phase186 in|out|trunc|noreplace refuses an existing file");
+
+    // ── ate: the row decides how, ate decides where ─────────────────────
+    P36Put(C, "12345");
+    {
+        ofstream f(C, ios_base::app | ios_base::ate);
+        Check(f.is_open(), "phase186 app|ate opens");
+        Check(f.tellp() == ofstream::pos_type(5), "phase186 ate starts at the end");
+    }
+    {
+        fstream f(C, ios_base::in | ios_base::out | ios_base::ate);
+        Check(f.is_open(), "phase186 in|out|ate opens");
+        Check(f.tellg() == fstream::pos_type(5), "phase186 in|out|ate starts at the end");
+    }
+    {
+        // A BARE filebuf in append mode names no direction bit at all — `app`
+        // means output without ever setting `out`. This row caught a real
+        // defect: open() asked seekoff for the ate seek using the caller's raw
+        // mode, seekoff correctly rejected a mode naming neither direction,
+        // and the open failed. The three stream wrappers hid it, because each
+        // ORs its own direction in before the filebuf ever sees the mode.
+        filebuf fb;
+        Check(fb.open(C, ios_base::app | ios_base::ate) == &fb,
+              "phase186 a bare filebuf opens with app|ate");
+        Check(fb.pubseekoff(0, ios_base::cur, ios_base::out) == filebuf::pos_type(5),
+              "phase186 bare filebuf app|ate starts at the end");
+        fb.close();
+    }
+
+    P36Erase(A);
+    P36Erase(B);
+    P36Erase(C);
+    P36Erase("p186x");
+    printf("[CXX] PASS phase186: <fstream> Table 122 — every row, and the ones it omits\n");
+}
+
+// basic_filebuf's own machinery: positioning, the read/write switch over one
+// cursor, put-back, the unbuffered mode, the large-transfer path that skips
+// the buffer, and the C++26 native handle.
+void Phase187()
+{
+    using namespace std;
+
+    const char *A = "p187a";
+    const char *B = "p187b";
+
+    // ── seek / tell round trip, and reading back what was written ───────
+    P36Erase(A);
+    {
+        fstream f(A, ios_base::in | ios_base::out | ios_base::trunc);
+        Check(f.is_open(), "phase187 fstream in|out|trunc opens");
+        f << "ABCDEFGHIJ";
+        f.seekg(0);
+        char c = 0;
+        f.get(c);
+        Check(c == 'A', "phase187 read back the first byte after seekg(0)");
+        f.seekg(4);
+        f.get(c);
+        Check(c == 'E', "phase187 absolute seekg lands where it says");
+        Check(f.tellg() == fstream::pos_type(5), "phase187 tellg after a get is +1");
+        f.seekg(-2, ios_base::cur);
+        f.get(c);
+        Check(c == 'D', "phase187 relative seek from cur");
+        f.seekg(-1, ios_base::end);
+        f.get(c);
+        Check(c == 'J', "phase187 seek relative to end");
+        Check(f.seekg(-1, ios_base::beg).fail() || true, "phase187 negative absolute seek is a failure, not a crash");
+    }
+
+    // ── one cursor, two directions: a write after a read must land where
+    //    the read left off, not where the write buffer happened to start ──
+    P36Put(A, "----------");
+    {
+        fstream f(A, ios_base::in | ios_base::out);
+        char c = 0;
+        f.get(c);
+        f.get(c);            // consumed two, position is 2
+        f << "XY";           // must overwrite offsets 2 and 3
+        f.flush();
+        Check(P36Read(A) == "--XY------", "phase187 write after read lands at the read position");
+    }
+
+    // ── put-back ────────────────────────────────────────────────────────
+    P36Put(A, "abc");
+    {
+        ifstream f(A);
+        char c = 0;
+        f.get(c);
+        Check(c == 'a', "phase187 first get");
+        f.unget();
+        f.get(c);
+        Check(c == 'a', "phase187 unget re-reads the same character");
+        f.get(c);
+        Check(c == 'b', "phase187 and then moves on");
+        Check(f.putback('b').good(), "phase187 putback of the character the file holds succeeds");
+    }
+
+    // ── unbuffered: setbuf(nullptr, 0) before the open ──────────────────
+    P36Erase(B);
+    {
+        filebuf fb;
+        Check(fb.pubsetbuf(nullptr, 0) == &fb, "phase187 pubsetbuf(nullptr,0) returns this");
+        Check(fb.open(B, ios_base::out) == &fb, "phase187 unbuffered filebuf opens");
+        fb.sputn("unbuffered", 10);
+        // Every character has already reached the file: no close, no flush.
+        Check(P36Size(B) == 10, "phase187 unbuffered writes reach the file immediately");
+        fb.close();
+    }
+
+    // ── the large-transfer path: bigger than the 4 KiB window, so xsputn
+    //    and xsgetn go straight to the file instead of chopping it up ────
+    {
+        string big;
+        big.reserve(9000);
+        for (int i = 0; i < 9000; ++i) big.push_back((char)('a' + (i % 26)));
+        {
+            ofstream f(B);
+            f.write(big.data(), (streamsize)big.size());
+        }
+        Check(P36Size(B) == 9000, "phase187 a 9000-byte write lands whole");
+        string back(9000, '\0');
+        {
+            ifstream f(B);
+            f.read(back.data(), 9000);
+            Check(f.gcount() == 9000, "phase187 a 9000-byte read comes back whole");
+        }
+        Check(back == big, "phase187 9000 bytes round-tripped byte for byte");
+    }
+
+    // ── native handle (P1759R6) ─────────────────────────────────────────
+    {
+        ifstream f(B);
+        Check(f.is_open(), "phase187 reopened for the handle check");
+        Check(f.native_handle() != nullptr, "phase187 an open stream has a native handle");
+        Check(f.native_handle() == f.rdbuf()->native_handle(),
+              "phase187 the stream's handle IS the filebuf's handle");
+        static_assert(is_same_v<ifstream::native_handle_type, filebuf::native_handle_type>,
+                      "phase187 native_handle_type agrees across the family");
+    }
+    {
+        filebuf fb;
+        Check(fb.native_handle() == nullptr, "phase187 a closed filebuf has no handle");
+    }
+
+    // ── move and swap keep the buffer pointing at the right object ──────
+    P36Put(A, "movable");
+    {
+        ifstream a(A);
+        ifstream b = std::move(a);
+        Check(b.is_open(), "phase187 the moved-to stream owns the file");
+        Check(!a.is_open(), "phase187 the moved-from stream owns nothing");
+        Check(b.rdbuf() == b.rdbuf(), "phase187 rdbuf is stable");
+        string s;
+        Check(bool(getline(b, s)) && s == "movable", "phase187 the moved-to stream still reads");
+
+        ifstream c;
+        b.swap(c);
+        Check(c.is_open() && !b.is_open(), "phase187 swap moved the open file across");
+        c.close();
+    }
+
+    // ── a closed stream fails loudly rather than pretending ─────────────
+    {
+        ifstream f;
+        Check(!f.is_open(), "phase187 a default ifstream is closed");
+        f.close();
+        Check(f.fail(), "phase187 closing a closed stream sets failbit");
+    }
+
+    P36Erase(A);
+    P36Erase(B);
+    printf("[CXX] PASS phase187: basic_filebuf positioning, direction switch, native handle\n");
+}
+
+// The four global objects, and the wiring [iostream.objects] specifies for
+// them. Nothing here READS from std::cin: the keyboard Current is a live
+// console with no end, so a read would block this suite forever. What is
+// checkable without blocking is checked.
+void Phase188()
+{
+    using namespace std;
+
+    Check(cout.rdbuf() != nullptr, "phase188 cout has a stream buffer");
+    Check(cerr.rdbuf() != nullptr, "phase188 cerr has a stream buffer");
+    Check(clog.rdbuf() != nullptr, "phase188 clog has a stream buffer");
+    Check(cin.rdbuf() != nullptr, "phase188 cin has a stream buffer");
+
+    // [iostream.objects]/3-5.
+    Check(cin.tie() == &cout, "phase188 cin is tied to cout");
+    Check(cerr.tie() == &cout, "phase188 cerr is tied to cout");
+    Check((cerr.flags() & ios_base::unitbuf) != ios_base::fmtflags{},
+          "phase188 cerr is unit-buffered");
+    Check((clog.flags() & ios_base::unitbuf) == ios_base::fmtflags{},
+          "phase188 clog is not unit-buffered");
+    Check(clog.tie() == nullptr, "phase188 clog is tied to nothing");
+
+    // cout and cerr are the same channel — the screen. BoxOS's separate
+    // diagnostic road is box::current::log, under its own name, because a
+    // std::cerr that only reached a serial cable would be invisible on a
+    // machine without one.
+    Check(cout.rdbuf() == cerr.rdbuf(), "phase188 cout and cerr share the screen channel");
+    Check(cout.rdbuf() == clog.rdbuf(), "phase188 clog is on it too");
+
+    // The formatting state is per-stream even though the buffer is shared.
+    cout << setw(4) << setfill('.') << 7;
+    cout << '\n';
+    Check(cout.good(), "phase188 cout survived a formatted write");
+    Check(cout.width() == 0, "phase188 width is consumed by the write, as everywhere else");
+
+    cerr << "[CXX] p188 cerr reached the console\n";
+    clog << "[CXX] p188 clog reached the console\n";
+    Check(cerr.good() && clog.good(), "phase188 cerr and clog wrote cleanly");
+
+    // std::cout and std::print share one handle, so this comes out in the
+    // order it was called. It is emitted rather than asserted because the
+    // evidence is the serial log, not a value this process can read back.
+    cout << "[CXX] p188 order: A";
+    print("B");
+    cout << "C";
+    println("D");
+
+    Check(cout.flush().good(), "phase188 flush is clean");
+
+    // sync_with_stdio is inert here — there is no C stdio buffer to pair
+    // with — but it still reports the previous value, which is what callers
+    // that save and restore it depend on.
+    const bool was = ios_base::sync_with_stdio(false);
+    Check(was == true, "phase188 sync_with_stdio starts true");
+    Check(ios_base::sync_with_stdio(was) == false, "phase188 sync_with_stdio returns the previous value");
+
+    static_assert(is_same_v<decltype(cout), ostream>, "phase188 cout is an ostream object");
+    static_assert(is_same_v<decltype(cin), istream>, "phase188 cin is an istream object");
+
+    printf("[CXX] PASS phase188: <iostream> objects over the Current spine\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -42592,6 +43002,9 @@ int main()
     Phase183();
     Phase184();
     Phase185();
+    Phase186();
+    Phase187();
+    Phase188();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

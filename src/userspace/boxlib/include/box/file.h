@@ -40,6 +40,19 @@ int delete(uint32_t file_id);
 #endif
 int file_rename(uint32_t file_id, const char* new_filename);
 
+/* Drop everything past `new_size`. SHRINK ONLY: growing is refused
+ * (-ERR_INVALID_ARGUMENT), because TagFS does not zero freshly allocated
+ * blocks and a grow would hand back the previous tenant's bytes — files grow
+ * by being written. Refused on a snapshotted file (-ERR_INVALID_OPERATION):
+ * a block not yet copied since the snapshot is still the snapshot's only
+ * copy. Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like
+ * delete. Returns 0 or a negative -error_t.
+ *
+ * Publishes a TRUNCATED Touch event on every tag of the file — the same
+ * 32-byte payload shape as a write, with op = 3, offset = the new length,
+ * bytes = how many were discarded. */
+int file_truncate(uint32_t file_id, uint64_t new_size);
+
 int tag_add(uint32_t file_id, const char* tag);
 int tag_remove(uint32_t file_id, const char* key);
 

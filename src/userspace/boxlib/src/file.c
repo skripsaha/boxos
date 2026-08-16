@@ -24,6 +24,7 @@
 #define STORAGE_OBJ_DELETE      0x08
 #define STORAGE_OBJ_RENAME      0x09
 #define STORAGE_OBJ_GET_INFO    0x0A
+#define STORAGE_OBJ_TRUNCATE    0x0B
 #define STORAGE_CONTEXT_SET     0x10
 #define STORAGE_CONTEXT_CLEAR   0x11
 #define STORAGE_CONTEXT_GET     0x12
@@ -248,6 +249,20 @@ int delete(uint32_t file_id)
 {
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_DELETE,
                      &file_id, sizeof(file_id),
+                     NULL, 0, NULL, 0, NULL,
+                     STORAGE_TIMEOUT_MS, NULL);
+    return box_fail(rc);
+}
+
+int file_truncate(uint32_t file_id, uint64_t new_size)
+{
+    /* params: [u32 file_id][u64 new_size]. */
+    uint8_t params[12];
+    memcpy(params,     &file_id,  4);
+    memcpy(params + 4, &new_size, 8);
+
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_TRUNCATE,
+                     params, sizeof(params),
                      NULL, 0, NULL, 0, NULL,
                      STORAGE_TIMEOUT_MS, NULL);
     return box_fail(rc);

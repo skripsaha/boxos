@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **80** — 76 of C++23 (29 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Standard headers provided | **82** — 78 of C++23 (27 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 120 |
-| Header source | ~80 000 lines |
-| Feature-test macros defined | 199 — 154 at their C++23 value, 45 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Header source | ~81 000 lines |
+| Feature-test macros defined | 200 — 154 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 200 phases (181 of them the numbered `PhaseN` series), 5 141 runtime checks, 1 729 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 203 phases (184 of them the numbered `PhaseN` series), 5 256 runtime checks, 1 732 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -55,7 +55,7 @@ checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **200**. The
+there are exactly as many as there are phase definitions. That is **203**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -76,8 +76,11 @@ the library itself; there is no "no-exceptions" configuration.
 
 | You wrote | What happens | Why / what to use |
 |---|---|---|
-| `#include <iostream>`, `std::cout` | no such header, no such name | BoxOS has no stdin/stdout/stderr. Use `std::print` / `std::println`, or `box::current` for the I/O spine. `<ostream>`, `<sstream>` and the rest of the stream machinery **do** exist (§1.1). |
-| `#include <fstream>` | no such header | Files are tag-addressed: `box::tagfs`, and `box::ferry` for `co_await` file I/O. |
+| `while (std::getline(std::cin, s))` | never ends | The keyboard Current is a live console with no terminator — there is no Ctrl-D here to make one, so `std::cin` never sets `eofbit`. Read a known number of lines, or read from a file. (§2 `<iostream>`) |
+| `std::cerr << "..."` | goes to the **screen**, like `cout` | BoxOS's separate diagnostic road is the serial `box::current::log`, under its own name. A `cerr` that only reached a serial cable would be invisible on a machine without one. (§2 `<iostream>`) |
+| `std::ofstream f(path)` with a path | opens a file literally named `"a/b.txt"` | TagFS is tag-addressed: the argument is a NAME, not a path. There are no directories to walk and no separator to parse. |
+| `std::ofstream f(name)` on a snapshotted file | fails to open | `out` means truncate, and truncating a file a snapshot still reads would corrupt the snapshot. (§2 `<fstream>`) |
+| `#include <filesystem>`, `std::filesystem::path` | no such header, no such name | There is no hierarchical path namespace to model, so the `path` overloads of `fstream`'s constructors and `open()` are absent with it. |
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
@@ -87,12 +90,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (29)
+## 1.1 Headers that do not exist (27)
 
-76 of the C++23 headers are provided and 29 are absent, which accounts for the
+78 of the C++23 headers are provided and 27 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 80 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 82 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -120,27 +123,39 @@ the compiler's own freestanding C headers remain available and are used by the
 library itself: `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`,
 `<float.h>` come from GCC, not from a libc, and resolve normally.
 
-### Excluded by decision — 5
+### Excluded by decision — 3
 
 | Header | Why |
 |---|---|
-| `<iostream>` | BoxOS does not have the Unix stdin/stdout/stderr model. Its replacement is the Current I/O spine (`box::current`), and formatted console output is `std::print` / `std::println`. The in-memory stream machinery **does** exist — see the next paragraph. |
-| `<fstream>` | Files are reached through TagFS (`box::tagfs`, `box::ferry`), not through a path-opened byte stream. |
-| `<filesystem>` | There is no hierarchical path namespace to model. TagFS is tag-addressed: a file is found by the tags it carries, not by where it sits. |
+| `<filesystem>` | There is no hierarchical path namespace to model. TagFS is tag-addressed: a file is found by the tags it carries, not by where it sits. This is also why `<fstream>`'s `filesystem::path` overloads are absent (§2 `<fstream>`). |
 | `<regex>` | Excluded by plan. |
 | `<valarray>` | Excluded by plan. |
 
-`<iostream>` being absent does **not** mean the streams are absent.
-`<iosfwd>` `<ios>` `<streambuf>` `<ostream>` `<istream>` `<sstream>` `<iomanip>`
-`<locale>` are all implemented; what is missing is the three global objects and
-the header that declares them.
+**`<iostream>` and `<fstream>` used to be on that list, and no longer are.**
+The entry for them read, in substance, that BoxOS does not have the Unix
+stdin/stdout/stderr model and does not reach files through a path-opened byte
+stream — both of which are still true, and neither of which turned out to be a
+reason the headers could not exist. What the two headers actually needed was a
+channel to bind to, and BoxOS has one: the Current spine. `std::cout`, `cerr`
+and `clog` are the standard's names for the `"screen"` Current; `std::cin` is
+the `"keyboard"` Current; a `basic_filebuf` is a `"file:"` Current. None of
+them is a descriptor, and the `s` a filebuf opens is a TagFS name, not a path.
+
+Reversing the exclusion cost one thing that was not a C++ problem at all.
+[filebuf.members] Table 122 says plain `ios_base::out` means `"w"`, and `"w"`
+truncates — and TagFS could not truncate. `tagfs_write` only ever grew a file,
+so **every shorter rewrite in the system left the old tail readable behind the
+new content**, and had done since TagFS was written. Ф36 built the primitive
+(`tagfs_truncate_file` → `STORAGE_OBJ_TRUNCATE` → `file_truncate` →
+`current_resize`); the C++ header is what finally asked for it. Its two
+refusals are recorded in §2 `<fstream>`.
 
 ### C++23 features not implemented — 7
 
 | Header | Status |
 |---|---|
 | `<spanstream>` | Not implemented. |
-| `<syncstream>` | Not implemented (its contract is written against `<iostream>`). |
+| `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
 | `<typeindex>` | Not implemented — there is no `std::type_index`. |
 | `<stacktrace>` | Deferred against a named blocker: symbolization needs the running image's `.symtab`, which is cross-layer kernel/boxlib work. The unwinder half already exists — `_Unwind_Backtrace` works today. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
@@ -151,7 +166,12 @@ the header that declares them.
 
 - **Wide characters.** There are no wide streams, no `wformat_context`, and no
   wide-character facets. `wchar_t` itself works as a type; nothing in the
-  library is instantiated for it.
+  library is instantiated for it. Concretely, since Ф36 gave the narrow
+  streams a home: `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
+  `wcin`/`wcout`/`wcerr`/`wclog`, and `<fstream>` and `<iosfwd>` carry
+  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts.
+  Every class template involved is still generic in `CharT`, so the exclusion
+  is a decision about what is shipped and tested, not a structural block.
 - **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
   machinery needs. The `L` format specifier is accepted and ignored.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
@@ -159,18 +179,18 @@ the header that declares them.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **199** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **200** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled:
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are forty-five so far, measured rather than counted by hand: every
+  section; there are forty-six so far, measured rather than counted by hand: every
   macro whose value here exceeds what libstdc++ 16.1 reports at `-std=c++23`,
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 199 macros × 80 headers by
+  checked over the full cross-product of 200 macros × 82 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -184,7 +204,7 @@ the whole set, not sampled:
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 161 of the 199 macros are also
+- **The converse does not hold, and cannot.** 161 of the 200 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -208,7 +228,14 @@ the whole set, not sampled:
   third is `__cpp_lib_span`, which had never leaked anywhere at all because
   nothing included `<span>` — `<mdspan>` now does, since `extents` and
   `mdspan` both take one. The three macros `<mdspan>` itself owns leak
-  nowhere: nothing includes `<mdspan>`.
+  nowhere: nothing includes `<mdspan>`. Ф36 added two headers and one macro
+  and did **not** move the pin: it stayed at 161, which is what the accounting
+  predicts rather than a coincidence. The metric counts distinct MACROS that
+  reach somewhere they are not owned, not (macro, header) pairs — so
+  `<fstream>` and `<iostream>` seeing everything `<ios>` and `<string>`
+  already leaked adds nobody new, and the one macro Ф36 defines,
+  `__cpp_lib_fstream_native_handle`, leaks nowhere because nothing in the tree
+  includes `<fstream>`.
 
 **18 of the macros [version.syn] names are not defined**, and `<version>` lists
 every one by name with its specific reason — that list, not this section, is the authoritative
@@ -705,6 +732,43 @@ nothing has been found since.
   — but four noisier errors precede it (a deleted constructor, a missing `parse`,
   and two consteval failures).
 
+## `<fstream>`
+
+New in Ф36. The backing is a `"file:"` Current, and the `s` a filebuf opens is
+a TagFS **name** — there is no directory to walk and no separator to parse.
+All nine rows of [filebuf.members] Table 122 are implemented, along with the
+`noreplace` column P2467R1 added, and the suite pins each of them plus the
+combinations the table leaves out.
+
+- `–` **No `filesystem::path` overloads** of the constructors or of `open()`,
+  because there is no `<filesystem>` (§1.1). The `const char*` and
+  `const string&` forms are complete.
+- `~` **`truncate` is refused on a snapshotted file**, so `ios_base::out` on
+  one fails to open rather than silently doing something else. A block that
+  has not been copied since the snapshot was taken is still the snapshot's
+  only copy, and a `CowSnapshot` records redirects rather than an extent list
+  of its own — nothing in the kernel can tell "mine alone" from "shared with a
+  frozen view". Freeing such a block would corrupt the snapshot. Refusing
+  costs a rare failed open; guessing costs the snapshot.
+- `~` **The truncate primitive shrinks only.** Growing a file by truncation is
+  refused rather than served, because TagFS does not zero freshly allocated
+  blocks and a grow would hand back whatever the allocator's previous tenant
+  left there. No `<fstream>` operation needs it: files grow by being written.
+- `?` **`binary` is accepted and changes nothing.** A Current is a byte channel
+  and boxcxx performs no text translation, so binary and text are one road.
+  The standard leaves the difference implementation-defined; this records
+  which way it was settled.
+- `?` **`showmanyc()` reports the bytes remaining in the file**, and `0` at the
+  end rather than `-1`. `-1` would assert that no character can ever be read
+  again, which of a file another writer may still append to is not knowable.
+- `+` **`pbackfail()` with a character the file does not hold writes it
+  through**, and fails when it cannot — in a read-only or appending mode.
+  Putting it only in the get area would be a lie about the file. The standard
+  permits either.
+- C++26 `__cpp_lib_fstream_native_handle` (P1759R6) is claimed:
+  `native_handle_type` is `Current*`, not an `int`, because BoxOS has no
+  descriptor table to index into.
+
 ## `<functional>`
 
 - `✓` Added in Ф34: **`std::copyable_function`** (P2548R6), all twelve
@@ -777,6 +841,43 @@ nothing has been found since.
   only ever move-assigns between live elements, and an argument that names
   an element of the same vector stays valid because nothing moves under it.
   The cost is about three moves per element where a shift costs one.
+
+## `<iostream>`
+
+New in Ф36. `cin`, `cout`, `cerr` and `clog` exist and are bound to the Current
+spine: the three output objects to the `"screen"` Current, `cin` to the
+`"keyboard"` one. They share the very handle `std::print` uses, so
+`std::cout << a; std::print("{}", b);` emits `a` then `b` — one channel, one
+order, one buffer underneath. The ties and buffering [iostream.objects]
+specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
+`cerr.tie() == &cout`, `cerr` unit-buffered, `clog` neither.
+
+- `~` **`std::cin` never reaches end of file.** The keyboard Current is a live
+  console: it blocks for the next line and has no terminator, because a
+  console has no end, and there is no Ctrl-D here to invent one. `eofbit` is
+  therefore never set from input exhaustion, and `while (getline(cin, s))`
+  does not terminate. This is the truth about the channel, not a defect in the
+  stream — read a known number of lines, or read from a file.
+- `~` **`cerr` and `clog` go to the screen, not to a diagnostic channel.**
+  BoxOS has one — the serial `box::current::log` — and it keeps its own name.
+  A `std::cerr` that only reached a serial cable would be invisible to anyone
+  running on real hardware without one, and silently losing an error message
+  is worse than not distinguishing it. `cout.rdbuf() == cerr.rdbuf()`, and the
+  suite pins that too; the per-stream formatting state is still per-stream.
+- `?` **The keyboard Current strips the line terminator; the stream buffer puts
+  it back.** The channel is line-oriented and hands back one edited line
+  without its newline. A character stream without line terminators is a
+  different stream — `getline` would never find its delimiter and would splice
+  every line the user ever typed into one — so `underflow()` appends the `\n`.
+- `–` No `wcin`/`wcout`/`wcerr`/`wclog` (§1.2).
+- `?` **`sync_with_stdio` remains inert** and returns the previous value. There
+  is no C stdio buffer to pair with; boxlib's own `printf` is a different
+  subsystem that no stream here touches.
+- The objects are constructed by a priority-102 constructor — after the TLS
+  bootstrap at 101, ahead of every default-priority global in the program — so
+  a user's own global constructor may write to `std::cout`. `ios_base::Init`,
+  which was an honest no-op for the whole epic, now does the other half:
+  its last destructor flushes the streams while they are still alive.
 
 ## `<iterator>`
 
@@ -1178,9 +1279,13 @@ nothing has been found since.
 
 ## `<random>`
 
-- `–` No `operator<<` / `operator>>` on engines or distributions. Text
-  serialization of a generator's state is specified in terms of streams that BoxOS
-  does not have.
+- `–` No `operator<<` / `operator>>` on engines or distributions (measured: the
+  header contains neither operator at all). This entry used to say the reason
+  was that [rand.req.eng]'s text serialization is specified in terms of
+  "streams that BoxOS does not have". **That reason went stale in Ф30e**, when
+  `<ostream>` and `<istream>` were built, and Ф36's sweep is what noticed —
+  `<iostream>` exists now too. The honest reason is that nobody wrote the
+  operators. Nothing blocks them.
 - `?` The distributions are **not reproducible against another implementation**.
   The standard makes the engines deterministic and leaves the distributions
   implementation-defined; boxcxx picks its own algorithms (Marsaglia polar,
@@ -2058,6 +2163,33 @@ What is left:
   under contention; the real fix is an allocation-free drain path.
 - One user-mode page fault was observed on a loaded 16-core BIOS run and has
   never reproduced in isolation. It is recorded rather than explained.
+- `✓` **TagFS could not shorten a file, and nothing had noticed.** `tagfs_write`
+  only ever grew one — `if (offset > file_size) file_size = offset` — so every
+  shorter rewrite anywhere in BoxOS left the previous tail readable past the new
+  content. This is not a C++ defect and predates the epic by years; what made it
+  impossible to keep ignoring is that [filebuf.members] Table 122 defines plain
+  `ios_base::out` as `"w"`, and `"w"` truncates. **Closed in Ф36** with a real
+  primitive through all four layers: `tagfs_truncate_file` (frees the tail
+  extents, trims the extent list, commits the new record before releasing a
+  single block, unregisters the freed blocks from the dedup index and drops them
+  from the read-ahead cache) → `STORAGE_OBJ_TRUNCATE` (guarded like
+  `OBJ_DELETE`, and publishing a `TRUNCATED` Touch event with `op = 3` in the
+  same 32-byte payload shape a write uses) → `file_truncate` → `current_resize`
+  and the `CURRENT_TRUNCATE` open flag.
+- **`tagfs_delete_file` does not unregister the blocks it frees from the dedup
+  index.** Found while writing the truncate path above, which does unregister
+  them. It is latent rather than live: inline dedup is disabled on the write
+  path (`tagfs.c` says so, in a comment naming the block-reuse race that
+  disabled it), so nothing currently consults a stale entry. Left alone rather
+  than fixed in passing — it is one line in the most destructive path in the
+  filesystem, and it deserves its own change with its own test, not a ride
+  along a C++ header.
+- **The file backing now accepts `CURRENT_READ | CURRENT_WRITE`.** Every other
+  Current still takes exactly one role, and a Brook end explicitly rejects the
+  combination — a producer and a consumer open different objects. A file is one
+  object with one cursor, and `fstream(name, in|out)` needs exactly that; the
+  spine's honesty rule ("never claim a capability the backing lacks") reads the
+  other way too.
 
 ## Deliberately deferred to a future C++26 phase
 
@@ -2078,6 +2210,9 @@ x86_64-elf-g++ -std=gnu++23 -nostdinc++ -fexceptions -frtti -ffreestanding \
 ```
 
 Every statement about **libstdc++** or **libc++** was re-measured on 2026-08-14
+— and the one claim Ф36 added, that libstdc++ 16.1 defines
+`__cpp_lib_fstream_native_handle` only at `-std=c++26` and at the same value
+202306L, on 2026-08-16 —
 against the toolchains installed on the build host — libstdc++ 16.1.0
 (`__GLIBCXX__ 20260430`) and libc++ 22.1.6 (`_LIBCPP_VERSION 220106`) — by
 compiling and running the same program against each. Claims that no longer
