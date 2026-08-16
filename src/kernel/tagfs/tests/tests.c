@@ -109,7 +109,164 @@ static TestResult test_tagfs_write_read(void) {
     // Cleanup
     tagfs_close(handle);
     tagfs_delete_file(file_id);
-    
+
+    return TEST_PASS;
+}
+
+// ============================================================================
+// Dedup index — does a block leave it when it leaves the allocator?
+//
+// It did not, until now: only truncate ever unregistered anything, so every
+// deleted file left its blocks in the index for the lifetime of the system,
+// each one mapping content that no longer exists to bytes handed to somebody
+// else. These pin both halves of the fix — the entry goes when the block goes,
+// and a block the index still counts as shared does NOT go.
+// ============================================================================
+
+// Give a block content nothing else in the volume holds, so a hash lookup for
+// it can only find this test's block.
+static void dedup_stamp(uint8_t *buf, uint8_t fill, const char *marker) {
+    fill_pattern(buf, TAGFS_BLOCK_SIZE, fill);
+    for (uint32_t i = 0; marker[i]; i++)
+        buf[i] = (uint8_t)marker[i];
+}
+
+static TestResult test_dedup_delete_unregisters(void) {
+    if (!TagFS_DedupIsInitialized())
+        return TEST_SKIP;
+
+    DedupStats before;
+    TEST_ASSERT_OK(TagFS_DedupGetStats(&before), "stats before");
+
+    dedup_stamp(g_test_buffer, 0xD1, "dedup-delete-unregisters");
+
+    uint32_t file_id;
+    uint16_t tag_ids[1] = {1};
+    TEST_ASSERT_OK(tagfs_create_file("dedup_del", tag_ids, 1, &file_id),
+                   "create should succeed");
+
+    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    TEST_ASSERT(handle != NULL, "open for write should succeed");
+    int written = tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
+    tagfs_close(handle);
+    TEST_ASSERT_EQ(written, TAGFS_BLOCK_SIZE, "should write a whole block");
+
+    uint32_t block = 0;
+    bool is_dup = false;
+    TEST_ASSERT_OK(TagFS_DedupCheck(g_test_buffer, &block, &is_dup),
+                   "the written block should be indexed");
+    TEST_ASSERT(is_dup && block != 0, "and found by its content");
+
+    TEST_ASSERT_EQ(tagfs_delete_file(file_id), 0, "delete should succeed");
+
+    is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
+    TEST_ASSERT(!is_dup, "delete must take the block out of the index");
+
+    DedupStats after;
+    TEST_ASSERT_OK(TagFS_DedupGetStats(&after), "stats after");
+    TEST_ASSERT_EQ(after.unique_blocks, before.unique_blocks,
+                   "a create/write/delete cycle must not grow the index");
+
+    return TEST_PASS;
+}
+
+static TestResult test_dedup_truncate_unregisters(void) {
+    if (!TagFS_DedupIsInitialized())
+        return TEST_SKIP;
+
+    dedup_stamp(g_test_buffer, 0xD2, "dedup-truncate-unregisters");
+
+    uint32_t file_id;
+    uint16_t tag_ids[1] = {1};
+    TEST_ASSERT_OK(tagfs_create_file("dedup_trunc", tag_ids, 1, &file_id),
+                   "create should succeed");
+
+    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    TEST_ASSERT(handle != NULL, "open for write should succeed");
+    int written = tagfs_write(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
+    tagfs_close(handle);
+    TEST_ASSERT_EQ(written, TAGFS_BLOCK_SIZE, "should write a whole block");
+
+    uint32_t block = 0;
+    bool is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
+    TEST_ASSERT(is_dup, "the written block should be indexed");
+
+    TEST_ASSERT_EQ(tagfs_truncate_file(file_id, 0), 0, "truncate to empty");
+
+    is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &block, &is_dup);
+    TEST_ASSERT(!is_dup, "a truncated-away block must leave the index too");
+
+    tagfs_delete_file(file_id);
+    return TEST_PASS;
+}
+
+static TestResult test_dedup_shared_block_survives_release(void) {
+    if (!TagFS_DedupIsInitialized())
+        return TEST_SKIP;
+
+    TagFSState* fs = tagfs_get_state();
+    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
+
+    uint32_t block = 0;
+    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "alloc one block");
+    TEST_ASSERT(block != 0, "block 0 is not a block");
+
+    dedup_stamp(g_test_buffer, 0x5A, "dedup-shared-block");
+    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_buffer, 0xBEEF), "register");
+    TEST_ASSERT_OK(TagFS_DedupAddRef(block), "a second owner takes a reference");
+
+    uint32_t free_before = fs->superblock.free_blocks;
+    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "first release");
+    TEST_ASSERT_EQ(fs->superblock.free_blocks, free_before,
+                   "a shared block must NOT go back to the allocator");
+
+    uint32_t found = 0;
+    bool is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
+    TEST_ASSERT(is_dup && found == block, "its entry survives the first release");
+
+    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "last release");
+    TEST_ASSERT_EQ(fs->superblock.free_blocks, free_before + 1,
+                   "the last release hands the block back");
+
+    is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
+    TEST_ASSERT(!is_dup, "and takes the entry with it");
+
+    return TEST_PASS;
+}
+
+static TestResult test_dedup_reregister_follows_content(void) {
+    if (!TagFS_DedupIsInitialized())
+        return TEST_SKIP;
+
+    uint32_t block = 0;
+    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &block), 0, "alloc one block");
+
+    dedup_stamp(g_test_buffer, 0xA1, "dedup-content-one");
+    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_buffer, 0xC0DE), "register first content");
+
+    dedup_stamp(g_test_output, 0xA2, "dedup-content-two");
+    TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_output, 0xC0DE), "register second content");
+
+    uint32_t found = 0;
+    bool is_dup = false;
+    TagFS_DedupCheck(g_test_output, &found, &is_dup);
+    TEST_ASSERT(is_dup && found == block, "the block is found by what it holds now");
+
+    is_dup = false;
+    TagFS_DedupCheck(g_test_buffer, &found, &is_dup);
+    TEST_ASSERT(!is_dup, "and not by what it used to hold");
+
+    // One block, one entry: a single release must empty it.
+    TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "release");
+    is_dup = false;
+    TagFS_DedupCheck(g_test_output, &found, &is_dup);
+    TEST_ASSERT(!is_dup, "re-registering must not have forked a second entry");
+
     return TEST_PASS;
 }
 
@@ -871,9 +1028,16 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, ""},
     };
 
+    static TestCase dedup_tests[] = {
+        {"dedup_delete_unregisters", test_dedup_delete_unregisters, TEST_SKIP, 0, ""},
+        {"dedup_truncate_unregisters", test_dedup_truncate_unregisters, TEST_SKIP, 0, ""},
+        {"dedup_shared_block_survives_release", test_dedup_shared_block_survives_release, TEST_SKIP, 0, ""},
+        {"dedup_reregister_follows_content", test_dedup_reregister_follows_content, TEST_SKIP, 0, ""},
+    };
+
     // Run all test suites
     static TestCase* all_suites[] = {
-        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests
+        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests, dedup_tests
     };
     uint32_t suite_sizes[] = {
         sizeof(core_tests)/sizeof(TestCase),
@@ -884,12 +1048,15 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         sizeof(braid_tests)/sizeof(TestCase),
         sizeof(cow_tests)/sizeof(TestCase),
         sizeof(boxhash_tests)/sizeof(TestCase),
-        sizeof(integrity_tests)/sizeof(TestCase)
+        sizeof(integrity_tests)/sizeof(TestCase),
+        sizeof(dedup_tests)/sizeof(TestCase)
     };
 
     debug_printf("\n[Tests] Starting test run...\n");
 
-    for (uint32_t s = 0; s < 9; s++) {
+    /* Derived, not typed: the count used to be a literal 9, which is a silent
+     * way to add a suite that never runs. */
+    for (uint32_t s = 0; s < sizeof(all_suites)/sizeof(all_suites[0]); s++) {
         for (uint32_t i = 0; i < suite_sizes[s]; i++) {
             TestCase* test = &all_suites[s][i];
             uint64_t start = get_time_ms();
