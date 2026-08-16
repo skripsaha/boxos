@@ -546,6 +546,7 @@
 #include <sstream>
 #include <iomanip>
 #include <stack>
+#include <stacktrace>
 #include <stdexcept>
 #include <streambuf>
 #include <string>
@@ -29537,13 +29538,13 @@ void Phase131()
 #ifdef __cpp_lib_constexpr_vector
 #  error "phase131: __cpp_lib_constexpr_vector must stay undefined"
 #endif
-    // The seven below name a header boxcxx does not ship at all, so the
+    // The guards below name a header boxcxx does not ship at all, so the
     // macro could only ever appear by accident -- these guards are what
-    // turns "we never wrote it" into "we checked". (It was nine until
+    // turns "we never wrote it" into "we checked". (There were nine until
     // Ф31b-1 shipped <flat_set>; __cpp_lib_flat_set moved out of this list
-    // and into phase133's value pin. It was eight until Ф31b-2 shipped
-    // <flat_map>; __cpp_lib_flat_map moved out of this list and into
-    // phase135's value pin.)
+    // and into phase133's value pin. Eight until Ф31b-2 shipped <flat_map>;
+    // __cpp_lib_flat_map moved into phase135's. Seven until Ф37 shipped
+    // <stacktrace>; __cpp_lib_stacktrace is a value pin right here now.)
 #ifdef __cpp_lib_execution
 #  error "phase131: __cpp_lib_execution must stay undefined"
 #endif
@@ -29589,9 +29590,7 @@ static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp
 #ifdef __cpp_lib_spanstream
 #  error "phase131: __cpp_lib_spanstream must stay undefined"
 #endif
-#ifdef __cpp_lib_stacktrace
-#  error "phase131: __cpp_lib_stacktrace must stay undefined"
-#endif
+static_assert(__cpp_lib_stacktrace == 202011L, "phase131: __cpp_lib_stacktrace — closed by Ф37");
 static_assert(__cpp_lib_stdatomic_h == 202011L, "phase131: __cpp_lib_stdatomic_h -- <stdatomic.h> built in F34");
 static_assert(__cpp_lib_stdbit_h == 202603L, "phase131: __cpp_lib_stdbit_h -- F34");
 static_assert(__cpp_lib_stdckdint_h == 202603L, "phase131: __cpp_lib_stdckdint_h -- F34");
@@ -42795,6 +42794,270 @@ void Phase188()
     printf("[CXX] PASS phase188: <iostream> objects over the Current spine\n");
 }
 
+// ── phase189/190 fixtures: Nameplate and <stacktrace> ──────────────────────
+//
+// extern "C" throughout, and that is the point: the table stores names exactly
+// as the linker wrote them, so a C-linkage fixture lets these tests assert the
+// name they expect instead of asserting against a mangling nobody can read.
+
+extern "C" [[gnu::noinline]] int P189NamedLeaf(int x)
+{
+    __asm__ volatile("" ::: "memory");
+    return x + 1;
+}
+
+extern "C" [[gnu::noinline]] std::stacktrace P189Inner()
+{
+    return std::stacktrace::current();
+}
+
+extern "C" [[gnu::noinline]] std::stacktrace P189Outer()
+{
+    std::stacktrace st = P189Inner();
+    __asm__ volatile("" ::: "memory");
+    return st;
+}
+
+// Both traces are taken from the SAME frame, so everything above this
+// function is the identical chain of return addresses in both — which is what
+// makes the skip assertion exact rather than approximate.
+extern "C" [[gnu::noinline]] void P189SkipPair(std::stacktrace *a, std::stacktrace *b)
+{
+    *a = std::stacktrace::current(0);
+    __asm__ volatile("" ::: "memory");
+    *b = std::stacktrace::current(1);
+}
+
+bool P189Starts(const std::string &s, const char *prefix)
+{
+    const size_t n = __builtin_strlen(prefix);
+    return s.size() >= n && __builtin_memcmp(s.data(), prefix, n) == 0;
+}
+
+int g_p189_datum = 7;   // a .data address: above every function in the image
+
+void Phase189()
+{
+    using namespace std;
+
+    static_assert(__cpp_lib_stacktrace == 202011L, "phase189 FTM value");
+
+    // ── (A) Nameplate, the layer underneath ────────────────────────────────
+    Check(nameplate_count() > 0, "phase189 the image carries a Nameplate");
+
+    NameplateSite site{};
+    const uintptr_t leaf = reinterpret_cast<uintptr_t>(&P189NamedLeaf);
+
+    Check(nameplate_lookup(leaf, &site) == 1, "phase189 a function address resolves");
+    Check(string_view(site.Name) == "P189NamedLeaf", "phase189 by its own name");
+    Check(site.Start == leaf && site.Offset == 0, "phase189 at offset zero");
+
+    // ENDBR64 alone is four bytes, so +3 is inside the function under any
+    // codegen this tree can produce.
+    Check(nameplate_lookup(leaf + 3, &site) == 1 && site.Offset == 3 &&
+              string_view(site.Name) == "P189NamedLeaf",
+          "phase189 an address inside the function keeps the name and reports the offset");
+
+    // Below everything the table describes, and above it. The second is the
+    // rule that matters: the nearest function is NOT the answer when the
+    // address is past its end, and a wrong name costs more than no name.
+    Check(nameplate_lookup(0, &site) == 0, "phase189 a null address names nothing");
+    Check(nameplate_lookup(0x10, &site) == 0, "phase189 an address below the table names nothing");
+    Check(nameplate_lookup(reinterpret_cast<uintptr_t>(&g_p189_datum), &site) == 0,
+          "phase189 an address past the last function names nothing");
+
+    // ── (B) stacktrace_entry ───────────────────────────────────────────────
+    static_assert(is_same_v<stacktrace_entry::native_handle_type, uintptr_t>,
+                  "phase189 native_handle_type");
+    static_assert(is_trivially_copyable_v<stacktrace_entry>, "phase189 entry is trivially copyable");
+    static_assert(!is_convertible_v<stacktrace_entry, bool>, "phase189 operator bool is explicit");
+
+    constexpr stacktrace_entry empty{};
+    static_assert(empty.native_handle() == 0, "phase189 default entry holds no address");
+    static_assert(!static_cast<bool>(empty), "phase189 default entry is false");
+    static_assert(empty == stacktrace_entry{}, "phase189 default entries compare equal");
+    static_assert((empty <=> stacktrace_entry{}) == strong_ordering::equal,
+                  "phase189 and order equal");
+    static_assert(is_same_v<decltype(empty <=> empty), strong_ordering>,
+                  "phase189 the ordering is strong");
+
+    Check(empty.description().empty(), "phase189 an empty entry describes nothing");
+    Check(empty.source_file().empty(), "phase189 source_file is empty — no .debug_line ships");
+    Check(empty.source_line() == 0, "phase189 source_line is zero for the same reason");
+    Check(to_string(empty) == "<unknown>", "phase189 an empty entry prints <unknown>");
+
+    // ── (C) end to end: a trace names the functions it walked ──────────────
+    const stacktrace st = P189Outer();
+    Check(st.size() >= 3, "phase189 the trace reached at least three frames");
+
+    if (st.size() >= 3) {
+        const string d0 = st[0].description();
+        const string d1 = st[1].description();
+
+        Check(P189Starts(d0, "P189Inner"),
+              "phase189 frame 0 is the function that called current(), not current() itself");
+        Check(P189Starts(d1, "P189Outer"), "phase189 frame 1 is its caller");
+        Check(d0.find('+') != string::npos,
+              "phase189 the description carries an offset into the function");
+
+        // The address is a RETURN address, so it points past the call and
+        // therefore strictly inside the function that made it.
+        Check(st[0].native_handle() > reinterpret_cast<uintptr_t>(&P189Inner),
+              "phase189 the handle is an address inside that function");
+        Check(st[1].native_handle() > reinterpret_cast<uintptr_t>(&P189Outer),
+              "phase189 and so is the caller's");
+
+        // Frame 2 is Phase189 itself — a C++ function, so its name comes back
+        // mangled, which is the documented behaviour rather than a defect.
+        const string d2 = st[2].description();
+        Check(!d2.empty() && d2[0] == '_' && d2[1] == 'Z',
+              "phase189 a C++ frame is named, and named mangled");
+    }
+
+    printf("[CXX] PASS phase189: Nameplate + stacktrace_entry (%u names)\n",
+           nameplate_count());
+}
+
+void Phase190()
+{
+    using namespace std;
+
+    // ── (A) container surface [stacktrace.basic] ───────────────────────────
+    static_assert(is_same_v<stacktrace, basic_stacktrace<allocator<stacktrace_entry>>>,
+                  "phase190 the alias");
+    static_assert(is_same_v<stacktrace::value_type, stacktrace_entry>, "phase190 value_type");
+    static_assert(is_same_v<stacktrace::const_reference, const stacktrace_entry &>,
+                  "phase190 const_reference");
+    static_assert(is_same_v<stacktrace::iterator, stacktrace::const_iterator>,
+                  "phase190 iterator IS const_iterator");
+    static_assert(random_access_iterator<stacktrace::const_iterator>,
+                  "phase190 the iterator is random access");
+    static_assert(is_same_v<stacktrace::difference_type, ptrdiff_t>, "phase190 difference_type");
+    static_assert(is_nothrow_move_constructible_v<stacktrace>, "phase190 move ctor is noexcept");
+    static_assert(noexcept(stacktrace::current()), "phase190 current() is noexcept");
+
+    const stacktrace st = P189Outer();
+    Check(!st.empty() && st.size() >= 3, "phase190 a captured trace is non-empty");
+    Check(st.max_size() > st.size(), "phase190 max_size exceeds it");
+    Check(static_cast<size_t>(st.end() - st.begin()) == st.size(), "phase190 iterators span it");
+    Check(&st[0] == st.begin(), "phase190 operator[] and begin agree");
+    Check(*st.rbegin() == st[st.size() - 1], "phase190 rbegin is the last frame");
+    Check(st.at(0) == st[0], "phase190 at agrees with operator[]");
+
+    bool threw = false;
+    try {
+        (void)st.at(st.size());
+    } catch (const out_of_range &) {
+        threw = true;
+    }
+    Check(threw, "phase190 at throws out_of_range past the end");
+
+    // ── (B) copy, move, swap, compare ──────────────────────────────────────
+    stacktrace copy = st;
+    Check(copy == st, "phase190 a copy compares equal");
+    Check((copy <=> st) == strong_ordering::equal, "phase190 and orders equal");
+    Check(copy.begin() != st.begin(), "phase190 while owning its own frames");
+
+    stacktrace moved = std::move(copy);
+    Check(moved == st, "phase190 a move keeps the frames");
+    Check(copy.empty(), "phase190 and empties the source");
+
+    stacktrace assigned;
+    assigned = st;
+    Check(assigned == st, "phase190 copy assignment");
+    assigned = std::move(moved);
+    Check(assigned == st, "phase190 move assignment");
+
+    stacktrace lhs = st, rhs;
+    lhs.swap(rhs);
+    Check(lhs.empty() && rhs == st, "phase190 member swap");
+    swap(lhs, rhs);
+    Check(rhs.empty() && lhs == st, "phase190 free swap");
+
+    const stacktrace shorter = stacktrace::current(0, 1);
+    Check(shorter.size() == 1, "phase190 max_depth caps the trace");
+    Check((shorter <=> st) == strong_ordering::less,
+          "phase190 a shorter trace orders before a longer one");
+    Check(!(shorter == st), "phase190 and is not equal to it");
+    Check(stacktrace{} == stacktrace{}, "phase190 two empty traces are equal");
+
+    // ── (C) skip, measured exactly ─────────────────────────────────────────
+    stacktrace a, b;
+    P189SkipPair(&a, &b);
+    Check(a.size() == b.size() + 1, "phase190 skip drops exactly one frame");
+    if (a.size() >= 2 && !b.empty())
+        Check(a[1].native_handle() == b[0].native_handle(),
+              "phase190 and it is the frame it should have dropped");
+    Check(stacktrace::current(1000000).empty(),
+          "phase190 skipping past the whole stack yields an empty trace");
+
+    // ── (D) presentation ───────────────────────────────────────────────────
+    const string s = to_string(st);
+    Check(P189Starts(s, "   0# "), "phase190 to_string numbers the frames");
+    Check(s.find("\n   1# ") != string::npos, "phase190 one frame per line");
+    Check(s.back() != '\n', "phase190 with no trailing newline");
+    Check(s.find("P189Inner") != string::npos, "phase190 and it names them");
+    Check(to_string(st[0]).find("[0x") != string::npos,
+          "phase190 an entry prints its address in brackets");
+    Check(to_string(stacktrace{}).empty(), "phase190 an empty trace prints nothing");
+
+    ostringstream os;
+    os << st[0];
+    Check(os.str() == to_string(st[0]), "phase190 operator<< is to_string, as specified");
+    ostringstream os2;
+    os2 << st;
+    Check(os2.str() == s, "phase190 and so is the whole-trace one");
+
+    Check(format("{}", st[0]) == to_string(st[0]), "phase190 format matches to_string");
+    const string padded = format("{:>80}", st[0]);
+    Check(padded.size() == 80 && padded[0] == ' ', "phase190 width and align are honoured");
+    const string filled = format("{:*<80}", st[0]);
+    Check(filled.size() == 80 && filled.back() == '*', "phase190 fill too");
+    Check(format("{}", stacktrace{}).empty(), "phase190 an empty trace formats empty");
+
+    // [stacktrace.format] gives the grammar as fill-and-align and width, and
+    // nothing else. Runtime strings are the only way to test the rejection —
+    // a literal one is a compile error, which is the point of it.
+    for (const char *bad : {"{:.3}", "{:d}", "{:#}", "{:+}", "{:05}", "{:L}"}) {
+        bool rejected = false;
+        try {
+            (void)vformat(string_view(bad), make_format_args(st));
+        } catch (const format_error &) {
+            rejected = true;
+        }
+        Check(rejected, "phase190 a spec outside the stacktrace grammar is refused");
+    }
+
+    // ── (E) hash ───────────────────────────────────────────────────────────
+    Check(hash<stacktrace>{}(st) == hash<stacktrace>{}(assigned),
+          "phase190 equal traces hash equal");
+    Check(hash<stacktrace_entry>{}(st[0]) == hash<stacktrace_entry>{}(st[0]),
+          "phase190 an entry hashes stably");
+    Check(hash<stacktrace_entry>{}(st[0]) != hash<stacktrace_entry>{}(st[1]),
+          "phase190 different frames hash apart");
+
+    // ── (F) allocators, including pmr ──────────────────────────────────────
+    CountingResource res;
+    {
+        pmr::stacktrace pst = pmr::stacktrace::current(0, 8, &res);
+        Check(!pst.empty(), "phase190 a pmr trace captures frames");
+        Check(res.allocs > 0, "phase190 through the resource it was given");
+        Check(pst.get_allocator().resource() == &res, "phase190 and remembers it");
+
+        // The raw frame buffer is taken from the same resource and handed
+        // back before current() returns: an allocator-aware type has no
+        // business reaching for the global heap behind its owner's back.
+        Check(res.frees > 0, "phase190 and returns its scratch to it");
+
+        pmr::stacktrace copy2(pst, &res);
+        Check(copy2 == pst, "phase190 an allocator-extended copy compares equal");
+    }
+    Check(res.allocs == res.frees, "phase190 the pmr trace freed everything it took");
+
+    printf("[CXX] PASS phase190: basic_stacktrace (%u frames deep)\n",
+           static_cast<unsigned>(st.size()));
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -43005,6 +43268,8 @@ int main()
     Phase186();
     Phase187();
     Phase188();
+    Phase189();
+    Phase190();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
