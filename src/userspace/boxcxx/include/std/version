@@ -77,7 +77,7 @@
 #include <__bits/version_flat_set>        // <flat_set>
 #include <__bits/version_format>          // <format>
 #include <__bits/version_functional>      // <functional>
-#include <__bits/version_iostreams>       // <ios>/<streambuf>/<iomanip>
+#include <__bits/version_iostreams>       // <ios>/<iomanip>/<sstream>/<fstream>
 #include <__bits/version_inplace_vector>  // <inplace_vector>
 #include <__bits/version_iterator>        // <iterator> (+ <array>)
 #include <__bits/version_mdspan>          // <mdspan>
