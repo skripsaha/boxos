@@ -55,6 +55,7 @@ typedef struct Current Current;
 /* Open flags. */
 #define CURRENT_CREATE      0x10u  /* create the backing if absent (stream / file writer) */
 #define CURRENT_NONBLOCK    0x20u  /* put/take never block: -ERR_WOULD_BLOCK when full/empty */
+#define CURRENT_TRUNCATE    0x40u  /* file writer: discard existing content at open */
 
 /* Capability bits — query with current_caps(). Honest per-backing. */
 #define CURRENT_CAP_READ          0x01u  /* current_read / current_take usable */
@@ -63,6 +64,7 @@ typedef struct Current Current;
 #define CURRENT_CAP_BACKPRESSURE  0x08u  /* writer can block until the consumer catches up */
 #define CURRENT_CAP_CLOSEABLE     0x10u  /* a reader can observe end-of-stream (CURRENT_CLOSED) */
 #define CURRENT_CAP_SEEKABLE      0x20u  /* random access by byte offset (current_seek) */
+#define CURRENT_CAP_RESIZABLE     0x40u  /* extent is knowable and shrinkable (current_size/resize) */
 
 /* Reader sentinel: current_read / current_take return CURRENT_CLOSED (0) when
  * no more data will arrive — the writer closed a stream, or a file's content
@@ -82,7 +84,12 @@ typedef struct Current Current;
 
 /* Open (or, with CURRENT_CREATE, create) the Current named `tag`.
  *
- *   role      : CURRENT_READ or CURRENT_WRITE (exactly one).
+ *   role      : CURRENT_READ or CURRENT_WRITE — exactly one, EXCEPT on the
+ *               file backing, which also accepts CURRENT_READ|CURRENT_WRITE.
+ *               A Brook end is a producer or a consumer and the two open
+ *               different objects; a file is one object with one cursor that
+ *               can be read and written. Screen/log take WRITE only, keyboard
+ *               READ only, a stream exactly one.
  *   item_size : framed backings (stream) — bytes per item (>= 1; values < 8
  *               are padded to the Brook minimum transparently, <= 65536).
  *               byte backings (screen/keyboard/log/file) — pass 0.
@@ -157,6 +164,23 @@ int current_take_for(Current *c, void *item, uint32_t ms);
  * ------------------------------------------------------------------------ */
 int      current_seek(Current *c, uint64_t offset);
 uint64_t current_tell(const Current *c);
+
+/* --------------------------------------------------------------------------
+ * Extent (CURRENT_CAP_RESIZABLE backings — file). A seekable channel that
+ * could not say how long it is, or shorten itself, was only half a channel:
+ * every shorter rewrite left the old tail readable behind the new content.
+ * ------------------------------------------------------------------------ */
+
+/* Current length in bytes, or a negative -ERR_* (-ERR_INVALID_OPERATION when
+ * the backing has no knowable extent — a stream, the screen, the keyboard). */
+int64_t current_size(const Current *c);
+
+/* Discard everything past `new_size`. SHRINK ONLY — see file_truncate for why
+ * growth is refused rather than served. Returns OK, -ERR_INVALID_OPERATION on
+ * a backing without an extent or one opened for reading, or the underlying
+ * -ERR_*. The byte cursor is clamped into the new range so a writer cannot be
+ * left pointing past the end. */
+int current_resize(Current *c, uint64_t new_size);
 
 /* --------------------------------------------------------------------------
  * Introspection

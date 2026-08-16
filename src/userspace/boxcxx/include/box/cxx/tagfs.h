@@ -260,6 +260,19 @@ public:
         return id_ ? box::_detail::from_status(::anchor(id_))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
+    // Drop everything past `n` bytes. SHRINK ONLY: growing lands in the error
+    // arm as invalid_argument, because TagFS does not zero freshly allocated
+    // blocks and growing here would hand back the previous tenant's content —
+    // a file grows by being written. Refused on a snapshotted file
+    // (invalid_operation): a block not yet copied since the snapshot was taken
+    // is still the snapshot's only copy. Refused on a "system"/"boot" file
+    // (permission_denied), like remove(). Publishes a TRUNCATED Touch event on
+    // every tag of the file.
+    box::status truncate(std::uint64_t n)
+    {
+        return id_ ? box::_detail::from_status(::file_truncate(id_, n))
+                   : std::unexpected(box::error{box::errc::invalid_argument});
+    }
 
     // ── random-access byte I/O, bound to this file_id ────────────────────
     // On success the byte count transferred; the error arm carries the recovered

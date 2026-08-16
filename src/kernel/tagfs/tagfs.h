@@ -432,6 +432,13 @@ int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t t
 int  tagfs_delete_file(uint32_t file_id);
 int  tagfs_rename_file(uint32_t file_id, const char* new_filename);
 
+/* Drop everything past `new_size`. SHRINK ONLY — a request to grow is
+ * refused (-ERR_INVALID_ARGUMENT) because freshly allocated blocks are not
+ * zeroed, and refused outright on a snapshotted file (-ERR_INVALID_OPERATION)
+ * because a not-yet-copied block is still the snapshot's only copy. Returns 0
+ * or a negative -ERR_*. See the comment above the definition. */
+int  tagfs_truncate_file(uint32_t file_id, uint64_t new_size);
+
 int  tagfs_add_tag(uint32_t file_id, uint16_t tag_id);
 int  tagfs_remove_tag(uint32_t file_id, uint16_t tag_id);
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id);

@@ -10,9 +10,10 @@
  *   ios_base::failure          ctors + dtor (system_error-derived)
  *   iostream_category()        error_category singleton
  *   ios_base::xalloc()         backed by a real atomic<int> global
- *   ios_base::Init             ctor/dtor (no-ops — see <ios>'s header
- *                               comment: BoxOS ships no cin/cout to
- *                               sequence)
+ *
+ * ios_base::Init is NOT here. Since Ф36 it sequences something real — the
+ * four stream objects — so it lives with them, in iostream.cpp. Putting it
+ * here would make every user of <ios> drag the console streams in.
  */
 
 #include <ios>
@@ -64,8 +65,5 @@ int ios_base::xalloc() noexcept
 {
     return g_ios_xalloc_counter.fetch_add(1, memory_order_relaxed);
 }
-
-ios_base::Init::Init() {}
-ios_base::Init::~Init() {}
 
 } // namespace std

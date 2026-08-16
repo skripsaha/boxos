@@ -17,6 +17,12 @@
 #define STORAGE_OBJ_DELETE      0x08
 #define STORAGE_OBJ_RENAME      0x09
 #define STORAGE_OBJ_GET_INFO    0x0A
+/* obj.truncate — drop everything past a byte length. params =
+ * [u32 file_id][u64 new_size]. Shrink only: growing is refused, because
+ * TagFS does not zero freshly allocated blocks and a grow would hand back
+ * the allocator's previous tenant. The operation TagFS lacked until <fstream>
+ * needed it — ios_base::out alone means "w", and "w" truncates. */
+#define STORAGE_OBJ_TRUNCATE    0x0B
 #define STORAGE_CONTEXT_SET     0x10
 #define STORAGE_CONTEXT_CLEAR   0x11
 #define STORAGE_CONTEXT_GET     0x12

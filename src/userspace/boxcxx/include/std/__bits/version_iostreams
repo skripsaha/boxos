@@ -41,3 +41,11 @@
 #  define __cpp_lib_sstream_from_string_view 202306L
 #endif
 #undef BOXCXX_OWNS_sstream_from_string_view
+// Ф36: <fstream> exists, and its native handle is the thing a BoxOS program
+// can actually use for more than a stream does -- the Current itself, not an
+// fd, because BoxOS has no descriptor table. P1759R6.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_fstream_native_handle)) && \
+    !defined(__cpp_lib_fstream_native_handle)
+#  define __cpp_lib_fstream_native_handle 202306L
+#endif
+#undef BOXCXX_OWNS_fstream_native_handle

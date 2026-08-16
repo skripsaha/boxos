@@ -8,12 +8,15 @@
 // (vector<long>/vector<void*>/a small callback list), never a fixed-size
 // array — mandated by ios_base's synopsis right now, not speculative.
 //
-// sync_with_stdio and ios_base::Init are honest no-ops: BoxOS has no C
-// <stdio.h> buffer for the former to (de)synchronize with (boxlib's own
-// printf in print.c is an unrelated subsystem no stream in this header
-// ever touches), and no cin/cout globals for the latter to sequence
-// (BoxOS never ships <iostream> or the four global stream objects — see
-// CONFORMANCE note at the bottom).
+// sync_with_stdio is an honest no-op: BoxOS has no C <stdio.h> buffer to
+// (de)synchronize with (boxlib's own printf in print.c is an unrelated
+// subsystem no stream in this header ever touches), so there is nothing for
+// the flag to switch on or off. It returns the previous value and is
+// otherwise inert.
+//
+// ios_base::Init is NOT a no-op any more. Since Ф36 there are four global
+// stream objects for it to sequence — see <iostream>. Its ctor/dtor are
+// defined in src/runtime/iostream.cpp, with the objects they answer for.
 #ifndef BOXCXX_IOS
 #define BOXCXX_IOS
 
@@ -667,9 +670,14 @@ inline ios_base &defaultfloat(ios_base &s)
 
 } // namespace std
 
-// CONFORMANCE: BoxOS never ships <iostream> or the cin/cout/cerr/clog
-// global objects (BoxOS-native I/O is box::current<T>/Current — see the
-// I/O spine design). ios_base::Init exists only so generic code that
-// defensively constructs one still compiles; it has nothing to sequence.
+// CONFORMANCE: this note used to say BoxOS would never ship <iostream> or
+// the cin/cout/cerr/clog objects. Ф36 reversed that decision — they exist,
+// bound to the Current spine rather than to a descriptor table, and
+// ios_base::Init now sequences them for real. What is still true is the
+// reason the exclusion was made: BoxOS-native I/O is box::current<T>, and
+// these four objects are the standard's names for three of its channels, not
+// a second I/O model. The differences that follow from that (std::cin has no
+// end of file; std::cerr goes to the screen, not to the serial log) are
+// documented in <iostream> and in CONFORMANCE §1.1.
 
 #endif // BOXCXX_IOS

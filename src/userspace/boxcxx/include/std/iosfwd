@@ -101,6 +101,14 @@ template <class CharT, class Traits = char_traits<CharT>, class Allocator = allo
 class basic_ostringstream;
 template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
 class basic_stringstream;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_filebuf;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ifstream;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ofstream;
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_fstream;
 
 class ios_base;
 class locale; // full definition in <locale>
@@ -114,11 +122,15 @@ using stringbuf     = basic_stringbuf<char>;
 using istringstream = basic_istringstream<char>;
 using ostringstream = basic_ostringstream<char>;
 using stringstream  = basic_stringstream<char>;
+using filebuf       = basic_filebuf<char>;
+using ifstream      = basic_ifstream<char>;
+using ofstream      = basic_ofstream<char>;
+using fstream       = basic_fstream<char>;
 
 // Deliberately NOT provided: wios/wstreambuf/wistream/wostream/wiostream/
-// wstringbuf/wistringstream/wostringstream/wstringstream, and the
-// char8_t/char16_t/char32_t stream typedefs — wide/multibyte streams are
-// a documented, out-of-scope exclusion.
+// wstringbuf/wistringstream/wostringstream/wstringstream, wfilebuf and the
+// wide fstream typedefs, and the char8_t/char16_t/char32_t stream typedefs —
+// wide/multibyte streams are a documented, out-of-scope exclusion.
 
 } // namespace std
 
