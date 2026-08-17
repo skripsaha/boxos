@@ -1,4 +1,5 @@
 #include "scheduler.h"
+#include "nightwatch.h"
 #include "use_context.h"
 #include "klib.h"
 #include "process.h"
@@ -969,6 +970,11 @@ void schedule(void *frame_ptr)
         __atomic_store_n(&current->on_cpu, (int16_t)-1, __ATOMIC_RELEASE);
     }
     spin_unlock(&s->scheduler_lock);
+
+    /* Nightwatch: real work dispatched here, so this core is no longer idle
+     * and a later stall counts as a new episode. One byte store. */
+    if (!process_is_idle(next))
+        nightwatch_core_busy(amp_get_core_index());
 
     g_sched_stats.context_switches++;
 
