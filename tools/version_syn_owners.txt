@@ -194,6 +194,7 @@ __cpp_lib_smart_ptr_owner_equality|memory
 __cpp_lib_source_location|source_location
 __cpp_lib_spans|span
 __cpp_lib_span|span
+__cpp_lib_spanstream|spanstream
 __cpp_lib_ssize|iterator
 __cpp_lib_sstream_from_string_view|sstream
 __cpp_lib_stacktrace|stacktrace

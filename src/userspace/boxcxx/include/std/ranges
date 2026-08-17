@@ -74,8 +74,11 @@ concept viewable_range =
 
 namespace ranges {
 
-template <typename C, typename T>
-inline constexpr bool enable_borrowed_range<basic_string_view<C, T>> = true;
+// basic_string_view's enable_borrowed_range is NOT here: [string.view.synop]
+// puts it in <string_view>, and Ф38 measured what keeping it here cost --
+// a translation unit with <string_view> alone answered FALSE. span's stays,
+// because <span> includes this header rather than the other way round, so
+// declaring it here reaches every translation unit that can name a span.
 template <typename T, size_t E>
 inline constexpr bool enable_borrowed_range<span<T, E>> = true;
 

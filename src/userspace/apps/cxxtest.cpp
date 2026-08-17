@@ -543,6 +543,7 @@
 #include <exception>
 #include <initializer_list>
 #include <span>
+#include <spanstream>
 #include <sstream>
 #include <iomanip>
 #include <stack>
@@ -29589,9 +29590,7 @@ static_assert(__cpp_lib_ranges_as_const == 202311L, "phase131: __cpp_lib_ranges_
 static_assert(__cpp_lib_robust_nonmodifying_seq_ops == 201304L, "phase131: __cpp_lib_robust_nonmodifying_seq_ops — closed by Ф31e");
 // (scoped_lock joined them in Ф31e-d, once scoped_lock<Mutex> gained the
 //  mutex_type [thread.lock.scoped] asks for.)
-#ifdef __cpp_lib_spanstream
-#  error "phase131: __cpp_lib_spanstream must stay undefined"
-#endif
+static_assert(__cpp_lib_spanstream == 202106L, "phase131: __cpp_lib_spanstream — closed by Ф38");
 static_assert(__cpp_lib_stacktrace == 202011L, "phase131: __cpp_lib_stacktrace — closed by Ф37");
 static_assert(__cpp_lib_stdatomic_h == 202011L, "phase131: __cpp_lib_stdatomic_h -- <stdatomic.h> built in F34");
 static_assert(__cpp_lib_stdbit_h == 202603L, "phase131: __cpp_lib_stdbit_h -- F34");
@@ -43273,6 +43272,221 @@ void Phase192()
     printf("[CXX] PASS phase192: <typeindex>\n");
 }
 
+// ── phase193: <spanstream> ([span.streams], P0448R4) ────────────────────
+// The header's whole reason to exist is that it never allocates, so the
+// checks that matter are the ones a growing buffer would never need:
+// that span() reports what was WRITTEN and not what is available, that a
+// write past the end fails the stream instead of the memory after it, and
+// that `end` means different things to a buffer being read and a buffer
+// being written. Every buffer below is bracketed by guard bytes; if the
+// stream ever wrote one byte past its span, the guard says so.
+void Phase193()
+{
+    using namespace std;
+    using PosT = spanbuf::pos_type;
+    using OffT = spanbuf::off_type;
+    const PosT kFail = PosT(OffT(-1));
+
+    static_assert(is_same_v<spanbuf, basic_spanbuf<char>>);
+    static_assert(is_same_v<ispanstream, basic_ispanstream<char>>);
+    static_assert(is_same_v<ospanstream, basic_ospanstream<char>>);
+    static_assert(is_same_v<spanstream, basic_spanstream<char>>);
+    static_assert(!is_copy_constructible_v<spanbuf>);
+    static_assert(!is_copy_assignable_v<spanbuf>);
+    static_assert(is_move_constructible_v<spanbuf>);
+    static_assert(!is_copy_constructible_v<ospanstream>);
+    static_assert(is_base_of_v<basic_streambuf<char>, spanbuf>);
+    static_assert(is_base_of_v<basic_istream<char>, ispanstream>);
+    static_assert(is_base_of_v<basic_ostream<char>, ospanstream>);
+    static_assert(is_base_of_v<basic_iostream<char>, spanstream>);
+    // [ispanstream.cons]: the range constructor takes only ranges that do
+    // NOT convert to span<char> -- otherwise it would compete with the
+    // span overload for every ordinary buffer.
+    static_assert(is_constructible_v<ispanstream, string_view>);
+    static_assert(!is_constructible_v<ospanstream, string_view>);
+
+    // ---- span() is the written prefix in out mode, the buffer otherwise --
+    {
+        char raw[16];
+        for (char &c : raw) c = '#';
+
+        spanbuf out(span<char>(raw, 8), ios_base::out);
+        Check(out.span().size() == 0, "phase193 an out spanbuf starts with nothing written");
+        Check(out.sputn("abc", 3) == 3, "phase193 sputn writes into the caller's buffer");
+        Check(out.span().size() == 3 && out.span().data() == raw,
+              "phase193 span() is the written prefix, not the whole buffer");
+        Check(raw[0] == 'a' && raw[2] == 'c', "phase193 the bytes landed in the caller's array");
+        Check(raw[3] == '#' && raw[8] == '#', "phase193 nothing past the write was touched");
+
+        spanbuf in(span<char>(raw, 8), ios_base::in);
+        Check(in.span().size() == 8, "phase193 an in spanbuf reports the whole buffer");
+    }
+
+    // ---- a fixed buffer refuses to grow, and says so ----------------------
+    // These three are the checks that found a defect one layer down: every
+    // formatted inserter funnels through one width/fill engine in <ostream>,
+    // and that engine threw away what sputn/sputc told it. Nothing had ever
+    // noticed, because until <spanstream> no sink in the tree could refuse
+    // -- a stringbuf grows, a filebuf grows, the screen always accepts. So
+    // the string form, the number form and the fill are each checked: they
+    // are three different call sites into the same engine.
+    {
+        char raw[16];
+        for (char &c : raw) c = '#';
+        ospanstream os(span<char>(raw, 8));
+        os << "0123456789";
+        Check(os.bad(), "phase193 overrunning a fixed buffer fails the stream");
+        Check(raw[8] == '#' && raw[15] == '#',
+              "phase193 ...and does not write one byte past the span");
+    }
+    {
+        char raw[8];
+        for (char &c : raw) c = '#';
+        ospanstream os(span<char>(raw, 4));
+        os << 1234567;
+        Check(os.bad(), "phase193 a number too long for the buffer fails the stream");
+        Check(raw[4] == '#', "phase193 ...and stops at the end of the span");
+    }
+    {
+        char raw[8];
+        for (char &c : raw) c = '#';
+        ospanstream os(span<char>(raw, 4));
+        os << setw(10) << 'x';
+        Check(os.bad(), "phase193 padding that does not fit fails the stream too");
+        Check(raw[4] == '#', "phase193 ...and the fill stops at the end of the span");
+    }
+
+    // ---- [ospanstream.cons] ORs in `out`, not `in` ------------------------
+    // libstdc++ 16.1 ORs ios_base::in here, which is invisible at the
+    // default argument and leaves the stream with no put area for any
+    // other mode. This is the check that tells the two apart.
+    {
+        char raw[8];
+        for (char &c : raw) c = '#';
+        ospanstream os(span<char>(raw, 8), ios_base::in);
+        os << "ab";
+        Check(os.good() && os.span().size() == 2 && raw[0] == 'a' && raw[1] == 'b',
+              "phase193 an ospanstream is open for output whatever mode it is handed");
+    }
+
+    // ---- seekoff: the three bases, and the two refusals --------------------
+    {
+        char raw[10];
+        for (char &c : raw) c = '.';
+        spanbuf sb(span<char>(raw, 10), ios_base::in | ios_base::out);
+
+        Check(sb.pubseekoff(0, ios_base::cur, ios_base::in | ios_base::out) == kFail,
+              "phase193 a relative seek of both sequences at once is refused");
+        Check(sb.pubseekoff(4, ios_base::beg, ios_base::in) == PosT(4),
+              "phase193 an absolute seek inside the buffer succeeds");
+        Check(sb.pubseekoff(11, ios_base::beg, ios_base::in) == kFail,
+              "phase193 a seek past the end of the buffer is refused");
+        Check(sb.pubseekoff(-1, ios_base::beg, ios_base::in) == kFail,
+              "phase193 a seek before the start is refused");
+        Check(sb.pubseekoff(-2, ios_base::end, ios_base::in) == PosT(8),
+              "phase193 for the input sequence, `end` is the end of the buffer");
+        Check(sb.pubseekpos(PosT(2), ios_base::in) == PosT(2),
+              "phase193 seekpos is seekoff from the beginning");
+        Check(sb.sgetc() == '.', "phase193 the get pointer really moved");
+    }
+    {
+        // The clause worth having a test of its own: in an OUT-ONLY buffer
+        // `end` is the write position, because the bytes after it were
+        // never written and seeking to them would mean seeking to garbage.
+        char raw[10];
+        for (char &c : raw) c = '.';
+        spanbuf sb(span<char>(raw, 10), ios_base::out);
+        sb.sputn("abc", 3);
+        Check(sb.pubseekoff(0, ios_base::end, ios_base::out) == PosT(3),
+              "phase193 for an out-only spanbuf, `end` is what has been written");
+        // Naming the input sequence of a buffer that has none is refused,
+        // not silently answered: its next pointer is null and the offset
+        // would not be zero, which is one of the standard's own failures.
+        Check(sb.pubseekoff(0, ios_base::end, ios_base::in | ios_base::out) == kFail,
+              "phase193 ...and naming a sequence this buffer never opened is refused");
+
+        char both[10];
+        for (char &c : both) c = '.';
+        spanbuf rw(span<char>(both, 10), ios_base::in | ios_base::out);
+        rw.sputn("abc", 3);
+        Check(rw.pubseekoff(0, ios_base::end, ios_base::in | ios_base::out) == PosT(10),
+              "phase193 with both sequences open, `end` is the whole buffer");
+    }
+
+    {
+        // [spanbuf.virtuals] fails a seek whose next pointer is null and
+        // whose offset is not zero -- which is the ONLY thing standing
+        // between "seek the put sequence of a read-only buffer" and
+        // computing nullptr + 3. libstdc++ 16.1 omits the test and does
+        // exactly that; this is the check that says boxcxx does not.
+        char raw[10];
+        for (char &c : raw) c = '.';
+        spanbuf sb(span<char>(raw, 10), ios_base::in);
+        Check(sb.pubseekoff(3, ios_base::beg, ios_base::out) == kFail,
+              "phase193 seeking a sequence the buffer never opened is refused");
+        Check(sb.pubseekoff(0, ios_base::beg, ios_base::out) == PosT(0),
+              "phase193 ...though a seek to zero asks for no arithmetic and is not");
+    }
+
+    // ---- setbuf re-points the buffer --------------------------------------
+    {
+        char a[4], b[6];
+        for (char &c : a) c = '#';
+        for (char &c : b) c = '#';
+        spanbuf sb(span<char>(a, 4), ios_base::out);
+        sb.sputn("xy", 2);
+        Check(sb.pubsetbuf(b, 6) == &sb, "phase193 setbuf returns the buffer itself");
+        sb.sputn("zw", 2);
+        Check(b[0] == 'z' && b[1] == 'w' && a[2] == '#',
+              "phase193 setbuf moves the stream onto the new span");
+        Check(sb.span().size() == 2, "phase193 ...and restarts the written prefix");
+    }
+
+    // ---- ispanstream over a read-only range -------------------------------
+    {
+        string_view text = "42 7 rest";
+        ispanstream is(text);
+        int a = 0, b = 0;
+        is >> a >> b;
+        Check(a == 42 && b == 7, "phase193 an ispanstream reads out of a string_view");
+        Check(is.span().size() == text.size(),
+              "phase193 an in-only stream reports the whole range");
+        string tail;
+        is >> tail;
+        Check(tail == "rest", "phase193 ...and keeps its position across extractions");
+    }
+
+    // ---- move keeps the buffer AND repoints rdbuf --------------------------
+    {
+        char raw[16];
+        for (char &c : raw) c = '#';
+        ospanstream a(span<char>(raw, 16));
+        a << "xy";
+        ospanstream b(std::move(a));
+        Check(b.rdbuf() != a.rdbuf(),
+              "phase193 a moved-to stream owns its own spanbuf, not the source's");
+        b << "z";
+        Check(raw[2] == 'z' && b.span().size() == 3,
+              "phase193 a moved ospanstream writes on into the same buffer");
+    }
+
+    // ---- read and write through one spanstream -----------------------------
+    {
+        char raw[32];
+        for (char &c : raw) c = '\0';
+        spanstream ss(span<char>(raw, 32));
+        ss << 17 << ' ' << 42;
+        const size_t written = ss.span().size();
+        Check(written == 5, "phase193 a spanstream reports what it wrote");
+        ss.rdbuf()->pubseekoff(0, ios_base::beg, ios_base::in);
+        int x = 0, y = 0;
+        ss >> x >> y;
+        Check(x == 17 && y == 42, "phase193 ...and reads it back out of the same span");
+    }
+
+    printf("[CXX] PASS phase193: <spanstream>\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -43487,6 +43701,7 @@ int main()
     Phase190();
     Phase191();
     Phase192();
+    Phase193();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

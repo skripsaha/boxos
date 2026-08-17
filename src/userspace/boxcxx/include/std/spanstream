@@ -1,0 +1,430 @@
+// boxcxx — <spanstream>  ([span.streams], P0448R4)
+//
+// The stream family that owns no memory. A spanbuf writes into, and reads
+// out of, a buffer the caller already has — so formatting into a stack
+// array costs no allocation at all, which is the difference between
+// "iostreams are unusable here" and "iostreams are usable in an interrupt-
+// adjacent path". <sstream> is the same shape over a basic_string that
+// grows; this one cannot grow, and that single fact decides every design
+// question in the header:
+//
+//   * overflow / underflow / pbackfail are NOT overridden. The standard
+//     says outright that with a fixed buffer none of them "can provide
+//     useful behavior", and the inherited defaults already do the right
+//     thing: a write past the end fails the stream instead of scribbling.
+//     Only setbuf, seekoff and seekpos are virtual overrides here.
+//   * span() is not one accessor but two behaviours — the WRITTEN prefix
+//     in out mode, the WHOLE buffer otherwise. An ospanstream reporting
+//     the whole buffer would report uninitialised tail bytes as output.
+//
+// The one place boxcxx does not simply follow the reference implementation
+// is documented at PbumpBy below; the one place the reference is wrong is
+// documented at basic_ospanstream's constructor.
+#ifndef BOXCXX_SPANSTREAM
+#define BOXCXX_SPANSTREAM
+
+#include <__bits/ranges_core>   // ranges::borrowed_range
+#include <concepts>             // convertible_to
+#include <cstddef>
+#include <ios>
+#include <istream>
+#include <ostream>
+#include <span>
+#include <streambuf>
+#include <type_traits>
+#include <utility>
+
+// [version.syn] names this header as the owner of the macro below.
+#define BOXCXX_OWNS_spanstream
+#include <__bits/version_spanstream>
+
+namespace std {
+
+// ── basic_spanbuf<CharT,Traits> [spanbuf] ───────────────────────────────
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_spanbuf : public basic_streambuf<CharT, Traits> {
+    using __base = basic_streambuf<CharT, Traits>;
+
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    basic_spanbuf() : basic_spanbuf(ios_base::in | ios_base::out) {}
+
+    explicit basic_spanbuf(ios_base::openmode which)
+        : basic_spanbuf(std::span<CharT>(), which)
+    {
+    }
+
+    explicit basic_spanbuf(std::span<CharT> s,
+                           ios_base::openmode which = ios_base::in | ios_base::out)
+        : __mode(which)
+    {
+        span(s);
+    }
+
+    basic_spanbuf(const basic_spanbuf &) = delete;
+    basic_spanbuf &operator=(const basic_spanbuf &) = delete;
+
+    // [spanbuf.cons]: the moved-from buffer's state is implementation-
+    // defined, and leaving it ALONE is the honest choice for a type that
+    // owns nothing -- there is no resource whose ownership could have
+    // moved, so pretending otherwise would only cost the caller a buffer
+    // they still hold a span to. Same decision libstdc++ documents.
+    basic_spanbuf(basic_spanbuf &&rhs) : __base(rhs), __mode(rhs.__mode), __buf(rhs.__buf)
+    {
+    }
+
+    basic_spanbuf &operator=(basic_spanbuf &&rhs)
+    {
+        basic_spanbuf(std::move(rhs)).swap(*this);
+        return *this;
+    }
+
+    void swap(basic_spanbuf &rhs)
+    {
+        // Qualified on purpose: this function is itself named swap, and an
+        // unqualified call inside it finds the member first.
+        __base::swap(rhs);
+        std::swap(__mode, rhs.__mode);
+        std::swap(__buf, rhs.__buf);
+    }
+
+    // [spanbuf.members]. In out mode the answer is what has been WRITTEN,
+    // not what could be: pptr() is the high mark, and the bytes past it
+    // were never given a value by this stream.
+    [[nodiscard]] std::span<CharT> span() const noexcept
+    {
+        if (Has(__mode, ios_base::out))
+            return std::span<CharT>(this->pbase(), this->pptr());
+        return __buf;
+    }
+
+    void span(std::span<CharT> s) noexcept
+    {
+        __buf = s;
+        if (Has(__mode, ios_base::out)) {
+            this->setp(s.data(), s.data() + s.size());
+            if (Has(__mode, ios_base::ate)) PbumpBy(off_type(s.size()));
+        }
+        if (Has(__mode, ios_base::in)) this->setg(s.data(), s.data(), s.data() + s.size());
+    }
+
+protected:
+    basic_streambuf<CharT, Traits> *setbuf(CharT *s, streamsize n) override
+    {
+        // n < 0 violates the precondition, so any behaviour conforms --
+        // but the ONE behaviour that must not happen on a bare-metal
+        // system is converting it to a ~2^64-element span and handing the
+        // stream a licence to walk all of memory. Refuse instead.
+        span(n > 0 ? std::span<CharT>(s, size_t(n)) : std::span<CharT>());
+        return this;
+    }
+
+    // [spanbuf.virtuals]. baseoff is the standard's own three-case table;
+    // the only case worth naming is way == end, where the base is the
+    // WRITE position in an out-only buffer and the buffer size otherwise
+    // -- "the end" of a fixed buffer being read is its last byte, but
+    // "the end" of one being written is the last byte written.
+    pos_type seekoff(off_type off, ios_base::seekdir way,
+                     ios_base::openmode which = ios_base::in | ios_base::out) override
+    {
+        const pos_type kFail = pos_type(off_type(-1));
+        which &= (ios_base::in | ios_base::out);
+
+        off_type baseoff = 0;
+        if (way == ios_base::beg) {
+            baseoff = 0;
+        } else if (which == ios_base::out) {
+            baseoff = this->pptr() - this->pbase();
+        } else if (way == ios_base::cur) {
+            // Both sequences named plus a relative seek asks to move two
+            // independent positions by one offset: the standard makes it
+            // a failure rather than pick one.
+            if (which != ios_base::in) return kFail;
+            baseoff = this->gptr() - this->eback();
+        } else if (way == ios_base::end) {
+            baseoff = off_type(__buf.size());
+        } else {
+            return kFail;
+        }
+
+        off_type newoff = 0;
+        if (__builtin_add_overflow(baseoff, off, &newoff)) return kFail;
+        if (newoff < 0 || static_cast<size_t>(newoff) > __buf.size()) return kFail;
+        // A null next pointer can only be positioned at zero. This is the
+        // only thing between "seek the put sequence of a read-only buffer"
+        // and evaluating nullptr + newoff; libstdc++ 16.1 omits the test.
+        if (newoff != 0) {
+            if (Has(which, ios_base::in) && this->gptr() == nullptr) return kFail;
+            if (Has(which, ios_base::out) && this->pptr() == nullptr) return kFail;
+        }
+
+        if (Has(which, ios_base::in))
+            this->setg(this->eback(), this->eback() + newoff, this->egptr());
+        if (Has(which, ios_base::out)) {
+            this->setp(this->pbase(), this->epptr());
+            PbumpBy(newoff);
+        }
+        return pos_type(newoff);
+    }
+
+    pos_type seekpos(pos_type sp,
+                     ios_base::openmode which = ios_base::in | ios_base::out) override
+    {
+        return seekoff(off_type(sp), ios_base::beg, which);
+    }
+
+private:
+    // openmode is an enum class here, so a bit test is a comparison rather
+    // than a contextual conversion. Same helper <sstream> carries.
+    static bool Has(ios_base::openmode mode, ios_base::openmode bit) noexcept
+    {
+        return (mode & bit) != ios_base::openmode{};
+    }
+
+    // [streambuf.put.area] gives pbump an `int`, and every offset in this
+    // header is an off_type. Handing it a truncated int would move the put
+    // pointer somewhere nobody asked for -- silently, and only for buffers
+    // over 2 GiB, which is exactly the size at which a bug stops being
+    // reproducible. Stepping is three lines and the class of bug is gone.
+    // libstdc++ narrows here; this is the deliberate divergence.
+    void PbumpBy(off_type n) noexcept
+    {
+        constexpr off_type kStep = 0x7fffffff;
+        while (n > kStep) {
+            this->pbump(int(kStep));
+            n -= kStep;
+        }
+        this->pbump(int(n));
+    }
+
+    ios_base::openmode __mode;
+    std::span<CharT>   __buf;
+};
+
+template <class CharT, class Traits>
+void swap(basic_spanbuf<CharT, Traits> &x, basic_spanbuf<CharT, Traits> &y)
+{
+    x.swap(y);
+}
+
+using spanbuf  = basic_spanbuf<char>;
+using wspanbuf = basic_spanbuf<wchar_t>;
+
+// The read-only-range constructors of ispanstream take any borrowed_range
+// that converts to span<const CharT> but NOT to span<CharT> -- i.e. exactly
+// the ranges whose elements are const. [ispanstream.cons] then casts the
+// const away to build the spanbuf, which is safe for the reason the
+// constraint exists: the buffer is opened `in` and nothing in the input
+// path ever writes through it.
+template <class ROS, class CharT>
+concept __SpanReadOnlyRange = ranges::borrowed_range<ROS> &&
+                              (!convertible_to<ROS, std::span<CharT>>) &&
+                              convertible_to<ROS, std::span<const CharT>>;
+
+// ── basic_ispanstream<CharT,Traits> [ispanstream] ───────────────────────
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ispanstream : public basic_istream<CharT, Traits> {
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    explicit basic_ispanstream(std::span<CharT> s, ios_base::openmode which = ios_base::in)
+        : basic_istream<CharT, Traits>(&sb_), sb_(s, which | ios_base::in)
+    {
+    }
+
+    template <class ROS>
+        requires __SpanReadOnlyRange<ROS, CharT>
+    explicit basic_ispanstream(ROS &&s)
+        : basic_istream<CharT, Traits>(&sb_), sb_(ios_base::in)
+    {
+        span(std::forward<ROS>(s));
+    }
+
+    basic_ispanstream(const basic_ispanstream &) = delete;
+    basic_ispanstream &operator=(const basic_ispanstream &) = delete;
+
+    // MOVE hotspot, identical to <sstream>'s: basic_ios::move() nulls THIS
+    // object's rdbuf() pointer, which is right for a bare basic_istream and
+    // wrong for one that owns its buffer. Relocate sb_, then repoint.
+    basic_ispanstream(basic_ispanstream &&rhs)
+        : basic_istream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_ispanstream &operator=(basic_ispanstream &&rhs)
+    {
+        basic_istream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_ispanstream &rhs)
+    {
+        basic_istream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    [[nodiscard]] basic_spanbuf<CharT, Traits> *rdbuf() const noexcept
+    {
+        return const_cast<basic_spanbuf<CharT, Traits> *>(&sb_);
+    }
+
+    [[nodiscard]] std::span<const CharT> span() const noexcept { return sb_.span(); }
+
+    void span(std::span<CharT> s) noexcept { sb_.span(s); }
+
+    template <class ROS>
+        requires __SpanReadOnlyRange<ROS, CharT>
+    void span(ROS &&s) noexcept
+    {
+        std::span<const CharT> sp(std::forward<ROS>(s));
+        sb_.span(std::span<CharT>(const_cast<CharT *>(sp.data()), sp.size()));
+    }
+
+private:
+    basic_spanbuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_ispanstream<CharT, Traits> &x, basic_ispanstream<CharT, Traits> &y)
+{
+    x.swap(y);
+}
+
+using ispanstream  = basic_ispanstream<char>;
+using wispanstream = basic_ispanstream<wchar_t>;
+
+// ── basic_ospanstream<CharT,Traits> [ospanstream] ───────────────────────
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_ospanstream : public basic_ostream<CharT, Traits> {
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    // [ospanstream.cons] says `which | ios_base::out`, and it has to: an
+    // ospanstream that is not open for output has no put area, so its very
+    // first insertion fails. libstdc++ 16.1 writes `which | ios_base::in`
+    // here -- harmless at the default argument (out is already set) and a
+    // dead stream for any caller who passes something else, e.g.
+    // ospanstream(buf, ios_base::ate). Measured, not assumed; Phase193
+    // pins the ate case for exactly that reason.
+    explicit basic_ospanstream(std::span<CharT> s, ios_base::openmode which = ios_base::out)
+        : basic_ostream<CharT, Traits>(&sb_), sb_(s, which | ios_base::out)
+    {
+    }
+
+    basic_ospanstream(const basic_ospanstream &) = delete;
+    basic_ospanstream &operator=(const basic_ospanstream &) = delete;
+
+    basic_ospanstream(basic_ospanstream &&rhs)
+        : basic_ostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_ospanstream &operator=(basic_ospanstream &&rhs)
+    {
+        basic_ostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_ospanstream &rhs)
+    {
+        basic_ostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    [[nodiscard]] basic_spanbuf<CharT, Traits> *rdbuf() const noexcept
+    {
+        return const_cast<basic_spanbuf<CharT, Traits> *>(&sb_);
+    }
+
+    [[nodiscard]] std::span<CharT> span() const noexcept { return sb_.span(); }
+    void span(std::span<CharT> s) noexcept { sb_.span(s); }
+
+private:
+    basic_spanbuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_ospanstream<CharT, Traits> &x, basic_ospanstream<CharT, Traits> &y)
+{
+    x.swap(y);
+}
+
+using ospanstream  = basic_ospanstream<char>;
+using wospanstream = basic_ospanstream<wchar_t>;
+
+// ── basic_spanstream<CharT,Traits> [spanstream] ─────────────────────────
+template <class CharT, class Traits = char_traits<CharT>>
+class basic_spanstream : public basic_iostream<CharT, Traits> {
+public:
+    using char_type   = CharT;
+    using int_type    = typename Traits::int_type;
+    using pos_type    = typename Traits::pos_type;
+    using off_type    = typename Traits::off_type;
+    using traits_type = Traits;
+
+    explicit basic_spanstream(std::span<CharT> s,
+                              ios_base::openmode which = ios_base::out | ios_base::in)
+        : basic_iostream<CharT, Traits>(&sb_), sb_(s, which)
+    {
+    }
+
+    basic_spanstream(const basic_spanstream &) = delete;
+    basic_spanstream &operator=(const basic_spanstream &) = delete;
+
+    basic_spanstream(basic_spanstream &&rhs)
+        : basic_iostream<CharT, Traits>(std::move(rhs)), sb_(std::move(rhs.sb_))
+    {
+        this->set_rdbuf(&sb_);
+    }
+    basic_spanstream &operator=(basic_spanstream &&rhs)
+    {
+        basic_iostream<CharT, Traits>::operator=(std::move(rhs));
+        sb_ = std::move(rhs.sb_);
+        this->set_rdbuf(&sb_);
+        return *this;
+    }
+    void swap(basic_spanstream &rhs)
+    {
+        basic_iostream<CharT, Traits>::swap(rhs);
+        sb_.swap(rhs.sb_);
+    }
+
+    [[nodiscard]] basic_spanbuf<CharT, Traits> *rdbuf() const noexcept
+    {
+        return const_cast<basic_spanbuf<CharT, Traits> *>(&sb_);
+    }
+
+    [[nodiscard]] std::span<CharT> span() const noexcept { return sb_.span(); }
+    void span(std::span<CharT> s) noexcept { sb_.span(s); }
+
+private:
+    basic_spanbuf<CharT, Traits> sb_;
+};
+
+template <class CharT, class Traits>
+void swap(basic_spanstream<CharT, Traits> &x, basic_spanstream<CharT, Traits> &y)
+{
+    x.swap(y);
+}
+
+using spanstream  = basic_spanstream<char>;
+using wspanstream = basic_spanstream<wchar_t>;
+
+} // namespace std
+
+#endif // BOXCXX_SPANSTREAM

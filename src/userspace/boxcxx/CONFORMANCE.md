@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **84** — 80 of C++23 (25 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Standard headers provided | **85** — 81 of C++23 (24 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 121 |
 | Header source | ~87 000 lines |
-| Feature-test macros defined | 201 — 155 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 202 — 156 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 207 phases (188 of them the numbered `PhaseN` series), 5 325 runtime checks, 1 757 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 208 phases (189 of them the numbered `PhaseN` series), 5 360 runtime checks, 1 772 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **207**. The
+there are exactly as many as there are phase definitions. That is **208**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -96,12 +96,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (25)
+## 1.1 Headers that do not exist (24)
 
-80 of the C++23 headers are provided and 25 are absent, which accounts for the
+81 of the C++23 headers are provided and 24 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 84 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 85 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -156,15 +156,25 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 5
+### C++23 features not implemented — 4
 
 | Header | Status |
 |---|---|
-| `<spanstream>` | Not implemented. |
 | `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
 | `<scoped_allocator>` | Not implemented. |
 | `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<spanstream>` left that list in Ф38 too**, and its entry — "Not
+implemented." — was the honest one: unlike `<stacktrace>`'s identically brief
+line, nothing was in the way. `<span>`, `<streambuf>`, `<istream>` and
+`<ostream>` had all been here since Ф30e, and a buffer that cannot grow needs
+less machinery than one that can. Writing it found a defect one layer down,
+recorded in §2 `<ostream>`: every formatted inserter shares one width/fill
+engine, and that engine discarded what `sputn`/`sputc` told it. No sink in the
+tree could refuse before — a stringbuf grows, a filebuf grows, the screen
+always accepts — so a short write had never been possible. A spanbuf can
+refuse, and until this commit it was refused silently.
 
 **`<typeindex>` left that list in Ф38.** Its entry read "there is no
 `std::type_index`", which was true and said nothing about why the header had
@@ -223,7 +233,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 201 macros × 84 headers by
+  checked over the full cross-product of 202 macros × 85 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -1255,6 +1265,24 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<ostream>`
 
+- `✓` Closed in Ф38, found by building `<spanstream>`: **a formatted inserter
+  that could not write everything reported success anyway.**
+  [ostream.formatted.reqmts] says a generation failure calls
+  `setstate(badbit)`; the unformatted path (`basic_ostream::write`) had always
+  checked `sputn`'s return, but every *formatted* inserter — integer, float,
+  bool, pointer, char, string, and the fill a `width()` asks for — funnels
+  through one shared width/fill engine, and that engine called `sputn` and
+  `sputc` and looked at neither. The reason nobody had noticed is the reason it
+  was worth finding: **no sink in this tree could refuse a write.** A
+  `stringbuf` grows, a `filebuf` grows (Ф36), the screen Current always
+  accepts. `basic_spanbuf` is the first that cannot — its buffer belongs to the
+  caller and is a fixed size — so `ospanstream os(span); os << "too long";`
+  dropped the tail and left `os.good()` true. The two write helpers now report
+  refusal, the chain stops at the first one (there is no point filling a buffer
+  that has said it is full), and the engine sets `badbit`. Pinned by three
+  Phase193 checks — the string form, the number form and the padding — because
+  they are three different call sites into the same engine; reverting the fix
+  fails exactly those three and nothing else.
 - `✓` Closed in Ф31e-a: the `wchar_t` / `char8_t` / `char16_t` / `char32_t`
   inserters are now deleted per [ostream.inserters.character], in both the
   character and the pointer form. Until then they were merely *absent*, which is
@@ -1556,6 +1584,47 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   that span had no `crbegin`/`crend` was wrong** — both were there. Closed
   `__cpp_lib_span`.
 
+## `<spanstream>`
+
+- Complete: `basic_spanbuf`, `basic_ispanstream`, `basic_ospanstream`,
+  `basic_spanstream`, the four `swap` free functions and all eight typedefs.
+  New in Ф38; `__cpp_lib_spanstream` is 202106L.
+- `overflow`, `underflow` and `pbackfail` are **not** overridden, and that is
+  the specification rather than an omission: [spanbuf.virtuals] says outright
+  that with a fixed buffer none of them "can provide useful behavior". The
+  inherited defaults refuse, which is what a caller wants — the alternative to
+  refusing is writing past a buffer somebody else owns.
+- `span()` answers two different questions depending on the mode: the WRITTEN
+  prefix (`pbase()` to `pptr()`) when `out` is set, the whole buffer otherwise.
+  An `ospanstream` reporting the whole buffer would be reporting uninitialised
+  bytes as output.
+- **boxcxx refuses a seek that libstdc++ 16.1 performs.**
+  [spanbuf.virtuals] fails the positioning when "the next pointer is null and
+  the new offset is nonzero" — which is exactly `pubseekoff(3, beg, out)` on a
+  buffer opened `in` only. libstdc++ omits that test and evaluates
+  `nullptr + 3`. Pinned by Phase193; removing the guard here fails exactly the
+  two checks that name it.
+- **boxcxx's `basic_ospanstream` constructor ORs `ios_base::out`; libstdc++
+  16.1 ORs `ios_base::in`.** [ospanstream.cons] says `which | ios_base::out`,
+  and it must: a stream with no put area fails its first insertion. The
+  difference is invisible at the default argument, where `out` is already set,
+  and total for anything else — `ospanstream(buf, ios_base::in)` writes
+  normally here and is dead there. Measured against the normative text, not
+  inferred; Phase193 pins the case, and reverting to libstdc++'s form fails
+  exactly that one check.
+- `pbump` takes an `int` ([streambuf.put.area]) while every offset in the
+  header is an `off_type`. boxcxx steps it rather than narrowing, so a span
+  larger than `INT_MAX` positions correctly; libstdc++ narrows. Unreachable at
+  today's buffer sizes and free to get right.
+- `setbuf(s, n)` with `n < 0` violates its precondition, so any behaviour
+  conforms. boxcxx installs an empty span rather than converting the count to
+  a ~2^64-element one, which is the only outcome that must not happen on a
+  system without a memory-protection net under the streams.
+- A moved-from `basic_spanbuf` is left unchanged. [spanbuf.cons] makes the
+  moved-from state implementation-defined, and there is no owned resource to
+  transfer — the caller still holds the span either way. Same choice
+  libstdc++ documents.
+
 ## `<sstream>`
 
 - `✓` Closed in Ф32-a: **P2495R3 is complete and its macro is claimed** — the
@@ -1725,6 +1794,23 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   hundred digits. The integer overloads are unchanged.
 
 ## `<string_view>`
+
+- `✓` Closed in Ф38: **`enable_borrowed_range<basic_string_view<C,T>>` was
+  declared in `<ranges>` instead of here**, so the answer depended on what else
+  the translation unit happened to include. Measured before the move: with
+  `<string_view>` alone `ranges::borrowed_range<string_view>` was **false**,
+  and it became true only once `<ranges>`, `<algorithm>` or `<span>` came
+  along. [string.view.synop] declares it in this header, and where a marker is
+  declared is the whole of its meaning: a view that does not own its characters
+  outlives an iterator into it, so `ranges::` algorithms may hand that iterator
+  back rather than `ranges::dangling`. The primary template is in
+  `<__bits/ranges_core>`, which this header already included for its own range
+  constructor, so nothing new is pulled in to say it. `<ranges>` keeps
+  `enable_view<basic_string_view>` — that one cannot be stated without
+  `enable_view`, which is declared in `<ranges>` itself, and is unreachable
+  without it. Found while building `<spanstream>`, whose range constructor is
+  constrained on `borrowed_range` and would otherwise have rested on a
+  transitive include.
 
 ### P1391R4 / P1989R2 — the two constructors, and a macro value that never existed (Ф32-i)
 
