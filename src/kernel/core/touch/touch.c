@@ -7,6 +7,7 @@
 #include "kresult.h"
 #include "result.h"
 #include "klib.h"
+#include "clockboard.h"
 #include "vmm.h"
 #include "pmm.h"
 #include "tagfs.h"
@@ -52,6 +53,9 @@ static volatile uint64_t g_touch_push_fail;
  * (syscalls IF=0; scheduler switches only outside REACT chains). */
 static uint32_t          g_react_depth[CONFIG_MAX_CORES];
 static volatile uint64_t g_react_depth_drops;
+/* Rate limit for the drop announcement below — one line per burst. */
+#define TOUCH_DROP_ANNOUNCE_MS 1000u
+static volatile uint64_t g_touch_drop_announced_ms;
 
 void TouchStatsSnapshot(uint64_t out[5])
 {
@@ -313,11 +317,31 @@ void TouchRestDeliver(process_t *target, TouchTag tag_id,
         }
         for (int p = 0; p < 32; p++) cpu_pause();
         if (target->destroying) {
+            /* Target is dying — its ring is nobody's business any more. Counted,
+             * not announced: this drop harms no one. */
             __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
             return;
         }
     }
-    __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
+    /* Out of retries: this event is GONE.
+     *
+     * A counter nobody reads is not diagnostics. A dropped event can strand a
+     * subscriber forever — process:died most of all, since a supervisor
+     * blocking on it has nothing else to wake it — so the drop says so, names
+     * the victim, and does it once per burst rather than once per event so a
+     * saturated ring cannot drown the console it is trying to warn. */
+    uint64_t fails = __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
+    uint64_t now_ms = clockboard_uptime_ms();
+    uint64_t last   = __atomic_load_n(&g_touch_drop_announced_ms, __ATOMIC_RELAXED);
+    if (now_ms - last >= TOUCH_DROP_ANNOUNCE_MS &&
+        __atomic_compare_exchange_n(&g_touch_drop_announced_ms, &last, now_ms,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        kprintf("[TOUCH] ERROR: dropped a publish to pid %u (tag %u) — ring full past "
+                "%d retries; %lu dropped since boot. A subscriber blocked on this "
+                "event will not be woken by it\n",
+                target->pid, (unsigned)tag_id, TOUCH_PUSH_RETRIES,
+                (unsigned long)fails);
+    }
     touch_wake_remote(target);
 }
 
