@@ -159,11 +159,18 @@ void mem_init(void)
      * pmm_alloc, not pmm_alloc_zero: zeroing the whole pool would touch bytes
      * past the identity window. Each half is zeroed when it is published.
      *
-     * Halve on refusal down to the floor. Two things can refuse: the buddy
-     * caps a single block at BUDDY_MAX_ORDER, and the pre-Pull-Map window may
-     * simply not hold the ideal size. A machine that cannot spare it must
-     * still boot with a smaller heap, and the size it really got is printed
-     * rather than assumed. */
+     * The pool is one block, so clamp to the largest block the PMM can serve
+     * BEFORE asking. Learning that limit from a refusal works, but the refusal
+     * logs PMM_FAIL, and a scary line in every boot log is exactly the noise
+     * that sends the next investigation down the wrong path.
+     *
+     * Halving still covers what remains: the pre-Pull-Map window may not hold
+     * the ideal size. A machine that cannot spare it must still boot with a
+     * smaller heap, and the size it really got is printed rather than assumed. */
+    size_t max_bytes = pmm_max_alloc_pages() * VMM_PAGE_SIZE;
+    if (heap_size > max_bytes)
+        heap_size = max_bytes;
+
     void  *pool = NULL;
     for (;;)
     {

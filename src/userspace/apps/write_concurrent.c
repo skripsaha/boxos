@@ -12,6 +12,7 @@
  * match a single writer's pattern.
  */
 
+#include "box/bay.h"
 #include "box/file.h"
 #include "box/touch.h"
 #include "box/system.h"
@@ -22,6 +23,7 @@
 
 #define WC_NAME       "_wconc_test"
 #define WC_TAG        "wconc"
+#define WC_CLAIM_TAG  "wconc:claim"
 #define PAGE_SIZE     4096
 #define CHILD_COUNT   2
 #define CHILD_LOOPS   50
@@ -31,9 +33,30 @@ static char rbuf[PAGE_SIZE];
 
 static int child_role(uint32_t my_pid)
 {
-    /* Slice index by pid parity — keeps the test deterministic across
-     * runs even when the kernel allocates pids in different orders. */
-    uint64_t offset = (uint64_t)(my_pid % CHILD_COUNT) * PAGE_SIZE;
+    /* Claim a slice ATOMICALLY instead of deriving it from the pid.
+     *
+     * This was `my_pid % CHILD_COUNT`, under a comment claiming pid parity
+     * kept the assignment deterministic "even when the kernel allocates pids
+     * in different orders". It does the opposite: CONSECUTIVE pids differ in
+     * parity, non-consecutive ones need not. Let any other process take a pid
+     * between the two spawns — routine as soon as more than one core is
+     * running — and both children land on the same slice while the other slice
+     * is never written and keeps the parent's pre-fill. The parent then read
+     * zeros, reconstructed writer pid 0 from byte 0, and reported the kernel's
+     * write path as torn. The requirement is "one writer per slice"; a claim
+     * counter states it, pid arithmetic guesses it. */
+    uint32_t *claim = (uint32_t *)bay_open(WC_CLAIM_TAG, 0, BAY_OPEN);
+    if (!claim) {
+        kdbg_print("[WC child %u] claim bay missing", my_pid);
+        return 1;
+    }
+    uint32_t slice_idx = __sync_fetch_and_add(claim, 1u);
+    bay_release(claim);
+    if (slice_idx >= CHILD_COUNT) {
+        kdbg_print("[WC child %u] claim idx=%u out of range", my_pid, slice_idx);
+        return 1;
+    }
+    uint64_t offset = (uint64_t)slice_idx * PAGE_SIZE;
 
     uint32_t   fids[4];
     file_info_t infos[4];
@@ -57,8 +80,8 @@ static int child_role(uint32_t my_pid)
         }
     }
 
-    kdbg_print("[WC child %u] %d iterations done at offset %lu",
-               my_pid, CHILD_LOOPS, (unsigned long)offset);
+    kdbg_print("[WC child %u] %d iterations done at slice %u (offset %lu)",
+               my_pid, CHILD_LOOPS, slice_idx, (unsigned long)offset);
     return 0;
 }
 
@@ -91,10 +114,22 @@ int main(void)
         }
     }
 
+    /* Slice-claim Bay. Created before the first spawn so no child can find
+     * it missing, and held by the parent until every child has exited so the
+     * last release cannot re-key it mid-run. */
+    uint32_t *claim = (uint32_t *)bay_open(WC_CLAIM_TAG, PAGE_SIZE, BAY_CREATE);
+    if (!claim) {
+        kdbg_print("[WC] claim bay create FAIL");
+        delete(fid);
+        return 1;
+    }
+    *claim = 0;
+
     /* Subscribe to process:died so we know when children finish. */
     TouchTag died_tag = TOUCH_TAG_ID(TOUCH_TAG_PROCESS_DIED);
     if (touch_claim(died_tag, TOUCH_REST, 0, 0) != 0) {
         kdbg_print("[WC] claim process:died FAIL");
+        bay_release(claim);
         delete(fid);
         return 1;
     }
@@ -106,6 +141,7 @@ int main(void)
         if (kids[i] < 0) {
             kdbg_print("[WC] spawn child %d rc=%d", i, kids[i]);
             touch_release(died_tag);
+            bay_release(claim);
             delete(fid);
             return 1;
         }
@@ -136,6 +172,15 @@ int main(void)
 
     if (kids_alive > 0) {
         kdbg_print("[WC] FAIL: %d children still alive after timeout", kids_alive);
+        bay_release(claim);
+        delete(fid);
+        return 1;
+    }
+
+    uint32_t claimed = *claim;
+    bay_release(claim);
+    if (claimed != CHILD_COUNT) {
+        kdbg_print("[WC] FAIL: %u of %d slices claimed", claimed, CHILD_COUNT);
         delete(fid);
         return 1;
     }
@@ -151,6 +196,20 @@ int main(void)
             fails++;
             continue;
         }
+        /* An all-zero slice is the parent's pre-fill, not a torn write: no
+         * writer can produce it, since a writer's bytes step by one from its
+         * own pid. Calling that "torn at j=1" is what sent the last hunt after
+         * the kernel's write path instead of after the missing writer. */
+        bool written = false;
+        for (uint32_t j = 0; j < PAGE_SIZE; j++) {
+            if (rbuf[j] != 0) { written = true; break; }
+        }
+        if (!written) {
+            kdbg_print("[WC] slice=%d NEVER WRITTEN (still pre-fill zeros)", slice);
+            fails++;
+            continue;
+        }
+
         /* Reconstruct writer PID from byte 0: byte0 = (pid + 0) & 0xFF. */
         uint8_t pid_low = (uint8_t)rbuf[0];
         bool clean = true;
@@ -173,6 +232,6 @@ int main(void)
                    CHILD_COUNT, CHILD_LOOPS, CHILD_COUNT);
         return 0;
     }
-    kdbg_print("[WC] FAIL — %d slice(s) torn", fails);
+    kdbg_print("[WC] FAIL — %d bad slice(s)", fails);
     return 1;
 }

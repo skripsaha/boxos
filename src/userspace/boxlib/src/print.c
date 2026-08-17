@@ -658,15 +658,35 @@ int readline(char* buffer, size_t max_len)
          * correct exit; timing out and re-prompting created phantom prompts
          * + stash-poisoned input where the line typed at one prompt would
          * appear at the next. */
+        /* Accept only the display daemon's reply to OUR request.
+         *
+         * This used to take whatever arrived: the first four bytes of ANY
+         * message became the line length and the rest of it became the line.
+         * That is exactly the failure shell.c:96-106 describes — a second
+         * daemon's PING reply read as a length-prefixed line — and
+         * ShellDrainStaleIpc() exists to drain such messages BEFORE they can
+         * be misread, not because readline could tell them apart. Filtering by
+         * sender closes the class at the point of use. Bounded, so a mailbox
+         * someone else keeps filling cannot hold readline here forever. */
         Result result;
-        if (!receive_wait(&result, 0))                            return -1;
+        int foreign = 0;
+        for (;;) {
+            if (!receive_wait(&result, 0))                        return -1;
+            if (result.sender_pid == g_display_pid)               break;
+            if (++foreign > 64)                                   return -1;
+        }
         if (result.error_code != OK)                              return -1;
         if (result.data_addr == 0 || result.data_length < 4)      return -1;
 
         const uint8_t* resp = (const uint8_t*)(uintptr_t)result.data_addr;
         uint32_t len;
         memcpy(&len, resp, 4);
-        if (len > max_len - 1) len = (uint32_t)(max_len - 1);
+        /* Bound by what actually ARRIVED as well as by the destination: the
+         * length lives in the message body, so a short message carrying a
+         * large prefix would otherwise copy from past the received payload. */
+        uint32_t avail = (uint32_t)(result.data_length - 4);
+        if (len > avail)             len = avail;
+        if (len > max_len - 1)       len = (uint32_t)(max_len - 1);
         memcpy(buffer, resp + 4, len);
         buffer[len] = '\0';
         return (int)len;
@@ -694,8 +714,15 @@ int getchar(void)
 
         /* Same rationale as readline above: block until display delivers a
          * keypress.  No timeout — getchar is blocking by definition. */
+        /* Same sender filter as readline: a foreign message's first byte
+         * would otherwise be handed back as the user's keypress. */
         Result result;
-        if (!receive_wait(&result, 0))                            return -1;
+        int foreign = 0;
+        for (;;) {
+            if (!receive_wait(&result, 0))                        return -1;
+            if (result.sender_pid == g_display_pid)               break;
+            if (++foreign > 64)                                   return -1;
+        }
         if (result.error_code != OK)                              return -1;
         if (result.data_addr == 0 || result.data_length < 1)      return -1;
         return *(const uint8_t*)(uintptr_t)result.data_addr;

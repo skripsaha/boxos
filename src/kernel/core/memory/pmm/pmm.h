@@ -36,6 +36,11 @@ error_t pmm_init(void);
 void    pmm_free(void* addr, size_t pages);
 
 size_t   pmm_total_pages(void);
+/* Largest page count a SINGLE pmm_alloc can serve (the buddy's max block).
+ * A caller that wants one contiguous span should clamp to this instead of
+ * discovering the limit through a failed allocation — that path logs
+ * PMM_FAIL, which then reads as a shortage in every boot log. */
+size_t   pmm_max_alloc_pages(void);
 size_t   pmm_free_pages(void);
 size_t   pmm_used_pages(void);
 uint64_t pmm_get_total_memory(void);     /* phys-top of buddy zone (one-past-last byte) */
