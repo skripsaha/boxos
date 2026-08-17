@@ -20,17 +20,43 @@ static inline spinlock_t *BucketLock(MemRegionRegistry *reg, uint32_t id) {
     return &reg->bucket_locks[id % MEMTAG_REGION_BUCKETS];
 }
 
+/* Slot ceiling the kernel heap can actually back.
+ *
+ * slots[] and free_stack[] live in the kernel heap, a pool whose size is fixed
+ * at boot. MEMTAG_REGION_MAX_CAP alone promised 1M slots — over 64 MiB of
+ * arrays — which no heap in this kernel hands out, so a caller approaching the
+ * ceiling learned about it from an allocation failure rather than from the cap
+ * that was supposed to describe it. Derive the live bound from the pool and
+ * keep the constant as the architectural ceiling.
+ *
+ * A quarter of the pool is the registry's share: growth briefly holds the old
+ * arrays alongside the new, so the live bound must leave room for its own
+ * transition and for every other heap user. */
+static uint32_t RegionSlotCeiling(void) {
+    size_t per_slot = sizeof(MemRegion) + sizeof(uint32_t);
+    size_t cap      = (mem_heap_size() / 4) / per_slot;
+
+    if (cap < MEMTAG_REGION_INITIAL_CAP) cap = MEMTAG_REGION_INITIAL_CAP;
+    if (cap > MEMTAG_REGION_MAX_CAP)     cap = MEMTAG_REGION_MAX_CAP;
+    return (uint32_t)cap;
+}
+
 static error_t EnsureSlotCapacity(MemRegionRegistry *reg, uint32_t needed_id) {
     /* Caller must hold reg->lock. Grows slots[] / free_stack[] together. */
     if (needed_id < reg->slot_cap) return OK;
-    if (needed_id >= MEMTAG_REGION_MAX_CAP) {
-        debug_printf("[MEMTAG/RGN] cap exhausted (max=%u)\n", MEMTAG_REGION_MAX_CAP);
+
+    uint32_t ceiling = RegionSlotCeiling();
+    if (needed_id >= ceiling) {
+        kprintf("[MEMTAG/RGN] cap exhausted: id %u needs more than %u slots "
+                "(heap %zu KB, architectural max %u)\n",
+                needed_id, ceiling, mem_heap_size() / 1024,
+                (unsigned)MEMTAG_REGION_MAX_CAP);
         return ERR_NO_MEMORY;
     }
 
     uint32_t new_cap = reg->slot_cap * 2;
     if (new_cap <= needed_id) new_cap = needed_id + 1;
-    if (new_cap > MEMTAG_REGION_MAX_CAP) new_cap = MEMTAG_REGION_MAX_CAP;
+    if (new_cap > ceiling) new_cap = ceiling;
 
     MemRegion *new_slots = (MemRegion *)kmalloc(sizeof(MemRegion) * new_cap);
     if (!new_slots) return ERR_NO_MEMORY;

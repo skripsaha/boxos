@@ -1615,9 +1615,66 @@ vmm_context_t *vmm_create_context(void)
  * names this PML4 in the linear-address space. Used only to compose the
  * `is_identity_mapped` check for the (now dead in practice) pre-Pull-Map
  * boot identity teardown path. */
+
+/* Frames already returned to the PMM during THIS teardown.
+ *
+ * The guard exists because one frame can be named by more than one PTE in the
+ * same cabin (a CoW snapshot sharing pages with the live mapping): each unique
+ * frame must be freed exactly once, or the buddy takes a double free.
+ *
+ * Keyed by frame number, so the scratch costs what the ADDRESS SPACE costs. It
+ * used to be one bit per physical page — 288 KiB on an 8 GiB box, 16 MiB on a
+ * 512 GiB one — to track a walk that can touch at most this context's own
+ * mapped pages. Slots hold frame+1 so that 0 means empty and no user frame
+ * needs a sentinel of its own. */
+typedef struct
+{
+    uint64_t *slots;
+    size_t    mask;      /* capacity - 1; capacity is a power of two */
+    void     *phys;      /* PMM block backing slots[] */
+    size_t    pages;
+} VmmFreedSet;
+
+static size_t vmm_pow2_ceil(size_t v)
+{
+    size_t p = 1;
+    while (p < v) p <<= 1;
+    return p;
+}
+
+/* True when `frame` was absent and is now recorded — i.e. the caller owns the
+ * free. False when it was already there (aliased), or when the set is full,
+ * which cannot happen at the load factor chosen in vmm_destroy_context but is
+ * answered conservatively rather than assumed away. */
+static bool vmm_freed_set_add(VmmFreedSet *set, uint64_t frame)
+{
+    if (!set || !set->slots)
+        return false;
+
+    uint64_t key = frame + 1;
+    /* Fibonacci hashing: one multiply, and it spreads the sequential frame
+     * numbers a linear walk produces instead of piling them into one run. */
+    size_t i = (size_t)((key * 0x9E3779B97F4A7C15ULL) >> 32) & set->mask;
+
+    for (size_t probe = 0; probe <= set->mask; probe++)
+    {
+        uint64_t cur = set->slots[i];
+        if (cur == 0)
+        {
+            set->slots[i] = key;
+            return true;
+        }
+        if (cur == key)
+            return false;
+        i = (i + 1) & set->mask;
+    }
+
+    kprintf("[VMM] ERROR: dedup set full at frame 0x%lx — leaking the rest of "
+            "this context to avoid a double-free\n", (unsigned long)frame);
+    return false;
+}
 static void vmm_walk_free_pml4_user_(page_table_t *pml4, int pml4_entry_end,
-                                     uint8_t *freed_bitmap, bool has_dedup,
-                                     size_t dedup_total_pages,
+                                     VmmFreedSet *freed,
                                      uint64_t pml5_va_term)
 {
     for (int p4 = 0; p4 < pml4_entry_end; p4++)
@@ -1711,34 +1768,16 @@ static void vmm_walk_free_pml4_user_(page_table_t *pml4, int pml4_entry_end,
                      * and flushed all TLBs, so the frame can return to PMM
                      * immediately — there is no longer a second pass over all of
                      * physical RAM (the old O(total-RAM) Phase 3 scan is gone;
-                     * teardown is now O(mapped-pages)). The dedup bitmap still
+                     * teardown is now O(mapped-pages)). The dedup set still
                      * guards a frame aliased by more than one PTE in this cabin
                      * (e.g. a CoW snapshot sharing pages with the live mapping):
-                     * free each unique frame exactly once. If the bitmap is
-                     * absent (kmalloc failed) we must NOT free — an un-deduped
+                     * free each unique frame exactly once. With no set (its own
+                     * allocation failed) we must NOT free — an un-deduped
                      * double-free would corrupt the buddy — so the frame leaks,
-                     * a rare bounded fallback (same as the old has_dedup gate). */
+                     * a rare bounded fallback. */
                     if (!is_identity_mapped)
                     {
-                        bool do_free = has_dedup;
-                        if (has_dedup)
-                        {
-                            size_t page_idx = phys / VMM_PAGE_SIZE;
-                            if (page_idx >= dedup_total_pages)
-                            {
-                                do_free = false;   /* outside tracked RAM — don't risk it */
-                            }
-                            else
-                            {
-                                size_t byte_idx = page_idx / 8;
-                                size_t bit_idx  = page_idx % 8;
-                                if (freed_bitmap[byte_idx] & (1 << bit_idx))
-                                    do_free = false;            /* aliased — already freed */
-                                else
-                                    freed_bitmap[byte_idx] |= (1 << bit_idx);
-                            }
-                        }
-                        if (do_free)
+                        if (vmm_freed_set_add(freed, phys / VMM_PAGE_SIZE))
                         {
                             pmm_free((void *)phys, 1);
                             freed_pages++;
@@ -1797,33 +1836,35 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
      * drains inline, so it does not deadlock. */
     vmm_shootdown_full_evict(ctx->pml4_phys);
 
-    // bitmap to detect duplicate PT entries pointing to the same physical page
-    // sized dynamically from pmm_get_mem_end() so all physical RAM is covered
-    uint64_t dedup_mem_end = pmm_get_mem_end();
-    size_t dedup_total_pages = dedup_mem_end / VMM_PAGE_SIZE;
-    size_t dedup_bitmap_size = (dedup_total_pages + 7) / 8;
-
-    /* From the PMM, not kmalloc. One bit per physical page means this scratch
-     * scales with INSTALLED RAM — 288 KiB on an 8 GiB box — and it is asked
-     * for on every address-space teardown. The kernel heap is a fixed
-     * small-object pool; a page-scale, RAM-sized buffer taken from it starves
-     * every other large allocation in the kernel. The PMM is exactly the
-     * allocator for page-scale scratch, and it is where the pages being
-     * counted here come from anyway. */
-    size_t dedup_pages = (dedup_bitmap_size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
-    void *dedup_phys = pmm_alloc_zero(dedup_pages);
-    uint8_t *freed_bitmap = dedup_phys ? (uint8_t *)vmm_phys_to_virt((uintptr_t)dedup_phys)
-                                       : NULL;
-    bool has_dedup = (freed_bitmap != NULL);
-    if (!has_dedup)
+    /* Dedup scratch, sized by THIS context rather than by installed RAM.
+     *
+     * Capacity is a power of two at twice the context's mapped-page count, so
+     * linear probing runs at a load factor of 0.5 or better and insertion
+     * cannot fail through fullness. From the PMM: the kernel heap is a fixed
+     * small-object pool, and this is page-scale scratch for a walk that is
+     * about to hand pages back to the PMM anyway. */
+    VmmFreedSet freed = {0};
     {
-        /* kprintf: this is not a soft degradation. Without the bitmap the
-         * walk below cannot tell a doubly-mapped frame from a fresh one, so
-         * it frees NO user data pages at all — every data page of this
-         * address space leaks. Silent here meant the leak compounded until
-         * the PMM ran dry and unrelated allocations started failing. */
-        kprintf("[VMM] ERROR: dedup bitmap alloc failed (%zu pages) — LEAKING every "
-                "user data page of this context to avoid a double-free\n", dedup_pages);
+        size_t want_slots = vmm_pow2_ceil(((size_t)ctx->mapped_pages + 1) * 2);
+        size_t want_bytes = want_slots * sizeof(uint64_t);
+        freed.pages = (want_bytes + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
+        freed.phys  = pmm_alloc_zero(freed.pages);
+        if (freed.phys)
+        {
+            freed.slots = (uint64_t *)vmm_phys_to_virt((uintptr_t)freed.phys);
+            freed.mask  = want_slots - 1;
+        }
+        else
+        {
+            /* kprintf: this is not a soft degradation. With no set the walk
+             * cannot tell a doubly-mapped frame from a fresh one, so it frees
+             * NO user data page at all and every one of them leaks. Silent
+             * here meant the leak compounded until the PMM ran dry and
+             * unrelated allocations began failing. */
+            kprintf("[VMM] ERROR: dedup set alloc failed (%zu pages) — LEAKING every "
+                    "user data page of this context to avoid a double-free\n",
+                    freed.pages);
+        }
     }
     // When has_dedup is false we still walk the tables to free page-table
     // structures but SKIP freeing data pages (pmm_free) to prevent
@@ -1833,10 +1874,7 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
         /* 4-level: user-half = PML4[0..255]. Kernel-shared entries
          * 256..511 are left alone (they reference the kernel PML4
          * mirror shared across every cabin). */
-        vmm_walk_free_pml4_user_(ctx->pml4, 256,
-                                  freed_bitmap, has_dedup,
-                                  dedup_total_pages,
-                                  0ULL);
+        vmm_walk_free_pml4_user_(ctx->pml4, 256, &freed, 0ULL);
     } else {
         /* 5-level: user-half = PML5[0..255]; each non-NULL entry points
          * to a PML4 whose ALL 512 entries are user (since kernel lives
@@ -1850,10 +1888,7 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
             page_table_t *pml4_user =
                 (page_table_t *)vmm_phys_to_virt(pml4_phys_user);
             uint64_t pml5_va_term = (uint64_t)p5 << 48;
-            vmm_walk_free_pml4_user_(pml4_user, 512,
-                                      freed_bitmap, has_dedup,
-                                      dedup_total_pages,
-                                      pml5_va_term);
+            vmm_walk_free_pml4_user_(pml4_user, 512, &freed, pml5_va_term);
             vmm_free_page_table(pml4_phys_user);
             ctx->pml4->entries[p5] = 0;
         }
@@ -1864,8 +1899,8 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
      * gone: the Phase 0 quiesce flushed every core and evicted them off this
      * CR3, and the walk now frees each mapped data page inline. Teardown cost is
      * O(mapped pages), not O(installed RAM). Only the dedup scratch remains. */
-    if (dedup_phys)
-        pmm_free(dedup_phys, dedup_pages);
+    if (freed.phys)
+        pmm_free(freed.phys, freed.pages);
 
     debug_printf("[VMM] User space tables freed\n");
 }
