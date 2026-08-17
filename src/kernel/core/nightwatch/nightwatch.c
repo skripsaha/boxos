@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include "kcore.h"
 #include "result_ring.h"
+#include "touch_ring.h"
 #include "clockboard.h"
 #include "klib.h"
 
@@ -73,6 +74,7 @@ typedef struct
     uintptr_t phys_addr;
     uint8_t   wait_reason;
     uint64_t  result_ring_phys;
+    uint64_t  touch_ring_phys;
 } NightwatchProbe;
 
 void nightwatch_init(void)
@@ -156,6 +158,7 @@ static void nightwatch_verdict(bool all_quiet)
         e->phys_addr  = p->addr_wait_entry.phys_addr;
         e->wait_reason      = (uint8_t)p->wait_reason;
         e->result_ring_phys = p->result_ring_phys;
+        e->touch_ring_phys  = p->touch_ring_phys;
     }
     process_list_unlock();
 
@@ -188,6 +191,21 @@ static void nightwatch_verdict(bool all_quiet)
             rr_tail = __atomic_load_n(&h->tail, __ATOMIC_ACQUIRE);
             result_ready = (rr_tail != rr_head);
         }
+        /* Same proof for the other delivery surface. A supervisor blocked on
+         * process:died waits on its Touch ring, not on a Result — and a death
+         * sitting unread in that ring while its reader stays asleep is the same
+         * defect wearing different clothes. */
+        bool touch_ready = false;
+        uint64_t tr_head = 0, tr_tail = 0;
+        if (e->state == (uint8_t)PROC_WAITING && e->touch_ring_phys)
+        {
+            const TouchRingHeader *t =
+                (const TouchRingHeader *)vmm_phys_to_virt(e->touch_ring_phys);
+            tr_head = __atomic_load_n(&t->head, __ATOMIC_ACQUIRE);
+            tr_tail = __atomic_load_n(&t->tail, __ATOMIC_ACQUIRE);
+            touch_ready = (tr_tail != tr_head);
+        }
+        if (touch_ready) undelivered++;
         if (result_ready) undelivered++;
 
         if (!e->linked || e->done)
@@ -200,6 +218,10 @@ static void nightwatch_verdict(bool all_quiet)
                 kprintf("      ‼ RESULT UNDELIVERED — ring holds head=%lu tail=%lu, "
                         "yet this process still waits\n",
                         (unsigned long)rr_head, (unsigned long)rr_tail);
+            if (touch_ready && speak)
+                kprintf("      ‼ TOUCH UNDELIVERED — ring holds head=%lu tail=%lu, "
+                        "yet this process still waits\n",
+                        (unsigned long)tr_head, (unsigned long)tr_tail);
             continue;
         }
 
