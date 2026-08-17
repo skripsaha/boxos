@@ -1,0 +1,74 @@
+// boxcxx — <typeindex>  ([type.index])
+//
+// type_index is the wrapper that makes a type usable as a key: type_info
+// itself cannot be, because it is neither copyable nor assignable. The
+// whole header is one class holding one pointer, and the interesting part
+// is not the class — it is whether the order it exposes is real.
+//
+// [type.index.members] defines the order through type_info::before, and
+// boxcxx's before compares the mangled-name POINTERS (<typeinfo>, which
+// says why: a BoxOS binary is one static image and vague linkage merges
+// every duplicate typeinfo). That makes the order a strict total order
+// only if distinct type_info objects never share a name pointer — and they
+// cannot: distinct types have distinct mangled names, distinct names are
+// distinct string objects, and the merging the linker does for identical
+// string contents cannot fire on contents that differ. So `==` (pointer
+// identity of the type_info) and `before` (pointer order of its name)
+// agree, which is exactly what map<type_index, T> needs and what
+// Phase192 pins.
+//
+// Comparing unrelated pointers with `<` is unspecified in the abstract
+// machine, not undefined; on one flat address space it is a total order,
+// and libstdc++ makes the same trade whenever it is allowed to assume
+// merged typeinfo names. The alternative — strcmp on every comparison —
+// would buy nothing here and cost a string walk per tree node.
+#ifndef BOXCXX_TYPEINDEX
+#define BOXCXX_TYPEINDEX
+
+#include <compare>
+#include <cstddef>
+#include <typeinfo>
+
+namespace std {
+
+// Declared, not defined: specializing hash does not need the primary
+// template's body, and <functional> is far too much to pull in for one
+// specialization. Same arrangement as <string_view> and <__bits/indirect>.
+template <class T>
+struct hash;
+
+class type_index {
+public:
+    type_index(const type_info &rhs) noexcept : target(&rhs) {}
+
+    [[nodiscard]] bool operator==(const type_index &rhs) const noexcept
+    {
+        return *target == *rhs.target;
+    }
+
+    [[nodiscard]] strong_ordering operator<=>(const type_index &rhs) const noexcept
+    {
+        if (*target == *rhs.target) return strong_ordering::equal;
+        if (target->before(*rhs.target)) return strong_ordering::less;
+        return strong_ordering::greater;
+    }
+
+    [[nodiscard]] size_t hash_code() const noexcept { return target->hash_code(); }
+
+    [[nodiscard]] const char *name() const noexcept { return target->name(); }
+
+private:
+    const type_info *target; // exposition only
+};
+
+template <>
+struct hash<type_index> {
+    [[nodiscard]] size_t operator()(type_index index) const noexcept
+    {
+        return index.hash_code();
+    }
+};
+
+} // namespace std
+
+#endif // BOXCXX_TYPEINDEX
