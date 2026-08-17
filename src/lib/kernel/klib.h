@@ -26,8 +26,10 @@ extern uintptr_t _kernel_start;
 #define KLIB_HEAP_RAM_CAP_DIVISOR   64
 
 /* The MBR + Stage2 path only identity-maps the first 128 MB until the VMM's
- * Pull Map is activated. Until then the heap pool MUST fit in that window;
- * after vmm_init + mem_activate_pull_map the full heap is reachable. */
+ * Pull Map is activated. The pool is allocated whole at boot, but only this
+ * much of it is PUBLISHED until mem_activate_pull_map hands over the tail —
+ * see mem_init. Anything larger would be untouchable while the window is all
+ * the addressing there is. */
 #define KLIB_HEAP_BOOTLOADER_SAFE_SIZE  (2 * 1024 * 1024)
 
 // 32 bytes: mem_block_t is 20 bytes; 16-byte alignment causes misaligned new_block pointers in kmalloc split
@@ -77,6 +79,7 @@ void mem_activate_pull_map(void);
 void* kmalloc(size_t size);
 void kfree(void* ptr);
 void mem_stats(void);
+size_t mem_heap_size(void);
 
 __attribute__((noreturn)) void panic(const char* message, ...);
 int kprintf(const char* format, ...);

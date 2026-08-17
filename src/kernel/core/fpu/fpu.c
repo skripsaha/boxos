@@ -176,9 +176,14 @@ void enable_fpu(void) {
         /* kprintf: this number sets the per-process FPU buffer, and once it
          * passes SLAB_LARGE_THRESHOLD every process allocates out of the
          * fixed kernel pool instead of the growable slab.  That crossing is
-         * invisible unless the number itself is on the console. */
-        kprintf("[FPU] XSAVE enabled: XCR0=0x%lx, area_size=%u bytes (per-process buffer %u)\n",
-                xcr0, g_xsave_area_size, g_xsave_area_size + 63);
+         * invisible unless the number itself is on the console.
+         *
+         * Once, not once per core: every AP runs enable_fpu and reaches the
+         * same CPUID answer, so the other N-1 lines say nothing new. */
+        static volatile uint8_t xsave_line_done = 0;
+        if (__atomic_exchange_n(&xsave_line_done, 1, __ATOMIC_RELAXED) == 0)
+            kprintf("[FPU] XSAVE enabled: XCR0=0x%lx, area_size=%u bytes (per-process buffer %u)\n",
+                    xcr0, g_xsave_area_size, g_xsave_area_size + 63);
         if (xcr0 & XCR0_AVX)
             debug_printf("[FPU]   AVX: enabled\n");
         if (xcr0 & XCR0_OPMASK)

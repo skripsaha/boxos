@@ -36,20 +36,30 @@ typedef struct
 } heap_guard_t;
 
 static uint8_t      *memory_pool = NULL;
+/* PUBLISHED size — what the free list covers and what the range checks accept.
+ * Before the Pull Map is up it is only the part the bootloader's identity
+ * window can reach; mem_activate_pull_map raises it to memory_pool_full. */
 static size_t        memory_pool_size = 0;
+static size_t        memory_pool_full = 0;   /* size actually allocated at boot */
 static mem_block_t  *free_list = NULL;
 static spinlock_t    heap_lock = {0};
 
-/* Pool occupancy, maintained under heap_lock.  The pool is FIXED at boot and
- * never grows, so how close it runs to full is the difference between a
- * healthy system and every caller's error-unwind path firing at once.  A
- * high-water mark is the only way to see that coming: instantaneous stats
- * always read fine, because the peak has already drained by the time anyone
- * asks.  Reported at each quarter of the pool — four lines per boot. */
+/* Pool occupancy, maintained under heap_lock.  The pool is sized once at boot,
+ * so how close it runs to full is the difference between a healthy system and
+ * every caller's error-unwind path firing at once.  A high-water mark is the
+ * only way to see that coming: instantaneous stats always read fine, because
+ * the peak has already drained by the time anyone asks.
+ *
+ * Reported on each DOUBLING of the peak from HEAP_PEAK_REPORT_FLOOR up, not at
+ * fractions of the pool: a fraction of a large pool is never crossed by a
+ * healthy system, so the reporter would go silent exactly on the machines with
+ * the most room to misjudge.  Doubling gives at most log2(pool/floor) lines —
+ * eight for a 64 MiB pool — and each one is a real change of magnitude. */
+#define HEAP_PEAK_REPORT_FLOOR (256u * 1024u)
 static size_t g_heap_live  = 0;
 static size_t g_heap_peak  = 0;
 static size_t g_heap_max_1 = 0;   /* largest single request ever served */
-static unsigned g_heap_peak_step = 0;
+static size_t g_heap_peak_reported = 0;
 
 /* Declared in klib_print.c — initialises g_kprintf_lock once. */
 void klib_print_lock_init(void);
@@ -76,6 +86,41 @@ void mem_activate_pull_map(void)
     }
 
     slab_activate_pull_map();
+
+    /* Publish the tail. Every physical byte is addressable now, so the part of
+     * the pool the identity window could not reach joins the free list. The
+     * pool is ONE contiguous block, so this is an append — and a merge when the
+     * highest free block ends exactly where the tail begins — not a second
+     * region: the free list stays address-ordered and the range checks stay a
+     * single interval. Runs single-threaded during vmm_init, before the APs
+     * boot, so no lock is taken. */
+    if (memory_pool_full > memory_pool_size)
+    {
+        uint8_t *tail  = memory_pool + memory_pool_size;
+        size_t   added = memory_pool_full - memory_pool_size;
+        memset(tail, 0, added);
+
+        mem_block_t *blk = (mem_block_t *)tail;
+        blk->size  = added - sizeof(mem_block_t);
+        blk->next  = NULL;
+        blk->magic = KLIB_MAGIC_FREE;
+
+        memory_pool_size = memory_pool_full;
+
+        mem_block_t *last = free_list;
+        while (last && last->next)
+            last = last->next;
+
+        if (!last)
+            free_list = blk;
+        else if ((uint8_t *)last + sizeof(mem_block_t) + last->size == tail)
+            last->size += sizeof(mem_block_t) + added;
+        else
+            last->next = blk;
+
+        kprintf("[KLIB] kernel heap now %zu KB (tail of %zu KB published)\n",
+                memory_pool_size / 1024, added / 1024);
+    }
 }
 
 void mem_init(void)
@@ -103,33 +148,60 @@ void mem_init(void)
     if (heap_size > dynamic_max)
         heap_size = dynamic_max;
 
-    /* Pre-VMM bootloader-window cap (rationale: klib.h). */
-    if (heap_size > KLIB_HEAP_BOOTLOADER_SAFE_SIZE)
+    heap_size = ALIGN_UP(heap_size, VMM_PAGE_SIZE);
+
+    /* Take the whole pool NOW, as ONE contiguous block, and publish only the
+     * part the bootloader's identity window can reach. The tail joins the free
+     * list in mem_activate_pull_map. The pool used to be clamped to the window
+     * outright, with a message promising it "will be N MB after VMM init" —
+     * nothing ever raised it, so a 2 MiB heap was all any machine ever got.
+     *
+     * pmm_alloc, not pmm_alloc_zero: zeroing the whole pool would touch bytes
+     * past the identity window. Each half is zeroed when it is published.
+     *
+     * Halve on refusal down to the floor. Two things can refuse: the buddy
+     * caps a single block at BUDDY_MAX_ORDER, and the pre-Pull-Map window may
+     * simply not hold the ideal size. A machine that cannot spare it must
+     * still boot with a smaller heap, and the size it really got is printed
+     * rather than assumed. */
+    void  *pool = NULL;
+    for (;;)
     {
-        debug_printf("[KLIB] Heap size capped at %zu MB (bootloader mapping limit), will be %zu MB after VMM init\n",
-                     (size_t)(KLIB_HEAP_BOOTLOADER_SAFE_SIZE / (1024 * 1024)),
-                     heap_size / (1024 * 1024));
-        heap_size = KLIB_HEAP_BOOTLOADER_SAFE_SIZE;
+        pool = pmm_alloc(heap_size / VMM_PAGE_SIZE);
+        if (pool)
+            break;
+        if (heap_size <= KLIB_HEAP_MIN_SIZE)
+            panic("Failed to allocate kernel memory pool from PMM!");
+        heap_size /= 2;
+        if (heap_size < KLIB_HEAP_MIN_SIZE)
+            heap_size = KLIB_HEAP_MIN_SIZE;
     }
 
-    heap_size = ALIGN_UP(heap_size, VMM_PAGE_SIZE);
-    memory_pool_size = heap_size;
+    size_t early = heap_size;
+    if (early > KLIB_HEAP_BOOTLOADER_SAFE_SIZE)
+        early = KLIB_HEAP_BOOTLOADER_SAFE_SIZE;
 
-    size_t pages_needed = heap_size / VMM_PAGE_SIZE;
-
-    kprintf("[KLIB] Total RAM: %zu MB, kernel heap: %zu KB (%zu pages, FIXED — never grows)\n",
-            total_ram / (1024 * 1024), heap_size / 1024, pages_needed);
-
-    memory_pool = (uint8_t *)pmm_alloc_zero(pages_needed);
-    if (!memory_pool)
-        panic("Failed to allocate kernel memory pool from PMM!");
+    memory_pool      = (uint8_t *)pool;
+    memory_pool_full = heap_size;
+    memory_pool_size = early;
+    memset(memory_pool, 0, early);
 
     free_list = (mem_block_t *)memory_pool;
-    free_list->size = heap_size - sizeof(mem_block_t);
+    free_list->size = early - sizeof(mem_block_t);
     free_list->next = NULL;
     free_list->magic = KLIB_MAGIC_FREE;
 
+    kprintf("[KLIB] Total RAM: %zu MB, kernel heap: %zu KB (%zu KB live until Pull Map)\n",
+            total_ram / (1024 * 1024), heap_size / 1024, early / 1024);
+
     slab_init();
+}
+
+/* Published pool size. Callers that size a growable structure against the
+ * heap need the real number, not a constant that outlives the sizing policy. */
+size_t mem_heap_size(void)
+{
+    return memory_pool_full ? memory_pool_full : memory_pool_size;
 }
 
 static void *kmalloc_internal(size_t size)
@@ -210,12 +282,13 @@ static void *kmalloc_internal(size_t size)
         if (g_heap_live > g_heap_peak)
         {
             g_heap_peak = g_heap_live;
-            unsigned q = (unsigned)((g_heap_peak * 4) / (memory_pool_size ? memory_pool_size : 1));
-            if (q > g_heap_peak_step)
+            size_t next = g_heap_peak_reported ? g_heap_peak_reported * 2
+                                               : HEAP_PEAK_REPORT_FLOOR;
+            if (g_heap_peak >= next)
             {
-                g_heap_peak_step = q;
-                step = q;
-                peak = g_heap_peak;
+                g_heap_peak_reported = next;
+                step  = 1;
+                peak  = g_heap_peak;
                 max_1 = g_heap_max_1;
             }
         }
@@ -242,8 +315,8 @@ static void *kmalloc_internal(size_t size)
                 "peak %zu KB, largest free %zu B\n",
                 size, memory_pool_size / 1024, live / 1024, peak / 1024, largest_free);
     else if (step)
-        kprintf("[KLIB] heap high-water %zu KB of %zu KB (%u/4), largest request %zu B\n",
-                peak / 1024, memory_pool_size / 1024, step, max_1);
+        kprintf("[KLIB] heap high-water %zu KB of %zu KB, largest request %zu B\n",
+                peak / 1024, memory_pool_size / 1024, max_1);
 
     return result;
 }
