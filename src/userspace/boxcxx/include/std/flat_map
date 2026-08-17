@@ -385,8 +385,8 @@ public:
     // the tagged forms take the caller's word for it and only move. The
     // allocator forms are "equivalent to the corresponding non-allocator
     // constructor except that c.keys and c.values are constructed with
-    // uses-allocator construction", which is MakeUsingAlloc applied to each
-    // container independently.
+    // uses-allocator construction", which is std::make_obj_using_allocator
+    // applied to each container independently.
 
     MapImpl() : MapImpl(key_compare()) {}
 
@@ -399,7 +399,7 @@ public:
     template <typename Alloc>
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(const key_container_type &key_cont, const mapped_container_type &mapped_cont, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a, key_cont), MakeUsingAlloc<MappedContainer>(a, mapped_cont)},
+        : c{std::make_obj_using_allocator<KeyContainer>(a, key_cont), std::make_obj_using_allocator<MappedContainer>(a, mapped_cont)},
           compare()
     {
         SortAndDedupWhole();
@@ -408,7 +408,7 @@ public:
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(const key_container_type &key_cont, const mapped_container_type &mapped_cont,
             const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a, key_cont), MakeUsingAlloc<MappedContainer>(a, mapped_cont)},
+        : c{std::make_obj_using_allocator<KeyContainer>(a, key_cont), std::make_obj_using_allocator<MappedContainer>(a, mapped_cont)},
           compare(comp)
     {
         SortAndDedupWhole();
@@ -423,7 +423,7 @@ public:
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(SortedT, const key_container_type &key_cont, const mapped_container_type &mapped_cont,
             const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a, key_cont), MakeUsingAlloc<MappedContainer>(a, mapped_cont)},
+        : c{std::make_obj_using_allocator<KeyContainer>(a, key_cont), std::make_obj_using_allocator<MappedContainer>(a, mapped_cont)},
           compare()
     {
     }
@@ -431,7 +431,7 @@ public:
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(SortedT, const key_container_type &key_cont, const mapped_container_type &mapped_cont,
             const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a, key_cont), MakeUsingAlloc<MappedContainer>(a, mapped_cont)},
+        : c{std::make_obj_using_allocator<KeyContainer>(a, key_cont), std::make_obj_using_allocator<MappedContainer>(a, mapped_cont)},
           compare(comp)
     {
     }
@@ -440,13 +440,13 @@ public:
     template <typename Alloc>
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare(comp)
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare(comp)
     {
     }
     template <typename Alloc>
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     explicit MapImpl(const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare()
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare()
     {
     }
 
@@ -460,7 +460,7 @@ public:
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<key_container_type, Alloc> &&
                  uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(It first, It last, const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare(comp)
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare(comp)
     {
         insert(first, last);
     }
@@ -468,7 +468,7 @@ public:
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<key_container_type, Alloc> &&
                  uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(It first, It last, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare()
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare()
     {
         insert(first, last);
     }
@@ -485,14 +485,14 @@ public:
     template <ContainerCompatibleRange<value_type> R, typename Alloc>
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(from_range_t, R &&rg, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare()
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare()
     {
         insert_range(std::forward<R>(rg));
     }
     template <ContainerCompatibleRange<value_type> R, typename Alloc>
         requires uses_allocator_v<key_container_type, Alloc> && uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(from_range_t, R &&rg, const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare(comp)
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare(comp)
     {
         insert_range(std::forward<R>(rg));
     }
@@ -507,7 +507,7 @@ public:
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<key_container_type, Alloc> &&
                  uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(SortedT s, It first, It last, const key_compare &comp, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare(comp)
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare(comp)
     {
         insert(s, first, last);
     }
@@ -515,7 +515,7 @@ public:
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<key_container_type, Alloc> &&
                  uses_allocator_v<mapped_container_type, Alloc>
     MapImpl(SortedT s, It first, It last, const Alloc &a)
-        : c{MakeUsingAlloc<KeyContainer>(a), MakeUsingAlloc<MappedContainer>(a)}, compare()
+        : c{std::make_obj_using_allocator<KeyContainer>(a), std::make_obj_using_allocator<MappedContainer>(a)}, compare()
     {
         insert(s, first, last);
     }

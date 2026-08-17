@@ -10,6 +10,7 @@
 #define BOXCXX_MEMORY_RESOURCE
 
 #include <__bits/allocator_core>
+#include <__bits/uses_allocator>
 #include <cstddef>
 #include <new>
 #include <tuple>
@@ -75,20 +76,6 @@ template <class T = byte>
 class polymorphic_allocator {
     memory_resource *res_;
 
-    // uses-allocator argument tuple for a member of type M ([allocator.uses]).
-    template <class M, class... A>
-    constexpr auto MemberArgs(A &&...a) const
-    {
-        if constexpr (!uses_allocator_v<M, polymorphic_allocator>)
-            return forward_as_tuple(static_cast<A &&>(a)...);
-        else if constexpr (is_constructible_v<M, allocator_arg_t,
-                                              polymorphic_allocator, A...>)
-            return tuple<allocator_arg_t, polymorphic_allocator, A &&...>(
-                allocator_arg, *this, static_cast<A &&>(a)...);
-        else
-            return forward_as_tuple(static_cast<A &&>(a)..., *this);
-    }
-
 public:
     using value_type = T;
 
@@ -153,64 +140,30 @@ public:
     }
 
     // uses-allocator construction --------------------------------------
+    // [mem.poly.allocator.mem]/1 is one member, not seven, and it says
+    // exactly this: apply construct_at to whatever
+    // uses_allocator_construction_args decides the argument list should be.
+    //
+    // Six hand-written overloads used to stand here -- the plain one plus
+    // five pair forms -- and they were wrong in three ways that only became
+    // visible once the rule itself existed in <__bits/uses_allocator>
+    // (Ф38). They were missing the C++23 `pair<U,V>&` and
+    // `const pair<U,V>&&` overloads, so a non-const lvalue pair went
+    // through the const path; they had no pair-like or single-argument form
+    // at all; and the plain one ended in a branch commented "best effort"
+    // that constructed WITHOUT the allocator when neither allocator
+    // position fit. The standard calls that program ill-formed. What it
+    // produced here was a pmr element that silently did not share its
+    // container's resource -- the same failure Ф31e-g-2 found in
+    // allocate_shared, arrived at from a different direction.
     template <class U, class... A>
     void construct(U *p, A &&...args)
     {
-        if constexpr (!uses_allocator_v<U, polymorphic_allocator> &&
-                      is_constructible_v<U, A...>)
-            construct_at(p, static_cast<A &&>(args)...);
-        else if constexpr (uses_allocator_v<U, polymorphic_allocator> &&
-                           is_constructible_v<U, allocator_arg_t,
-                                              polymorphic_allocator, A...>)
-            construct_at(p, allocator_arg, *this, static_cast<A &&>(args)...);
-        else if constexpr (uses_allocator_v<U, polymorphic_allocator> &&
-                           is_constructible_v<U, A..., polymorphic_allocator>)
-            construct_at(p, static_cast<A &&>(args)..., *this);
-        else
-            construct_at(p, static_cast<A &&>(args)...); // best effort
-    }
-
-    // pair: propagate the allocator into each member ([allocator.uses]).
-    template <class T1, class T2, class Tup1, class Tup2>
-    void construct(pair<T1, T2> *p, piecewise_construct_t, Tup1 &&x, Tup2 &&y)
-    {
-        auto a1 = apply(
-            [this](auto &&...e) {
-                return MemberArgs<T1>(static_cast<decltype(e) &&>(e)...);
+        std::apply(
+            [p](auto &&...newargs) {
+                construct_at(p, std::forward<decltype(newargs)>(newargs)...);
             },
-            static_cast<Tup1 &&>(x));
-        auto a2 = apply(
-            [this](auto &&...e) {
-                return MemberArgs<T2>(static_cast<decltype(e) &&>(e)...);
-            },
-            static_cast<Tup2 &&>(y));
-        construct_at(p, piecewise_construct, static_cast<decltype(a1) &&>(a1),
-                     static_cast<decltype(a2) &&>(a2));
-    }
-    template <class T1, class T2>
-    void construct(pair<T1, T2> *p)
-    {
-        construct(p, piecewise_construct, tuple<>(), tuple<>());
-    }
-    template <class T1, class T2, class U, class V>
-    void construct(pair<T1, T2> *p, U &&u, V &&v)
-    {
-        construct(p, piecewise_construct,
-                  forward_as_tuple(static_cast<U &&>(u)),
-                  forward_as_tuple(static_cast<V &&>(v)));
-    }
-    template <class T1, class T2, class U, class V>
-    void construct(pair<T1, T2> *p, const pair<U, V> &pr)
-    {
-        construct(p, piecewise_construct, forward_as_tuple(pr.first),
-                  forward_as_tuple(pr.second));
-    }
-    template <class T1, class T2, class U, class V>
-    void construct(pair<T1, T2> *p, pair<U, V> &&pr)
-    {
-        construct(p, piecewise_construct,
-                  forward_as_tuple(static_cast<U &&>(pr.first)),
-                  forward_as_tuple(static_cast<V &&>(pr.second)));
+            std::uses_allocator_construction_args<U>(*this, std::forward<A>(args)...));
     }
 
     template <class U>

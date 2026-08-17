@@ -42,6 +42,15 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф38 raised it 161 -> 162, and the delta is ONE macro:
+#           __cpp_lib_make_obj_using_allocator, owned by <memory>, which
+#           nearly every container pulls in. Measured as a set difference
+#           rather than asserted -- with the phase's new headers present but
+#           the macro still undefined the count was 161, and defining it made
+#           it 162 with nothing else moving. The phase's other two new
+#           headers, <spanstream> and <scoped_allocator>, leak nothing at
+#           all, because nothing in the tree includes either.
+#
 #           Ф35 raised it 158 -> 161, and the three are: indirect and
 #           polymorphic (owned by <memory>, which nearly every container
 #           pulls in), plus __cpp_lib_span, which had never leaked ANYWHERE
@@ -55,7 +64,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=161
+LEAK_BUDGET=162
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

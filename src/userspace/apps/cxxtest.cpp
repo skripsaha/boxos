@@ -542,6 +542,7 @@
 #include <new>
 #include <exception>
 #include <initializer_list>
+#include <scoped_allocator>
 #include <span>
 #include <spanstream>
 #include <sstream>
@@ -43487,6 +43488,283 @@ void Phase193()
     printf("[CXX] PASS phase193: <spanstream>\n");
 }
 
+// ── phase194: [allocator.uses.construction] + <scoped_allocator> ────────
+// Two things that are really one: the adaptor's construct() is SPECIFIED in
+// terms of uses_allocator_construction_args, so the rule had to exist
+// before the header could. It did not — the tree carried two partial
+// hand-written copies instead, one of which (pmr's) ended in a branch that
+// constructed WITHOUT the allocator rather than diagnosing.
+//
+// Every expected value below was first produced by libstdc++ 16.1 and
+// libc++ on the host, which agree with each other on the seven overloads
+// they share; libc++ supplied the two libstdc++ does not implement (the
+// pair-like and single-argument forms). So these pin the standard, not this
+// implementation.
+//
+// The tag values are the whole point: 1 means the object received the
+// allocator through the leading allocator_arg position, 2 through the
+// trailing one, 0 means it never got one at all. A 0 anywhere below is the
+// silent failure this phase exists to catch.
+struct P194Leading {
+    using allocator_type = std::allocator<int>;
+    int v;
+    int tag;
+    P194Leading(std::allocator_arg_t, const allocator_type &, int x = 0) : v(x), tag(1) {}
+    P194Leading(int x = 0) : v(x), tag(0) {}
+};
+struct P194Trailing {
+    using allocator_type = std::allocator<int>;
+    int v;
+    int tag;
+    P194Trailing(int x, const allocator_type &) : v(x), tag(2) {}
+    P194Trailing(int x = 0) : v(x), tag(0) {}
+    P194Trailing(const allocator_type &) : v(0), tag(2) {}
+};
+struct P194Plain {
+    int v;
+    P194Plain(int x = 0) : v(x) {}
+};
+// The same two shapes again, naming pmr's allocator instead of
+// std::allocator. They have to be separate types: uses_allocator_v asks
+// whether the allocator being offered CONVERTS to the type's own
+// allocator_type, and a polymorphic_allocator does not convert to a
+// std::allocator. A fixture that got that wrong would report "no allocator
+// was delivered" for a library that had done nothing wrong.
+struct P194PmrLeading {
+    using allocator_type = std::pmr::polymorphic_allocator<>;
+    int v;
+    int tag;
+    P194PmrLeading(std::allocator_arg_t, const allocator_type &, int x = 0) : v(x), tag(1) {}
+    P194PmrLeading(int x = 0) : v(x), tag(0) {}
+};
+struct P194PmrTrailing {
+    using allocator_type = std::pmr::polymorphic_allocator<>;
+    int v;
+    int tag;
+    P194PmrTrailing(int x, const allocator_type &) : v(x), tag(2) {}
+    P194PmrTrailing(int x = 0) : v(x), tag(0) {}
+    P194PmrTrailing(const allocator_type &) : v(0), tag(2) {}
+};
+
+// A minimal allocator that carries an identity, so "which allocator did
+// this object actually get" is answerable rather than inferred.
+template <class T>
+struct P194TagAlloc {
+    using value_type = T;
+    int id;
+    P194TagAlloc(int i = 0) : id(i) {}
+    template <class U>
+    P194TagAlloc(const P194TagAlloc<U> &o) : id(o.id)
+    {
+    }
+    T   *allocate(std::size_t n) { return static_cast<T *>(::operator new(n * sizeof(T))); }
+    void deallocate(T *p, std::size_t) { ::operator delete(p); }
+    bool operator==(const P194TagAlloc &o) const { return id == o.id; }
+};
+// Records the id of whatever allocator reached it.
+struct P194Tagged {
+    using allocator_type = P194TagAlloc<int>;
+    int v;
+    int allocId;
+    P194Tagged(int x, const allocator_type &a) : v(x), allocId(a.id) {}
+    P194Tagged(const allocator_type &a) : v(0), allocId(a.id) {}
+};
+
+void Phase194()
+{
+    using namespace std;
+
+    allocator<int> A;
+    using PLT = pair<P194Leading, P194Trailing>;
+
+    // ---- (A) the nine shapes of uses_allocator_construction_args --------
+    // The three plain branches are checked by TYPE, because that is what the
+    // function returns and what every caller then applies.
+    {
+        auto t1 = uses_allocator_construction_args<P194Plain>(A, 1);
+        static_assert(is_same_v<decltype(t1), tuple<int &&>>,
+                      "phase194 no allocator use: the arguments pass through");
+        auto t2 = uses_allocator_construction_args<P194Leading>(A, 1);
+        static_assert(
+            is_same_v<decltype(t2), tuple<allocator_arg_t, const allocator<int> &, int &&>>,
+            "phase194 leading-tag form");
+        auto t3 = uses_allocator_construction_args<P194Trailing>(A, 1);
+        static_assert(is_same_v<decltype(t3), tuple<int &&, const allocator<int> &>>,
+                      "phase194 trailing form");
+        Check(get<2>(t2) == 1 && get<0>(t3) == 1, "phase194 the arguments survive the wrapping");
+    }
+    {
+        auto p = make_obj_using_allocator<PLT>(A, piecewise_construct, tuple<int>(7),
+                                               tuple<int>(8));
+        Check(p.first.v == 7 && p.first.tag == 1 && p.second.v == 8 && p.second.tag == 2,
+              "phase194 piecewise: each member asks the question separately");
+    }
+    {
+        auto p = make_obj_using_allocator<PLT>(A);
+        Check(p.first.tag == 1 && p.second.tag == 2,
+              "phase194 a pair built from nothing still gets the allocator");
+    }
+    {
+        auto p = make_obj_using_allocator<PLT>(A, 1, 2);
+        Check(p.first.v == 1 && p.first.tag == 1 && p.second.v == 2 && p.second.tag == 2,
+              "phase194 two arguments, one per member");
+    }
+    {
+        pair<int, int> src{3, 4};
+        auto           l = make_obj_using_allocator<PLT>(A, src);            // pair&
+        auto           c = make_obj_using_allocator<PLT>(A, as_const(src));  // const pair&
+        auto           r = make_obj_using_allocator<PLT>(A, std::move(src)); // pair&&
+        const pair<int, int> csrc{13, 14};
+        auto                 cr = make_obj_using_allocator<PLT>(A, std::move(csrc)); // const pair&&
+        Check(l.first.v == 3 && l.second.v == 4 && l.first.tag == 1 && l.second.tag == 2,
+              "phase194 from a non-const lvalue pair (a C++23 addition)");
+        Check(c.first.v == 3 && c.second.v == 4, "phase194 from a const lvalue pair");
+        Check(r.first.v == 3 && r.second.v == 4, "phase194 from an rvalue pair");
+        Check(cr.first.v == 13 && cr.second.v == 14 && cr.first.tag == 1,
+              "phase194 from a const rvalue pair (the other C++23 addition)");
+    }
+    {
+        // The two overloads libstdc++ 16.1 does not implement at all.
+        auto t = make_obj_using_allocator<PLT>(A, tuple<int, int>{5, 6});
+        auto a = make_obj_using_allocator<PLT>(A, array<int, 2>{9, 10});
+        Check(t.first.v == 5 && t.second.v == 6 && t.first.tag == 1 && t.second.tag == 2,
+              "phase194 pair-like: a tuple of two splits into the two members");
+        Check(a.first.v == 9 && a.second.v == 10 && a.second.tag == 2,
+              "phase194 pair-like: an array of two does too");
+    }
+    {
+        alignas(PLT) unsigned char raw[sizeof(PLT)];
+        PLT *p = uninitialized_construct_using_allocator(reinterpret_cast<PLT *>(raw), A, 11, 12);
+        Check(p == reinterpret_cast<PLT *>(raw), "phase194 it returns where it built");
+        Check(p->first.v == 11 && p->first.tag == 1 && p->second.v == 12 && p->second.tag == 2,
+              "phase194 constructing in place obeys the same rule");
+        p->~PLT();
+    }
+
+    // ---- (B) the pmr rebase ---------------------------------------------
+    {
+        // Reaching pmr::polymorphic_allocator::construct with a pair-like
+        // argument was a hard error before this phase: the six hand-written
+        // overloads had no such form. Now it routes through the rule, and
+        // the rule says delegate to the piecewise form -- so the allocator
+        // reaches BOTH members. Measured on the host, both references
+        // disagree with the standard here in different ways: libstdc++ 16.1
+        // does not compile this call at all, and libc++ compiles it and
+        // delivers the allocator to neither member.
+        using PmrP = pair<P194PmrLeading, P194PmrTrailing>;
+        pmr::polymorphic_allocator<> pa;
+        alignas(PmrP) unsigned char raw[sizeof(PmrP)];
+        PmrP *p = reinterpret_cast<PmrP *>(raw);
+        pa.construct(p, tuple<int, int>{21, 22});
+        Check(p->first.v == 21 && p->first.tag == 1 && p->second.v == 22 && p->second.tag == 2,
+              "phase194 pmr construct takes a pair-like, and propagates through it");
+        pa.destroy(p);
+
+        pa.construct(p, 23, 24);
+        Check(p->first.tag == 1 && p->second.tag == 2,
+              "phase194 ...and the ordinary pair forms still deliver the allocator");
+        pa.destroy(p);
+
+        // The negative half, and the reason the fixtures above are doubled:
+        // a type whose allocator_type is std::allocator cannot be handed a
+        // polymorphic_allocator, so it must get NO allocator rather than a
+        // converted one.
+        alignas(PLT) unsigned char raw2[sizeof(PLT)];
+        PLT *q = reinterpret_cast<PLT *>(raw2);
+        pa.construct(q, 25, 26);
+        Check(q->first.tag == 0 && q->second.tag == 0 && q->first.v == 25,
+              "phase194 an allocator that does not convert is not delivered");
+        pa.destroy(q);
+    }
+    {
+        // The property the rebase must not break: a nested pmr container
+        // inherits its parent's resource rather than the default one.
+        char                     buf[4096];
+        pmr::monotonic_buffer_resource res(buf, sizeof buf, pmr::null_memory_resource());
+        pmr::vector<pmr::string> v(&res);
+        v.emplace_back("a string long enough that it cannot possibly be stored inline");
+        Check(v[0].get_allocator().resource() == &res,
+              "phase194 a nested pmr container still inherits the resource");
+    }
+
+    // ---- (C) scoped_allocator_adaptor ------------------------------------
+    using Outer = P194TagAlloc<P194Tagged>;
+    using Inner = P194TagAlloc<int>;
+    using SAA   = scoped_allocator_adaptor<Outer, Inner>;
+    using SAA1  = scoped_allocator_adaptor<Outer>;
+
+    static_assert(is_same_v<SAA::inner_allocator_type, scoped_allocator_adaptor<Inner>>,
+                  "phase194 the inner allocator is the adaptor over the tail");
+    static_assert(is_same_v<SAA1::inner_allocator_type, SAA1>,
+                  "phase194 with no inner allocators the adaptor is its own");
+    static_assert(is_same_v<SAA::outer_allocator_type, Outer>);
+    static_assert(is_same_v<SAA::value_type, P194Tagged>);
+    static_assert(is_same_v<SAA::rebind<int>::other, scoped_allocator_adaptor<Inner, Inner>>,
+                  "phase194 rebind touches the outer allocator and leaves the tail alone");
+    static_assert(is_base_of_v<Outer, SAA>, "phase194 the adaptor IS its outer allocator");
+
+    {
+        SAA saa(Outer{1}, Inner{2});
+        Check(saa.outer_allocator().id == 1 && saa.inner_allocator().outer_allocator().id == 2,
+              "phase194 the two allocators stay distinct");
+
+        P194Tagged *p = saa.allocate(1);
+        saa.construct(p, 5);
+        // The headline behaviour, and the one worth a test of its own: the
+        // storage comes from the OUTER allocator, and the object is handed
+        // the INNER one. Getting 1 here would mean the object kept the
+        // allocator that owns the array rather than the one meant for what
+        // the object itself allocates.
+        Check(p->v == 5 && p->allocId == 2,
+              "phase194 the object receives the INNER allocator, not the outer");
+        saa.destroy(p);
+        saa.deallocate(p, 1);
+    }
+    {
+        SAA1 one(Outer{7});
+        Check(&one.inner_allocator() == &one,
+              "phase194 a single-allocator adaptor is its own inner allocator");
+        P194Tagged *p = one.allocate(1);
+        one.construct(p, 6);
+        Check(p->allocId == 7, "phase194 ...so the object gets that one allocator");
+        one.destroy(p);
+        one.deallocate(p, 1);
+    }
+    {
+        SAA  a(Outer{1}, Inner{2});
+        SAA  b(Outer{1}, Inner{2});
+        SAA  c(Outer{1}, Inner{9});
+        Check(a == b, "phase194 equal outer and equal inner compare equal");
+        Check(!(a == c), "phase194 a different inner allocator is a different adaptor");
+
+        auto sel = a.select_on_container_copy_construction();
+        Check(sel.outer_allocator().id == 1 && sel.inner_allocator().outer_allocator().id == 2,
+              "phase194 select_on_container_copy_construction reaches every allocator");
+
+        SAA moved(std::move(b));
+        Check(moved.outer_allocator().id == 1, "phase194 the adaptor moves");
+        SAA copied(a);
+        Check(copied == a, "phase194 ...and copies");
+    }
+    {
+        // End to end: a vector of vectors where only the OUTER vector was
+        // told about the allocator. Without the adaptor the inner vectors
+        // would each go to the global heap.
+        using InnerVec = vector<int, Inner>;
+        using OuterAll = scoped_allocator_adaptor<P194TagAlloc<InnerVec>, Inner>;
+        vector<InnerVec, OuterAll> v(OuterAll(P194TagAlloc<InnerVec>{3}, Inner{4}));
+        v.emplace_back();
+        v.back().push_back(1);
+        v.back().push_back(2);
+        Check(v.size() == 1 && v[0].size() == 2 && v[0][0] == 1 && v[0][1] == 2,
+              "phase194 the nested container works at all");
+        Check(v[0].get_allocator().id == 4,
+              "phase194 ...and it was built with the inner allocator it was never handed");
+    }
+
+    printf("[CXX] PASS phase194: [allocator.uses.construction] + <scoped_allocator>\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -43702,6 +43980,7 @@ int main()
     Phase191();
     Phase192();
     Phase193();
+    Phase194();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

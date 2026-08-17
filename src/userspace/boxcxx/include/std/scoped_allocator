@@ -1,0 +1,305 @@
+// boxcxx — <scoped_allocator>  ([allocator.adaptor])
+//
+// One allocator that hands itself down. A vector<string, A> built with a
+// plain A allocates its own buffer from A and lets every string inside go
+// to the global heap; wrap A in a scoped_allocator_adaptor and the strings
+// come from A too. That is the whole feature, and it is the reason
+// [allocator.uses.construction] exists — the adaptor's construct() is
+// specified in terms of it, which is why <__bits/uses_allocator> had to be
+// written first.
+//
+// Two pieces of machinery carry the recursion:
+//
+//   OUTERMOST(x)  follows .outer_allocator() as far as it goes, so an
+//                 adaptor wrapping an adaptor still constructs through the
+//                 allocator at the bottom of the stack. Written as a
+//                 constrained partial specialization, the same shape
+//                 <__bits/allocator_core> uses for allocator_traits'
+//                 member detection.
+//
+//   inner storage With no inner allocators, inner_allocator_type is
+//                 scoped_allocator_adaptor<OuterAlloc> — the adaptor is
+//                 its own inner allocator, and there is no member at all.
+//                 With one or more, the member is the adaptor over the
+//                 tail. The two cases are told apart by which overload of
+//                 Get() the `this` pointer matches, which is the only way
+//                 to write "return *this" for one and "return the member"
+//                 for the other from a single call site.
+#ifndef BOXCXX_SCOPED_ALLOCATOR
+#define BOXCXX_SCOPED_ALLOCATOR
+
+#include <__bits/allocator_core>
+#include <__bits/uses_allocator>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+// [version.syn] names this header as an owner of the macro below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_allocator_traits_is_always_equal
+#include <__bits/version_containers>
+
+namespace std {
+
+template <class OuterAlloc, class... InnerAllocs>
+class scoped_allocator_adaptor;
+
+namespace __scoped {
+
+// OUTERMOST ([allocator.adaptor]/3).
+template <class A>
+struct Outermost {
+    using type = A;
+    static type &Get(A &a) noexcept { return a; }
+};
+template <class A>
+    requires requires(A &a) { a.outer_allocator(); }
+struct Outermost<A> {
+    using Next  = Outermost<remove_reference_t<decltype(declval<A &>().outer_allocator())>>;
+    using type  = typename Next::type;
+    static type &Get(A &a) noexcept { return Next::Get(a.outer_allocator()); }
+};
+
+template <class A>
+using OutermostTraits = allocator_traits<typename Outermost<A>::type>;
+
+// The inner half. Templated on the OUTER allocator as well, even though the
+// non-empty case ignores it, because the empty case needs to name
+// scoped_allocator_adaptor<Outer> — the adaptor is its own inner allocator
+// when there is nothing else to be one.
+template <class Outer, class... Inners>
+struct Inner {
+    using type = scoped_allocator_adaptor<Inners...>;
+
+    Inner() = default;
+    explicit Inner(const Inners &...a) : Value(a...) {}
+    template <class... Other>
+    Inner(const Inner<Other...> &o) noexcept : Value(o.Value)
+    {
+    }
+    template <class... Other>
+    Inner(Inner<Other...> &&o) noexcept : Value(std::move(o.Value))
+    {
+    }
+    explicit Inner(type v) noexcept : Value(std::move(v)) {}
+
+    type       &Get(void *) noexcept { return Value; }
+    const type &Get(const void *) const noexcept { return Value; }
+
+    [[no_unique_address]] type Value;
+};
+
+template <class Outer>
+struct Inner<Outer> {
+    using type = scoped_allocator_adaptor<Outer>;
+
+    Inner() = default;
+    template <class... Other>
+    Inner(const Inner<Other...> &) noexcept
+    {
+    }
+    template <class... Other>
+    Inner(Inner<Other...> &&) noexcept
+    {
+    }
+
+    // No member: `this` IS the inner allocator. The exact-pointer overload
+    // wins over the void* one in the case above, which is how one call
+    // site serves both.
+    type       &Get(type *self) noexcept { return *self; }
+    const type &Get(const type *self) const noexcept { return *self; }
+};
+
+} // namespace __scoped
+
+template <class OuterAlloc, class... InnerAllocs>
+class scoped_allocator_adaptor : public OuterAlloc {
+    using OuterTraits = allocator_traits<OuterAlloc>;
+    using InnerBox    = __scoped::Inner<OuterAlloc, InnerAllocs...>;
+    using Self        = scoped_allocator_adaptor;
+
+    template <class, class...>
+    friend class scoped_allocator_adaptor;
+    template <class, class...>
+    friend struct __scoped::Inner;
+
+    // Private, because it is only ever reached from
+    // select_on_container_copy_construction: the allocators arriving here
+    // have already been through select_on_container_copy_construction and
+    // must not go through it again.
+    struct SelectedTag {};
+    explicit scoped_allocator_adaptor(SelectedTag, OuterAlloc outer)
+        : OuterAlloc(std::move(outer))
+    {
+    }
+    // Constrained, not merely unused, in the no-inner case: an explicit
+    // instantiation of the whole class instantiates every member whether
+    // or not the if constexpr below can reach it, and there is no
+    // Inner<Outer> to build from an adaptor when the adaptor IS the inner
+    // allocator.
+    scoped_allocator_adaptor(SelectedTag, OuterAlloc outer, typename InnerBox::type inner)
+        requires(sizeof...(InnerAllocs) != 0)
+        : OuterAlloc(std::move(outer)), __inner(std::move(inner))
+    {
+    }
+
+public:
+    using outer_allocator_type = OuterAlloc;
+    using inner_allocator_type = typename InnerBox::type;
+
+    using value_type         = typename OuterTraits::value_type;
+    using size_type          = typename OuterTraits::size_type;
+    using difference_type    = typename OuterTraits::difference_type;
+    using pointer            = typename OuterTraits::pointer;
+    using const_pointer      = typename OuterTraits::const_pointer;
+    using void_pointer       = typename OuterTraits::void_pointer;
+    using const_void_pointer = typename OuterTraits::const_void_pointer;
+
+    // "any of them" for the three propagate traits, "all of them" for
+    // is_always_equal -- an adaptor that propagates only some of its
+    // allocators on assignment would leave the container's members owned
+    // by an allocator the container no longer has.
+    using propagate_on_container_copy_assignment = bool_constant<
+        (OuterTraits::propagate_on_container_copy_assignment::value || ... ||
+         allocator_traits<InnerAllocs>::propagate_on_container_copy_assignment::value)>;
+    using propagate_on_container_move_assignment = bool_constant<
+        (OuterTraits::propagate_on_container_move_assignment::value || ... ||
+         allocator_traits<InnerAllocs>::propagate_on_container_move_assignment::value)>;
+    using propagate_on_container_swap = bool_constant<
+        (OuterTraits::propagate_on_container_swap::value || ... ||
+         allocator_traits<InnerAllocs>::propagate_on_container_swap::value)>;
+    using is_always_equal = bool_constant<
+        (OuterTraits::is_always_equal::value && ... &&
+         allocator_traits<InnerAllocs>::is_always_equal::value)>;
+
+    template <class T>
+    struct rebind {
+        using other =
+            scoped_allocator_adaptor<typename OuterTraits::template rebind_alloc<T>,
+                                     InnerAllocs...>;
+    };
+
+    scoped_allocator_adaptor() : OuterAlloc(), __inner() {}
+
+    template <class OuterA2>
+        requires is_constructible_v<OuterAlloc, OuterA2>
+    scoped_allocator_adaptor(OuterA2 &&outerAlloc, const InnerAllocs &...innerAllocs) noexcept
+        : OuterAlloc(std::forward<OuterA2>(outerAlloc)), __inner(innerAllocs...)
+    {
+    }
+
+    scoped_allocator_adaptor(const scoped_allocator_adaptor &other) noexcept
+        : OuterAlloc(other.outer_allocator()), __inner(other.__inner)
+    {
+    }
+    scoped_allocator_adaptor(scoped_allocator_adaptor &&other) noexcept
+        : OuterAlloc(std::move(other.outer_allocator())), __inner(std::move(other.__inner))
+    {
+    }
+
+    template <class OuterA2>
+        requires is_constructible_v<OuterAlloc, const OuterA2 &>
+    scoped_allocator_adaptor(
+        const scoped_allocator_adaptor<OuterA2, InnerAllocs...> &other) noexcept
+        : OuterAlloc(other.outer_allocator()), __inner(other.__inner)
+    {
+    }
+    template <class OuterA2>
+        requires is_constructible_v<OuterAlloc, OuterA2>
+    scoped_allocator_adaptor(scoped_allocator_adaptor<OuterA2, InnerAllocs...> &&other) noexcept
+        : OuterAlloc(std::move(other.outer_allocator())), __inner(std::move(other.__inner))
+    {
+    }
+
+    scoped_allocator_adaptor &operator=(const scoped_allocator_adaptor &) = default;
+    scoped_allocator_adaptor &operator=(scoped_allocator_adaptor &&) = default;
+    ~scoped_allocator_adaptor() = default;
+
+    inner_allocator_type &inner_allocator() noexcept { return __inner.Get(this); }
+    const inner_allocator_type &inner_allocator() const noexcept { return __inner.Get(this); }
+
+    outer_allocator_type &outer_allocator() noexcept
+    {
+        return static_cast<OuterAlloc &>(*this);
+    }
+    const outer_allocator_type &outer_allocator() const noexcept
+    {
+        return static_cast<const OuterAlloc &>(*this);
+    }
+
+    [[nodiscard]] pointer allocate(size_type n)
+    {
+        return OuterTraits::allocate(outer_allocator(), n);
+    }
+    [[nodiscard]] pointer allocate(size_type n, const_void_pointer hint)
+    {
+        return OuterTraits::allocate(outer_allocator(), n, hint);
+    }
+    void deallocate(pointer p, size_type n) noexcept
+    {
+        OuterTraits::deallocate(outer_allocator(), p, n);
+    }
+    size_type max_size() const { return OuterTraits::max_size(outer_allocator()); }
+
+    // [allocator.adaptor.members]/5, verbatim in shape: the INNER allocator
+    // decides how the object receives one, the OUTERMOST allocator does the
+    // constructing. Those are different allocators on purpose -- the inner
+    // one is what the object should keep, the outer one is what owns the
+    // storage it is being built in.
+    template <class T, class... Args>
+    void construct(T *p, Args &&...args)
+    {
+        std::apply(
+            [p, this](auto &&...newargs) {
+                __scoped::OutermostTraits<Self>::construct(
+                    __scoped::Outermost<Self>::Get(*this), p,
+                    std::forward<decltype(newargs)>(newargs)...);
+            },
+            std::uses_allocator_construction_args<T>(inner_allocator(),
+                                                     std::forward<Args>(args)...));
+    }
+
+    template <class T>
+    void destroy(T *p)
+    {
+        __scoped::OutermostTraits<Self>::destroy(__scoped::Outermost<Self>::Get(*this), p);
+    }
+
+    // Every allocator in the stack is asked separately, which the recursion
+    // gives for free: the inner adaptor's own answer is the tail's answer.
+    scoped_allocator_adaptor select_on_container_copy_construction() const
+    {
+        if constexpr (sizeof...(InnerAllocs) == 0) {
+            return scoped_allocator_adaptor(
+                SelectedTag{},
+                OuterTraits::select_on_container_copy_construction(outer_allocator()));
+        } else {
+            return scoped_allocator_adaptor(
+                SelectedTag{},
+                OuterTraits::select_on_container_copy_construction(outer_allocator()),
+                inner_allocator().select_on_container_copy_construction());
+        }
+    }
+
+private:
+    [[no_unique_address]] InnerBox __inner;
+};
+
+template <class OuterAlloc, class... InnerAllocs>
+scoped_allocator_adaptor(OuterAlloc, InnerAllocs...)
+    -> scoped_allocator_adaptor<OuterAlloc, InnerAllocs...>;
+
+template <class OuterA1, class OuterA2, class... InnerAllocs>
+bool operator==(const scoped_allocator_adaptor<OuterA1, InnerAllocs...> &a,
+                const scoped_allocator_adaptor<OuterA2, InnerAllocs...> &b) noexcept
+{
+    if constexpr (sizeof...(InnerAllocs) == 0)
+        return a.outer_allocator() == b.outer_allocator();
+    else
+        return a.outer_allocator() == b.outer_allocator() &&
+               a.inner_allocator() == b.inner_allocator();
+}
+
+} // namespace std
+
+#endif // BOXCXX_SCOPED_ALLOCATOR
