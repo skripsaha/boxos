@@ -123,7 +123,8 @@ public:
     // the tagged forms take the caller's word for it and only move. The
     // twelve allocator forms are "equivalent to the corresponding
     // non-allocator constructor except that c is constructed with
-    // uses-allocator construction", which is exactly MakeUsingAlloc.
+    // uses-allocator construction", which is exactly
+    // std::make_obj_using_allocator.
 
     SetImpl() : SetImpl(key_compare()) {}
 
@@ -135,14 +136,14 @@ public:
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(const container_type &cont, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare()
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, cont)), compare()
     {
         SortAndUnique();
     }
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(const container_type &cont, const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, cont)), compare(comp)
     {
         SortAndUnique();
     }
@@ -154,13 +155,13 @@ public:
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(SortedT, const container_type &cont, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare()
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, cont)), compare()
     {
     }
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(SortedT, const container_type &cont, const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, cont)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, cont)), compare(comp)
     {
     }
 
@@ -168,12 +169,12 @@ public:
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare(comp)
     {
     }
     template <typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
-    explicit SetImpl(const Alloc &a) : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+    explicit SetImpl(const Alloc &a) : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare()
     {
     }
 
@@ -191,14 +192,14 @@ public:
     template <typename It, typename Alloc>
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
     SetImpl(It first, It last, const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare(comp)
     {
         insert(first, last);
     }
     template <typename It, typename Alloc>
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
     SetImpl(It first, It last, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+        : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare()
     {
         insert(first, last);
     }
@@ -215,14 +216,14 @@ public:
     template <ContainerCompatibleRange<value_type> R, typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(from_range_t, R &&rg, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a)), compare()
+        : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare()
     {
         insert_range(std::forward<R>(rg));
     }
     template <ContainerCompatibleRange<value_type> R, typename Alloc>
         requires uses_allocator_v<container_type, Alloc>
     SetImpl(from_range_t, R &&rg, const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a)), compare(comp)
     {
         insert_range(std::forward<R>(rg));
     }
@@ -236,13 +237,13 @@ public:
     template <typename It, typename Alloc>
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
     SetImpl(SortedT, It first, It last, const key_compare &comp, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, first, last)), compare(comp)
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, first, last)), compare(comp)
     {
     }
     template <typename It, typename Alloc>
         requires __iter_impl::Cpp17InputIterator<It> && uses_allocator_v<container_type, Alloc>
     SetImpl(SortedT, It first, It last, const Alloc &a)
-        : keys(MakeUsingAlloc<KeyContainer>(a, first, last)), compare()
+        : keys(std::make_obj_using_allocator<KeyContainer>(a, first, last)), compare()
     {
     }
 

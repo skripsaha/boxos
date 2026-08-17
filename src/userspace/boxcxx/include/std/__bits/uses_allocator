@@ -1,0 +1,296 @@
+// boxcxx — <__bits/uses_allocator>
+//
+// [allocator.uses.construction] (P0591R4): the rule that decides HOW an
+// allocator reaches an object being constructed — as a leading
+// allocator_arg tag, as a trailing argument, or not at all — together with
+// the three functions that apply it.
+//
+// The rule was in this tree twice before it was here once, and neither
+// copy was the rule:
+//
+//   * __flat::MakeUsingAlloc (<__bits/flat_engine>) had the three plain
+//     branches and no pair case at all, with a comment admitting the
+//     original was "absent tree-wide".
+//   * pmr::polymorphic_allocator::construct had the pair cases AND a
+//     fourth branch commented "best effort", which constructed the object
+//     WITHOUT the allocator when neither allocator form fit. The standard
+//     says such a program is ill-formed; the branch turned that into a pmr
+//     element that silently does not share its container's resource.
+//
+// Both now call the functions below, and the "best effort" branch is a
+// static_assert naming what went wrong. Ф38.
+//
+// Nine overloads, which is two more than libstdc++ 16.1 has: it implements
+// neither the pair-like form nor the single-argument pair-constructor form
+// (measured, not assumed — a probe over all nine shapes answers 7/9 there
+// and 9/9 in libc++). Both are C++23 or older and both are reachable from
+// ordinary code: uses_allocator_construction_args<pair<K,V>>(a, tuple) and
+// ...(a, x) where x converts to the pair.
+#ifndef BOXCXX_BITS_USES_ALLOCATOR
+#define BOXCXX_BITS_USES_ALLOCATOR
+
+#include <__bits/allocator_core>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+namespace std {
+
+namespace __uses_alloc {
+
+template <class T>
+inline constexpr bool IsPairType = false;
+template <class A, class B>
+inline constexpr bool IsPairType<pair<A, B>> = true;
+
+template <class T>
+concept StdPair = IsPairType<remove_cv_t<T>>;
+
+template <class P>
+concept Subrange = __bits::IsSubrangeType<remove_cvref_t<P>>;
+
+// [allocator.uses.construction]'s exposition-only FUN, whose only job is
+// to answer "would this argument bind to a const pair reference?" — i.e.
+// can a pair be built from it directly, in which case the single-argument
+// form must stand aside for the ordinary pair overloads.
+template <class A, class B>
+void Fun(const pair<A, B> &);
+
+template <class U>
+concept BindsToConstPairRef = requires { Fun(std::declval<U>()); };
+
+} // namespace __uses_alloc
+
+// ── declarations ────────────────────────────────────────────────────────
+// The pair forms are mutually recursive through the piecewise one, and the
+// single-argument form calls make_obj_using_allocator, so every signature
+// is declared before any is defined.
+
+template <class T, class Alloc, class... Args>
+    requires(!__uses_alloc::StdPair<T>)
+constexpr auto uses_allocator_construction_args(const Alloc &a, Args &&...args) noexcept;
+
+template <class T, class Alloc, class Tuple1, class Tuple2>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, piecewise_construct_t,
+                                                Tuple1 &&x, Tuple2 &&y) noexcept;
+
+template <class T, class Alloc>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a) noexcept;
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, U &&u, V &&v) noexcept;
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, pair<U, V> &pr) noexcept;
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, const pair<U, V> &pr) noexcept;
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, pair<U, V> &&pr) noexcept;
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, const pair<U, V> &&pr) noexcept;
+
+template <class T, class Alloc, class P>
+    requires __uses_alloc::StdPair<T> && __bits::PairLike<P> && (!__uses_alloc::Subrange<P>)
+constexpr auto uses_allocator_construction_args(const Alloc &a, P &&p) noexcept;
+
+template <class T, class Alloc, class U>
+    requires __uses_alloc::StdPair<T> &&
+             (__uses_alloc::Subrange<U> ||
+              (!__bits::PairLike<U> && !__uses_alloc::BindsToConstPairRef<U>))
+constexpr auto uses_allocator_construction_args(const Alloc &a, U &&u) noexcept;
+
+template <class T, class Alloc, class... Args>
+constexpr T make_obj_using_allocator(const Alloc &a, Args &&...args);
+
+template <class T, class Alloc, class... Args>
+constexpr T *uninitialized_construct_using_allocator(T *p, const Alloc &a, Args &&...args);
+
+// ── definitions ─────────────────────────────────────────────────────────
+
+// The whole rule, for everything that is not a pair. The two
+// static_asserts are the standard's two "otherwise the program is
+// ill-formed" clauses, and they are the reason this function exists rather
+// than the three hand-written branches it replaced: an allocator that
+// cannot be delivered has to be a diagnostic, never a silent omission.
+template <class T, class Alloc, class... Args>
+    requires(!__uses_alloc::StdPair<T>)
+constexpr auto uses_allocator_construction_args(const Alloc &a, Args &&...args) noexcept
+{
+    if constexpr (uses_allocator_v<remove_cv_t<T>, Alloc>) {
+        if constexpr (is_constructible_v<T, allocator_arg_t, const Alloc &, Args...>) {
+            return tuple<allocator_arg_t, const Alloc &, Args &&...>(
+                allocator_arg, a, std::forward<Args>(args)...);
+        } else {
+            static_assert(is_constructible_v<T, Args..., const Alloc &>,
+                          "uses_allocator_v<T, Alloc> is true, so T must be constructible "
+                          "either with allocator_arg and the allocator first, or with the "
+                          "allocator last ([allocator.uses.construction])");
+            return tuple<Args &&..., const Alloc &>(std::forward<Args>(args)..., a);
+        }
+    } else {
+        static_assert(is_constructible_v<T, Args...>,
+                      "T is not constructible from these arguments "
+                      "([allocator.uses.construction])");
+        return tuple<Args &&...>(std::forward<Args>(args)...);
+    }
+}
+
+// A pair is not one object to the rule but two: each member asks the
+// question separately, which is what lets a pmr::map<K, pmr::string> hand
+// its resource to the mapped string and not to the int key.
+template <class T, class Alloc, class Tuple1, class Tuple2>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, piecewise_construct_t,
+                                                Tuple1 &&x, Tuple2 &&y) noexcept
+{
+    using T1 = typename remove_cv_t<T>::first_type;
+    using T2 = typename remove_cv_t<T>::second_type;
+    return std::make_tuple(
+        piecewise_construct,
+        std::apply(
+            [&a](auto &&...a1) {
+                return std::uses_allocator_construction_args<T1>(
+                    a, std::forward<decltype(a1)>(a1)...);
+            },
+            std::forward<Tuple1>(x)),
+        std::apply(
+            [&a](auto &&...a2) {
+                return std::uses_allocator_construction_args<T2>(
+                    a, std::forward<decltype(a2)>(a2)...);
+            },
+            std::forward<Tuple2>(y)));
+}
+
+template <class T, class Alloc>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a) noexcept
+{
+    return std::uses_allocator_construction_args<T>(a, piecewise_construct, tuple<>(), tuple<>());
+}
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, U &&u, V &&v) noexcept
+{
+    return std::uses_allocator_construction_args<T>(a, piecewise_construct,
+                                                    std::forward_as_tuple(std::forward<U>(u)),
+                                                    std::forward_as_tuple(std::forward<V>(v)));
+}
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, pair<U, V> &pr) noexcept
+{
+    return std::uses_allocator_construction_args<T>(a, piecewise_construct,
+                                                    std::forward_as_tuple(pr.first),
+                                                    std::forward_as_tuple(pr.second));
+}
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, const pair<U, V> &pr) noexcept
+{
+    return std::uses_allocator_construction_args<T>(a, piecewise_construct,
+                                                    std::forward_as_tuple(pr.first),
+                                                    std::forward_as_tuple(pr.second));
+}
+
+// LWG 3527: forwarding through pr.first would hand the members along as
+// LVALUES, so a pair of rvalue references arrived copied. get<>(move(pr))
+// is what moves them.
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, pair<U, V> &&pr) noexcept
+{
+    return std::uses_allocator_construction_args<T>(
+        a, piecewise_construct, std::forward_as_tuple(std::get<0>(std::move(pr))),
+        std::forward_as_tuple(std::get<1>(std::move(pr))));
+}
+
+template <class T, class Alloc, class U, class V>
+    requires __uses_alloc::StdPair<T>
+constexpr auto uses_allocator_construction_args(const Alloc &a, const pair<U, V> &&pr) noexcept
+{
+    return std::uses_allocator_construction_args<T>(
+        a, piecewise_construct, std::forward_as_tuple(std::get<0>(std::move(pr))),
+        std::forward_as_tuple(std::get<1>(std::move(pr))));
+}
+
+// pair-like: a tuple<A,B>, an array<T,2>, anything with two elements that
+// is not a subrange. Split on get<> and handed to the piecewise form.
+template <class T, class Alloc, class P>
+    requires __uses_alloc::StdPair<T> && __bits::PairLike<P> && (!__uses_alloc::Subrange<P>)
+constexpr auto uses_allocator_construction_args(const Alloc &a, P &&p) noexcept
+{
+    // UNQUALIFIED on purpose, which is how the standard writes it too: the
+    // pair-like set is open (tuple, array, complex, and whatever a header
+    // included later adds), and a qualified std::get is bound at definition
+    // time to the overloads <utility> happened to have declared by then.
+    // std::array's get lives in <array>, which this leaf must not include
+    // and does not need to -- ADL finds it at instantiation, by which point
+    // the caller has necessarily included whatever type it is passing.
+    using std::get;
+    return std::uses_allocator_construction_args<T>(
+        a, piecewise_construct, std::forward_as_tuple(get<0>(std::forward<P>(p))),
+        std::forward_as_tuple(get<1>(std::forward<P>(p))));
+}
+
+// The last resort: one argument that is not a pair, is not pair-like, and
+// does not bind to a const pair& — so the only way it can become the pair
+// is through the pair's own converting constructor. The standard's answer
+// is an object that IS that conversion, deferred until the pair is really
+// built, so the allocator still reaches both members.
+template <class T, class Alloc, class U>
+    requires __uses_alloc::StdPair<T> &&
+             (__uses_alloc::Subrange<U> ||
+              (!__bits::PairLike<U> && !__uses_alloc::BindsToConstPairRef<U>))
+constexpr auto uses_allocator_construction_args(const Alloc &a, U &&u) noexcept
+{
+    struct PairConstructor {
+        using PairType = remove_cv_t<T>;
+
+        constexpr auto DoConstruct(const PairType &p) const
+        {
+            return std::make_obj_using_allocator<PairType>(__alloc, p);
+        }
+        constexpr auto DoConstruct(PairType &&p) const
+        {
+            return std::make_obj_using_allocator<PairType>(__alloc, std::move(p));
+        }
+
+        const Alloc &__alloc;
+        U          &__u;
+
+        constexpr operator PairType() const { return DoConstruct(std::forward<U>(__u)); }
+    };
+    return std::make_tuple(PairConstructor{a, u});
+}
+
+template <class T, class Alloc, class... Args>
+constexpr T make_obj_using_allocator(const Alloc &a, Args &&...args)
+{
+    return std::make_from_tuple<T>(
+        std::uses_allocator_construction_args<T>(a, std::forward<Args>(args)...));
+}
+
+template <class T, class Alloc, class... Args>
+constexpr T *uninitialized_construct_using_allocator(T *p, const Alloc &a, Args &&...args)
+{
+    return std::apply(
+        [&](auto &&...xs) { return std::construct_at(p, std::forward<decltype(xs)>(xs)...); },
+        std::uses_allocator_construction_args<T>(a, std::forward<Args>(args)...));
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_USES_ALLOCATOR

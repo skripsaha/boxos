@@ -25,6 +25,7 @@
 #define BOXCXX_BITS_FLAT_ENGINE
 
 #include <__bits/allocator_core>
+#include <__bits/uses_allocator>  // make_obj_using_allocator
 #include <__bits/ranges_core>
 #include <algorithm>
 #include <new>
@@ -54,23 +55,6 @@ namespace __flat {
 // qualified-id Compare::is_transparent must be valid and denote a type.
 template <typename C>
 concept Transparent = requires { typename C::is_transparent; };
-
-// ── uses-allocator construction ([allocator.uses.construction]) ─────────
-// Written out here because std::uses_allocator_construction_args and
-// std::make_obj_using_allocator are absent tree-wide. The three branches
-// are the standard's own: no allocator use at all, leading-tag form,
-// trailing-allocator form.
-
-template <typename C, typename A, typename... Args>
-C MakeUsingAlloc(const A &a, Args &&...args)
-{
-    if constexpr (!uses_allocator_v<C, A>)
-        return C(std::forward<Args>(args)...);
-    else if constexpr (is_constructible_v<C, allocator_arg_t, const A &, Args...>)
-        return C(allocator_arg, a, std::forward<Args>(args)...);
-    else
-        return C(std::forward<Args>(args)..., a);
-}
 
 // ── invariant restore ([flat.set.overview]/6) ───────────────────────────
 // "If any member function in [flat.set.defn] exits via an exception, the

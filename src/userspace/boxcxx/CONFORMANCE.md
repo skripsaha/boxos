@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **85** — 81 of C++23 (24 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 121 |
+| Standard headers provided | **86** — 82 of C++23 (23 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 123 |
 | Header source | ~87 000 lines |
-| Feature-test macros defined | 202 — 156 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 203 — 157 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 208 phases (189 of them the numbered `PhaseN` series), 5 360 runtime checks, 1 772 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 209 phases (190 of them the numbered `PhaseN` series), 5 387 runtime checks, 1 781 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **208**. The
+there are exactly as many as there are phase definitions. That is **209**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -96,12 +96,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (24)
+## 1.1 Headers that do not exist (23)
 
-81 of the C++23 headers are provided and 24 are absent, which accounts for the
+82 of the C++23 headers are provided and 23 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 85 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 86 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -156,14 +156,25 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 4
+### C++23 features not implemented — 3
 
 | Header | Status |
 |---|---|
 | `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
-| `<scoped_allocator>` | Not implemented. |
 | `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<scoped_allocator>` left that list in Ф38 as well**, and its "Not
+implemented." was hiding a dependency rather than an absence: the adaptor's
+`construct` is *specified* in terms of `uses_allocator_construction_args`
+([allocator.adaptor.members]/5), and [allocator.uses.construction] did not
+exist in this tree at all. What existed were two partial hand-written copies
+of the rule — one in `<__bits/flat_engine>` with no `pair` case whatsoever, one
+in `<memory_resource>` whose last branch was commented "best effort" and
+constructed the object **without the allocator** where the standard says the
+program is ill-formed. Both are gone; the rule is in `<__bits/uses_allocator>`
+and everything calls it. Details in §2 `<memory>`, `<memory_resource>` and
+`<scoped_allocator>`.
 
 **`<spanstream>` left that list in Ф38 too**, and its entry — "Not
 implemented." — was the honest one: unlike `<stacktrace>`'s identically brief
@@ -233,7 +244,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 202 macros × 85 headers by
+  checked over the full cross-product of 203 macros × 86 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -1095,6 +1106,29 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<memory>`
 
+- `✓` Added in Ф38: **the whole of [allocator.uses.construction]** —
+  `uses_allocator_construction_args` in all nine of its overloads,
+  `make_obj_using_allocator` and `uninitialized_construct_using_allocator,`
+  living in `<__bits/uses_allocator>` so `<memory_resource>`,
+  `<__bits/flat_engine>` and `<scoped_allocator>` can all reach the one copy.
+  `__cpp_lib_make_obj_using_allocator` is 201811L. **P0591R4 is from C++20;
+  none of it was here.** The tree instead carried two partial hand-written
+  copies of the rule (see `<memory_resource>` below and
+  `<__bits/flat_engine>`), and the macro was not merely undefined — it was
+  absent from `<version>`'s list of deliberately-absent macros AND from
+  `tools/version_syn_owners.txt`, so no gate was looking for it. That third
+  omission is why the first two could sit there unnoticed; the audit now
+  covers it.
+- **boxcxx implements two overloads libstdc++ 16.1 does not**, both measured
+  rather than inferred: the *pair-like* form (P2165R4, C++23 —
+  `uses_allocator_construction_args<pair<K,V>>(a, some_tuple_of_two)`) and the
+  single-argument *pair-constructor* form (C++20). A probe over all nine
+  shapes answers 7/9 against libstdc++ and 9/9 against libc++. On the
+  pair-like path the two references disagree with the standard in opposite
+  directions: libstdc++ does not compile the call, and libc++ compiles it and
+  delivers the allocator to *neither* member, where the Effects clause
+  delegates to the piecewise form and so reaches both. Phase194 pins reaching
+  both.
 - `✓` Added in Ф35: **`indirect` and `polymorphic`** ([mem.composite.types],
   P3019R11), with `hash<indirect<T, A>>` and the `pmr::indirect` /
   `pmr::polymorphic` aliases [memory.syn] pairs with them.
@@ -1231,6 +1265,22 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<memory_resource>`
 
+- `!` `✓` Closed in Ф38: **`polymorphic_allocator::construct` had a branch
+  that silently dropped the allocator.** [mem.poly.allocator.mem]/1 is one
+  member specified through `uses_allocator_construction_args`; boxcxx had six
+  hand-written overloads instead, and the plain one ended in
+  `else construct_at(p, args...);  // best effort`. That branch is reached
+  when `uses_allocator_v<T, polymorphic_allocator>` is **true** and the type
+  takes the allocator in neither position — a case [allocator.uses.construction]
+  makes ill-formed. What it produced was a pmr element that did not share its
+  container's resource, with no diagnostic: the same class of defect Ф31e-g-2
+  found in `allocate_shared`, reached from a different direction. Proven by
+  mutation rather than by reading: a type with `allocator_type` and only a
+  `T(int)` constructor now fails to compile with one error naming the rule,
+  and compiles silently with the old branch restored.
+  The six overloads are now one, which also gained the two C++23 pair forms
+  they never had (`pair<U,V>&` and `const pair<U,V>&&`) and the pair-like and
+  single-argument forms.
 - `?` `unsynchronized_pool_resource::options()` and `synchronized_pool_resource::options()`
   return the **effective** options, not the ones handed to the constructor.
   `largest_required_pool_block` is not a request this engine can honour — its
@@ -1624,6 +1674,36 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   moved-from state implementation-defined, and there is no owned resource to
   transfer — the caller still holds the span either way. Same choice
   libstdc++ documents.
+
+## `<scoped_allocator>`
+
+- Complete: `scoped_allocator_adaptor` with every typedef, every constructor,
+  `inner_allocator`/`outer_allocator`, `allocate`/`deallocate`/`max_size`,
+  `construct`/`destroy`, `select_on_container_copy_construction`, `rebind` and
+  the free `operator==`. New in Ф38.
+- It has no feature-test macro of its own; [version.syn] names it among the
+  owners of `__cpp_lib_allocator_traits_is_always_equal`, which it now answers
+  for. The map in `tools/version_syn_owners.txt` had listed it as an owner
+  since that file was written, against a header that did not exist.
+- The recursion is the whole implementation. *OUTERMOST* follows
+  `.outer_allocator()` to the bottom of a stack of adaptors, so construction
+  happens through the allocator that actually owns the storage; the object,
+  meanwhile, is offered the **inner** allocator, which is what it should keep
+  for whatever it allocates itself. Phase194 pins exactly that split, and
+  swapping the two fails precisely the two checks that name it.
+- With no inner allocators `inner_allocator_type` is
+  `scoped_allocator_adaptor<OuterAlloc>` and `inner_allocator()` returns
+  `*this` — there is no member at all in that case. The two cases are told
+  apart by which overload of an internal `Get()` the `this` pointer matches,
+  which is how one call site serves both.
+- `select_on_container_copy_construction` is recursive rather than built on an
+  index-tuple: the inner adaptor's own answer already applies
+  `select_on_container_copy_construction` to each of its allocators, so
+  asking it is asking all of them. Same result as libstdc++'s tie/index
+  machinery, in four lines instead of forty.
+- Deriving publicly from `OuterAlloc` is the standard's own synopsis, not an
+  implementation liberty; the adaptor's own `allocate`/`deallocate` hide the
+  base's.
 
 ## `<sstream>`
 

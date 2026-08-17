@@ -36,6 +36,14 @@
 // allocator_traits<A2> per [util.smartptr.shared.create]/7-8, while the
 // *_for_overwrite pair default-initialises via `::new (pv) U`.
 //
+// make_obj_using_allocator is P0591R4's [allocator.uses.construction] --
+// uses_allocator_construction_args, make_obj_using_allocator and
+// uninitialized_construct_using_allocator, all in <__bits/uses_allocator>.
+// Ф38 wrote them; before that the macro was not defined, not listed among
+// <version>'s deliberately-absent ones, and not in
+// tools/version_syn_owners.txt either, so nothing was checking for it. That
+// third omission is why the first two could sit there unnoticed.
+//
 // Deliberately absent (see <version>'s list): start_lifetime_as's sibling
 // is_implicit_lifetime (no toolchain builtin).
 //
@@ -89,6 +97,11 @@
 #  define __cpp_lib_make_unique 201304L
 #endif
 #undef BOXCXX_OWNS_make_unique
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_make_obj_using_allocator)) && \
+    !defined(__cpp_lib_make_obj_using_allocator)
+#  define __cpp_lib_make_obj_using_allocator 201811L
+#endif
+#undef BOXCXX_OWNS_make_obj_using_allocator
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_transparent_operators)) && \
     !defined(__cpp_lib_transparent_operators)
 // P0074R0, co-owned with <functional> -- see the note there. owner_less<void>

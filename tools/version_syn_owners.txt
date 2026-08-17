@@ -130,6 +130,7 @@ __cpp_lib_launder|new
 __cpp_lib_list_remove_return_type|forward_list,list
 __cpp_lib_logical_traits|type_traits
 __cpp_lib_make_from_tuple|tuple
+__cpp_lib_make_obj_using_allocator|memory
 __cpp_lib_make_reverse_iterator|iterator
 __cpp_lib_make_unique|memory
 __cpp_lib_map_try_emplace|map
