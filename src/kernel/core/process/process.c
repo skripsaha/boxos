@@ -174,6 +174,32 @@ static bool cleanup_queue_enqueue(process_t *proc);
 static process_t *cleanup_queue_dequeue(void);
 static void process_cleanup_immediate(process_t *proc);
 
+/* Live-process high-water mark.  Every live process pins a kernel stack, an
+ * FPU buffer and a process_t, so the PEAK — not the total ever created — is
+ * what the fixed kernel pool has to survive.  On one core the peak stays
+ * near one; it grows with the number of cores that can be inside
+ * strand_spawn at the same time, which is exactly the axis along which
+ * spawn failures were showing up.  Recorded under process_lock, reported
+ * (after the unlock) each time it advances by PEAK_REPORT_STEP. */
+#define PEAK_REPORT_STEP 16u
+static uint32_t g_proc_peak = 0;
+static uint32_t g_proc_peak_reported = 0;
+static uint32_t g_cleanup_peak = 0;
+static uint32_t g_cleanup_peak_reported = 0;
+
+/* Call with process_lock held, right after process_count++.  Returns the new
+ * peak when it deserves a line, 0 otherwise. */
+static uint32_t process_note_peak_locked(void)
+{
+    if (process_count <= g_proc_peak)
+        return 0;
+    g_proc_peak = process_count;
+    if (g_proc_peak < g_proc_peak_reported + PEAK_REPORT_STEP)
+        return 0;
+    g_proc_peak_reported = g_proc_peak;
+    return g_proc_peak;
+}
+
 void process_init(void)
 {
     aslr_init();
@@ -502,7 +528,11 @@ process_t *process_create(const char *tags)
     process_list_head = proc;
     process_hash_insert(proc);
     process_count++;
+    uint32_t peak = process_note_peak_locked();
     spin_unlock(&process_lock);
+
+    if (peak)
+        kprintf("[PROCESS] live high-water %u processes (limit %u)\n", peak, PROCESS_MAX_COUNT);
 
     return proc;
 }
@@ -1183,7 +1213,11 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     process_list_head = proc;
     process_hash_insert(proc);
     process_count++;
+    uint32_t peak = process_note_peak_locked();
     spin_unlock(&process_lock);
+
+    if (peak)
+        kprintf("[PROCESS] live high-water %u processes (limit %u)\n", peak, PROCESS_MAX_COUNT);
 
     debug_printf("[STRAND] spawned PID %u in cabin (entry=0x%lx rsp=0x%lx arg=0x%lx home_core=%u)\n",
                  proc->pid, (unsigned long)entry_va, (unsigned long)stack_top,
@@ -1819,7 +1853,22 @@ static bool cleanup_queue_enqueue(process_t *proc)
         g_cleanup_queue.head = proc;
     g_cleanup_queue.tail = proc;
     g_cleanup_queue.count++;
+    /* Depth matters as much as process_count: process_destroy decrements
+     * process_count while the kernel stack and FPU buffer are still held,
+     * and only this queue's drain releases them.  Live memory is therefore
+     * process_count PLUS this depth — a lagging drain is invisible in the
+     * process count alone. */
+    uint32_t depth = g_cleanup_queue.count;
+    bool report = (depth > g_cleanup_peak &&
+                   depth >= g_cleanup_peak_reported + PEAK_REPORT_STEP);
+    if (depth > g_cleanup_peak)
+        g_cleanup_peak = depth;
+    if (report)
+        g_cleanup_peak_reported = depth;
     spin_unlock(&g_cleanup_queue.lock);
+
+    if (report)
+        kprintf("[PROCESS] cleanup-queue high-water %u pending\n", depth);
     return true;
 }
 

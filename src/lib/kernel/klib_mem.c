@@ -40,6 +40,17 @@ static size_t        memory_pool_size = 0;
 static mem_block_t  *free_list = NULL;
 static spinlock_t    heap_lock = {0};
 
+/* Pool occupancy, maintained under heap_lock.  The pool is FIXED at boot and
+ * never grows, so how close it runs to full is the difference between a
+ * healthy system and every caller's error-unwind path firing at once.  A
+ * high-water mark is the only way to see that coming: instantaneous stats
+ * always read fine, because the peak has already drained by the time anyone
+ * asks.  Reported at each quarter of the pool — four lines per boot. */
+static size_t g_heap_live  = 0;
+static size_t g_heap_peak  = 0;
+static size_t g_heap_max_1 = 0;   /* largest single request ever served */
+static unsigned g_heap_peak_step = 0;
+
 /* Declared in klib_print.c — initialises g_kprintf_lock once. */
 void klib_print_lock_init(void);
 
@@ -106,8 +117,8 @@ void mem_init(void)
 
     size_t pages_needed = heap_size / VMM_PAGE_SIZE;
 
-    debug_printf("[KLIB] Total RAM: %zu MB, Kernel heap: %zu MB (%zu pages)\n",
-                 total_ram / (1024 * 1024), heap_size / (1024 * 1024), pages_needed);
+    kprintf("[KLIB] Total RAM: %zu MB, kernel heap: %zu KB (%zu pages, FIXED — never grows)\n",
+            total_ram / (1024 * 1024), heap_size / 1024, pages_needed);
 
     memory_pool = (uint8_t *)pmm_alloc_zero(pages_needed);
     if (!memory_pool)
@@ -183,14 +194,57 @@ static void *kmalloc_internal(size_t size)
         curr = curr->next;
     }
 
+    size_t live = 0, peak = 0, largest_free = 0, max_1 = 0;
+    unsigned step = 0;
+
+    if (result)
+    {
+        /* Account the BLOCK, not the request: when the tail remainder is too
+         * small to split off, curr->size stays larger than `size` and the
+         * block carries that slack until it is freed. kfree_internal gives
+         * back curr->size, so charging `size` here would drift the counter
+         * down on every non-splitting allocation and understate the peak. */
+        g_heap_live += curr->size + sizeof(mem_block_t);
+        if (size > g_heap_max_1)
+            g_heap_max_1 = size;
+        if (g_heap_live > g_heap_peak)
+        {
+            g_heap_peak = g_heap_live;
+            unsigned q = (unsigned)((g_heap_peak * 4) / (memory_pool_size ? memory_pool_size : 1));
+            if (q > g_heap_peak_step)
+            {
+                g_heap_peak_step = q;
+                step = q;
+                peak = g_heap_peak;
+                max_1 = g_heap_max_1;
+            }
+        }
+    }
+    else
+    {
+        live = g_heap_live;
+        peak = g_heap_peak;
+        for (mem_block_t *b = free_list; b; b = b->next)
+            if (b->size > largest_free)
+                largest_free = b->size;
+    }
+
     spin_unlock(&heap_lock);
 
     /* kprintf, not debug_printf: a NULL from here is how every caller's
      * error-unwind path begins, and in a release build debug_printf is
      * compiled out — heap exhaustion used to leave no trace at all, so the
-     * unwind that followed looked like a spontaneous failure. */
+     * unwind that followed looked like a spontaneous failure.  Printing
+     * happens after the unlock: kprintf takes the console lock, and heap
+     * before console is not an ordering this kernel takes anywhere else. */
     if (!result)
-        kprintf("[KLIB] ERROR: kmalloc failed for %zu bytes (heap exhausted)\n", size);
+        kprintf("[KLIB] ERROR: kmalloc failed for %zu bytes — pool %zu KB, live %zu KB, "
+                "peak %zu KB, largest free %zu B\n",
+                size, memory_pool_size / 1024, live / 1024, peak / 1024, largest_free);
+    else if (step)
+        kprintf("[KLIB] heap high-water %zu KB of %zu KB (%u/4), largest request %zu B\n",
+                peak / 1024, memory_pool_size / 1024, step, max_1);
+
     return result;
 }
 
@@ -248,6 +302,9 @@ static void kfree_internal(void *ptr)
     block->magic = KLIB_MAGIC_FREE;
 
     spin_lock(&heap_lock);
+
+    if (g_heap_live >= block->size + sizeof(mem_block_t))
+        g_heap_live -= block->size + sizeof(mem_block_t);
 
     mem_block_t *curr = free_list, *prev = NULL;
     while (curr && curr < block)
