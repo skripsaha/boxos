@@ -29,7 +29,6 @@ struct ManifestStage {
     uint32_t  scratch_capacity;
     bool      scratch_in_use;
     uint8_t   kcore_id;
-    bool      scratch_via_pmm;   /* true: pmm_alloc_in_domain; false: kmalloc */
     uint8_t   _pad;
     size_t    scratch_pages;     /* page count, needed for pmm_free on rollback */
     void     *scratch_phys;      /* phys addr (NUMA path only); needed for pmm_free */
@@ -140,66 +139,63 @@ static uint32_t stage_choose_scratch_size(uint32_t ncores)
 }
 
 /*
- * Allocate `pages` contiguous physical frames preferring the K-Core's
- * NUMA domain (looked up by LAPIC ID via SRAT). Returns a kernel pointer
- * (Pull-Map) on success, NULL on out-of-memory at this allocation order.
+ * Allocate `pages` contiguous physical frames preferring the K-Core's NUMA
+ * domain (looked up by LAPIC ID via SRAT), and return a kernel Pull-Map
+ * pointer. NULL only when the PMM has no contiguous block at this order.
  *
- * Failure modes folded into kmalloc fallback:
- *   - SRAT absent (BIOS without NUMA / single-socket boards)
- *   - K-Core's LAPIC ID not in SRAT's CPU table
- *   - NUMA domain has no free contiguous block at this order
- *   - pmm_alloc_in_domain succeeded but the phys range overflows MAXPHYADDR
+ * The domain hint is dropped — not the allocation — when: SRAT is absent
+ * (single-socket boards), the LAPIC ID is not in SRAT's CPU table, or the
+ * named domain has no free block at this order.
  *
- * Returns a zeroed buffer in BOTH paths so callers don't have to remember
- * which one fired.
- */
+ * The scratch is page-scale, so BOTH tiers take it from the PMM: domain-
+ * hinted when SRAT names this core's domain, plain otherwise.
+ *
+ * The second tier used to be kmalloc, on the stated belief that it "routes
+ * through the same buddy but cannot honour a domain hint". It does not: a
+ * request of this size skips the slab and lands in the kernel's FIXED
+ * small-object pool. And SRAT naming no domain is not the exotic case — it
+ * is every UMA machine, so on a 16-core host this quietly carved
+ * 16 × 64 KiB = 1 MiB out of a 2 MiB heap and left every other large
+ * allocation in the kernel fighting for the remainder. */
 static uint8_t *stage_alloc_scratch_numa(uint8_t kcore_id, size_t pages,
-                                          bool *out_via_pmm,
                                           void **out_phys,
                                           uint32_t *out_numa_hits,
-                                          uint32_t *out_kmalloc_hits)
+                                          uint32_t *out_uma_hits)
 {
     uint32_t apic_id = g_amp.cores[kcore_id].lapic_id;
     uint32_t domain  = acpi_numa_domain_for_apic(apic_id);
 
+    void *phys      = NULL;
+    bool  domain_hit = false;
+
     if (domain != ACPI_NUMA_DOMAIN_UNKNOWN) {
-        void *phys = pmm_alloc_in_domain(pages, domain);
-        if (phys) {
-            void *kv = vmm_phys_to_virt((uintptr_t)phys);
-            if (kv) {
-                (*out_numa_hits)++;
-                *out_via_pmm = true;
-                *out_phys    = phys;     /* remember for pmm_free */
-                return (uint8_t *)kv;
-            }
-            /* Translation failed — return phys to PMM; fall through to
-             * kmalloc. Shouldn't happen for normally-mapped phys but is
-             * defensive. */
-            pmm_free(phys, pages);
-        }
+        phys = pmm_alloc_in_domain(pages, domain);
+        domain_hit = (phys != NULL);
+    }
+    if (!phys)
+        phys = pmm_alloc(pages);
+    if (!phys)
+        return NULL;
+
+    void *kv = vmm_phys_to_virt((uintptr_t)phys);
+    if (!kv) {
+        pmm_free(phys, pages);
+        return NULL;
     }
 
-    /* Kmalloc fallback. Contiguous kernel VA, may or may not honour the
-     * domain depending on the buddy allocator's current free-list locality.
-     * Treated as success — caller only cares about contiguity + zeroing. */
-    void *kp = kmalloc(pages * PMM_PAGE_SIZE);
-    if (kp) (*out_kmalloc_hits)++;
-    *out_via_pmm = false;
-    *out_phys    = NULL;
-    return (uint8_t *)kp;
+    if (domain_hit) (*out_numa_hits)++;
+    else            (*out_uma_hits)++;
+    *out_phys = phys;
+    return (uint8_t *)kv;
 }
 
-/* Symmetric free — pick the right deallocator based on which tier was used
- * at init. Only called on init-rollback path (per-K-Core scratch never
- * frees during steady-state lifetime). */
+/* Only called on the init-rollback path — per-K-Core scratch never frees
+ * during steady-state lifetime. Both allocation tiers are PMM, so there is
+ * one deallocator. */
 static void stage_free_scratch(struct ManifestStage *st)
 {
     if (!st->scratch) return;
-    if (st->scratch_via_pmm) {
-        if (st->scratch_phys) pmm_free(st->scratch_phys, st->scratch_pages);
-    } else {
-        kfree(st->scratch);
-    }
+    if (st->scratch_phys) pmm_free(st->scratch_phys, st->scratch_pages);
     st->scratch      = NULL;
     st->scratch_phys = NULL;
 }
@@ -239,25 +235,21 @@ error_t ManifestStageInitAll(void)
      */
     size_t per_core_pages = (per_core + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     uint32_t numa_hits   = 0;
-    uint32_t kmalloc_hits = 0;
+    uint32_t uma_hits = 0;
     for (uint32_t i = 0; i < ncores; i++) {
         struct ManifestStage *st = &g_stages[i];
         memset(st, 0, sizeof(*st));
 
-        bool via_pmm  = false;
-        void *phys    = NULL;
+        void *phys = NULL;
         st->scratch = stage_alloc_scratch_numa((uint8_t)i, per_core_pages,
-                                                &via_pmm, &phys,
-                                                &numa_hits, &kmalloc_hits);
+                                                &phys, &numa_hits, &uma_hits);
         if (!st->scratch) {
             kprintf("[ManifestStage] FATAL: core %u alloc(%u B) failed "
                     "(autoscale=%u B, ncores=%u, RAM=%lu MiB, "
-                    "numa_hits=%u kmalloc_hits=%u)\n",
+                    "numa_hits=%u uma_hits=%u)\n",
                     i, per_core, per_core, ncores,
                     (unsigned long)(pmm_get_total_ram_bytes() / (1024ull * 1024ull)),
-                    numa_hits, kmalloc_hits);
-            /* Roll back — each j may be PMM or kmalloc, dispatch to the
-             * matching deallocator. */
+                    numa_hits, uma_hits);
             for (uint32_t j = 0; j < i; j++) {
                 stage_free_scratch(&g_stages[j]);
             }
@@ -267,12 +259,11 @@ error_t ManifestStageInitAll(void)
         st->scratch_capacity = per_core;
         st->scratch_in_use   = false;
         st->kcore_id         = (uint8_t)i;
-        st->scratch_via_pmm  = via_pmm;
         st->scratch_pages    = per_core_pages;
         st->scratch_phys     = phys;
     }
     debug_printf("[ManifestStage] NUMA placement: %u cores domain-local, "
-                 "%u cores kmalloc-fallback\n", numa_hits, kmalloc_hits);
+                 "%u cores unhinted\n", numa_hits, uma_hits);
 
     g_stages_initialized = true;
     debug_printf("[ManifestStage] ready: %u cores × %u B scratch "

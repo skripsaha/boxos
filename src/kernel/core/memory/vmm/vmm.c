@@ -1803,15 +1803,27 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
     size_t dedup_total_pages = dedup_mem_end / VMM_PAGE_SIZE;
     size_t dedup_bitmap_size = (dedup_total_pages + 7) / 8;
 
-    uint8_t *freed_bitmap = kmalloc(dedup_bitmap_size);
+    /* From the PMM, not kmalloc. One bit per physical page means this scratch
+     * scales with INSTALLED RAM — 288 KiB on an 8 GiB box — and it is asked
+     * for on every address-space teardown. The kernel heap is a fixed
+     * small-object pool; a page-scale, RAM-sized buffer taken from it starves
+     * every other large allocation in the kernel. The PMM is exactly the
+     * allocator for page-scale scratch, and it is where the pages being
+     * counted here come from anyway. */
+    size_t dedup_pages = (dedup_bitmap_size + VMM_PAGE_SIZE - 1) / VMM_PAGE_SIZE;
+    void *dedup_phys = pmm_alloc_zero(dedup_pages);
+    uint8_t *freed_bitmap = dedup_phys ? (uint8_t *)vmm_phys_to_virt((uintptr_t)dedup_phys)
+                                       : NULL;
     bool has_dedup = (freed_bitmap != NULL);
     if (!has_dedup)
     {
-        debug_printf("[VMM] WARNING: kmalloc(%zu) failed for dedup bitmap — skipping user page frees to avoid double-free\n", dedup_bitmap_size);
-    }
-    else
-    {
-        memset(freed_bitmap, 0, dedup_bitmap_size);
+        /* kprintf: this is not a soft degradation. Without the bitmap the
+         * walk below cannot tell a doubly-mapped frame from a fresh one, so
+         * it frees NO user data pages at all — every data page of this
+         * address space leaks. Silent here meant the leak compounded until
+         * the PMM ran dry and unrelated allocations started failing. */
+        kprintf("[VMM] ERROR: dedup bitmap alloc failed (%zu pages) — LEAKING every "
+                "user data page of this context to avoid a double-free\n", dedup_pages);
     }
     // When has_dedup is false we still walk the tables to free page-table
     // structures but SKIP freeing data pages (pmm_free) to prevent
@@ -1852,8 +1864,8 @@ static void vmm_free_user_space_tables(vmm_context_t *ctx)
      * gone: the Phase 0 quiesce flushed every core and evicted them off this
      * CR3, and the walk now frees each mapped data page inline. Teardown cost is
      * O(mapped pages), not O(installed RAM). Only the dedup scratch remains. */
-    if (freed_bitmap)
-        kfree(freed_bitmap);
+    if (dedup_phys)
+        pmm_free(dedup_phys, dedup_pages);
 
     debug_printf("[VMM] User space tables freed\n");
 }

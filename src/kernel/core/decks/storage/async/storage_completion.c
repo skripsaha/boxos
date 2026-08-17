@@ -2,6 +2,8 @@
 #include "amp.h"
 #include "atomics.h"
 #include "klib.h"
+#include "pmm.h"
+#include "vmm.h"
 #include "lapic.h"
 #include "irqchip.h"
 
@@ -82,12 +84,19 @@ void StorageCompletionInit(void)
     uint32_t n = g_amp.total_cores;
     if (n == 0) n = 1;
 
-    g_storage_cq = (StorageCompletionQueue *)kmalloc(sizeof(StorageCompletionQueue) * n);
+    /* From the PMM, for the same reason as the K-Core queue array: sized by
+     * CORE COUNT, allocated once, never freed. The kernel heap is a fixed
+     * small-object pool and must not carry per-machine-scale arrays. */
+    size_t cq_bytes = sizeof(StorageCompletionQueue) * n;
+    size_t cq_pages = (cq_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    void  *cq_phys  = pmm_alloc_zero(cq_pages);
+    g_storage_cq = cq_phys ? (StorageCompletionQueue *)vmm_phys_to_virt((uintptr_t)cq_phys)
+                           : NULL;
     if (!g_storage_cq) {
-        kprintf("[STORAGE_CQ] FATAL: cannot allocate queue array (%u cores)\n", n);
+        kprintf("[STORAGE_CQ] FATAL: cannot allocate queue array (%u cores, %zu pages)\n",
+                n, cq_pages);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
-    memset(g_storage_cq, 0, sizeof(StorageCompletionQueue) * n);
 
     for (uint32_t i = 0; i < n; i++) {
         StorageCompletionQueue *q = &g_storage_cq[i];

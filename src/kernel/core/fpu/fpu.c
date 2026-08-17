@@ -173,8 +173,12 @@ void enable_fpu(void) {
         g_xsave_mask = xcr0;
         g_xsave_area_size = ebx; // size for currently enabled features
 
-        debug_printf("[FPU] XSAVE enabled: XCR0=0x%lx, area_size=%u bytes\n",
-                     xcr0, g_xsave_area_size);
+        /* kprintf: this number sets the per-process FPU buffer, and once it
+         * passes SLAB_LARGE_THRESHOLD every process allocates out of the
+         * fixed kernel pool instead of the growable slab.  That crossing is
+         * invisible unless the number itself is on the console. */
+        kprintf("[FPU] XSAVE enabled: XCR0=0x%lx, area_size=%u bytes (per-process buffer %u)\n",
+                xcr0, g_xsave_area_size, g_xsave_area_size + 63);
         if (xcr0 & XCR0_AVX)
             debug_printf("[FPU]   AVX: enabled\n");
         if (xcr0 & XCR0_OPMASK)

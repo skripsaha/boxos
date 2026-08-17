@@ -6,6 +6,7 @@
 #include "atomics.h"
 #include "klib.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "perf_trace.h"
 #include "amp.h"
 #include "irq_defer.h"
@@ -18,12 +19,20 @@ KCorePocketQueue *g_kcore_queues = NULL;
 void kcore_init(void)
 {
     uint32_t n = g_amp.total_cores;
-    g_kcore_queues = kmalloc(sizeof(KCorePocketQueue) * n);
+    /* From the PMM: this array is sized by CORE COUNT — 65 KiB at 16 cores,
+     * ~1 MiB at MAX_CORES — and the kernel heap is a fixed small-object pool
+     * that does not grow with the machine. Allocated once at boot and never
+     * freed, so the Pull-Map pointer is valid for the kernel's lifetime. */
+    size_t queue_bytes = sizeof(KCorePocketQueue) * n;
+    size_t queue_pages = (queue_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
+    void  *queue_phys  = pmm_alloc_zero(queue_pages);
+    g_kcore_queues = queue_phys ? (KCorePocketQueue *)vmm_phys_to_virt((uintptr_t)queue_phys)
+                                : NULL;
     if (!g_kcore_queues) {
-        kprintf("[KCORE] FATAL: cannot allocate queue array (%u cores)\n", n);
+        kprintf("[KCORE] FATAL: cannot allocate queue array (%u cores, %zu pages)\n",
+                n, queue_pages);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
-    memset(g_kcore_queues, 0, sizeof(KCorePocketQueue) * n);
     for (uint32_t i = 0; i < n; i++) {
         g_kcore_queues[i].kcore_idx = (uint8_t)i;
     }
