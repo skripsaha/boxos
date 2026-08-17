@@ -185,8 +185,12 @@ static void *kmalloc_internal(size_t size)
 
     spin_unlock(&heap_lock);
 
+    /* kprintf, not debug_printf: a NULL from here is how every caller's
+     * error-unwind path begins, and in a release build debug_printf is
+     * compiled out — heap exhaustion used to leave no trace at all, so the
+     * unwind that followed looked like a spontaneous failure. */
     if (!result)
-        debug_printf("[KLIB] WARNING: kmalloc_internal failed for %zu bytes (heap exhausted)\n", size);
+        kprintf("[KLIB] ERROR: kmalloc failed for %zu bytes (heap exhausted)\n", size);
     return result;
 }
 
