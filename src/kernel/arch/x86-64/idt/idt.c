@@ -13,6 +13,7 @@
 #include "kring.h"
 #include "vmm.h"
 #include "uaccess.h"  /* UACCESS_USER_VA_MAX for SMAP-fault diagnostic */
+#include "nameplate.h"  /* nameplate_name_at — name the frames of a user fault */
 #include "atomics.h"
 #include "touch.h"   /* TouchTag types — Phase 2K #CP publish */
 #include "scheduler.h"
@@ -448,27 +449,51 @@ void exception_handler(interrupt_frame_t *frame)
              * known in advance; do not read the first entry as "the function
              * that faulted".
              *
-             * Addresses only. Naming them is userspace's job, and the same
-             * ELF .symtab the shipped images carry answers it offline:
-             *   x86_64-elf-nm -n <app>.elf | awk '$1 <= addr'  */
+             * The names come from the image itself. Every BoxOS image carries
+             * a Nameplate — a table the linker step builds from its own
+             * symbols (src/include/nameplate_format.h) — and the loader noted
+             * where it landed. Reading it means reaching into the faulting
+             * process's address space, which is done the same way the frame
+             * walk itself is done: through get_user, with page-fault fixup, so
+             * a process that corrupted its own table gets an unnamed frame
+             * rather than taking the kernel down while being diagnosed.
+             *
+             * A frame with no name is not a failure worth hiding — an address
+             * in a leaf no symbol claims, or an image linked without a table,
+             * prints as the bare address it always did. */
             {
                 uint64_t fp = frame->rbp;
-                kprintf("[EXCEPTION]  called from:");
+                kprintf("[EXCEPTION]  called from:\n");
                 for (int depth = 0; depth < 8; depth++) {
-                    uint64_t next = 0, ret = 0;
+                    uint64_t      next = 0, ret = 0;
+                    NameplateName site;
+
                     if (fp == 0 || (fp & 7) != 0) break;
                     if (get_user_u64(&next, (const uint64_t *)(uintptr_t)fp) != 0)
                         break;
                     if (get_user_u64(&ret, (const uint64_t *)(uintptr_t)(fp + 8)) != 0)
                         break;
                     if (ret == 0) break;
-                    kprintf(" 0x%lx", ret);
+
+                    /* The return address points PAST the call, so the byte
+                     * that belongs to the call is ret-1; naming ret itself
+                     * would name the next function whenever a call is the
+                     * last instruction of its own. */
+                    if (nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes,
+                                          (uintptr_t)(ret - 1), &site))
+                        /* +1 turns the offset of the looked-up byte back into
+                         * the offset of the return address, which is what a
+                         * reader compares against a disassembly. */
+                        kprintf("[EXCEPTION]    0x%lx  %s+0x%lx\n", ret, site.Text,
+                                site.Offset + 1);
+                    else
+                        kprintf("[EXCEPTION]    0x%lx\n", ret);
+
                     /* Frames march toward higher addresses. A chain that
                      * stalls or reverses is a smashed stack, not a caller. */
                     if (next <= fp) break;
                     fp = next;
                 }
-                kprintf("\n");
             }
 
             kprintf("[EXCEPTION] Killing PID %u and scheduling next process\n", proc->pid);

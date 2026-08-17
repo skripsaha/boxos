@@ -257,6 +257,13 @@ typedef struct process_t
      * not in any bucket chain. */
     AddrWaitEntry     addr_wait_entry;
 
+    /* Nameplate — where this image's "address -> name" table is mapped, found
+     * by the loader (nameplate_locate) at the one moment the whole file is in
+     * kernel memory. 0 when the image carries none. Read only by the
+     * user-mode fault dump, and only through get_user. */
+    uintptr_t         nameplate_va;
+    uint64_t          nameplate_bytes;
+
     struct process_t *hash_next;    // hash table collision chain
     struct process_t *next;         // global process list (forward)
     struct process_t *prev;         // global process list (backward) — O(1) unlink in process_destroy

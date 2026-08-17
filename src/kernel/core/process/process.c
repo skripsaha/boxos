@@ -10,6 +10,7 @@
 #include "kring.h"
 #include "touch_ring.h"
 #include "vmm.h"
+#include "nameplate.h"   /* nameplate_locate — where this image keeps its names */
 #include "scheduler.h"
 #include "gdt.h"
 #include "tss.h"
@@ -821,6 +822,16 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
         pmm_free(code_phys, page_count);
         return -1;
     }
+
+    /* Where this image keeps the names of its own functions, so a fault dump
+     * can print them instead of a column of hex. Read here and nowhere else:
+     * this is the one moment the WHOLE file is in kernel memory — for an ELF
+     * the pages below are handed straight back, and after that only the
+     * mapped segments exist. Costs nothing when the image has no table. */
+    proc->nameplate_va    = 0;
+    proc->nameplate_bytes = 0;
+    (void)nameplate_locate(code_virt, size, VMM_CABIN_CODE_START,
+                           &proc->nameplate_va, &proc->nameplate_bytes);
 
     const uint8_t *probe = (const uint8_t *)code_virt;
     bool was_elf = (size >= 4 && probe[0] == 0x7F && probe[1] == 'E' &&
