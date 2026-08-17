@@ -647,6 +647,11 @@ size_t pmm_total_pages(void) {
     return pmm_usable_pages;
 }
 
+size_t pmm_max_alloc_pages(void)
+{
+    return (size_t)1 << BUDDY_MAX_ORDER;
+}
+
 size_t pmm_free_pages(void) {
     spin_lock(&pmm_buddy.lock);
     size_t count = pmm_buddy.free_count;
