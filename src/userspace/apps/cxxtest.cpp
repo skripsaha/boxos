@@ -553,6 +553,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <typeindex>
 #include <typeinfo>
 #include <unwind.h>
 #include <vector>
@@ -43131,6 +43132,147 @@ void Phase191()
     printf("[CXX] PASS phase191: __cxa_demangle\n");
 }
 
+// ── phase192: <typeindex> ([type.index]) ────────────────────────────────
+// The class is trivial; the property that matters is that the order it
+// exposes is a real strict total order, because that is the only reason
+// the header exists (type_info cannot be a key — it is neither copyable
+// nor assignable, and both facts are asserted below). boxcxx's
+// type_info::before compares mangled-name POINTERS, so the order is
+// checked exhaustively over a fixed type zoo rather than spot-checked:
+// irreflexivity, asymmetry and transitivity over all triples, and
+// agreement between <=> and ==. A comparison that answered inconsistently
+// would not merely fail a Check — it would corrupt any map keyed on it,
+// so the map itself is exercised too.
+struct P192Base {
+    virtual ~P192Base() = default;
+};
+struct P192Derived : P192Base {
+};
+
+void Phase192()
+{
+    using namespace std;
+
+    static_assert(is_same_v<decltype(declval<const type_index &>() <=>
+                                     declval<const type_index &>()),
+                            strong_ordering>,
+                  "phase192 [type.index] mandates strong_ordering");
+    // The whole point of the wrapper: type_info is neither of these.
+    static_assert(is_copy_constructible_v<type_index>);
+    static_assert(is_copy_assignable_v<type_index>);
+    static_assert(is_nothrow_copy_constructible_v<type_index>);
+    static_assert(!is_copy_constructible_v<type_info>);
+    static_assert(!is_default_constructible_v<type_index>);
+    // Non-explicit, so typeid() flows into a type_index parameter or key.
+    static_assert(is_convertible_v<const type_info &, type_index>);
+
+    const type_index ti  = typeid(int);
+    const type_index ti2 = typeid(int);
+    const type_index tl  = typeid(long);
+
+    Check(ti == ti2, "phase192 the same type gives equal indices");
+    Check(!(ti == tl), "phase192 different types give unequal indices");
+    Check(ti != tl, "phase192 synthesized != follows from ==");
+    Check((ti <=> ti2) == strong_ordering::equal,
+          "phase192 equal indices compare equal");
+    Check(ti.hash_code() == ti2.hash_code(),
+          "phase192 equal indices hash equal");
+    Check(ti.hash_code() == typeid(int).hash_code(),
+          "phase192 hash_code forwards to the type_info");
+    Check(__builtin_strcmp(ti.name(), typeid(int).name()) == 0,
+          "phase192 name forwards to the type_info");
+    Check(hash<type_index>{}(ti) == ti.hash_code(),
+          "phase192 hash<type_index> is hash_code");
+
+    // A type zoo wide enough that a broken comparison cannot pass by luck:
+    // fundamentals, a pointer, a reference-stripped array, a class, a
+    // template specialization, an enum, and a function type.
+    enum P192Enum { kOne };
+    const type_index kZoo[] = {
+        typeid(int),         typeid(long),        typeid(double),
+        typeid(char),        typeid(int *),       typeid(int[4]),
+        typeid(P192Base),    typeid(P192Derived), typeid(vector<int>),
+        typeid(vector<long>), typeid(P192Enum),   typeid(void (*)(int)),
+    };
+    constexpr size_t kN = sizeof(kZoo) / sizeof(kZoo[0]);
+
+    // Every type in the zoo is distinct, so equality must be exactly the
+    // diagonal. This is what makes the ordering checks below non-vacuous.
+    size_t equalPairs = 0;
+    for (size_t i = 0; i < kN; ++i)
+        for (size_t j = 0; j < kN; ++j)
+            if (kZoo[i] == kZoo[j]) ++equalPairs;
+    Check(equalPairs == kN, "phase192 the zoo holds kN distinct types");
+
+    bool irreflexive = true, asymmetric = true, consistent = true;
+    for (size_t i = 0; i < kN; ++i) {
+        if (kZoo[i] < kZoo[i]) irreflexive = false;
+        for (size_t j = 0; j < kN; ++j) {
+            const bool lt = kZoo[i] < kZoo[j];
+            const bool gt = kZoo[j] < kZoo[i];
+            const bool eq = kZoo[i] == kZoo[j];
+            if (lt && gt) asymmetric = false;
+            // Exactly one of less / equal / greater, always.
+            if (int(lt) + int(gt) + int(eq) != 1) consistent = false;
+        }
+    }
+    Check(irreflexive, "phase192 the order is irreflexive");
+    Check(asymmetric, "phase192 the order is asymmetric");
+    Check(consistent, "phase192 <=> and == agree on every pair");
+
+    bool transitive = true;
+    for (size_t i = 0; i < kN; ++i)
+        for (size_t j = 0; j < kN; ++j)
+            for (size_t k = 0; k < kN; ++k)
+                if (kZoo[i] < kZoo[j] && kZoo[j] < kZoo[k] && !(kZoo[i] < kZoo[k]))
+                    transitive = false;
+    Check(transitive, "phase192 the order is transitive");
+
+    // The order is only worth having if a tree agrees with it.
+    set<type_index> tree;
+    for (const type_index &t : kZoo) tree.insert(t);
+    Check(tree.size() == kN, "phase192 a set keyed on type_index holds them all");
+    bool sorted = true;
+    for (auto it = tree.begin(), prev = it; it != tree.end(); prev = it, ++it)
+        if (it != prev && !(*prev < *it)) sorted = false;
+    Check(sorted, "phase192 the set iterates in the exposed order");
+    Check(tree.count(typeid(vector<int>)) == 1 && tree.count(typeid(short)) == 0,
+          "phase192 lookup by typeid finds exactly what was inserted");
+
+    map<type_index, int> byType;
+    for (size_t i = 0; i < kN; ++i) byType.emplace(kZoo[i], int(i));
+    Check(byType.size() == kN, "phase192 a map keyed on type_index holds them all");
+    Check(byType.at(typeid(P192Derived)) == 7,
+          "phase192 the map finds the value put under a class type");
+
+    unordered_map<type_index, int> byHash;
+    for (size_t i = 0; i < kN; ++i) byHash.emplace(kZoo[i], int(i));
+    Check(byHash.size() == kN, "phase192 an unordered_map holds them all");
+    Check(byHash.at(typeid(void (*)(int))) == 11,
+          "phase192 the unordered_map finds a function-pointer key");
+
+    // Dynamic type through a base pointer — RTTI and type_index together,
+    // which is the case the header is actually reached for.
+    {
+        P192Derived d;
+        P192Base   *b = &d;
+        Check(type_index(typeid(*b)) == type_index(typeid(P192Derived)),
+              "phase192 the index of a polymorphic object is its dynamic type");
+        Check(type_index(typeid(*b)) != type_index(typeid(P192Base)),
+              "phase192 ...and not its static type");
+        Check(byType.at(typeid(*b)) == 7,
+              "phase192 a dynamic type indexes the map like a static one");
+    }
+
+    // Assignment: the other half of why the wrapper exists.
+    type_index movable = typeid(int);
+    movable            = typeid(double);
+    Check(movable == type_index(typeid(double)),
+          "phase192 a type_index can be reassigned");
+
+    printf("[CXX] PASS phase192: <typeindex>\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -43344,6 +43486,7 @@ int main()
     Phase189();
     Phase190();
     Phase191();
+    Phase192();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

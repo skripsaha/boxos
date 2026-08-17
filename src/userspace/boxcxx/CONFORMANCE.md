@@ -37,25 +37,31 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **83** — 79 of C++23 (26 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Standard headers provided | **84** — 80 of C++23 (25 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 121 |
 | Header source | ~87 000 lines |
 | Feature-test macros defined | 201 — 155 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 206 phases (187 of them the numbered `PhaseN` series), 5 301 runtime checks, 1 750 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 207 phases (188 of them the numbered `PhaseN` series), 5 325 runtime checks, 1 757 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
-here it is: headers and leaves are `ls -1` of `include/std` and
-`include/std/__bits`; macros are `#define __cpp_lib_` lines from `-dM -E` on a
+here it is: headers and leaves are the *regular files* in `include/std` and
+`include/std/__bits` (`ls -1 include/std` returns one more than the header
+count, because `__bits` is an entry too — the rule used to say plain `ls -1`,
+and Ф38 re-derived every row and found that one off by exactly that
+directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are `Phase*();`
-call sites in `main`; checks and `static_assert`s are occurrences of those two
-tokens in `cxxtest.cpp`. `tools/cxx_ftm_audit.sh` re-derives the macro count and
-checks it against [version.syn] on every run.
+call sites in `main`; checks are occurrences of `Check(` in `cxxtest.cpp` and
+`static_assert`s are occurrences of the bare token `static_assert` (which is 21
+more than `static_assert(`, the difference being the times the keyword is
+named in a comment — the two rows were never counted the same way, and saying
+so is cheaper than renumbering both). `tools/cxx_ftm_audit.sh` re-derives the
+macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **206**. The
+there are exactly as many as there are phase definitions. That is **207**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -90,12 +96,12 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (26)
+## 1.1 Headers that do not exist (25)
 
-79 of the C++23 headers are provided and 26 are absent, which accounts for the
+80 of the C++23 headers are provided and 25 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
 headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 83 standard
+(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 84 standard
 headers in all.
 
 ### C library wrappers — 17
@@ -150,16 +156,33 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 6
+### C++23 features not implemented — 5
 
 | Header | Status |
 |---|---|
 | `<spanstream>` | Not implemented. |
 | `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
-| `<typeindex>` | Not implemented — there is no `std::type_index`. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
 | `<scoped_allocator>` | Not implemented. |
 | `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<typeindex>` left that list in Ф38.** Its entry read "there is no
+`std::type_index`", which was true and said nothing about why the header had
+never been worth an entry of its own: everything it needs — `type_info::before`
+and `type_info::hash_code` — had been in `<typeinfo>` since Ф5. What the header
+adds is an *order*, and boxcxx's `before` compares mangled-name pointers, so the
+question worth answering was whether that order is a strict total one. It is,
+and for a reason that holds by construction rather than by luck: distinct types
+have distinct mangled names, and a linker that merges identical string contents
+cannot merge contents that differ, so distinct `type_info` objects never share a
+name pointer and `==` (pointer identity) and `before` (pointer order) cannot
+disagree. Phase192 pins it the only way worth pinning it — irreflexivity,
+asymmetry, transitivity and `<=>`/`==` agreement over every pair and triple of a
+twelve-type zoo, plus the `set`/`map`/`unordered_map` that would silently lose
+keys if any of those failed. Comparing unrelated pointers with `<` is
+*unspecified* rather than undefined, and on one flat address space it is a total
+order; libstdc++ makes the same trade whenever it may assume merged typeinfo
+names.
 
 **`<stacktrace>` used to be on that list, and no longer is.** Its entry named a
 real blocker rather than an absence: symbolization needs a symbol table in the
@@ -200,7 +223,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 201 macros × 83 headers by
+  checked over the full cross-product of 201 macros × 84 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -1794,6 +1817,30 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   be one: `is_base_of` is true either way, and the cast that would tell the two
   apart is ill-formed exactly when the answer is "virtual". The macro appears
   only when the builtin does.
+
+## `<typeindex>`
+
+- Complete: `type_index` with all five members and `hash<type_index>`. New in
+  Ф38; the header used to be in §1.1.
+- The order is **pointer order over mangled names**, because that is what
+  `type_info::before` is here (see `<typeinfo>`: a BoxOS binary is one static
+  image and vague linkage merges every duplicate typeinfo, so pointer identity
+  *is* type identity). Comparing unrelated pointers with `<` is unspecified in
+  the abstract machine and a total order on one flat address space; libstdc++
+  makes the same trade whenever it may assume merged typeinfo names, and the
+  alternative — `strcmp` per comparison — would cost a string walk at every
+  tree node and buy nothing.
+- What makes that order *safe* rather than merely conventional: `==` compares
+  the `type_info` addresses and `before` compares their name addresses, so the
+  two could in principle disagree — but only if two distinct `type_info`
+  objects shared a name pointer, which cannot happen, since distinct types have
+  distinct mangled names and a linker merges identical string contents, never
+  differing ones. Phase192 pins the consequence directly rather than the
+  argument: irreflexivity, asymmetry, transitivity and `<=>`/`==` agreement
+  over every pair and every triple of a twelve-type zoo, then the `set`, `map`
+  and `unordered_map` that would silently drop keys if any of it were false.
+- `hash<type_index>` is `hash_code()`, which is FNV-1a over the mangled name.
+  It is not required to agree with any other implementation's, and does not.
 
 ## `<utility>`
 
