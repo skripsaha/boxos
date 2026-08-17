@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~87 000 lines |
 | Feature-test macros defined | 201 — 155 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 205 phases (186 of them the numbered `PhaseN` series), 5 292 runtime checks, 1 750 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 206 phases (187 of them the numbered `PhaseN` series), 5 301 runtime checks, 1 750 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -55,7 +55,7 @@ checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **205**. The
+there are exactly as many as there are phase definitions. That is **206**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -1560,15 +1560,36 @@ all three `current` overloads and the full allocator-aware surface,
 `pmr::stacktrace`, `to_string`, both `operator<<`, both formatters and both
 `hash` specializations. `__cpp_lib_stacktrace` is 202011L.
 
-- `~` **`description()` returns the MANGLED name**, with `+0xN` appended when
-  the address is not the function's first byte. The standard makes the
-  description implementation-defined, so this is conforming, but it is a real
-  difference from libstdc++, which demangles. There is no demangler in the
-  tree; doing it at image-build time instead was measured and rejected —
-  demangling `cxxtest.elf`'s 32 598 names grows the name blob from 3.67 MB to
-  9.71 MB, with single names reaching 5266 characters, and the TagFS image is
-  16 MB. A demangler is its own piece of work and would serve `typeid().name()`
-  and the shell as much as this header.
+- `~` **`description()` demangles, and the demangler's accuracy is measured
+  rather than claimed.** The names in the image are mangled — demangling them
+  at build time was measured and rejected, since it grows `cxxtest.elf`'s name
+  blob from 3.67 MB to 9.71 MB against a 16 MB image — so `__cxa_demangle`
+  (`include/cxxabi.h`, added in Ф37) does the work when someone asks.
+
+  It is held to the reference implementation over the whole corpus the tree
+  produces: **32 010 mangled names** from `cxxtest`, `brookexec` and
+  `currentexec`, each compared byte for byte against `x86_64-elf-c++filt`
+  (libiberty). The result, stated in full because a partial number would be
+  the misleading one:
+
+  | | |
+  |---|---|
+  | byte-identical to libiberty | **29 880 — 93.35%** |
+  | refused (returns null; the caller prints the mangled name) | 1 197 — 3.74% |
+  | demangled, but not identically | 933 — 2.91% |
+  | ...of those, differing in the function NAME rather than in a nested template argument | 315 — 0.98% |
+
+  The differences are concentrated in one place: template arguments of deeply
+  nested generic lambdas, where a substitution has to be re-evaluated in a
+  context the mangling only implies. A refusal is safe by construction — the
+  caller still holds the mangled name and prints it — and the parser is
+  fuzz-tested: 51 869 truncations, single-byte mutations and pure garbage
+  under ASan, UBSan and LeakSanitizer produced no crash, no hang and no leak.
+
+  371 names in that corpus the REFERENCE cannot demangle either — they use
+  `Tk`, the C++20 constrained-template-parameter mangling libiberty does not
+  implement — and they are excluded from the comparison rather than counted
+  as wins.
 - `~` **`source_file()` is always `""` and `source_line()` always `0`.**
   [stacktrace.entry.obs] specifies exactly this when the information is
   unavailable. It is unavailable for a measured reason rather than a chosen

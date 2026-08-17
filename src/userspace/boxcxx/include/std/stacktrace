@@ -25,11 +25,13 @@
 //   tenfold). An honest zero everywhere beats line numbers in the images
 //   that do not need them and silence in the ones that do.
 //
-//   description() returns the MANGLED name. There is no demangler in the
-//   tree, and doing it at build time was measured and rejected: demangling
-//   cxxtest's names grows them from 3.67 MB to 9.71 MB, single names reaching
-//   5266 characters. A demangler is its own piece of work and would serve
-//   more than this header.
+//   description() returns the DEMANGLED name where it can. The names in the
+//   image are mangled — demangling them at build time was measured and
+//   rejected, since it grows cxxtest's name blob from 3.67 MB to 9.71 MB
+//   against a 16 MB image — so the work happens here, at the moment someone
+//   asks. __cxa_demangle (<cxxabi.h>) is measured against libiberty over
+//   every C++ name in the shipped images; the names it cannot parse come
+//   back mangled rather than not at all.
 //
 //   A trace stops where the CFI stops. C sources build with
 //   -fno-asynchronous-unwind-tables, so a chain that reaches boxlib or _start
@@ -53,11 +55,15 @@
 
 #include <unwind.h>
 
+#include <cxxabi.h>
+
 #include "box/nameplate.h"
 
 namespace std {
 
 namespace __stacktrace {
+
+extern "C" void free(void *);
 
 // One raw frame as the unwinder reports it. `Pc` is a RETURN address: it
 // points at the instruction AFTER the call, so the byte that belongs to the
@@ -188,7 +194,7 @@ public:
     constexpr native_handle_type native_handle() const noexcept { return pc_; }
     constexpr explicit operator bool() const noexcept { return pc_ != 0; }
 
-    // The mangled name of the function containing this address, with +0xN
+    // The name of the function containing this address, demangled, with +0xN
     // when the address is not its first byte. Empty when the image carries no
     // name for it — which the standard asks for, and which is the truth for
     // an address in a leaf that no symbol claims.
@@ -200,7 +206,17 @@ public:
         if (pc_ == 0) return out;
         if (!nameplate_lookup(pc_ - __stacktrace::kLookupBias, &site)) return out;
 
-        out.append(site.Name);
+        // A name the demangler cannot parse is returned as it was stored: a
+        // mangled name is worse to read than a demangled one and far better
+        // than none.
+        int   status = -1;
+        char *pretty = __cxa_demangle(site.Name, nullptr, nullptr, &status);
+        if (pretty) {
+            out.append(pretty);
+            __stacktrace::free(pretty);
+        } else {
+            out.append(site.Name);
+        }
         // Offset from the TRUE pc, not from the biased lookup address: what
         // the reader compares against a disassembly is the return address.
         if (uintptr_t off = pc_ - site.Start; off != 0) {

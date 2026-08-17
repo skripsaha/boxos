@@ -45,6 +45,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/charconv_float.cpp \
        src/runtime/format.cpp \
        src/runtime/string_io.cpp \
+       src/runtime/demangle.cpp \
        src/tls/tls_init.cpp \
        src/tls/tls_strand.cpp \
        src/unwind/dwarf_cfi.cpp \

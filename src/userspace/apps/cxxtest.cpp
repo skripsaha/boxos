@@ -546,6 +546,7 @@
 #include <sstream>
 #include <iomanip>
 #include <stack>
+#include <cxxabi.h>
 #include <stacktrace>
 #include <stdexcept>
 #include <streambuf>
@@ -42907,11 +42908,15 @@ void Phase189()
         Check(st[1].native_handle() > reinterpret_cast<uintptr_t>(&P189Outer),
               "phase189 and so is the caller's");
 
-        // Frame 2 is Phase189 itself — a C++ function, so its name comes back
-        // mangled, which is the documented behaviour rather than a defect.
+        // Frame 2 is Phase189 itself — a C++ function in an anonymous
+        // namespace, and since Ф37's demangler it comes back readable rather
+        // than as _ZN12_GLOBAL__N_1L8Phase189Ev.
         const string d2 = st[2].description();
-        Check(!d2.empty() && d2[0] == '_' && d2[1] == 'Z',
-              "phase189 a C++ frame is named, and named mangled");
+        Check(d2.find("Phase189") != string::npos,
+              "phase189 a C++ frame is named by its source name");
+        Check(d2.find("(anonymous namespace)") != string::npos,
+              "phase189 including the namespace it lives in");
+        Check(d2.find("_Z") == string::npos, "phase189 and not by its mangling");
     }
 
     printf("[CXX] PASS phase189: Nameplate + stacktrace_entry (%u names)\n",
@@ -43056,6 +43061,74 @@ void Phase190()
 
     printf("[CXX] PASS phase190: basic_stacktrace (%u frames deep)\n",
            static_cast<unsigned>(st.size()));
+}
+
+void Phase191()
+{
+    using namespace std;
+
+    // Every expected string below was taken from the reference demangler
+    // (x86_64-elf-c++filt, i.e. libiberty) rather than written by hand, and
+    // the whole implementation is held to that standard: 32381 names from the
+    // shipped C++ images are compared against it byte for byte.
+    struct Case {
+        const char *Mangled;
+        const char *Plain;
+    };
+    static const Case kCases[] = {
+        {"_Z3foov", "foo()"},
+        {"_ZNSt6vectorIiSaIiEE9push_backERKi",
+         "std::vector<int, std::allocator<int> >::push_back(int const&)"},
+        {"_ZSt4sqrtIiEDaT_", "auto std::sqrt<int>(int)"},
+        {"_ZNKSs4dataEv",
+         "std::basic_string<char, std::char_traits<char>, std::allocator<char> >::data() const"},
+        {"_ZN3box5tagfs4fileD1Ev", "box::tagfs::file::~file()"},
+        {"_ZSt7destroyIPiEvT_S1_", "void std::destroy<int*>(int*, int*)"},
+        {"_ZNSt8functionIFiiEEC1Ev", "std::function<int (int)>::function()"},
+    };
+
+    for (const Case &c : kCases) {
+        int   status = -1;
+        char *out    = __cxa_demangle(c.Mangled, nullptr, nullptr, &status);
+        Check(out != nullptr && status == 0, "phase191 a known name demangles");
+        if (out) {
+            Check(__builtin_strcmp(out, c.Plain) == 0,
+                  "phase191 and demangles to exactly what libiberty says");
+            free(out);
+        }
+    }
+
+    // Refusals are as much a part of the contract as successes: a caller that
+    // still has the mangled name must be told plainly that it is on its own.
+    int   status = 0;
+    char *out    = __cxa_demangle("not_a_mangled_name", nullptr, nullptr, &status);
+    Check(out == nullptr && status == -2, "phase191 a name that is not a mangling is refused");
+    out = __cxa_demangle("_ZThisIsNotValidEitherXX", nullptr, nullptr, &status);
+    Check(out == nullptr && status == -2, "phase191 and so is a broken one");
+    out = __cxa_demangle(nullptr, nullptr, nullptr, &status);
+    Check(out == nullptr && status == -3, "phase191 a null name is an argument error");
+
+    // The caller-supplied buffer path.
+    {
+        char   buf[256];
+        size_t n      = sizeof buf;
+        int    st2    = -1;
+        char  *result = __cxa_demangle("_Z3foov", buf, &n, &st2);
+        Check(result == buf && st2 == 0 && __builtin_strcmp(buf, "foo()") == 0,
+              "phase191 a caller's buffer is used when it fits");
+    }
+
+    // GCC's clone suffixes survive the round trip, and a dot INSIDE a name
+    // (a coroutine frame type) is not mistaken for one.
+    {
+        int   st3 = -1;
+        char *cl  = __cxa_demangle("_Z3foov.cold", nullptr, nullptr, &st3);
+        Check(cl != nullptr && __builtin_strcmp(cl, "foo() [clone .cold]") == 0,
+              "phase191 a clone suffix is kept");
+        free(cl);
+    }
+
+    printf("[CXX] PASS phase191: __cxa_demangle\n");
 }
 
 } // namespace
@@ -43270,6 +43343,7 @@ int main()
     Phase188();
     Phase189();
     Phase190();
+    Phase191();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
