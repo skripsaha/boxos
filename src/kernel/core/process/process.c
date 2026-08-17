@@ -284,7 +284,11 @@ static bool process_alloc_kernel_stack(process_t *proc)
 
     void *stack_phys = pmm_alloc(total_pages);
     if (!stack_phys)
+    {
+        kprintf("[PROCESS] ERROR: kernel stack alloc failed (%zu pages, PID %u)\n",
+                total_pages, proc->pid);
         return false;
+    }
 
     void *stack_virt_base   = vmm_phys_to_virt((uintptr_t)stack_phys);
     vmm_context_t *kernel_ctx = vmm_get_kernel_context();
@@ -292,7 +296,7 @@ static bool process_alloc_kernel_stack(process_t *proc)
     pte_t *guard_pte = vmm_get_or_create_pte(kernel_ctx, (uintptr_t)stack_virt_base);
     if (!guard_pte)
     {
-        debug_printf("[PROCESS] FATAL: Cannot create guard page PTE for PID %u\n", proc->pid);
+        kprintf("[PROCESS] ERROR: cannot create guard page PTE for PID %u\n", proc->pid);
         pmm_free(stack_phys, total_pages);
         return false;
     }
@@ -312,16 +316,46 @@ static bool process_alloc_kernel_stack(process_t *proc)
     return true;
 }
 
-/* Free the kernel stack (error-unwind helper for both constructors).
- * Mirrors the error-path free in the original process_create. */
+/* Free the kernel stack — the ONLY way these pages ever go back to the PMM
+ * (error unwind in both constructors, and normal teardown).
+ *
+ * process_alloc_kernel_stack punches the guard page OUT OF THE PULL MAP by
+ * zeroing its leaf PTE, so while the stack is owned, the block's first page
+ * has no kernel mapping at all.  The buddy allocator keeps its free list
+ * intrusively — buddy_list_insert writes order/next/prev into the first
+ * bytes of the freed block, reached through the Pull Map.  So the guard
+ * mapping MUST be restored before pmm_free, or the allocator faults on the
+ * very block being handed to it (#PF, P=0 W=1, CR2 = PullMap(block)+0x10).
+ *
+ * If the leaf cannot be restored, the block is deliberately NOT returned:
+ * leaking CONFIG_KERNEL_STACK_TOTAL_PAGES beats giving the allocator memory
+ * it cannot touch. */
 static void process_free_kernel_stack(process_t *proc)
 {
     if (!proc->kernel_stack_guard_base)
         return;
-    uintptr_t sp = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
-    pmm_free((void *)sp, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+
+    uintptr_t guard_virt = (uintptr_t)proc->kernel_stack_guard_base;
+    uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
+
     proc->kernel_stack_guard_base = NULL;
     proc->kernel_stack            = NULL;
+
+    vmm_context_t *kernel_ctx = vmm_get_kernel_context();
+    pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
+    if (!guard_pte)
+    {
+        kprintf("[PROCESS] ERROR: guard page 0x%lx has no leaf PTE, leaking %u pages (PID %u)\n",
+                guard_virt, (unsigned)CONFIG_KERNEL_STACK_TOTAL_PAGES, proc->pid);
+        return;
+    }
+
+    *guard_pte = vmm_make_pte(stack_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+    vmm_shootdown_page(kernel_ctx, guard_virt);
+
+    pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+
+    debug_printf("[PROCESS] Freed kernel stack: guard=0x%lx (PID %u)\n", guard_virt, proc->pid);
 }
 
 /* Initialise the register-frame base shared by every execution context:
@@ -344,7 +378,8 @@ static bool process_init_context_base(process_t *proc)
     proc->context.fpu_state = kmalloc(fpu_buf_size);
     if (!proc->context.fpu_state)
     {
-        debug_printf("[PROCESS] ERROR: Failed to allocate FPU state buffer (%u bytes)\n", fpu_buf_size);
+        kprintf("[PROCESS] ERROR: FPU state buffer alloc failed (%u bytes, PID %u)\n",
+                fpu_buf_size, proc->pid);
         return false;
     }
     fpu_init_state(proc->context.fpu_state);
@@ -452,11 +487,7 @@ process_t *process_create(const char *tags)
         spin_unlock(&process_lock);
         if (proc->context.fpu_state)
             kfree(proc->context.fpu_state);
-        if (proc->kernel_stack_guard_base)
-        {
-            uintptr_t sp = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
-            pmm_free((void *)sp, CONFIG_KERNEL_STACK_TOTAL_PAGES);
-        }
+        process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
         proc->cabin = NULL;
         pid_free(proc->pid);
@@ -964,7 +995,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     }
     if (atomic_load_u32(&process_count) >= PROCESS_MAX_COUNT)
     {
-        debug_printf("[STRAND] ERROR: process limit reached (%u)\n", PROCESS_MAX_COUNT);
+        kprintf("[STRAND] ERROR: process limit reached (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
 
@@ -1031,7 +1062,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
 
     if (!hammock_ok)
     {
-        debug_printf("[STRAND] ERROR: hammock window exhausted\n");
+        kprintf("[STRAND] ERROR: hammock window exhausted (PID %u)\n", proc->pid);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1050,7 +1081,8 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     void *ustack_phys = pmm_alloc(CONFIG_USER_STACK_PAGES);
     if (!ustack_phys)
     {
-        debug_printf("[STRAND] ERROR: user stack alloc failed\n");
+        kprintf("[STRAND] ERROR: user stack alloc failed (%u pages, PID %u)\n",
+                (unsigned)CONFIG_USER_STACK_PAGES, proc->pid);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
         cabin_ref_dec(cabin);
@@ -1069,7 +1101,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE | VMM_FLAG_USER);
     if (!smap.success)
     {
-        debug_printf("[STRAND] ERROR: user stack map failed: %s\n", smap.error_msg);
+        kprintf("[STRAND] ERROR: user stack map failed: %s (PID %u)\n", smap.error_msg, proc->pid);
         pmm_free(ustack_phys, CONFIG_USER_STACK_PAGES);
         kfree(proc->context.fpu_state);
         process_free_kernel_stack(proc);
@@ -1109,7 +1141,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
      * P4 data race). On failure, unwind everything allocated so far. */
     if (!strand_rings_create(proc))
     {
-        debug_printf("[STRAND] ERROR: per-strand rings/TLS setup failed\n");
+        kprintf("[STRAND] ERROR: per-strand rings/TLS setup failed (PID %u)\n", proc->pid);
         cet_process_destroy(proc);
         cet_process_destroy_kernel_ssp(proc);
         process_free_strand_stack(proc);
@@ -1142,7 +1174,7 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
         proc->cabin = NULL;
         pid_free(proc->pid);
         kfree(proc);
-        debug_printf("[STRAND] ERROR: process limit reached under lock\n");
+        kprintf("[STRAND] ERROR: process limit reached under lock (%u)\n", PROCESS_MAX_COUNT);
         return NULL;
     }
     proc->prev = NULL;
@@ -1818,27 +1850,7 @@ static void process_cleanup_immediate(process_t *proc)
         proc->context.fpu_state = NULL;
     }
 
-    if (proc->kernel_stack_guard_base)
-    {
-        uintptr_t guard_virt = (uintptr_t)proc->kernel_stack_guard_base;
-        uintptr_t stack_phys = vmm_virt_to_phys_direct(proc->kernel_stack_guard_base);
-
-        vmm_context_t *kernel_ctx = vmm_get_kernel_context();
-        pte_t *guard_pte = vmm_get_pte(kernel_ctx, guard_virt);
-        if (guard_pte)
-        {
-            *guard_pte = vmm_make_pte(stack_phys, VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
-            vmm_shootdown_page(kernel_ctx, guard_virt);
-        }
-
-        pmm_free((void *)stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
-
-        debug_printf("[PROCESS] Freed kernel stack: guard=0x%lx (PID %u)\n",
-                     guard_virt, proc->pid);
-
-        proc->kernel_stack_guard_base = NULL;
-        proc->kernel_stack = NULL;
-    }
+    process_free_kernel_stack(proc);
 
     /* Reclaim this strand's per-strand IPC rings + StrandInfo and its hammock
      * user stack (both no-ops for the main strand) while the cabin's address
