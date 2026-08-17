@@ -128,6 +128,11 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     entry->proc      = ctx->proc;
     entry->phys_addr = phys;
     entry->done      = 0;
+    /* Nightwatch's evidence, armed with the entry so a stalled system can be
+     * described without re-deriving what this park was waiting for. */
+    entry->user_va   = user_va;
+    entry->expected  = expected;
+    entry->timed     = (timeout_ms > 0) ? 1u : 0u;
     AddrWaitLink(bucket, entry);   /* bumps entry->seq for THIS park */
     uint32_t wait_seq = entry->seq;
     spin_unlock(&bucket->lock);

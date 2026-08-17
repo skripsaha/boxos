@@ -12,6 +12,7 @@
 #include "irq_defer.h"
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
+#include "nightwatch.h"
 #include "storage_completion.h"  /* Never-drop MPSC: async storage continuations */
 
 KCorePocketQueue *g_kcore_queues = NULL;
@@ -183,6 +184,8 @@ static void kcore_process_entry(struct process_t* proc)
     process_ref_inc(proc);
 
     uint8_t core_idx = amp_get_core_index();
+    /* Nightwatch: work arrived, so this K-Core is no longer idle. */
+    nightwatch_core_busy(core_idx);
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
     guide_process_one(proc);
@@ -275,6 +278,10 @@ void kcore_run_loop(void)
          *
          * (Before the K-Core timer was masked, the 100 Hz tick papered over
          * this race by waking every 10 ms; this is the proper fix.) */
+        /* Nightwatch: about to sleep with an empty queue. Marked before the
+         * CLI so the mark is never held across the sleep decision. */
+        nightwatch_core_idle(my_idx);
+
         __asm__ volatile("cli");
         if (kcore_queue_depth(my_idx) != 0 || StorageCompletionPending(my_idx)) {
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */

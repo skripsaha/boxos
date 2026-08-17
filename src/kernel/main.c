@@ -18,6 +18,7 @@
 #include "efi_selftest.h"
 #include "rtc.h"
 #include "clockboard.h"
+#include "nightwatch.h"
 #include "e820.h"
 #include "fpu.h"
 #include "process.h"
@@ -641,6 +642,10 @@ void kernel_main(void)
 
         debug_printf("[INIT] Booting Application Processors...\n");
         amp_boot_aps();
+
+        /* Nightwatch last: it snapshots how many cores actually answered, and
+         * a core the firmware promised but never delivered must not count. */
+        nightwatch_init();
     }
     else
     {

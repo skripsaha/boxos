@@ -1,5 +1,6 @@
 #include "idle.h"
 #include "process.h"
+#include "nightwatch.h"
 #include "klib.h"
 #include "gdt.h"
 #include "pmm.h"
@@ -129,6 +130,10 @@ bool process_is_idle(process_t* proc) {
 
 // One idle wait, executed each iteration of idle_loop (idle_loop.asm).
 void cpu_idle(void) {
+    /* Nightwatch: this core has nothing to run. Also its re-check point — an
+     * idle core wakes on every tick, so no timer of its own is needed. */
+    nightwatch_core_idle(amp_get_core_index());
+
     /* Periodic TSC recalibration. Runs out of IRQ context so the
      * 20ms HPET measurement window inside is harmless to interrupt
      * latency. Gated by an internal pending flag that's set every

@@ -68,6 +68,13 @@ void clockboard_tick_update(uint64_t uptime_us, uint64_t tick_count);
 
 /* Late-boot setters for the static fields. Called from cpu_calibrate
  * and rtc_init once those values are known. Safe to call repeatedly. */
+/* Monotonic uptime in milliseconds, straight off the published page.
+ * A plain aligned load — no lock, no syscall, no page walk — so kernel code
+ * may read it from any context, including one where taking another lock would
+ * itself be a hazard (Nightwatch reads it from the idle path). Returns 0
+ * before clockboard_init. */
+uint64_t clockboard_uptime_ms(void);
+
 void clockboard_set_tsc_freq_khz(uint64_t khz);
 void clockboard_set_boot_unix_secs(uint64_t secs);
 

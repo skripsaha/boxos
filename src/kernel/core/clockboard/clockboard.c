@@ -51,6 +51,12 @@ void clockboard_tick_update(uint64_t uptime_us, uint64_t tick_count)
     s_clockboard_kva->tick_count = tick_count;
 }
 
+uint64_t clockboard_uptime_ms(void)
+{
+    if (!s_clockboard_kva) return 0;
+    return __atomic_load_n(&s_clockboard_kva->uptime_ms, __ATOMIC_RELAXED);
+}
+
 void clockboard_set_tsc_freq_khz(uint64_t khz)
 {
     if (s_clockboard_kva) s_clockboard_kva->tsc_freq_khz = khz;

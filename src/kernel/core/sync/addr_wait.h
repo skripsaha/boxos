@@ -30,6 +30,20 @@ typedef struct AddrWaitEntry {
     struct AddrWaitEntry *prev;
     struct process_t     *proc;
     uintptr_t             phys_addr;
+    /* Recorded for Nightwatch. Without these three a parked entry cannot be
+     * told apart from a permanently unreachable one:
+     *   user_va  — re-resolving it and getting a DIFFERENT phys proves the
+     *              backing page moved under the parker, so a waker hashes to
+     *              another bucket and this wake can never arrive. That is the
+     *              REAL-HW CAVEAT above; until now the kernel kept no evidence
+     *              that it had actually happened.
+     *   expected — the value the parker waits to see change. If it HAS changed
+     *              while this entry is still linked, a wake was owed and never
+     *              delivered: provable at any instant, no timeout to guess.
+     *   timed    — a park with a deadline recovers by itself, so it is not a
+     *              stall even when everything around it is asleep. */
+    uint64_t              user_va;
+    uint64_t              expected;
     uint32_t              seq;    /* bumped on every link — identifies THIS park.
                                    * A park-timeout snapshots it at arm time and
                                    * only claims if it still matches, so a stale
@@ -38,6 +52,7 @@ typedef struct AddrWaitEntry {
                                    * never inject ERR_TIMEOUT into the new wait. */
     uint8_t               done;   /* 1 = waker claimed this entry */
     uint8_t               linked; /* 1 = currently in a bucket chain */
+    uint8_t               timed;  /* 1 = a park deadline was armed for this park */
 } AddrWaitEntry;
 
 typedef struct {
