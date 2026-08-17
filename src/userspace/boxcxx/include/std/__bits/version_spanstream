@@ -1,0 +1,25 @@
+// boxcxx — <__bits/version_spanstream>
+//
+// The feature-test macro [version.syn] owns for <spanstream>. 202106L is
+// P0448R4's value.
+//
+// It sat on <version>'s "deliberately not defined" list reading "no
+// <spanstream> header", which was the whole truth: unlike <stacktrace>,
+// nothing was in the way. Everything the header stands on -- <span>,
+// <streambuf>, <istream>, <ostream> -- had been in the tree since Ф30e,
+// and the header is the smallest of the stream family precisely because a
+// buffer that cannot grow needs no growth machinery. Ф38 wrote it.
+//
+// Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
+// include guard: it is meant to be included once per owning header, each time
+// defining only what that header declared it owns. [support.limits.general]
+// says a macro is defined by <version> AND by the header that provides the
+// feature; it does not say every header that happens to include this leaf.
+// <version> defines BOXCXX_OWNS_ALL and takes the lot. Checked by
+// tools/cxx_ftm_audit.sh.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_spanstream)) && \
+    !defined(__cpp_lib_spanstream)
+#  define __cpp_lib_spanstream 202106L
+#endif
+#undef BOXCXX_OWNS_spanstream

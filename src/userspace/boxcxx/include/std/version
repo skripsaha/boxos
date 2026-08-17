@@ -93,6 +93,7 @@
 #include <__bits/version_ranges>          // <ranges>
 #include <__bits/version_source_location> // <source_location>
 #include <__bits/version_span>            // <span>
+#include <__bits/version_spanstream>      // <spanstream>
 #include <__bits/version_stacktrace>      // <stacktrace>
 #include <__bits/version_stdatomic>       // <stdatomic.h>
 #include <__bits/version_stdbit>          // <stdbit.h>
@@ -243,8 +244,13 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// spanstream               no <spanstream> header.
 // syncbuf                  no <syncbuf> header.
+//
+// spanstream LEFT this list in Ф38. Its entry read "no <spanstream> header",
+// and unlike stacktrace's identically-worded one there was nothing behind it:
+// <span>, <streambuf>, <istream> and <ostream> had all been in the tree since
+// Ф30e, and a buffer that cannot grow needs less machinery than one that can,
+// not more. Nobody had written it.
 //
 // stacktrace LEFT this list in Ф37, when <stacktrace> was built. Its entry
 // used to read "no <stacktrace> header", which was true and hid the real

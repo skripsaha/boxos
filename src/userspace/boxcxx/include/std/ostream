@@ -397,13 +397,24 @@ inline char ToUpperAscii(char c)
     return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
 }
 
-inline void WriteRun(basic_streambuf<char> *buf, const char *s, streamsize n)
+// Both report whether the sink took EVERYTHING, and every caller is obliged
+// to look. That obligation is new in Ф38 and the reason is that until
+// <spanstream> no sink in this tree could refuse: a stringbuf grows, a
+// filebuf grows, the screen Current always accepts. A spanbuf cannot -- its
+// buffer belongs to the caller and is a fixed size -- so it is the first
+// thing that can say "no room", and a formatted inserter that did not ask
+// reported success while dropping the tail. The unformatted path
+// (basic_ostream::write) had always asked; only this one had not.
+[[nodiscard]] inline bool WriteRun(basic_streambuf<char> *buf, const char *s, streamsize n)
 {
-    if (n > 0) buf->sputn(s, n);
+    return n <= 0 || buf->sputn(s, n) == n;
 }
-inline void WriteFill(basic_streambuf<char> *buf, char fillCh, streamsize n)
+[[nodiscard]] inline bool WriteFill(basic_streambuf<char> *buf, char fillCh, streamsize n)
 {
-    for (streamsize i = 0; i < n; ++i) buf->sputc(fillCh);
+    using Tr = char_traits<char>;
+    for (streamsize i = 0; i < n; ++i)
+        if (Tr::eq_int_type(buf->sputc(fillCh), Tr::eof())) return false;
+    return true;
 }
 
 // The shared width/fill/adjustfield/sign/prefix engine -- backs EVERY
@@ -422,35 +433,36 @@ inline void EmitField(basic_ostream<char> &os, const char *sign, streamsize sign
     auto      *buf  = os.rdbuf();
     streamsize core = signLen + prefixLen + bodyLen;
     streamsize w    = os.width();
+    bool       ok;
     if (w <= core) {
-        WriteRun(buf, sign, signLen);
-        WriteRun(buf, prefix, prefixLen);
-        WriteRun(buf, body, bodyLen);
-        return;
+        ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
+             WriteRun(buf, body, bodyLen);
+    } else {
+        streamsize pad = w - core;
+        auto       adj = os.flags() & ios_base::adjustfield;
+        Align      align = adj == ios_base::left       ? Align::Left
+                          : adj == ios_base::internal   ? Align::Internal
+                          : adj == ios_base::right      ? Align::Right
+                                                         : dflt;
+        char fillCh = os.fill();
+        if (align == Align::Left) {
+            ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
+                 WriteRun(buf, body, bodyLen) && WriteFill(buf, fillCh, pad);
+        } else if (align == Align::Right) {
+            ok = WriteFill(buf, fillCh, pad) && WriteRun(buf, sign, signLen) &&
+                 WriteRun(buf, prefix, prefixLen) && WriteRun(buf, body, bodyLen);
+        } else { // Internal: fill sits BETWEEN the sign/prefix and the digits
+            ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
+                 WriteFill(buf, fillCh, pad) && WriteRun(buf, body, bodyLen);
+        }
     }
-    streamsize pad = w - core;
-    auto       adj = os.flags() & ios_base::adjustfield;
-    Align      align = adj == ios_base::left       ? Align::Left
-                      : adj == ios_base::internal   ? Align::Internal
-                      : adj == ios_base::right      ? Align::Right
-                                                     : dflt;
-    char fillCh = os.fill();
-    if (align == Align::Left) {
-        WriteRun(buf, sign, signLen);
-        WriteRun(buf, prefix, prefixLen);
-        WriteRun(buf, body, bodyLen);
-        WriteFill(buf, fillCh, pad);
-    } else if (align == Align::Right) {
-        WriteFill(buf, fillCh, pad);
-        WriteRun(buf, sign, signLen);
-        WriteRun(buf, prefix, prefixLen);
-        WriteRun(buf, body, bodyLen);
-    } else { // Internal: fill sits BETWEEN the sign/prefix and the digits
-        WriteRun(buf, sign, signLen);
-        WriteRun(buf, prefix, prefixLen);
-        WriteFill(buf, fillCh, pad);
-        WriteRun(buf, body, bodyLen);
-    }
+    // [ostream.formatted.reqmts]: "If the generation fails, then the
+    // formatted output function calls setstate(badbit)". The && chains
+    // above stop pushing at the first refusal -- there is no point filling
+    // a buffer that has already said it is full. setstate may throw, and
+    // that throw belongs to the caller: it lands in the inserter's catch,
+    // where HandleException rethrows it if badbit is armed.
+    if (!ok) os.setstate(ios_base::badbit);
 }
 
 // [ostream.formatted.reqmts]: on an exception during generation, badbit is
