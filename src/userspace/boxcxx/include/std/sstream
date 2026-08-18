@@ -223,6 +223,18 @@ public:
         __buf = s;
         ResetPositions();
     }
+    // The rvalue setter is the other half of P0408R7 -- str()&& hands the
+    // characters out without a copy, this one takes them back the same way.
+    // Only the getter was here; the gap surfaced in Ф40, where a syncbuf whose
+    // target accepted part of a run has to hand the remainder back to its own
+    // buffer, and copying it would have been a copy of everything not yet
+    // printed. It is NOT covered by the documented cross-allocator omission
+    // above: the allocator is the same one.
+    void str(basic_string<CharT, Traits, Allocator> &&s)
+    {
+        __buf = std::move(s);
+        ResetPositions();
+    }
     template <typename SV>
         requires IsViewLike<SV>
     void str(const SV &t)
@@ -548,6 +560,7 @@ public:
     basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
     __view view() const noexcept { return sb_.view(); }
     void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    void str(basic_string<CharT, Traits, Allocator> &&s) { sb_.str(std::move(s)); }
     template <typename SV>
         requires IsViewLike<SV>
     void str(const SV &t)
@@ -664,6 +677,7 @@ public:
     basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
     __view view() const noexcept { return sb_.view(); }
     void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    void str(basic_string<CharT, Traits, Allocator> &&s) { sb_.str(std::move(s)); }
     template <typename SV>
         requires IsViewLike<SV>
     void str(const SV &t)
@@ -792,6 +806,7 @@ public:
     basic_string<CharT, Traits, Allocator> str() && { return std::move(sb_).str(); }
     __view view() const noexcept { return sb_.view(); }
     void str(const basic_string<CharT, Traits, Allocator> &s) { sb_.str(s); }
+    void str(basic_string<CharT, Traits, Allocator> &&s) { sb_.str(std::move(s)); }
     template <typename SV>
         requires IsViewLike<SV>
     void str(const SV &t)

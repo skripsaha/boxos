@@ -42,6 +42,16 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф40's first commit raised it 164 -> 165, and the delta is ONE
+#           macro: __cpp_lib_syncbuf. Its owners are <syncstream> and
+#           <iosfwd>, and <iosfwd> is the most widely included header in the
+#           stream family -- every stream header takes it, and through them
+#           twenty-odd others -- so the macro reaches all of them the moment
+#           it exists. The phase's new header, <syncstream>, leaks nothing
+#           itself: nothing in the tree includes it, and every macro it sees
+#           through <ostream>/<sstream>/<memory> was already leaking
+#           elsewhere before this header existed.
+#
 #           Ф39's second commit raised it 163 -> 164, and the delta is again
 #           ONE macro: __cpp_lib_constexpr_vector, owned by <vector>, which
 #           <ios> includes -- so it reaches every stream header, and through
@@ -80,7 +90,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=164
+LEAK_BUDGET=165
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

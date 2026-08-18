@@ -77,7 +77,7 @@
 #include <__bits/version_flat_set>        // <flat_set>
 #include <__bits/version_format>          // <format>
 #include <__bits/version_functional>      // <functional>
-#include <__bits/version_iostreams>       // <ios>/<iomanip>/<sstream>/<fstream>
+#include <__bits/version_iostreams>       // <ios>/<iomanip>/<sstream>/<fstream>/<iosfwd>/<syncstream>
 #include <__bits/version_inplace_vector>  // <inplace_vector>
 #include <__bits/version_iterator>        // <iterator> (+ <array>)
 #include <__bits/version_mdspan>          // <mdspan>
@@ -124,12 +124,12 @@
 // ── Deliberately NOT defined ────────────────────────────────────────────
 //
 // Each line names a C++23 feature-test macro whose feature boxcxx does not
-// implement completely — for four of them (execution, parallel_algorithm,
-// filesystem, syncbuf), does not implement at all, because the owning header
-// does not exist — with the exact reason. This list is the backlog: when the
-// reason is fixed, the macro moves into the owning header's leaf. The count
-// read "eight" until Ф39 recounted it; it had been true when it was written
-// and four headers have been built since. There are fourteen entries.
+// implement completely — for three of them (execution, parallel_algorithm,
+// filesystem), does not implement at all, because the owning header does not
+// exist — with the exact reason. This list is the backlog: when the reason is
+// fixed, the macro moves into the owning header's leaf. The count read
+// "eight" until Ф39 recounted it; it had been true when it was written and
+// four headers have been built since. There are thirteen entries.
 //
 // C++26 macros are NOT listed here. This list is the C++23 backlog and is
 // meant to be finishable; the C++26 surface is an open frontier, and
@@ -236,7 +236,15 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// syncbuf                  no <syncbuf> header.
+//
+// syncbuf LEFT this list in Ф40. Its entry read "no <syncbuf> header", which
+// named the wrong header (the header is <syncstream>; <syncbuf> is what the
+// macro is called) and, like spanstream's, hid nothing behind itself: every
+// piece the type needed — a growable allocator-aware buffer, a mutex, RTTI to
+// recognise one buffer through a base pointer — had been in the tree for
+// phases. What it did hide was a hole one level down: <ostream>'s three sync
+// manipulators had been shipping as no-ops, honestly commented as such, and
+// only a buffer that can answer them turns the comment into code.
 //
 // constexpr_vector LEFT this list in Ф39 too, in the commit after the two
 // below. Its entry read "vector is not constexpr at all, same reason" — and
