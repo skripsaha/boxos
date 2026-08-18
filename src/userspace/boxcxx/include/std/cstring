@@ -1,0 +1,121 @@
+// boxcxx — <cstring>
+//
+// [cstring.syn]. The functions are boxlib's — one definition of memcpy in the
+// system, used by C and C++ alike — and this header's work is the part C++
+// adds on top of C: **the const-preserving overload pairs**. C declares
+// `char *strchr(const char *, int)`, which hands back a mutable pointer into a
+// const string; [cstring.syn]/3 replaces each of the six such functions with
+// two overloads, so `strchr` on a `const char *` yields `const char *` and on a
+// `char *` yields `char *`. That is the whole reason a C++ program should
+// include <cstring> rather than reach for the C declarations.
+//
+// **The C functions here are NULL-TOLERANT**, which C leaves undefined:
+// strlen(nullptr) is 0, a copy into nullptr returns nullptr, a search in
+// nullptr finds nothing. That was already true of the nine boxlib had before
+// Ф41 and the thirteen added with this header match it. It is a strengthening,
+// not a weakening — no conforming program can tell, because every case it
+// covers is undefined behaviour.
+//
+// **strtok's cursor is per-strand.** C describes one object and every hosted
+// libc makes it exactly that, which is why strtok is the textbook function two
+// threads must not both call. [c.strings] leaves the state unspecified, so a
+// __thread cursor is conformance rather than extension — and on a system whose
+// point is that several strands share a cabin, it is the only defensible
+// reading.
+#ifndef BOXCXX_CSTRING
+#define BOXCXX_CSTRING
+
+#include <cstddef>
+
+#include "box/string.h"
+
+namespace std {
+
+using ::memcmp;
+using ::memcpy;
+using ::memmove;
+using ::memset;
+using ::strcat;
+using ::strcmp;
+using ::strcoll;
+using ::strcpy;
+using ::strcspn;
+using ::strlen;
+using ::strncat;
+using ::strncmp;
+using ::strncpy;
+using ::strspn;
+using ::strtok;
+using ::strxfrm;
+
+// [cstring.syn]/3 — the six searches that must not launder const away. The C
+// declarations are hidden behind these: a using-declaration would let the
+// single-signature C form win by exact match on a const argument and give back
+// a char* into a const object.
+[[nodiscard]] inline const void *memchr(const void *s, int c, size_t n) noexcept
+{
+    return ::memchr(s, c, n);
+}
+[[nodiscard]] inline void *memchr(void *s, int c, size_t n) noexcept
+{
+    return ::memchr(s, c, n);
+}
+
+[[nodiscard]] inline const char *strchr(const char *s, int c) noexcept
+{
+    return ::strchr(s, c);
+}
+[[nodiscard]] inline char *strchr(char *s, int c) noexcept
+{
+    return ::strchr(s, c);
+}
+
+[[nodiscard]] inline const char *strpbrk(const char *s, const char *a) noexcept
+{
+    return ::strpbrk(s, a);
+}
+[[nodiscard]] inline char *strpbrk(char *s, const char *a) noexcept
+{
+    return ::strpbrk(s, a);
+}
+
+[[nodiscard]] inline const char *strrchr(const char *s, int c) noexcept
+{
+    return ::strrchr(s, c);
+}
+[[nodiscard]] inline char *strrchr(char *s, int c) noexcept
+{
+    return ::strrchr(s, c);
+}
+
+[[nodiscard]] inline const char *strstr(const char *h, const char *n) noexcept
+{
+    return ::strstr(h, n);
+}
+[[nodiscard]] inline char *strstr(char *h, const char *n) noexcept
+{
+    return ::strstr(h, n);
+}
+
+// The message for an errno value. Not boxlib's: the text belongs to the table
+// <system_error>'s generic_category() already answers from, and two tables that
+// must agree are one table.
+// Returns char*, as [cstring.syn] declares it, into a per-strand buffer that
+// the next call on the SAME strand overwrites — C allows exactly that, and the
+// per-strand part removes the race a shared buffer would have. The text is the
+// one generic_category().message() gives, because two tables that must agree
+// are one table.
+char *strerror(int errnum) noexcept;
+
+} // namespace std
+
+// Only strerror is injected globally. The six const-preserving pairs are NOT:
+// box/string.h has already declared the C forms at global scope, and a
+// using-declaration for a function that differs from an existing one only in
+// return type is a redeclaration conflict, not an overload. So `::strchr` stays
+// C's and `std::strchr` is the C++ one — exactly the split libc++ has, and one
+// libstdc++ does not manage: there, std::memchr on a const pointer still hands
+// back a mutable one.
+using std::strerror;
+
+#endif // BOXCXX_CSTRING

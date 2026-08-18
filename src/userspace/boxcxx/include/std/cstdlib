@@ -1,0 +1,170 @@
+// boxcxx — <cstdlib>
+//
+// [cstdlib.syn]. The header that CONFORMANCE §1.1 used to justify the absence
+// of all seventeen C wrappers with one sentence — "BoxOS has no libc" — and it
+// is the one the sentence was actually about. What it needed was not a libc but
+// answers to questions BoxOS had never been asked:
+//
+//   • **Where does memory come from?** boxlib's heap, which was already
+//     malloc/free/calloc/realloc under different linkage rules. aligned_alloc
+//     was built for this header (Ф41), inside the allocator, because [c.malloc]
+//     requires the ordinary free() to release it — see box/memory.h.
+//   • **What ends a process?** exit/_Exit/quick_exit/abort, and the difference
+//     between them is which teardown runs. That contract is real here and it
+//     was not before Ф41: see <csignal> in CONFORMANCE §2.
+//   • **What is the environment?** There isn't one. getenv always returns
+//     nullptr — not a stub, an answer: a BoxOS process is a cabin with tags,
+//     not a shell child with an inherited string table. Tags are read with
+//     box::this_process, and they are a different thing on purpose.
+//   • **Is there a command processor?** No. system(nullptr) returns 0, which is
+//     how C spells "there is none", and system(cmd) returns -1. BoxOS spawns a
+//     PROGRAM by name (box::process::spawn), not a shell command line.
+//
+// **The multibyte encoding of the "C" locale here is UTF-8**, and MB_CUR_MAX is
+// therefore 4. C leaves the encoding implementation-defined, and the compiler's
+// freestanding <limits.h> says MB_LEN_MAX 1 only because it assumes no locale
+// support at all. BoxOS is UTF-8 end to end — the screen, the keyboard and
+// TagFS names all are — so a second, narrower encoding living inside the C
+// functions would have been the strange choice, and mbstowcs on a BoxOS string
+// would have produced mojibake. <climits> raises MB_LEN_MAX to match, which is
+// its one documented deviation from <limits.h>.
+#ifndef BOXCXX_CSTDLIB
+#define BOXCXX_CSTDLIB
+
+#include <cstddef>
+#include <__bits/c_arith>
+#include <__bits/c_terminate>
+
+#include "box/memory.h"
+#include "box/system.h"
+
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
+
+// The generator below is a 64-bit LCG whose output is its high bits; 31 of them
+// are returned, so RAND_MAX is the largest value a C program may portably see.
+#define RAND_MAX 2147483647
+
+// UTF-8: four bytes is the longest sequence, and MB_LEN_MAX in <climits> is the
+// same 4 for the same reason.
+#define MB_CUR_MAX static_cast<::std::size_t>(4)
+
+namespace std {
+
+using ::size_t;
+
+// ── memory [c.malloc] ───────────────────────────────────────────────────
+using ::aligned_alloc;
+using ::calloc;
+using ::free;
+using ::malloc;
+using ::realloc;
+
+// ── termination [support.start.term] ────────────────────────────────────
+// exit and _Exit are boxlib's — one process-ending path for C and C++ — and
+// abort is <csignal>'s, because [support.start.term]/9 defines it as
+// raise(SIGABRT). std::abort arrives through <__bits/c_terminate>.
+using ::exit;
+using ::_Exit;
+
+// [support.start.term]/3: the handler has C++ language linkage here, and the C
+// one is accepted too. Registration is shared with the static-destructor
+// registry (__cxa_atexit), so ordering between an atexit handler and a static
+// destructor is the reverse of registration, as [basic.start.term] requires —
+// they are one list, not two that guess about each other.
+int atexit(void (*func)()) noexcept;
+int at_quick_exit(void (*func)()) noexcept;
+
+// Runs the at_quick_exit handlers in reverse registration order and then ends
+// the process WITHOUT static destructors, without the .fini_array, and without
+// the atexit list. The point of quick_exit is that it is not exit.
+[[noreturn]] void quick_exit(int status) noexcept;
+
+// ── environment ─────────────────────────────────────────────────────────
+[[nodiscard]] char *getenv(const char *name) noexcept;
+int system(const char *string);
+
+// ── conversions [c.strings] ─────────────────────────────────────────────
+// The strto* family is the real work: C's grammar is not <charconv>'s. It skips
+// leading whitespace, takes a sign, understands the 0x prefix (base 16 and
+// base 0), understands hex FLOATS, reports where it stopped through endptr and
+// signals overflow through errno rather than a return code. from_chars does
+// none of that by design ([charconv] forbids most of it), so what is shared is
+// the magnitude parsing underneath, not the interface.
+double atof(const char *nptr) noexcept;
+int atoi(const char *nptr) noexcept;
+long atol(const char *nptr) noexcept;
+long long atoll(const char *nptr) noexcept;
+
+double strtod(const char *nptr, char **endptr) noexcept;
+float strtof(const char *nptr, char **endptr) noexcept;
+long double strtold(const char *nptr, char **endptr) noexcept;
+
+long strtol(const char *nptr, char **endptr, int base) noexcept;
+long long strtoll(const char *nptr, char **endptr, int base) noexcept;
+unsigned long strtoul(const char *nptr, char **endptr, int base) noexcept;
+unsigned long long strtoull(const char *nptr, char **endptr, int base) noexcept;
+
+// ── multibyte, in UTF-8 ─────────────────────────────────────────────────
+int mblen(const char *s, size_t n) noexcept;
+int mbtowc(wchar_t *pwc, const char *s, size_t n) noexcept;
+int wctomb(char *s, wchar_t wc) noexcept;
+size_t mbstowcs(wchar_t *pwcs, const char *s, size_t n) noexcept;
+size_t wcstombs(char *s, const wchar_t *pwcs, size_t n) noexcept;
+
+// ── searching and sorting [alg.c.library] ───────────────────────────────
+extern "C" using __boxcxx_compare = int(const void *, const void *);
+
+// [cstdlib.syn] gives bsearch the same const-preserving treatment <cstring>
+// gives strchr: a search in a const array must not hand back a mutable
+// pointer into it.
+[[nodiscard]] const void *bsearch(const void *key, const void *base,
+                                  size_t nmemb, size_t size,
+                                  __boxcxx_compare *compar);
+[[nodiscard]] void *bsearch(const void *key, void *base, size_t nmemb,
+                            size_t size, __boxcxx_compare *compar);
+
+// Introsort, so the worst case is O(n log n) rather than the quadratic one a
+// plain quicksort hands to an adversarial (or merely sorted) input. C does not
+// require that; a system that must not stall does.
+void qsort(void *base, size_t nmemb, size_t size, __boxcxx_compare *compar);
+
+// ── pseudo-random [c.math.rand] ─────────────────────────────────────────
+// **The state is per-strand**, which C does not require and every hosted libc
+// gets wrong: glibc's rand() is a data race by construction. [c.math.rand] says
+// nothing about where the state lives, so this is conformance, and on a system
+// whose point is that several strands share a cabin it is the only defensible
+// reading. The consequence a program can observe: two strands that both srand(1)
+// get the same sequence rather than fighting over one.
+int rand() noexcept;
+void srand(unsigned int seed) noexcept;
+
+} // namespace std
+
+using std::atexit;
+using std::at_quick_exit;
+using std::atof;
+using std::atoi;
+using std::atol;
+using std::atoll;
+using std::bsearch;
+using std::getenv;
+using std::mblen;
+using std::mbstowcs;
+using std::mbtowc;
+using std::qsort;
+using std::quick_exit;
+using std::rand;
+using std::srand;
+using std::strtod;
+using std::strtof;
+using std::strtol;
+using std::strtold;
+using std::strtoll;
+using std::strtoul;
+using std::strtoull;
+using std::system;
+using std::wcstombs;
+using std::wctomb;
+
+#endif // BOXCXX_CSTDLIB

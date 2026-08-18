@@ -127,3 +127,155 @@ int memcmp(const void* s1, const void* s2, size_t n) {
     }
     return 0;
 }
+
+/* ---------------------------------------------------------------------------
+ * Ф41 — the rest of [cstring.syn].
+ *
+ * These thirteen were missing for as long as boxlib existed, and nothing had
+ * asked for them: BoxOS code says box_* and C++ code said std::string. A
+ * <cstring> is what asks. They are here rather than in boxcxx because a C
+ * string function has no C++ in it, and one definition shared by both languages
+ * cannot drift.
+ * ------------------------------------------------------------------------- */
+
+char* strcat(char* dest, const char* src) {
+    if (!dest) return NULL;
+    if (!src) return dest;
+    char* d = dest;
+    while (*d) d++;
+    while ((*d++ = *src++)) { }
+    return dest;
+}
+
+char* strncat(char* dest, const char* src, size_t n) {
+    if (!dest) return NULL;
+    if (!src) return dest;
+    char* d = dest;
+    while (*d) d++;
+    while (n-- && *src) *d++ = *src++;
+    *d = '\0';                      /* always terminated, unlike strncpy */
+    return dest;
+}
+
+/* The "C" locale collates by character code, so ordering IS strcmp and the
+ * transform that would make it so is a copy. Both are here for the callers
+ * [cstring.syn] promises them to, not because they add anything. */
+int strcoll(const char* s1, const char* s2) {
+    return strcmp(s1, s2);
+}
+
+size_t strxfrm(char* dest, const char* src, size_t n) {
+    size_t len = strlen(src);
+    if (dest && n > 0) {
+        size_t copy = (len < n - 1) ? len : n - 1;
+        for (size_t i = 0; i < copy; i++) dest[i] = src[i];
+        dest[copy] = '\0';
+    }
+    return len;                     /* length NEEDED, terminator excluded */
+}
+
+char* strchr(const char* s, int c) {
+    if (!s) return NULL;
+    const char ch = (char)c;
+    for (;; s++) {
+        if (*s == ch) return (char*)s;   /* '\0' is findable, as C requires */
+        if (!*s) return NULL;
+    }
+}
+
+char* strrchr(const char* s, int c) {
+    if (!s) return NULL;
+    const char ch = (char)c;
+    const char* found = NULL;
+    for (;; s++) {
+        if (*s == ch) found = s;
+        if (!*s) return (char*)found;
+    }
+}
+
+char* strstr(const char* haystack, const char* needle) {
+    if (!haystack || !needle) return NULL;
+    if (!*needle) return (char*)haystack;   /* empty needle matches at 0 */
+    for (; *haystack; haystack++) {
+        const char* h = haystack;
+        const char* n = needle;
+        while (*h && *n && *h == *n) { h++; n++; }
+        if (!*n) return (char*)haystack;
+    }
+    return NULL;
+}
+
+/* One pass over the 256-bit set beats a nested scan the moment `accept` is
+ * longer than a couple of characters, and costs 32 bytes of stack. */
+static void charset_build(unsigned char set[32], const char* chars) {
+    for (int i = 0; i < 32; i++) set[i] = 0;
+    if (!chars) return;
+    for (const unsigned char* p = (const unsigned char*)chars; *p; p++)
+        set[*p >> 3] |= (unsigned char)(1u << (*p & 7));
+}
+
+static int charset_has(const unsigned char set[32], unsigned char c) {
+    return (set[c >> 3] >> (c & 7)) & 1u;
+}
+
+size_t strspn(const char* s, const char* accept) {
+    if (!s) return 0;
+    unsigned char set[32];
+    charset_build(set, accept);
+    size_t n = 0;
+    while (s[n] && charset_has(set, (unsigned char)s[n])) n++;
+    return n;
+}
+
+size_t strcspn(const char* s, const char* reject) {
+    if (!s) return 0;
+    unsigned char set[32];
+    charset_build(set, reject);
+    size_t n = 0;
+    while (s[n] && !charset_has(set, (unsigned char)s[n])) n++;
+    return n;
+}
+
+char* strpbrk(const char* s, const char* accept) {
+    if (!s) return NULL;
+    unsigned char set[32];
+    charset_build(set, accept);
+    for (; *s; s++)
+        if (charset_has(set, (unsigned char)*s)) return (char*)s;
+    return NULL;
+}
+
+/* PER-STRAND cursor. C describes one static object and every hosted libc makes
+ * it exactly that, which is why strtok is the textbook example of a function
+ * two threads must not both call. Here the state is __thread, so two strands
+ * tokenizing two strings are independent — the standard says the state is
+ * unspecified, so this is conformance and not extension. */
+static __thread char* g_strtok_cursor = NULL;
+
+char* strtok(char* s, const char* delim) {
+    unsigned char set[32];
+    charset_build(set, delim);
+
+    char* p = s ? s : g_strtok_cursor;
+    if (!p) return NULL;
+
+    while (*p && charset_has(set, (unsigned char)*p)) p++;   /* leading delims */
+    if (!*p) { g_strtok_cursor = NULL; return NULL; }
+
+    char* token = p;
+    while (*p && !charset_has(set, (unsigned char)*p)) p++;
+    if (*p) { *p = '\0'; g_strtok_cursor = p + 1; }
+    else      g_strtok_cursor = NULL;
+    return token;
+}
+
+void* memchr(const void* s, int c, size_t n) {
+    if (!s) return NULL;
+    const unsigned char* p = (const unsigned char*)s;
+    const unsigned char ch = (unsigned char)c;
+    while (n--) {
+        if (*p == ch) return (void*)p;
+        p++;
+    }
+    return NULL;
+}

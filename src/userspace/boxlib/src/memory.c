@@ -697,6 +697,64 @@ void* malloc(size_t size) {
     return payload;
 }
 
+/* aligned_alloc — [c.malloc] requires that the pointer it returns be released
+ * by the ORDINARY free(), and that is the whole reason this lives inside the
+ * allocator instead of being a wrapper.
+ *
+ * The trick every hosted libc-less project reaches for first — over-allocate,
+ * return an aligned address inside, stash the real pointer just below it — is
+ * exactly what boxcxx's aligned operator new does, and it works there because
+ * the aligned DELETE knows to look for the stash. free() does not: it reads the
+ * 32 bytes in front of the payload and expects a block header with the heap
+ * magic. So this puts a REAL header there. The block found by the first-fit
+ * search is split in two: the leading remainder goes back on the free list, and
+ * the second half — whose header lands exactly at (aligned address − 32) — is
+ * the allocation. free() then sees an ordinary block, because that is what it
+ * is.
+ *
+ * The over-allocation is size + alignment + one header + HEAP_ALIGN: the last
+ * term guarantees the leading remainder is itself a usable block rather than a
+ * sliver too small to carry a header, which is the case that would otherwise
+ * force a second alignment step and eat into the payload. */
+void* aligned_alloc(size_t alignment, size_t size) {
+    if (size == 0) return NULL;
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) return NULL;
+    if (alignment <= HEAP_ALIGN) return malloc(size);
+
+    size_t raw = size + alignment + BLOCK_HDR_SIZE + HEAP_ALIGN;
+    if (raw < size) return NULL;                      /* overflow */
+
+    StrandPool *pool    = pool_self();
+    error_t    *errcell = heap_err_cell_for(pool);
+
+    uspin_lock(&heap_lock);
+    void* p = alloc_locked(raw, HEAP_TAG_NONE, errcell);
+    if (!p) {
+        uspin_unlock(&heap_lock);
+        return NULL;
+    }
+
+    block_t*  b      = (block_t*)((uint8_t*)p - BLOCK_HDR_SIZE);
+    uintptr_t target = align_up((uintptr_t)p + BLOCK_HDR_SIZE + HEAP_ALIGN,
+                                alignment);
+    block_t*  n      = (block_t*)(target - BLOCK_HDR_SIZE);
+    size_t    lead   = (uintptr_t)n - (uintptr_t)p;   /* payload left to b */
+
+    n->size  = b->size - lead - BLOCK_HDR_SIZE;
+    n->magic = HEAP_MAGIC;
+    n->free  = 0;
+    n->tag   = HEAP_TAG_NONE;
+    n->next  = b->next;
+
+    b->size  = lead;
+    b->free  = 1;
+    b->tag   = HEAP_TAG_NONE;
+    b->next  = n;
+
+    uspin_unlock(&heap_lock);
+    return (void*)target;
+}
+
 void* malloc_tagged(size_t size, const char *tag) {
     if (size == 0) return NULL;
 

@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **96** — 91 of the 105 C++23 [headers] name (14 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 132 |
+| Standard headers provided | **98** — 93 of the 105 C++23 [headers] name (12 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 133 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 218 phases (199 of them the numbered `PhaseN` series), 5 481 runtime checks, 1 908 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 219 phases (200 of them the numbered `PhaseN` series), 5 495 runtime checks, 1 929 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -96,14 +96,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (14)
+## 1.1 Headers that do not exist (12)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 91 of them are in the tree and 14 are not,
+[headers] name 105 headers in C++23; 93 of them are in the tree and 12 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 91 + 5 = the 96 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 93 + 5 = the 98 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -113,13 +113,13 @@ still added up because they were adjusted to each other rather than to the
 standard. It is absent, it is listed below, and the count above is now the
 output of a diff between [headers] and `ls include/std`.
 
-### C library wrappers — 11 absent, 10 provided
+### C library wrappers — 9 absent, 12 provided
 
-Absent: `<cfenv>` `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<cstdlib>`
-`<cstring>` `<ctime>` `<cuchar>` `<cwchar>` `<cwctype>`
+Absent: `<cfenv>` `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<ctime>`
+`<cuchar>` `<cwchar>` `<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
-`<cstdarg>` `<csignal>` (§2).
+`<cstdarg>` `<csignal>` (Ф41-a) and `<cstring>` `<cstdlib>` (Ф41-b) — all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -162,8 +162,8 @@ The two C23 headers C++26 adopts, `<stdbit.h>` and `<stdckdint.h>`, are
 provided for the same reason and on the same terms (§2).
 
 `<cstddef>` and `<cstdint>` were provided long before Ф41, because they are pure
-type and macro headers with no runtime behind them, and `<cmath>` since Ф10; ten
-of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
+type and macro headers with no runtime behind them, and `<cmath>` since Ф10;
+twelve of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
 freestanding C headers remain available and are used by the library itself:
 `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`, `<float.h>` come from
 GCC, not from a libc, and resolve normally — with one measured hole, recorded
@@ -839,9 +839,13 @@ the way such things are found here — by writing the static_asserts in phase203
 that compare every macro against `std::numeric_limits`, and watching the build
 stop.
 
-**One measured number worth carrying forward:** `MB_LEN_MAX` is **1**. Whatever
-the multibyte functions of `<cstdlib>` and `<cuchar>` do when those headers are
-built, they answer to that.
+**And one deliberate deviation from `<limits.h>`: `MB_LEN_MAX` is raised to 4.**
+The compiler says 1, and when it does it is not describing this system — a
+freestanding implementation with no locale support has single-byte characters by
+default. Ф41-b made the `"C"` locale's multibyte encoding UTF-8 (§2
+`<cstdlib>`), which fixes `MB_CUR_MAX` at 4, and `MB_CUR_MAX` may never exceed
+`MB_LEN_MAX`. The alternative was a second, narrower encoding living inside the
+C functions of a system that is UTF-8 everywhere else.
 
 ## `<cmath>`
 
@@ -920,6 +924,101 @@ built, they answer to that.
   public member with a reserved name, for the same reason libstdc++'s
   `__get_part` is: a free function template cannot be befriended without
   repeating `complex`'s own requires-clause on every declaration.
+
+## `<cstdlib>`
+
+The header the "BoxOS has no libc" sentence was really about, and building it
+was mostly answering questions the system had never been asked.
+
+- **`getenv` always returns `nullptr`, and `system(nullptr)` returns 0.** Both
+  are answers rather than stubs. A BoxOS process is a cabin carrying TAGS —
+  read with `box::this_process`, not with a string table inherited from a
+  parent that may not exist — and there is no command processor to hand a
+  shell line to; a program is spawned by name (`box::process::spawn`).
+  `system(cmd)` returns −1.
+- **`aligned_alloc` is implemented INSIDE the allocator**, because [c.malloc]
+  requires the ordinary `free()` to release what it returns. The usual trick —
+  over-allocate, return an aligned address inside, stash the real pointer just
+  below it — is what boxcxx's aligned `operator new` does, and it works there
+  only because the aligned *delete* knows to look for the stash. `free()` reads
+  the 32 bytes in front of the payload and expects a block header, so boxlib
+  splits the block and puts a **real header** there. phase204 pins the split
+  with a conservation law over `heap_get_stats` (payloads plus one header
+  apiece can never exceed the bytes taken from sbrk) — a check added because
+  the first version of the test, which only checked alignment, writability and
+  freeability, passed a mutation that gave the split block 32 bytes it did not
+  own.
+- **`rand`'s state is per-strand.** [c.math.rand] says nothing about where the
+  state lives, and every hosted libc puts it in one object: glibc's `rand()` is
+  a data race by construction. Here two strands that both `srand(1)` get the
+  same sequence instead of fighting over one. The generator is a 64-bit LCG
+  returning its high bits (the low bits of any LCG have short periods, which is
+  how `rand()` earned its reputation); `RAND_MAX` is 2147483647.
+- **`qsort` is an introsort**, so the worst case is O(n log n). C requires no
+  complexity at all and the reference libcs ship a quicksort whose worst case
+  is quadratic; a system that must not stall cannot.
+- **The multibyte encoding of the `"C"` locale is UTF-8, and `MB_CUR_MAX` is
+  4.** C leaves the encoding implementation-defined. BoxOS is UTF-8 end to end
+  — screen, keyboard, TagFS names — so a second, narrower encoding inside the C
+  functions would have made `mbstowcs` produce mojibake from ordinary BoxOS
+  text. `mblen`/`mbtowc`/`wctomb`/`mbstowcs`/`wcstombs` decode and encode it
+  strictly: a truncated sequence, a bare continuation byte, an overlong form
+  and a surrogate are each rejected with −1. See `<climits>` for the one
+  consequence outside this header.
+- **The `strto*` grammar is C's, not `<charconv>`'s**, and the two are related
+  only underneath: leading whitespace, a sign, the `0x` prefix, hex floats,
+  `inf`/`nan`, `endptr`, and overflow reported through `errno` are all things
+  [charconv] deliberately forbids `from_chars` from doing. What is shared is
+  the magnitude parsing. On overflow `strtod` reports which side by re-parsing
+  into `long double` — an 80-bit type covers every `double` that overflowed, so
+  the answer is a comparison rather than a second scan of the text.
+- `atexit` registers into the **same** list as static destructors (through
+  `__cxa_atexit`), because [basic.start.term] orders the two against each other
+  by registration and two separate lists could only guess. `at_quick_exit` has
+  its own list, as it must: `quick_exit` runs those and nothing else — no
+  atexit handlers, no static destructors, no `.fini_array`. phase204 witnesses
+  that from a child process, the only place it is observable.
+- `abs`/`labs`/`llabs` and the `div` family live in `<__bits/c_arith>`, shared
+  with `<cmath>`: [c.math.abs] puts them here, but a TU that includes only
+  `<cmath>` and writes `abs(-3)` must not get `3.0`. They are `constexpr`
+  because P0533R9 (C++23) made them so, not because the implementation took a
+  liberty.
+
+## `<cstring>`
+
+The functions are boxlib's — one `memcpy` in the system, shared by C and C++ —
+so what this header adds is the part C++ adds to C: **the six const-preserving
+overload pairs** ([cstring.syn]/3). `strchr` on a `const char *` yields
+`const char *` here; the C declaration would have handed back a mutable pointer
+into a const string. That is also why the pairs are NOT injected into the
+global namespace: `::strchr` is C's, `std::strchr` is C++'s, and a
+using-declaration for a function differing only in return type is a
+redeclaration conflict rather than an overload. **libc++ makes the same split;
+libstdc++ does not manage it** — there, `std::memchr` on a const pointer still
+returns a mutable one.
+
+- **The functions are null-tolerant**, which C leaves undefined:
+  `strlen(nullptr)` is 0, a copy into `nullptr` returns `nullptr`, a search in
+  `nullptr` finds nothing. Nine of them already were before Ф41 and the
+  thirteen added match. No conforming program can tell, because every case is
+  undefined behaviour; a bare-metal system has no signal to turn the fault into
+  a diagnostic, so the strengthening costs nothing.
+- **`strtok`'s cursor is per-strand.** C describes one static object, which is
+  why `strtok` is the textbook function two threads must not both call.
+  [c.strings] leaves the state unspecified, so `__thread` is conformance rather
+  than extension — and on a system whose point is that several strands share a
+  cabin it is the only defensible reading. phase204 proves it with two strands
+  tokenizing concurrently; with the shared cursor the test fails on 16 cores.
+- **`strcoll` is `strcmp` and `strxfrm` is a copy**, because the `"C"` locale
+  collates by character code and there is no other locale (§1.2).
+- **`strerror` answers from `generic_category()`'s table**, not a second one:
+  [syserr.errcat.objects] ties errno values to that category, so a program
+  comparing `strerror(EDOM)` with `generic_category().message(EDOM)` is
+  entitled to the same words. The buffer it returns is per-strand and the next
+  call on that strand overwrites it, which C permits and which removes the race
+  a shared buffer would have. A condition BoxOS cannot surface gets
+  `"generic error N"` rather than a cargo-culted Unix string — the policy
+  `<system_error>` already had.
 
 ## `<csignal>`
 
