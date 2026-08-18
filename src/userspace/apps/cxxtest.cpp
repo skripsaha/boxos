@@ -43765,6 +43765,159 @@ void Phase194()
     printf("[CXX] PASS phase194: [allocator.uses.construction] + <scoped_allocator>\n");
 }
 
+// ── phase195: tuple's allocator-extended constructors ([tuple.cnstr]) ───
+// The half of [tuple.cnstr] that was missing entirely: fourteen
+// constructors taking allocator_arg_t, plus the uses_allocator
+// specialization without which none of them is reachable through
+// uses-allocator construction. Ф38 reported this as a debt and closes it
+// here.
+//
+// Every expected value below came from libstdc++ 16.1, which implements all
+// fourteen; libc++ has no allocator-extended tuple-like constructor at all,
+// so the last case has only one reference.
+//
+// Tags again: 1 = the element got the allocator in the leading position,
+// 2 = in the trailing one, 0 = it never got one.
+struct P195Leading {
+    using allocator_type = std::allocator<int>;
+    int v;
+    int tag;
+    P195Leading(int x = 0) : v(x), tag(0) {}
+    P195Leading(const P195Leading &) = default;
+    P195Leading(std::allocator_arg_t, const allocator_type &) : v(0), tag(1) {}
+    P195Leading(std::allocator_arg_t, const allocator_type &, int x) : v(x), tag(1) {}
+    P195Leading(std::allocator_arg_t, const allocator_type &, const P195Leading &o)
+        : v(o.v), tag(1)
+    {
+    }
+    P195Leading(std::allocator_arg_t, const allocator_type &, P195Leading &&o) : v(o.v), tag(1)
+    {
+    }
+};
+struct P195Trailing {
+    using allocator_type = std::allocator<int>;
+    int v;
+    int tag;
+    P195Trailing(int x = 0) : v(x), tag(0) {}
+    P195Trailing(const P195Trailing &) = default;
+    P195Trailing(const allocator_type &) : v(0), tag(2) {}
+    P195Trailing(int x, const allocator_type &) : v(x), tag(2) {}
+    P195Trailing(const P195Trailing &o, const allocator_type &) : v(o.v), tag(2) {}
+    P195Trailing(P195Trailing &&o, const allocator_type &) : v(o.v), tag(2) {}
+};
+// Neither copyable nor movable, and it takes an allocator. Constructing a
+// tuple of it is the check that the elements are built IN PLACE: any
+// implementation that produced the element and then moved it into the tuple
+// would not compile this at all.
+struct P195Immovable {
+    using allocator_type = std::allocator<int>;
+    int v;
+    int tag;
+    P195Immovable(int x) : v(x), tag(0) {}
+    P195Immovable(std::allocator_arg_t, const allocator_type &, int x) : v(x), tag(1) {}
+    P195Immovable(const P195Immovable &) = delete;
+    P195Immovable(P195Immovable &&)      = delete;
+};
+// Constructible ONLY with an allocator, which the constraint on the
+// allocator-extended constructor does NOT accept: [tuple.cnstr] says its
+// Constraints are the same as its non-allocator twin's, and that twin asks
+// whether the element is constructible from the argument ALONE. Confirmed
+// against libstdc++ 16.1, which rejects it too.
+struct P195OnlyWithAlloc {
+    using allocator_type = std::allocator<int>;
+    int v;
+    P195OnlyWithAlloc(std::allocator_arg_t, const allocator_type &, int x) : v(x) {}
+};
+
+void Phase195()
+{
+    using namespace std;
+
+    using TT = tuple<P195Leading, P195Trailing>;
+    allocator<int> A;
+
+    static_assert(uses_allocator_v<TT, allocator<int>>,
+                  "phase195 [tuple.syn]: a tuple always accepts an allocator");
+    static_assert(uses_allocator_v<tuple<>, allocator<int>>,
+                  "phase195 ...even an empty one, which has no element to want it");
+
+    auto both = [](const TT &t, int a, int b) {
+        return get<0>(t).v == a && get<0>(t).tag == 1 && get<1>(t).v == b &&
+               get<1>(t).tag == 2;
+    };
+
+    Check(both(TT(allocator_arg, A), 0, 0), "phase195 (alloc)");
+    {
+        P195Leading  cl(7);
+        P195Trailing ct(8, A);
+        Check(both(TT(allocator_arg, A, cl, ct), 7, 8), "phase195 (alloc, const Ts&...)");
+    }
+    Check(both(TT(allocator_arg, A, 1, 2), 1, 2), "phase195 (alloc, Us&&...)");
+    {
+        TT src(allocator_arg, A, 3, 4);
+        Check(both(TT(allocator_arg, A, src), 3, 4), "phase195 (alloc, const tuple&)");
+        Check(both(TT(allocator_arg, A, TT(allocator_arg, A, 5, 6)), 5, 6),
+              "phase195 (alloc, tuple&&)");
+    }
+    {
+        tuple<int, int>       u{9, 10};
+        const tuple<int, int> cu{13, 14};
+        Check(both(TT(allocator_arg, A, u), 9, 10), "phase195 (alloc, tuple<U>&)");
+        Check(both(TT(allocator_arg, A, as_const(u)), 9, 10),
+              "phase195 (alloc, const tuple<U>&)");
+        Check(both(TT(allocator_arg, A, tuple<int, int>{11, 12}), 11, 12),
+              "phase195 (alloc, tuple<U>&&)");
+        Check(both(TT(allocator_arg, A, std::move(cu)), 13, 14),
+              "phase195 (alloc, const tuple<U>&&)");
+    }
+    {
+        pair<int, int>       p{15, 16};
+        const pair<int, int> cp{19, 20};
+        Check(both(TT(allocator_arg, A, p), 15, 16), "phase195 (alloc, pair&)");
+        Check(both(TT(allocator_arg, A, as_const(p)), 15, 16),
+              "phase195 (alloc, const pair&)");
+        Check(both(TT(allocator_arg, A, pair<int, int>{17, 18}), 17, 18),
+              "phase195 (alloc, pair&&)");
+        Check(both(TT(allocator_arg, A, std::move(cp)), 19, 20),
+              "phase195 (alloc, const pair&&)");
+    }
+    Check(both(TT(allocator_arg, A, array<int, 2>{21, 22}), 21, 22),
+          "phase195 (alloc, tuple-like)");
+
+    // In place, not moved: this does not compile if the element is built
+    // somewhere else first.
+    {
+        tuple<P195Immovable> t(allocator_arg, A, 42);
+        Check(get<0>(t).v == 42 && get<0>(t).tag == 1,
+              "phase195 an element that cannot be moved is built where it lives");
+        static_assert(!is_constructible_v<tuple<P195OnlyWithAlloc>, allocator_arg_t,
+                                          allocator<int>, int>,
+                      "phase195 the constraint asks about the argument alone, "
+                      "not about the argument plus the allocator");
+    }
+
+    // What the whole thing is FOR: a tuple sitting inside a container whose
+    // allocator is a scoped_allocator_adaptor. Nobody hands the tuple an
+    // allocator; the container does, through uses-allocator construction,
+    // and the tuple passes it to each element. Before this phase
+    // uses_allocator_v<tuple<...>, A> was false, so the allocator stopped at
+    // the tuple and every element was built without one.
+    {
+        using Elem  = tuple<P195Leading, P195Trailing>;
+        using Outer = P194TagAlloc<Elem>;
+        using Inner = allocator<int>;
+        vector<Elem, scoped_allocator_adaptor<Outer, Inner>> v(
+            scoped_allocator_adaptor<Outer, Inner>(Outer{1}, Inner{}));
+        v.emplace_back(31, 32);
+        Check(v.size() == 1 && get<0>(v[0]).v == 31 && get<1>(v[0]).v == 32,
+              "phase195 a tuple inside a scoped-allocator container is built at all");
+        Check(get<0>(v[0]).tag == 1 && get<1>(v[0]).tag == 2,
+              "phase195 ...and the allocator reached both of its elements");
+    }
+
+    printf("[CXX] PASS phase195: tuple's allocator-extended constructors\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -43981,6 +44134,7 @@ int main()
     Phase192();
     Phase193();
     Phase194();
+    Phase195();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
