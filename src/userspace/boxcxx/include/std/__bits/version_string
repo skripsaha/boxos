@@ -9,7 +9,11 @@
 // missing; string_resize_and_overwrite is P1072R10; erase_if needed only
 // the basic_string predicate overload, the last of the thirteen.
 //
-// Deliberately absent (see <version>'s list): constexpr_string, char8_t.
+// constexpr_string arrived in Ф39, when basic_string became constexpr in
+// full -- SSO included, so a short string can be a constant object and not
+// only a value a constant expression computes.
+//
+// Deliberately absent (see <version>'s list): char8_t.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -47,6 +51,14 @@
 #  define __cpp_lib_constexpr_string_view 201811L
 #endif
 #undef BOXCXX_OWNS_constexpr_string_view
+// P0980R1 (Ф39). 201907L is the C++23 value, and the one both mainstream
+// libraries report. The working draft has since raised it to 202511L for a
+// C++26 change not implemented here, so that value is not claimed.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_string)) && \
+    !defined(__cpp_lib_constexpr_string)
+#  define __cpp_lib_constexpr_string 201907L
+#endif
+#undef BOXCXX_OWNS_constexpr_string
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_starts_ends_with)) && \
     !defined(__cpp_lib_starts_ends_with)
 #  define __cpp_lib_starts_ends_with 201711L

@@ -1,13 +1,15 @@
 // boxcxx — <__bits/char_traits>
 // char_traits for the five character types. Shared by <string_view> and
-// <string>. The char specialization rides the GCC builtins (constexpr-
-// capable in constant evaluation); the generic base uses plain loops.
+// <string>. The generic base uses plain loops; the char specialization rides
+// two GCC builtins at run time and walks the same loops at compile time --
+// see length()/compare() for the measurement that forced the split.
 #ifndef BOXCXX_BITS_CHAR_TRAITS
 #define BOXCXX_BITS_CHAR_TRAITS
 
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <type_traits>   // is_constant_evaluated
 
 namespace std {
 
@@ -59,11 +61,31 @@ struct TraitsBase {
         return nullptr;
     }
 
+    // Which way to walk is decided by "is dst above src", and that question
+    // has two legal forms. At run time it is one address comparison. During
+    // constant evaluation a relational comparison of pointers into different
+    // objects is not a constant expression at all, so the overlap is found
+    // with the one comparison that is -- equality: dst sits above src exactly
+    // when some destination element IS the last source element. Ranges that
+    // do not overlap answer false and are copied forward, which is correct
+    // for them either way.
+    static constexpr bool DstAboveSrc(const char_type *dst,
+                                      const char_type *src, size_t n)
+    {
+        if (is_constant_evaluated()) {
+            const char_type *last = src + (n - 1);
+            for (size_t i = 0; i < n; ++i)
+                if (dst + i == last) return true;
+            return false;
+        }
+        return !(dst < src);
+    }
+
     static constexpr char_type *move(char_type *dst, const char_type *src,
                                      size_t n)
     {
         if (dst == src || n == 0) return dst;
-        if (dst < src) {
+        if (!DstAboveSrc(dst, src, n)) {
             for (size_t i = 0; i < n; ++i) dst[i] = src[i];
         } else {
             for (size_t i = n; i > 0; --i) dst[i - 1] = src[i - 1];
@@ -118,12 +140,35 @@ struct char_traits<char> : __char_impl::TraitsBase<char, int> {
     {
         return static_cast<unsigned char>(a) < static_cast<unsigned char>(b);
     }
+    // Both builtins are folded by GCC only over storage it can see through:
+    // string literals, static objects, automatic arrays. Over the storage
+    // std::allocator hands out DURING constant evaluation it folds neither
+    // (measured on x86_64-elf-g++ 15.2.0: "'__builtin_strlen(((const char*)(&
+    // heap )))' is not a constant expression"). That is not a corner: it is
+    // every character a constexpr basic_string ever owns, and it already bit
+    // basic_string_view -- a view built over allocator storage was not a
+    // constant expression here while it is one in both mainstream libraries.
+    // So the constant-evaluated path walks and the run-time path keeps the
+    // builtin, which is where the generated code is worth caring about.
     static constexpr int compare(const char *a, const char *b, size_t n)
     {
-        return n == 0 ? 0 : __builtin_memcmp(a, b, n);
+        if (n == 0) return 0;
+        if (is_constant_evaluated()) {
+            for (size_t i = 0; i < n; ++i) {
+                if (lt(a[i], b[i])) return -1;
+                if (lt(b[i], a[i])) return 1;
+            }
+            return 0;
+        }
+        return __builtin_memcmp(a, b, n);
     }
     static constexpr size_t length(const char *s)
     {
+        if (is_constant_evaluated()) {
+            size_t n = 0;
+            while (s[n] != '\0') ++n;
+            return n;
+        }
         return __builtin_strlen(s);
     }
     // __builtin_memchr lowers to a real `call memchr` on this target once

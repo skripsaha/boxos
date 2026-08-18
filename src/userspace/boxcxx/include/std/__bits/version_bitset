@@ -1,13 +1,14 @@
 // boxcxx — <__bits/version_bitset>
 //
 // The [support.limits.general] per-header slot for <bitset>. It carries
-// P2697R1's __cpp_lib_bitset -- the string_view constructor -- and not
-// __cpp_lib_constexpr_bitset, the one C++23 macro this header owns, which
-// is not claimable yet (see <version>'s omission list -- the string-taking
-// constructor and both to_string() forms cannot run in constant evaluation
-// because basic_string is not constexpr). Everything else in [template.
-// bitset] IS constexpr, so the moment the constexpr_string blocker lifts
-// the define goes back here and nothing else has to move.
+// P2697R1's __cpp_lib_bitset -- the string_view constructor -- and, since
+// Ф39, P2417R2's __cpp_lib_constexpr_bitset. The second one waited on a
+// blocker outside this header: everything in [template.bitset] was already
+// constexpr except the string-taking constructor and the two to_string()
+// forms, which could not run in constant evaluation while basic_string could
+// not either. P0980R1 landed in Ф39 and the define came back here with no
+// change to <bitset> itself -- which is what the note that used to stand
+// here predicted.
 //
 // Same split rationale as <__bits/version_any>/<__bits/version_complex> --
 // see those files' comments.
@@ -30,3 +31,13 @@
 #  define __cpp_lib_bitset 202306L
 #endif
 #undef BOXCXX_OWNS_bitset
+
+// P2417R2 -- a constexpr bitset, all of it. 202207L is the value [version.syn]
+// carries and the macro's only one. libstdc++ 16.1 defines 202202L, the paper's
+// adoption meeting rather than the published value; libc++ agrees with the
+// draft. Both measured.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_bitset)) && \
+    !defined(__cpp_lib_constexpr_bitset)
+#  define __cpp_lib_constexpr_bitset 202207L
+#endif
+#undef BOXCXX_OWNS_constexpr_bitset

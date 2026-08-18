@@ -166,17 +166,9 @@
 //                          present and verified.
 // chrono                   <chrono> excludes time zones by design: no
 //                          tzdb, time_zone, zoned_time or leap seconds.
-// constexpr_bitset         every bit operation IS constexpr, but the
-//                          basic_string-taking constructor bitset(str, pos,
-//                          n, zero, one) and both to_string() forms are not
-//                          usable in constant evaluation -- same root cause
-//                          as constexpr_string below (they touch
-//                          basic_string, which is not constexpr).
 // constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
 //                          constexpr.
-// constexpr_string         basic_string is not constexpr at all (it needs
-//                          the compiler-blessed constexpr allocator path).
-// constexpr_vector         vector is not constexpr at all, same reason.
+// constexpr_vector         vector is not constexpr at all.
 // execution                no <execution> header.
 // filesystem               no <filesystem> header.
 // format                   <format> is char-only: no wchar_t, no
@@ -245,6 +237,20 @@
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
 // syncbuf                  no <syncbuf> header.
+//
+// constexpr_string and constexpr_bitset LEFT this list in Ф39. The first
+// entry blamed "the compiler-blessed constexpr allocator path", and that was
+// wrong twice over: std::allocator, allocator_traits and construct_at had
+// been constant-evaluable here since Ф31e, and the thing actually in the way
+// was smaller and more specific -- the inline buffer is a union member, and a
+// union member only becomes active when something writes it through its name,
+// which nothing in <string> did. Two builtins in char_traits<char> were the
+// other half: GCC folds neither over storage handed out by std::allocator
+// during constant evaluation, so even basic_string_view over such storage was
+// not a constant expression, which nobody had noticed because nothing could
+// produce that storage before. constexpr_bitset was second-order -- its
+// entry said so, and was right: the define came back with no change to
+// <bitset> at all.
 //
 // spanstream LEFT this list in Ф38. Its entry read "no <spanstream> header",
 // and unlike stacktrace's identically-worded one there was nothing behind it:

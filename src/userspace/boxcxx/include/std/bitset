@@ -26,6 +26,7 @@
 // [version.syn] names this header as an owner of the macro below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_bitset
+#define BOXCXX_OWNS_constexpr_bitset
 #include <__bits/version_bitset>
 #include <string>
 #include <ostream>
