@@ -40,9 +40,9 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Standard headers provided | **86** — 82 of C++23 (23 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 123 |
 | Header source | ~87 000 lines |
-| Feature-test macros defined | 205 — 159 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 206 — 160 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 212 phases (193 of them the numbered `PhaseN` series), 5 421 runtime checks, 1 804 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 213 phases (194 of them the numbered `PhaseN` series), 5 430 runtime checks, 1 816 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **212**. The
+there are exactly as many as there are phase definitions. That is **213**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -244,7 +244,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 205 macros × 86 headers by
+  checked over the full cross-product of 206 macros × 86 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -293,7 +293,7 @@ the whole set, not sampled:
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-**15 of the macros [version.syn] names are not defined**, and `<version>` lists
+**14 of the macros [version.syn] names are not defined**, and `<version>` lists
 every one by name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -2140,8 +2140,37 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   POCS allocator that is not copy-assignable, `vector<int>::swap` and
   `vector<bool>::swap` now both fail to compile at the allocator assignment, where
   before only `vector<int>` did.
-- `~` `vector` is not usable in a constant expression (P1004 unimplemented) — the
-  same limitation as `<string>`, and with the same cause.
+- `✓` Closed in Ф39: `vector` was not usable in a constant expression at all
+  (P1004R2 unimplemented). All of it is `constexpr` now, `vector<bool>` and its
+  proxy `reference` included, and `__cpp_lib_constexpr_vector` is claimed at
+  201907L. The primary template needed nothing but the annotations — no union,
+  no pointer question a constant expression refuses. `vector<bool>` needed one
+  thing: a bit is set by reading a word back and OR-ing into it, and **the
+  content of storage nobody has written is not usable in a constant
+  expression**, so freshly allocated words are zeroed when constant-evaluated
+  (and not at run time, where the read is fine and the fill would be waste).
+  libstdc++ does the same, for the same reason.
+- `~` A `constexpr std::vector` **variable** is impossible, at any size: its
+  elements always come from an allocation, and no allocation outlives constant
+  evaluation. `std::string` differs only because a short one has somewhere else
+  to live. Both mainstream libraries agree; measured.
+- `!` **[vector.cons]'s `initializer_list` constructor is split into two** —
+  `vector(initializer_list<T>)` delegating to `vector(initializer_list<T>,
+  const Allocator&)` — where the standard writes one signature with a defaulted
+  allocator. The reason is a compiler crash, not a design preference:
+  x86_64-elf-g++ 15.2.0 dies with "internal compiler error: in
+  cxx_eval_indirect_ref, at cp/constexpr.cc:6169" on
+  `vector<vector<vector<int>>> v{{{1, 2}, {3}}}` once the constructors are
+  `constexpr`. Two levels of braces are fine, four crash as well, and the
+  compiler builds the default argument as an allocator of the wrong element
+  type and reaches through a cast to it. Measured to be unaffected by
+  `[[no_unique_address]]`, by the try/catch, by how the member initializer
+  spells the copy, and by the default argument's form; it goes away with a
+  by-value parameter (which the standard does not allow) or with no default
+  argument (which is what shipped). No conforming program can distinguish two
+  constructors from one with a default argument — a constructor has no address
+  to take — and the alternative is a crash in ordinary user code. Pinned by
+  phase198's `Nested()`. Revisit when the toolchain moves.
 
 # 3. Where boxcxx is stronger than the reference implementations
 
@@ -2518,6 +2547,24 @@ expression between different objects; both now ask with `==` when
 constant-evaluated and keep the address comparison at run time. `<bitset>`
 needed no change at all: `__cpp_lib_constexpr_bitset` came back the moment its
 blocker lifted, exactly as the note in its leaf had predicted.
+
+The second commit of Ф39 did the same for `vector` (phase 198), and the header
+itself needed nothing but the annotations — no union, no pointer question. Its
+`<version>` entry had said "same reason" as `<string>`'s, and that was wrong in
+both halves. `vector<bool>` was the one place with a real obstacle, and a
+different one: a bit is set by reading a freshly allocated word back and
+OR-ing into it, and the content of storage nobody has written is not usable in
+a constant expression. Zeroing those words when constant-evaluated is the whole
+of the fix, at no run-time cost.
+
+What the commit also found is a **compiler crash**. With [vector.cons]'s single
+`initializer_list` signature and its defaulted allocator, x86_64-elf-g++ 15.2.0
+dies in `cxx_eval_indirect_ref` on three levels of nested braces, once the
+constructors are `constexpr` — it builds the default argument as an allocator
+of the wrong element type and reaches through a cast to it. Two levels are
+fine; four crash too; libstdc++ 16.1 and libc++ 22.1.6 compile the same source.
+Splitting that one signature into two constructors routes around it, and
+phase198's `Nested()` is what keeps the shape tested.
 
 What is left:
 

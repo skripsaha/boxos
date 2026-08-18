@@ -42,6 +42,13 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф39's second commit raised it 163 -> 164, and the delta is again
+#           ONE macro: __cpp_lib_constexpr_vector, owned by <vector>, which
+#           <ios> includes -- so it reaches every stream header, and through
+#           them <bitset>, <chrono> and the rest of the twenty. Same shape as
+#           the first commit: a widely-included owning header, no header
+#           answering for anything new.
+#
 #           Ф39 raised it 162 -> 163, and the delta is ONE macro:
 #           __cpp_lib_constexpr_string, owned by <string>, which almost
 #           everything includes -- it leaks into 20-odd headers and they are
@@ -73,7 +80,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=163
+LEAK_BUDGET=164
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

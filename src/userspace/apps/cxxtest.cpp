@@ -375,6 +375,9 @@
 #ifndef __cpp_lib_incomplete_container_elements
 #  error "__cpp_lib_incomplete_container_elements is not visible from <vector> alone"
 #endif
+#ifndef __cpp_lib_constexpr_vector
+#  error "__cpp_lib_constexpr_vector is not visible from <vector> alone"
+#endif
 #include <list>
 #ifndef __cpp_lib_list_remove_return_type
 #  error "__cpp_lib_list_remove_return_type is not visible from <list> alone"
@@ -29538,9 +29541,7 @@ static_assert(__cpp_lib_constexpr_bitset == 202207L, "phase131: __cpp_lib_conste
 #  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
 #endif
 static_assert(__cpp_lib_constexpr_string == 201907L, "phase131: __cpp_lib_constexpr_string — closed by Ф39");
-#ifdef __cpp_lib_constexpr_vector
-#  error "phase131: __cpp_lib_constexpr_vector must stay undefined"
-#endif
+static_assert(__cpp_lib_constexpr_vector == 201907L, "phase131: __cpp_lib_constexpr_vector — closed by Ф39");
     // The guards below name a header boxcxx does not ship at all, so the
     // macro could only ever appear by accident -- these guards are what
     // turns "we never wrote it" into "we checked". (There were nine until
@@ -44300,6 +44301,257 @@ void Phase197()
     printf("[CXX] PASS phase197: <bitset>'s string members in constant evaluation\n");
 }
 
+// ── phase198: <vector> in constant evaluation (P1004R2, Ф39) ────────────
+// Same discipline as phase196: every scenario is asked twice, once as a
+// static_assert and once at run time, because the header answers some
+// questions differently in the two evaluations and a split is only honest
+// when both halves agree.
+namespace p198 {
+
+using std::vector;
+
+// a non-trivial element, so construct/destroy really run
+struct Elem {
+    int v = 0;
+    constexpr Elem() = default;
+    constexpr explicit Elem(int x) : v(x) {}
+    constexpr Elem(const Elem &o) : v(o.v) {}
+    constexpr Elem(Elem &&o) noexcept : v(o.v) { o.v = -1; }
+    constexpr Elem &operator=(const Elem &o) { v = o.v; return *this; }
+    constexpr Elem &operator=(Elem &&o) noexcept { v = o.v; o.v = -1; return *this; }
+    constexpr ~Elem() {}
+    constexpr bool operator==(const Elem &o) const { return v == o.v; }
+};
+
+// 1. construction, every form
+constexpr bool Construct()
+{
+    vector<int> a;
+    if (!a.empty() || a.capacity() != 0 || a.data() != nullptr) return false;
+    vector<int> b(3);
+    if (b.size() != 3 || b[0] != 0 || b[2] != 0) return false;
+    vector<int> c(3, 7);
+    if (c.size() != 3 || c[1] != 7) return false;
+    vector<int> d{1, 2, 3};
+    if (d.size() != 3 || d[2] != 3) return false;
+    vector<int> e(d.begin(), d.end());
+    if (e != d) return false;
+    vector<int> f(std::from_range, d);
+    if (f != d) return false;
+    vector<int> g(d);
+    if (g != d) return false;
+    vector<int> h(std::move(g));
+    if (h != d || !g.empty()) return false;
+    return true;
+}
+
+// 2. growth: the reallocation path, with a type whose move really moves
+constexpr bool Growth()
+{
+    vector<Elem> v;
+    for (int i = 0; i < 40; ++i) v.push_back(Elem(i));
+    if (v.size() != 40 || v.capacity() < 40) return false;
+    if (v[0].v != 0 || v[39].v != 39) return false;
+    v.reserve(200);
+    if (v.capacity() < 200 || v[17].v != 17) return false;
+    v.resize(4);
+    if (v.size() != 4) return false;
+    v.shrink_to_fit();
+    if (v.capacity() != 4 || v[3].v != 3) return false;
+    v.clear();
+    if (!v.empty() || v.capacity() != 4) return false;
+    return true;
+}
+
+// 3. the modifiers
+constexpr bool Modifiers()
+{
+    vector<int> v{1, 2, 3};
+    v.push_back(4);
+    v.emplace_back(5);
+    if (v.size() != 5 || v.back() != 5) return false;
+    v.pop_back();
+    if (v.back() != 4) return false;
+    v.insert(v.begin(), 0);
+    if (v[0] != 0 || v.size() != 5) return false;
+    v.insert(v.begin() + 2, 2, 9);
+    if (v[2] != 9 || v[3] != 9 || v[4] != 2) return false;
+    v.insert(v.end(), {7, 8});
+    if (v.back() != 8) return false;
+    v.emplace(v.begin(), -1);
+    if (v.front() != -1) return false;
+    v.erase(v.begin());
+    if (v.front() != 0) return false;
+    v.erase(v.begin(), v.begin() + 2);
+    if (v.front() != 9) return false;
+    v.assign(3, 5);
+    if (v.size() != 3 || v[2] != 5) return false;
+    v.assign({1, 2});
+    if (v.size() != 2 || v[1] != 2) return false;
+    v.resize(4, 6);
+    if (v[3] != 6) return false;
+    vector<int> other{9, 9};
+    v.swap(other);
+    if (v.size() != 2 || v[0] != 9 || other.size() != 4) return false;
+    return true;
+}
+
+// 4. ranges members and the iterator surface
+constexpr bool Iterators()
+{
+    vector<int> v{1, 2, 3, 4};
+    int sum = 0;
+    for (int x : v) sum += x;
+    if (sum != 10) return false;
+    int rsum = 0;
+    for (auto it = v.rbegin(); it != v.rend(); ++it) rsum = rsum * 10 + *it;
+    if (rsum != 4321) return false;
+    if (*v.cbegin() != 1 || *(v.cend() - 1) != 4) return false;
+    v.append_range(vector<int>{5, 6});
+    if (v.size() != 6 || v.back() != 6) return false;
+    v.assign_range(vector<int>{7});
+    if (v.size() != 1 || v[0] != 7) return false;
+    v.insert_range(v.begin(), vector<int>{3, 4});
+    if (v[0] != 3 || v[1] != 4 || v[2] != 7) return false;
+    return true;
+}
+
+// 5. the non-member surface [vector.syn] declares constexpr
+constexpr bool NonMembers()
+{
+    vector<int> a{1, 2, 3}, b{1, 2, 4};
+    if (a == b || !(a == vector<int>{1, 2, 3})) return false;
+    if ((a <=> b) >= 0 || (b <=> a) <= 0 || (a <=> a) != 0) return false;
+    vector<int> c{1, 2, 2, 3, 2};
+    if (std::erase(c, 2) != 3 || c != vector<int>{1, 3}) return false;
+    vector<int> d{1, 2, 3, 4, 5, 6};
+    if (std::erase_if(d, [](int x) { return x % 2 == 0; }) != 3) return false;
+    if (d != vector<int>{1, 3, 5}) return false;
+    vector<int> e{1}, f{2};
+    std::swap(e, f);
+    return e[0] == 2 && f[0] == 1;
+}
+
+// 6. vector<bool>: the packed specialization, where a freshly allocated word
+//    is read-modify-written and constant evaluation refuses to read it
+//    until something has put a value there.
+constexpr bool Bits()
+{
+    vector<bool> v;
+    for (int i = 0; i < 100; ++i) v.push_back(i % 3 == 0);
+    if (v.size() != 100 || !v[0] || v[1] || !v[99]) return false;
+    v[1] = true;
+    if (!v[1]) return false;
+    v.flip();
+    if (v[0] || !v[2]) return false;
+    v.flip();
+    if (!v[0]) return false;
+    vector<bool> w(70, true);
+    if (w.size() != 70 || !w[69]) return false;
+    w.resize(200, false);
+    if (w.size() != 200 || w[199] || !w[69]) return false;
+    w.resize(3);
+    if (w.size() != 3 || !w[2]) return false;
+    vector<bool> x{true, false, true};
+    if (x.size() != 3 || !x[0] || x[1] || !x[2]) return false;
+    x.insert(x.begin(), false);
+    if (x[0] || !x[1]) return false;
+    x.erase(x.begin());
+    if (!x[0]) return false;
+    x.swap(w);
+    if (x.size() != 3 || w.size() != 3) return false;
+    vector<bool> y = x;
+    if (y != x) return false;
+    y.push_back(true);
+    if (y == x || (y <=> x) <= 0) return false;
+    y.clear();
+    if (!y.empty()) return false;
+    return true;
+}
+
+// 7. vector<bool>'s proxy reference, which is the whole reason it is special
+constexpr bool BitProxy()
+{
+    vector<bool> v(4, false);
+    vector<bool>::reference r = v[2];
+    r = true;
+    if (!v[2]) return false;
+    r.flip();
+    if (v[2]) return false;
+    v[0] = v[3] = true;
+    bool b = v[0];
+    if (!b) return false;
+    v[1] = v[0];                        // reference = reference
+    if (!v[1]) return false;
+    auto it = v.begin();
+    *it = false;
+    if (v[0]) return false;
+    if (it[3] != true) return false;
+    return true;
+}
+
+// 8. three levels of braces. This shape is here because it CRASHED the
+//    compiler: with [vector.cons]'s single initializer_list signature and its
+//    defaulted allocator, x86_64-elf-g++ 15.2.0 dies in cxx_eval_indirect_ref
+//    the moment the third level of braces is constant-evaluated. Two levels
+//    are fine; four crash too. <vector> splits that one signature into two
+//    constructors to route around it, and this is the check that says so.
+constexpr bool Nested()
+{
+    vector<vector<vector<int>>> v{{{1, 2}, {3}}, {{4, 5, 6}}};
+    if (v.size() != 2 || v[0].size() != 2 || v[1].size() != 1) return false;
+    if (v[0][0][1] != 2 || v[0][1][0] != 3 || v[1][0][2] != 6) return false;
+    vector<vector<vector<vector<int>>>> deep{{{{7}}}};
+    return deep[0][0][0][0] == 7;
+}
+
+// 9. an allocator-aware element: the container must reach it through
+//    allocator_traits in constant evaluation as well
+constexpr bool WithElem()
+{
+    vector<Elem> v;
+    v.emplace_back(1);
+    v.emplace_back(2);
+    vector<Elem> w = v;
+    if (w.size() != 2 || w[1].v != 2) return false;
+    vector<Elem> m = std::move(w);
+    if (m[0].v != 1 || !w.empty()) return false;
+    m.insert(m.begin(), Elem(0));
+    if (m[0].v != 0 || m[1].v != 1) return false;
+    m.erase(m.begin() + 1);
+    if (m.size() != 2 || m[1].v != 2) return false;
+    return true;
+}
+
+} // namespace p198
+
+void Phase198()
+{
+    static_assert(p198::Construct(), "phase198 construction (compile time)");
+    Check(p198::Construct(), "phase198 construction (run time)");
+    static_assert(p198::Growth(), "phase198 growth (compile time)");
+    Check(p198::Growth(), "phase198 growth (run time)");
+    static_assert(p198::Modifiers(), "phase198 modifiers (compile time)");
+    Check(p198::Modifiers(), "phase198 modifiers (run time)");
+    static_assert(p198::Iterators(), "phase198 iterators (compile time)");
+    Check(p198::Iterators(), "phase198 iterators (run time)");
+    static_assert(p198::NonMembers(), "phase198 non-members (compile time)");
+    Check(p198::NonMembers(), "phase198 non-members (run time)");
+    static_assert(p198::Bits(), "phase198 vector<bool> (compile time)");
+    Check(p198::Bits(), "phase198 vector<bool> (run time)");
+    static_assert(p198::BitProxy(), "phase198 vector<bool>::reference (compile time)");
+    Check(p198::BitProxy(), "phase198 vector<bool>::reference (run time)");
+    static_assert(p198::Nested(), "phase198 three levels of braces (compile time)");
+    Check(p198::Nested(), "phase198 three levels of braces (run time)");
+    static_assert(p198::WithElem(), "phase198 non-trivial elements (compile time)");
+    Check(p198::WithElem(), "phase198 non-trivial elements (run time)");
+
+    static_assert(__cpp_lib_constexpr_vector == 201907L,
+                  "phase198 __cpp_lib_constexpr_vector is P1004R2's value");
+
+    printf("[CXX] PASS phase198: <vector> is constexpr, packed bits included\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -44519,6 +44771,7 @@ int main()
     Phase195();
     Phase196();
     Phase197();
+    Phase198();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

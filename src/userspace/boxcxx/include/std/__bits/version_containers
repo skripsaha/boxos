@@ -41,6 +41,14 @@
 #endif
 #undef BOXCXX_OWNS_erase_if
 
+// P1004R2 (Ф39) -- constexpr vector, the packed bool specialization with it.
+// 201907L is the value in [version.syn]; the macro has no other.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_vector)) && \
+    !defined(__cpp_lib_constexpr_vector)
+#  define __cpp_lib_constexpr_vector 201907L
+#endif
+#undef BOXCXX_OWNS_constexpr_vector
+
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_adaptor_iterator_pair_constructor)) && \
     !defined(__cpp_lib_adaptor_iterator_pair_constructor)
 #  define __cpp_lib_adaptor_iterator_pair_constructor 202106L

@@ -65,6 +65,7 @@ __cpp_lib_constexpr_string_view|string_view
 __cpp_lib_constexpr_tuple|tuple
 __cpp_lib_constexpr_typeinfo|typeinfo
 __cpp_lib_constexpr_utility|utility
+__cpp_lib_constexpr_vector|vector
 __cpp_lib_constrained_equality|utility,tuple,optional,variant,expected
 __cpp_lib_containers_ranges|vector,list,forward_list,map,set,unordered_map,unordered_set,deque,queue,stack,string
 __cpp_lib_copyable_function|functional
