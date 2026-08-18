@@ -1,0 +1,122 @@
+// boxcxx — <cerrno>
+//
+// ‼ Read this before using errno for anything.
+//
+// **BoxOS has no errno register, and this header does not give it one.** That
+// idiom is deliberately absent from every BoxOS interface: boxlib returns an
+// `error_t` from the call that failed, box::error carries it in C++, and
+// several headers in the tree say so in as many words ("BoxOS has no errno
+// register", box/bay.h, box/brook.h, box/error.h). Nothing in that path
+// touches the object below and nothing ever will.
+//
+// What this header is, then, is the C standard library's contract, and only
+// that: [cerrno.syn] requires a thread-local modifiable int lvalue named
+// `errno`, and the C functions boxcxx provides — strtod and the rest of the
+// strto* family, and the math functions on the rare paths where they choose to
+// — are specified to set it. A caller that writes `errno = 0; x = strtod(s,
+// &e); if (errno == ERANGE)` is writing correct C, and it has to work. The
+// object exists to make those specifications true, not to become a second way
+// for BoxOS to report failure.
+//
+// The macro values are NOT invented here. They are the values of the
+// corresponding std::errc enumerators in <__bits/errc>, which follow the Linux
+// numbering (the standard leaves them implementation-defined and that set is
+// the de-facto convention). [syserr.errcat.objects]/2 makes the two answer for
+// each other: error_code(EDOM, generic_category()) == errc::argument_out_of_
+// domain has to hold. Phase203 pins every pair by static_assert, which is a
+// check neither reference implementation can make — theirs come from a libc
+// the library does not compile against.
+#ifndef BOXCXX_CERRNO
+#define BOXCXX_CERRNO
+
+// The object. thread_local because [errno] has required exactly that since
+// C++11 — two strands parsing two strings must not overwrite each other's
+// failure. `inline` gives the whole program one of them, in .tbss, with no
+// dynamic initialization to order against anything.
+inline thread_local int __boxcxx_errno = 0;
+
+#define errno ::__boxcxx_errno
+
+// ── The three [cerrno.syn] mandates ─────────────────────────────────────
+#define EDOM   33
+#define ERANGE 34
+#define EILSEQ 84
+
+// ── The rest: one macro per std::errc enumerator, same value ────────────
+#define EPERM            1
+#define ENOENT           2
+#define ESRCH            3
+#define EINTR            4
+#define EIO              5
+#define ENXIO            6
+#define E2BIG            7
+#define ENOEXEC          8
+#define EBADF            9
+#define ECHILD           10
+#define EAGAIN           11
+#define EWOULDBLOCK      11   // == EAGAIN, as on the system this numbering is from
+#define ENOMEM           12
+#define EACCES           13
+#define EFAULT           14
+#define EBUSY            16
+#define EEXIST           17
+#define EXDEV            18
+#define ENODEV           19
+#define ENOTDIR          20
+#define EISDIR           21
+#define EINVAL           22
+#define ENFILE           23
+#define EMFILE           24
+#define ENOTTY           25
+#define ETXTBSY          26
+#define EFBIG            27
+#define ENOSPC           28
+#define ESPIPE           29
+#define EROFS            30
+#define EMLINK           31
+#define EPIPE            32
+#define EDEADLK          35
+#define ENAMETOOLONG     36
+#define ENOLCK           37
+#define ENOSYS           38
+#define ENOTEMPTY        39
+#define ELOOP            40
+#define ENOMSG           42
+#define EIDRM            43
+#define ENOSTR           60
+#define ENODATA          61
+#define ETIME            62
+#define ENOSR            63
+#define ENOLINK          67
+#define EPROTO           71
+#define EBADMSG          74
+#define EOVERFLOW        75
+#define ENOTSOCK         88
+#define EDESTADDRREQ     89
+#define EMSGSIZE         90
+#define EPROTOTYPE       91
+#define ENOPROTOOPT      92
+#define EPROTONOSUPPORT  93
+#define ENOTSUP          95
+#define EOPNOTSUPP       95   // == ENOTSUP, as std::errc has them
+#define EAFNOSUPPORT     97
+#define EADDRINUSE       98
+#define EADDRNOTAVAIL    99
+#define ENETDOWN         100
+#define ENETUNREACH      101
+#define ENETRESET        102
+#define ECONNABORTED     103
+#define ECONNRESET       104
+#define ENOBUFS          105
+#define EISCONN          106
+#define ENOTCONN         107
+#define ETIMEDOUT        110
+#define ECONNREFUSED     111
+#define EHOSTUNREACH     113
+#define EALREADY         114
+#define EINPROGRESS      115
+#define ECANCELED        125
+#define EOWNERDEAD       130
+#define ENOTRECOVERABLE  131
+
+#endif // BOXCXX_CERRNO

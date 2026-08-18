@@ -1,0 +1,44 @@
+// boxcxx — <cassert>
+//
+// [assertions]. This header is the one place in the library with NO include
+// guard around what it defines, and that is required, not an oversight:
+// [assertions.assert]/1 says the macro is redefined according to the current
+// state of NDEBUG each time <cassert> is included, so a translation unit may
+// switch NDEBUG on and off between two inclusions and get two behaviours.
+// A guard would silently freeze whichever state came first.
+//
+// On failure the diagnostic goes to the SCREEN, not to the serial log. That
+// is the same call Ф36 made for std::cerr, for the same reason: on a real
+// machine with no cable attached, a diagnostic that only reaches the serial
+// port is a diagnostic nobody sees. box::current::log remains the road for
+// things a machine wants to keep, and an assertion failure is not one — the
+// process is about to end.
+
+// Guard only the declaration; the macro below is deliberately outside it.
+#ifndef BOXCXX_CASSERT_DECL
+#define BOXCXX_CASSERT_DECL
+extern "C" [[noreturn]] void __boxcxx_assert_fail(const char *expr,
+                                                  const char *file,
+                                                  unsigned    line,
+                                                  const char *func) noexcept;
+#endif
+
+#undef assert
+
+#ifdef NDEBUG
+
+// [assertions.assert]/2: with NDEBUG defined the macro expands so that the
+// expression is NOT evaluated — no side effect, no odr-use, nothing.
+#define assert(expr) (static_cast<void>(0))
+
+#else
+
+// One parameter, exactly as the standard writes it. A variadic form would
+// quietly accept `assert()` and `assert(a, b)`, which are ill-formed programs;
+// both reference implementations take the single parameter too, so a template
+// argument list still has to be parenthesised here — assert((is_same_v<A,B>)).
+#define assert(expr)                                                          \
+    ((expr) ? static_cast<void>(0)                                            \
+            : ::__boxcxx_assert_fail(#expr, __FILE__, __LINE__, __func__))
+
+#endif

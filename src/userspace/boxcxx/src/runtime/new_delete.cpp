@@ -2,8 +2,12 @@
  * new_delete.cpp — the full replaceable allocation-function set (Itanium
  * x86-64) over the boxlib heap.
  *
- * Backing calls go straight to _malloc_impl/free — box/memory.h's
- * variadic malloc() macro is deliberately bypassed.
+ * Backing calls go straight to malloc/free. They used to have to be declared
+ * here by hand, because box/memory.h made malloc a variadic MACRO and this
+ * file had to route around it; Ф41 made malloc a function, for the reason
+ * <cstdlib> would have forced anyway — the preprocessor does not look at
+ * qualification, so a malloc macro turns std::malloc(n) into a name that does
+ * not exist.
  *
  * Aligned forms over-allocate and stash the raw pointer one slot below
  * the aligned address. The compiler guarantees aligned new pairs with
@@ -23,7 +27,7 @@ namespace boxcxx {
 }
 
 extern "C" {
-void *_malloc_impl(size_t size);
+void *malloc(size_t size);
 void  free(void *ptr);
 }
 
@@ -35,7 +39,7 @@ void *AllocateWithHandler(size_t size)
 {
     if (size == 0) size = 1;
     for (;;) {
-        void *p = _malloc_impl(size);
+        void *p = malloc(size);
         if (p) return p;
         std::new_handler handler = g_new_handler;
         if (!handler) return nullptr;
@@ -52,7 +56,7 @@ void *AlignedAllocate(size_t size, size_t align)
     if (size > SIZE_MAX - align - sizeof(void *)) return nullptr;
 
     for (;;) {
-        void *raw = _malloc_impl(size + align + sizeof(void *));
+        void *raw = malloc(size + align + sizeof(void *));
         if (raw) {
             uintptr_t user = (reinterpret_cast<uintptr_t>(raw) +
                               sizeof(void *) + align - 1) &

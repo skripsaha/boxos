@@ -64,7 +64,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
 
-all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf
+all: proca.elf procb.elf today.elf memtest.elf mtest.elf chain.elf decks.elf bench.elf touch_test.elf touch_stress.elf lifecycle.elf persist.elf write_stress.elf write_concurrent.elf write_observer.elf cow_test.elf anchor_test.elf bay_test.elf brook_test.elf current_test.elf htest.elf cxxtest.elf strandtest.elf brookstrand.elf brookexec.elf currentexec.elf strandpark.elf childspin.elf print_stress.elf exitpaths.elf
 
 # Included AFTER `all`, never before: the fragment's first rule is the tool,
 # and whatever rule make reads first becomes the default goal — an include at
@@ -87,10 +87,16 @@ brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/use
 currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
+# Phase203's child: the only witness to whether teardown runs on a given exit
+# path is a process that took it. Stripped like cxxtest — it needs no debug
+# info to die.
+exitpaths.elf: $(BOXLIB_START) exitpaths.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) exitpaths.o $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
 # ---- C++ binaries (linked with the g++ driver) ----
-# Link order matters: libboxcxx.a BEFORE libbox.a (boxcxx pulls
-# _malloc_impl/printf from boxlib) and before any future libgcc so our
-# runtime symbols always win.
+# Link order matters: libboxcxx.a BEFORE libbox.a (boxcxx pulls malloc/printf
+# from boxlib) and before any future libgcc so our runtime symbols always win.
 cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(CXXLDFLAGS),$(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) -lgcc)
 	@# Drop .debug_* AND the symbol table. The debug info has to go because the

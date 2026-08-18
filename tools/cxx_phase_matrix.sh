@@ -80,12 +80,26 @@ for cfg in $CONFIGS; do
     # signature of hitting the budget below, and a real crash read as a slow
     # config. Any death the guest can print has to be in this alternation, or
     # "budget" becomes a place for failures to hide.
+    # One death IS a test: Ф41's phase203 spawns a child that must die of an
+    # uncaught exception, because nothing inside a living process can witness
+    # whether teardown ran on the way out. That child prints a fence line
+    # BEFORE it throws, and exactly one announced FATAL is subtracted per
+    # fence. The criterion stays strict in both directions — an unannounced
+    # death still fails, and a SECOND death after one fence still fails,
+    # because the subtraction is capped by the number of fences.
+    count_bad() {
+        total=$(grep -cE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null)
+        announced=$(grep -c 'expected-fatal' build/serial.log 2>/dev/null)
+        [ "$announced" -gt "$total" ] && announced=$total
+        echo $((total - announced))
+    }
+
     for i in $(seq 1 7200); do
         [ "$(grep -cE "$MARKER" build/serial.log 2>/dev/null)" -ge 1 ] && { hit=1; break; }
-        grep -qE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null && break
+        [ "$(count_bad)" -gt 0 ] && break
         sleep 0.5
     done
-    bad=$(grep -cE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] TOTAL FAILURES' build/serial.log 2>/dev/null)
+    bad=$(count_bad)
 
     if [ "$hit" = 1 ] && [ "$bad" = 0 ]; then
         echo "[$cfg] PASS (marker matched; no PANIC/EXCEPTION/FATAL/FAILURES)"

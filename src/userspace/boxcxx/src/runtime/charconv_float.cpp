@@ -21,7 +21,7 @@
 // (the boxlib heap serialises every allocation) and malloc returns null (never
 // throws) on exhaustion, so from_chars degrades to the stack path, never throws.
 extern "C" {
-void *_malloc_impl(__SIZE_TYPE__ size);
+void *malloc(__SIZE_TYPE__ size);
 void  free(void *ptr);
 }
 
@@ -1376,7 +1376,7 @@ void HBigRoundToIeeeLd(const HBig &num, const HBig &den, HBig &sn, HBig &sd, HBi
 // scratch allocation failed (caller falls back to the sticky stack path).
 bool DigitsToBitsLdHeap(const char *dig, int ndig, long E, bool sticky,
                         u64 &mant, unsigned &expField, bool &oor) {
-    u32 *blk = (u32 *)_malloc_impl(sizeof(u32) * 6 * kLdHeapWords);
+    u32 *blk = (u32 *)malloc(sizeof(u32) * 6 * kLdHeapWords);
     if (!blk) return false;
     HBig num {blk + 0 * kLdHeapWords, 0, kLdHeapWords};
     HBig den {blk + 1 * kLdHeapWords, 0, kLdHeapWords};
@@ -1408,7 +1408,7 @@ bool DigitsToBitsLdHeap(const char *dig, int ndig, long E, bool sticky,
 // a buffer could not be allocated (caller falls back to the sticky stack path).
 bool ParseLdDecimalHeap(const char *ms, const char *me, long expVal, bool neg, u128 &bits, int &ec)
 {
-    char *dig = (char *)_malloc_impl((__SIZE_TYPE__)kLdSigDigits);
+    char *dig = (char *)malloc((__SIZE_TYPE__)kLdSigDigits);
     if (!dig) return false;
     int ndig = 0; long E = 0; bool seenDot = false, sticky = false, seenNZ = false;
     for (const char *q = ms; q < me; ++q) {

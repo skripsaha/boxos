@@ -8,11 +8,24 @@
 # newest one in the draft. __cpp_lib_apply gained <type_traits> and <meta> with
 # its C++26 value 202603L; boxcxx defines the C++23 201603L, whose only owner
 # is <tuple>, so that is what this file records.
+# Ф41 found seven macros MISSING from this transcription -- chrono, filesystem,
+# format, formatters, is_implicit_lifetime, ranges and result_of_sfinae. None of
+# them is defined by boxcxx today, and the audit skips undefined macros, so the
+# gap could not produce a false green -- but it was a trap armed for the day one
+# of them is defined: its ownership would then go unchecked in silence. Verified
+# against eel.is/c++draft/version.syn when added. __cpp_lib_modules is still
+# absent ON PURPOSE: it has no "also in" list at all, so <version> is its only
+# owner and there is nothing for this file to say.
+# Ф41 also completed the freestanding family against the draft: the file had
+# eleven of the twenty-five __cpp_lib_freestanding_* macros, and the missing
+# fourteen were not a pattern (some C++23, some C++26). Two of the family
+# cannot be represented here at all and are absent on purpose, like modules:
+# freestanding_feature_test_macros has no "also in" list.
 __cpp_lib_adaptor_iterator_pair_constructor|stack,queue
 __cpp_lib_addressof_constexpr|memory
-__cpp_lib_aligned_accessor|mdspan
 __cpp_lib_algorithm_default_value_type|algorithm,ranges,string,deque,list,forward_list,vector,memory
 __cpp_lib_algorithm_iterator_requirements|algorithm,numeric,memory
+__cpp_lib_aligned_accessor|mdspan
 __cpp_lib_allocate_at_least|memory
 __cpp_lib_allocator_traits_is_always_equal|memory,scoped_allocator,string,deque,forward_list,list,vector,map,set,unordered_map,unordered_set
 __cpp_lib_any|any
@@ -44,6 +57,7 @@ __cpp_lib_byteswap|bit
 __cpp_lib_byte|cstddef
 __cpp_lib_char8_t|atomic,filesystem,iosfwd,istream,limits,locale,ostream,string,string_view
 __cpp_lib_chrono_udls|chrono
+__cpp_lib_chrono|chrono
 __cpp_lib_clamp|algorithm
 __cpp_lib_common_reference_wrapper|functional
 __cpp_lib_common_reference|type_traits
@@ -60,8 +74,8 @@ __cpp_lib_constexpr_functional|functional
 __cpp_lib_constexpr_iterator|iterator
 __cpp_lib_constexpr_memory|memory
 __cpp_lib_constexpr_numeric|numeric
-__cpp_lib_constexpr_string|string
 __cpp_lib_constexpr_string_view|string_view
+__cpp_lib_constexpr_string|string
 __cpp_lib_constexpr_tuple|tuple
 __cpp_lib_constexpr_typeinfo|typeinfo
 __cpp_lib_constexpr_utility|utility
@@ -79,23 +93,39 @@ __cpp_lib_exception_ptr_cast|exception
 __cpp_lib_exchange_function|utility
 __cpp_lib_execution|execution
 __cpp_lib_expected|expected
+__cpp_lib_filesystem|filesystem
 __cpp_lib_flat_map|flat_map
 __cpp_lib_flat_set|flat_set
 __cpp_lib_format_ranges|format
 __cpp_lib_format_uchar|format
+__cpp_lib_formatters|stacktrace,thread
+__cpp_lib_format|format
 __cpp_lib_forward_like|utility
+__cpp_lib_freestanding_algorithm|algorithm
+__cpp_lib_freestanding_array|array
+__cpp_lib_freestanding_char_traits|string
 __cpp_lib_freestanding_charconv|charconv
-__cpp_lib_fstream_native_handle|fstream
 __cpp_lib_freestanding_cstdlib|cstdlib,cmath
+__cpp_lib_freestanding_cstring|cstring
+__cpp_lib_freestanding_cwchar|cwchar
 __cpp_lib_freestanding_errc|cerrno,system_error
+__cpp_lib_freestanding_execution|execution
+__cpp_lib_freestanding_expected|expected
 __cpp_lib_freestanding_functional|functional
 __cpp_lib_freestanding_iterator|iterator
+__cpp_lib_freestanding_mdspan|mdspan
 __cpp_lib_freestanding_memory|memory
 __cpp_lib_freestanding_numeric|numeric
+__cpp_lib_freestanding_operator_new|new
+__cpp_lib_freestanding_optional|optional
+__cpp_lib_freestanding_random|random
 __cpp_lib_freestanding_ranges|ranges
 __cpp_lib_freestanding_ratio|ratio
+__cpp_lib_freestanding_string_view|string_view
 __cpp_lib_freestanding_tuple|tuple
 __cpp_lib_freestanding_utility|utility
+__cpp_lib_freestanding_variant|variant
+__cpp_lib_fstream_native_handle|fstream
 __cpp_lib_function_ref|functional
 __cpp_lib_gcd_lcm|numeric
 __cpp_lib_generator|generator
@@ -119,6 +149,7 @@ __cpp_lib_ios_noreplace|ios
 __cpp_lib_is_aggregate|type_traits
 __cpp_lib_is_constant_evaluated|type_traits
 __cpp_lib_is_final|type_traits
+__cpp_lib_is_implicit_lifetime|type_traits
 __cpp_lib_is_invocable|type_traits
 __cpp_lib_is_layout_compatible|type_traits
 __cpp_lib_is_nothrow_convertible|type_traits
@@ -153,8 +184,8 @@ __cpp_lib_optional|optional
 __cpp_lib_out_ptr|memory
 __cpp_lib_parallel_algorithm|algorithm,numeric
 __cpp_lib_philox_engine|random
-__cpp_lib_polymorphic|memory
 __cpp_lib_polymorphic_allocator|memory_resource
+__cpp_lib_polymorphic|memory
 __cpp_lib_print|print,ostream
 __cpp_lib_quoted_string_io|iomanip
 __cpp_lib_ranges_as_const|ranges
@@ -180,11 +211,13 @@ __cpp_lib_ranges_starts_ends_with|algorithm
 __cpp_lib_ranges_stride|ranges
 __cpp_lib_ranges_to_container|ranges
 __cpp_lib_ranges_zip|ranges,tuple,utility
+__cpp_lib_ranges|algorithm,functional,iterator,memory,ranges
 __cpp_lib_ratio|ratio
 __cpp_lib_raw_memory_algorithms|memory
 __cpp_lib_reference_from_temporary|type_traits
 __cpp_lib_reference_wrapper|functional
 __cpp_lib_remove_cvref|type_traits
+__cpp_lib_result_of_sfinae|functional,type_traits
 __cpp_lib_robust_nonmodifying_seq_ops|algorithm
 __cpp_lib_sample|algorithm
 __cpp_lib_saturation_arithmetic|numeric
@@ -198,9 +231,8 @@ __cpp_lib_shift|algorithm
 __cpp_lib_smart_ptr_for_overwrite|memory
 __cpp_lib_smart_ptr_owner_equality|memory
 __cpp_lib_source_location|source_location
-__cpp_lib_spans|span
-__cpp_lib_span|span
 __cpp_lib_spanstream|spanstream
+__cpp_lib_span|span
 __cpp_lib_ssize|iterator
 __cpp_lib_sstream_from_string_view|sstream
 __cpp_lib_stacktrace|stacktrace
@@ -213,8 +245,8 @@ __cpp_lib_string_contains|string,string_view
 __cpp_lib_string_resize_and_overwrite|string
 __cpp_lib_string_subview|string,string_view
 __cpp_lib_string_udls|string
-__cpp_lib_submdspan|mdspan
 __cpp_lib_string_view|string,string_view
+__cpp_lib_submdspan|mdspan
 __cpp_lib_syncbuf|iosfwd,syncstream
 __cpp_lib_three_way_comparison|compare
 __cpp_lib_to_address|memory

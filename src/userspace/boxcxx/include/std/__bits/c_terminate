@@ -1,0 +1,23 @@
+// boxcxx — <__bits/c_terminate>
+//
+// The termination functions of [support.start.term], factored out of
+// <cstdlib> so that the parts of the library that must END a process can say
+// so without pulling in the rest of <cstdlib> (its allocation, its conversion
+// and its sorting). Three callers do: <cassert>'s failure path, the Itanium
+// runtime's Panic, and <csignal>, where abort is actually defined —
+// [support.start.term]/9 specifies abort in terms of raise(SIGABRT), so the
+// definition belongs beside the disposition table rather than beside malloc.
+#ifndef BOXCXX_BITS_C_TERMINATE
+#define BOXCXX_BITS_C_TERMINATE
+
+namespace std {
+
+// Abnormal termination. No atexit callbacks, no static destructors, no
+// .fini_array. The console IS flushed first — [support.start.term]/9 leaves
+// that implementation-defined, and on a machine whose only witness is the
+// screen, a buffered last word is no word at all.
+[[noreturn]] void abort() noexcept;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_C_TERMINATE

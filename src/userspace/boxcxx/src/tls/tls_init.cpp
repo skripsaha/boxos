@@ -29,7 +29,7 @@
 #include "tls_mold.h"
 
 extern "C" {
-void *_malloc_impl(size_t size);
+void *malloc(size_t size);
 }
 
 namespace boxcxx {
@@ -62,7 +62,7 @@ extern "C" void __boxcxx_tls_bootstrap()
     const tls::Mold mold = tls::Take();
     const uint64_t total = mold.below_tcb + sizeof(TlsControlBlock);
 
-    void *raw = _malloc_impl(total + tls::kAlign);
+    void *raw = malloc(total + tls::kAlign);
     if (!raw) boxcxx::Panic("TLS bootstrap: heap exhausted");
 
     uintptr_t block = tls::AlignUp((uintptr_t)raw, tls::kAlign);

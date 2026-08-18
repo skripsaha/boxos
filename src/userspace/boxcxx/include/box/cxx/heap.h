@@ -171,7 +171,7 @@ inline error last_error() noexcept { return error{heap_get_last_error()}; }
 inline result<void *> allocate(std::size_t bytes)
 {
     if (bytes == 0) return std::unexpected(error{errc::invalid_argument});
-    void *p = ::_malloc_impl(bytes);
+    void *p = ::malloc(bytes);
     if (p) return p;
     ::error_t e = heap_get_last_error();
     return std::unexpected(error{e != OK ? e : static_cast<::error_t>(ERR_NO_MEMORY)});

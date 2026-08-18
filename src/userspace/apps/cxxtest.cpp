@@ -578,6 +578,16 @@
 #include <unwind.h>
 #include <vector>
 
+// ── Ф41: the C-compatibility headers ────────────────────────────────────
+// <cassert> is deliberately NOT here: it is the one header that must be
+// included more than once, and phase203 does that below, at global scope.
+#include <cctype>
+#include <cerrno>
+#include <cfloat>
+#include <climits>
+#include <csignal>
+#include <cstdarg>
+
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
 #include "box/cxx/brook.h"
@@ -608,6 +618,31 @@
 #include "box/cxx/timeouts.h"
 #include "box/cxx/timing.h"
 #include "box/cxx/touch.h"
+
+// ── Ф41 / phase203: <cassert> re-arms on every inclusion ────────────────
+// [assertions.assert]/1 says the macro is redefined according to the CURRENT
+// state of NDEBUG each time the header is included. That is a property of the
+// header having no include guard around the macro, and the only way to observe
+// it is to include it twice with NDEBUG changed in between — which has to
+// happen at global scope, before the anonymous namespace opens. The two
+// functions are the observation: with NDEBUG the expression must not be
+// evaluated at all, without it the expression must be evaluated exactly once.
+#define NDEBUG 1
+#include <cassert>
+static bool P203AssertDisabledDoesNotEvaluate()
+{
+    int n = 0;
+    assert(++n);          // must expand to nothing that touches n
+    return n == 0;
+}
+#undef NDEBUG
+#include <cassert>
+static bool P203AssertEnabledEvaluatesOnce()
+{
+    int n = 0;
+    assert(++n == 1);     // evaluated, true, and exactly once
+    return n == 1;
+}
 
 // A user-defined formatter (exercised in phase9b) — drives the type-erased
 // handle / FmtThunk path: the engine reaches it through a function pointer,
@@ -7708,7 +7743,7 @@ void Phase40()
 }
 
 // ── phase41: per-strand StrandPool malloc/free fast path (Ф20e) ─────────────────
-// The StrandPool layers a per-strand magazine cache under _malloc_impl/free so
+// The StrandPool layers a per-strand magazine cache under malloc/free so
 // concurrent malloc/free from many strands mostly skip the single global heap
 // lock — accelerating all C++ new/delete automatically. These checks are
 // host-invariant: A1 proves correctness (served block >= requested, tagged/oversize
@@ -7790,7 +7825,7 @@ void Phase41()
     }
 
     // realloc grow then shrink must preserve the existing bytes (auto-accelerated:
-    // realloc is unchanged and rides _malloc_impl/free).
+    // realloc is unchanged and rides malloc/free).
     {
         const std::size_t n0 = 64;
         auto *p = static_cast<unsigned char *>(malloc(n0));
@@ -7824,7 +7859,7 @@ void Phase41()
     {
         const char *kTag = "phase41:tagged";
         std::size_t before = heap_count_tag(kTag);
-        void *p = malloc(64, kTag);
+        void *p = malloc_tagged(64, kTag);
         Check(p != nullptr, "phase41 tagged alloc");
         Check(heap_count_tag(kTag) == before + 1,
               "phase41 tagged alloc bypasses cache (accounted live under its tag)");
@@ -7902,7 +7937,7 @@ void Phase41()
         uint64_t t1 = __builtin_ia32_rdtsc();
 
         for (int i = 0; i < M; i++) {
-            void *p = malloc(64, kBench);
+            void *p = malloc_tagged(64, kBench);
             if (p) free(p);
         }
         uint64_t t2 = __builtin_ia32_rdtsc();
@@ -36133,7 +36168,7 @@ void Phase142()
     // that is the reason for the stack buffer. It was written, and then measured
     // to be unable to fail: swapping the buffer for std::string left the suite
     // green. box::heap::counters() only counts what alloc_locked serves, and
-    // _malloc_impl serves everything up to 8192 bytes from a per-strand pool
+    // malloc serves everything up to 8192 bytes from a per-strand pool
     // that refills in batches — so a ~70-byte string allocated and freed in a
     // loop never moves malloc_calls at all. No counter reachable from userspace
     // sees it. The property holds by construction and by reading the code; it is
@@ -46022,6 +46057,368 @@ void Phase202()
     printf("[CXX] PASS phase202: the ExecutionPolicy overload set is complete\n");
 }
 
+// ── phase203 — Ф41-a: the C-compatibility foundation ────────────────────
+// <cassert> <cctype> <cerrno> <cfloat> <climits> <cstdarg> <csignal>, and the
+// termination contract underneath them.
+namespace p203 {
+
+// ── <cctype> ────────────────────────────────────────────────────────────
+// Not sampled: every value the contract admits is walked, and the answers are
+// checked two ways at once — the RELATIONS the standard fixes between the
+// predicates ([character.seq]) must hold at each value, and the COUNTS must
+// come out to what the "C" locale has. Either alone would pass a table that
+// was wrong in a self-consistent way.
+bool Ctype()
+{
+    int lower = 0, upper = 0, digit = 0, xdigit = 0, space = 0, blank = 0;
+    int cntrl = 0, printable = 0, graph = 0, punct = 0, alpha = 0, alnum = 0;
+
+    for (int c = 0; c <= 255; ++c) {
+        const bool is_lower = std::islower(c) != 0;
+        const bool is_upper = std::isupper(c) != 0;
+        const bool is_alpha = std::isalpha(c) != 0;
+        const bool is_digit = std::isdigit(c) != 0;
+        const bool is_alnum = std::isalnum(c) != 0;
+        const bool is_graph = std::isgraph(c) != 0;
+        const bool is_print = std::isprint(c) != 0;
+        const bool is_punct = std::ispunct(c) != 0;
+        const bool is_cntrl = std::iscntrl(c) != 0;
+        const bool is_space = std::isspace(c) != 0;
+
+        lower += is_lower; upper += is_upper; alpha += is_alpha;
+        digit += is_digit; alnum += is_alnum; graph += is_graph;
+        printable += is_print; punct += is_punct; cntrl += is_cntrl;
+        space += is_space;
+        xdigit += std::isxdigit(c) != 0;
+        blank  += std::isblank(c) != 0;
+
+        if (is_alnum != (is_alpha || is_digit)) return false;
+        if (is_punct != (is_graph && !is_alnum)) return false;
+        if (is_print != (is_graph || c == ' ')) return false;
+        if (is_alpha != (is_lower || is_upper)) return false;
+        if (is_alpha && is_lower == is_upper) return false;   // exactly one case
+        if (is_cntrl && is_print) return false;               // disjoint
+
+        // The conversions return the argument UNCHANGED where there is no
+        // counterpart — the property that makes tolower(c) safe to apply to
+        // anything at all.
+        if (is_lower && std::toupper(c) != c - 'a' + 'A') return false;
+        if (is_upper && std::tolower(c) != c - 'A' + 'a') return false;
+        if (!is_alpha && (std::tolower(c) != c || std::toupper(c) != c)) return false;
+
+        // Above 127 the "C" locale has nothing at all.
+        if (c > 127 && (is_alnum || is_print || is_cntrl || is_space || is_graph))
+            return false;
+    }
+
+    return lower == 26 && upper == 26 && alpha == 52 && digit == 10 &&
+           alnum == 62 && xdigit == 22 && space == 6 && blank == 2 &&
+           cntrl == 33 && printable == 95 && graph == 94 && punct == 32;
+}
+
+// The other half of the contract: the argument may be EOF, and every answer
+// has to be defined there. EOF itself is <cstdio>'s macro and that header does
+// not exist yet, so its value is written out; when <cstdio> arrives this is
+// what its EOF has to equal.
+bool CtypeAtEof()
+{
+    const int eof = -1;
+    return !std::isalnum(eof) && !std::isalpha(eof) && !std::isblank(eof) &&
+           !std::iscntrl(eof) && !std::isdigit(eof) && !std::isgraph(eof) &&
+           !std::islower(eof) && !std::isprint(eof) && !std::ispunct(eof) &&
+           !std::isspace(eof) && !std::isupper(eof) && !std::isxdigit(eof) &&
+           std::tolower(eof) == eof && std::toupper(eof) == eof;
+}
+
+// ── <cerrno> ────────────────────────────────────────────────────────────
+// Every macro against the std::errc enumerator it names. This is the check
+// neither reference implementation can make: theirs come from a libc they do
+// not compile against, so the two lists can drift and only a runtime
+// error_code comparison would notice. Here both halves are in the tree.
+#define P203_ERRNO_IS(MACRO, ENUMERATOR)                                       \
+    static_assert(MACRO == static_cast<int>(std::errc::ENUMERATOR),            \
+                  "phase203 " #MACRO " must equal std::errc::" #ENUMERATOR)
+
+P203_ERRNO_IS(EDOM,   argument_out_of_domain);
+P203_ERRNO_IS(ERANGE, result_out_of_range);
+P203_ERRNO_IS(EILSEQ, illegal_byte_sequence);
+P203_ERRNO_IS(EPERM,  operation_not_permitted);
+P203_ERRNO_IS(ENOENT, no_such_file_or_directory);
+P203_ERRNO_IS(ESRCH,  no_such_process);
+P203_ERRNO_IS(EINTR,  interrupted);
+P203_ERRNO_IS(EIO,    io_error);
+P203_ERRNO_IS(ENXIO,  no_such_device_or_address);
+P203_ERRNO_IS(E2BIG,  argument_list_too_long);
+P203_ERRNO_IS(ENOEXEC, executable_format_error);
+P203_ERRNO_IS(EBADF,  bad_file_descriptor);
+P203_ERRNO_IS(ECHILD, no_child_process);
+P203_ERRNO_IS(EAGAIN, resource_unavailable_try_again);
+P203_ERRNO_IS(EWOULDBLOCK, operation_would_block);
+P203_ERRNO_IS(ENOMEM, not_enough_memory);
+P203_ERRNO_IS(EACCES, permission_denied);
+P203_ERRNO_IS(EFAULT, bad_address);
+P203_ERRNO_IS(EBUSY,  device_or_resource_busy);
+P203_ERRNO_IS(EEXIST, file_exists);
+P203_ERRNO_IS(EXDEV,  cross_device_link);
+P203_ERRNO_IS(ENODEV, no_such_device);
+P203_ERRNO_IS(ENOTDIR, not_a_directory);
+P203_ERRNO_IS(EISDIR, is_a_directory);
+P203_ERRNO_IS(EINVAL, invalid_argument);
+P203_ERRNO_IS(ENFILE, too_many_files_open_in_system);
+P203_ERRNO_IS(EMFILE, too_many_files_open);
+P203_ERRNO_IS(ENOTTY, inappropriate_io_control_operation);
+P203_ERRNO_IS(ETXTBSY, text_file_busy);
+P203_ERRNO_IS(EFBIG,  file_too_large);
+P203_ERRNO_IS(ENOSPC, no_space_on_device);
+P203_ERRNO_IS(ESPIPE, invalid_seek);
+P203_ERRNO_IS(EROFS,  read_only_file_system);
+P203_ERRNO_IS(EMLINK, too_many_links);
+P203_ERRNO_IS(EPIPE,  broken_pipe);
+P203_ERRNO_IS(EDEADLK, resource_deadlock_would_occur);
+P203_ERRNO_IS(ENAMETOOLONG, filename_too_long);
+P203_ERRNO_IS(ENOLCK, no_lock_available);
+P203_ERRNO_IS(ENOSYS, function_not_supported);
+P203_ERRNO_IS(ENOTEMPTY, directory_not_empty);
+P203_ERRNO_IS(ELOOP,  too_many_symbolic_link_levels);
+P203_ERRNO_IS(ENOMSG, no_message);
+P203_ERRNO_IS(EIDRM,  identifier_removed);
+P203_ERRNO_IS(ENOSTR, not_a_stream);
+P203_ERRNO_IS(ENODATA, no_message_available);
+P203_ERRNO_IS(ETIME,  stream_timeout);
+P203_ERRNO_IS(ENOSR,  no_stream_resources);
+P203_ERRNO_IS(ENOLINK, no_link);
+P203_ERRNO_IS(EPROTO, protocol_error);
+P203_ERRNO_IS(EBADMSG, bad_message);
+P203_ERRNO_IS(EOVERFLOW, value_too_large);
+P203_ERRNO_IS(ENOTSOCK, not_a_socket);
+P203_ERRNO_IS(EDESTADDRREQ, destination_address_required);
+P203_ERRNO_IS(EMSGSIZE, message_size);
+P203_ERRNO_IS(EPROTOTYPE, wrong_protocol_type);
+P203_ERRNO_IS(ENOPROTOOPT, no_protocol_option);
+P203_ERRNO_IS(EPROTONOSUPPORT, protocol_not_supported);
+P203_ERRNO_IS(ENOTSUP, not_supported);
+P203_ERRNO_IS(EOPNOTSUPP, operation_not_supported);
+P203_ERRNO_IS(EAFNOSUPPORT, address_family_not_supported);
+P203_ERRNO_IS(EADDRINUSE, address_in_use);
+P203_ERRNO_IS(EADDRNOTAVAIL, address_not_available);
+P203_ERRNO_IS(ENETDOWN, network_down);
+P203_ERRNO_IS(ENETUNREACH, network_unreachable);
+P203_ERRNO_IS(ENETRESET, network_reset);
+P203_ERRNO_IS(ECONNABORTED, connection_aborted);
+P203_ERRNO_IS(ECONNRESET, connection_reset);
+P203_ERRNO_IS(ENOBUFS, no_buffer_space);
+P203_ERRNO_IS(EISCONN, already_connected);
+P203_ERRNO_IS(ENOTCONN, not_connected);
+P203_ERRNO_IS(ETIMEDOUT, timed_out);
+P203_ERRNO_IS(ECONNREFUSED, connection_refused);
+P203_ERRNO_IS(EHOSTUNREACH, host_unreachable);
+P203_ERRNO_IS(EALREADY, connection_already_in_progress);
+P203_ERRNO_IS(EINPROGRESS, operation_in_progress);
+P203_ERRNO_IS(ECANCELED, operation_canceled);
+P203_ERRNO_IS(EOWNERDEAD, owner_dead);
+P203_ERRNO_IS(ENOTRECOVERABLE, state_not_recoverable);
+#undef P203_ERRNO_IS
+
+// [errno] has required thread-local storage duration since C++11, and on a
+// system whose whole point is that several strands share a cabin that is not
+// a formality: two strands parsing two strings must not overwrite each other's
+// failure. The fresh strand must also START at zero, which is what .tbss buys.
+bool ErrnoIsPerStrand()
+{
+    errno = EDOM;
+    int child_start = -1;
+    int child_after = -1;
+    std::thread t([&] {
+        child_start = errno;
+        errno       = ERANGE;
+        child_after = errno;
+    });
+    t.join();
+    return child_start == 0 && child_after == ERANGE && errno == EDOM;
+}
+
+// [syserr.errcat.objects]/2 — the generic category's values ARE the errno
+// values, which is only true because the two lists above agree.
+bool ErrnoMeetsErrorCode()
+{
+    const std::error_code ec(EDOM, std::generic_category());
+    if (ec != std::errc::argument_out_of_domain) return false;
+    const std::error_condition cond = std::generic_category().default_error_condition(ERANGE);
+    return cond.value() == ERANGE && cond == std::errc::result_out_of_range;
+}
+
+// ── <cfloat> / <climits> against <limits> ───────────────────────────────
+// Two independently written descriptions of the same target: the compiler's
+// macros and boxcxx's numeric_limits. A disagreement means one of them is
+// describing a machine this code is not running on.
+static_assert(CHAR_BIT == 8);
+static_assert(MB_LEN_MAX == 1, "phase203 the freestanding multibyte width");
+static_assert(SCHAR_MIN == std::numeric_limits<signed char>::min());
+static_assert(SCHAR_MAX == std::numeric_limits<signed char>::max());
+static_assert(UCHAR_MAX == std::numeric_limits<unsigned char>::max());
+static_assert(SHRT_MIN == std::numeric_limits<short>::min());
+static_assert(SHRT_MAX == std::numeric_limits<short>::max());
+static_assert(USHRT_MAX == std::numeric_limits<unsigned short>::max());
+static_assert(INT_MIN == std::numeric_limits<int>::min());
+static_assert(INT_MAX == std::numeric_limits<int>::max());
+static_assert(UINT_MAX == std::numeric_limits<unsigned>::max());
+static_assert(LONG_MIN == std::numeric_limits<long>::min());
+static_assert(LONG_MAX == std::numeric_limits<long>::max());
+static_assert(ULONG_MAX == std::numeric_limits<unsigned long>::max());
+static_assert(LLONG_MIN == std::numeric_limits<long long>::min());
+static_assert(LLONG_MAX == std::numeric_limits<long long>::max());
+static_assert(ULLONG_MAX == std::numeric_limits<unsigned long long>::max());
+
+static_assert(FLT_RADIX == std::numeric_limits<double>::radix);
+static_assert(FLT_MANT_DIG == std::numeric_limits<float>::digits);
+static_assert(DBL_MANT_DIG == std::numeric_limits<double>::digits);
+static_assert(LDBL_MANT_DIG == std::numeric_limits<long double>::digits);
+static_assert(LDBL_MANT_DIG == 64, "phase203 x87 80-bit long double (Ф27)");
+static_assert(FLT_DIG == std::numeric_limits<float>::digits10);
+static_assert(DBL_DIG == std::numeric_limits<double>::digits10);
+static_assert(DBL_MAX_EXP == std::numeric_limits<double>::max_exponent);
+static_assert(DBL_MIN_EXP == std::numeric_limits<double>::min_exponent);
+static_assert(DBL_MAX == std::numeric_limits<double>::max());
+static_assert(DBL_MIN == std::numeric_limits<double>::min());
+static_assert(DBL_EPSILON == std::numeric_limits<double>::epsilon());
+static_assert(DECIMAL_DIG >= LDBL_DIG);
+
+// ── <cstdarg> ───────────────────────────────────────────────────────────
+static_assert(std::is_same_v<std::va_list, ::va_list>,
+              "phase203 std::va_list must name the type the macros walk");
+
+// The point of the two walks is va_copy: on x86-64 SysV a va_list is a
+// register-save-area cursor, so a copy that aliased the original would give
+// the same sum by accident on the first walk and garbage on the second.
+int SumTwice(int count, ...)
+{
+    std::va_list ap;
+    std::va_list copy;
+    va_start(ap, count);
+    va_copy(copy, ap);
+
+    int first = 0;
+    for (int i = 0; i < count; ++i) first += va_arg(ap, int);
+    int second = 0;
+    for (int i = 0; i < count; ++i) second += va_arg(copy, int);
+
+    va_end(copy);
+    va_end(ap);
+    return first == second ? first : -1;
+}
+
+bool Varargs()
+{
+    // Ten arguments: six integer registers, then the overflow area, so the
+    // copy has to carry both halves of the cursor.
+    return SumTwice(10, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55 &&
+           SumTwice(0) == 0;
+}
+
+// ── <csignal> ───────────────────────────────────────────────────────────
+static_assert(SIGINT == 2 && SIGILL == 4 && SIGABRT == 6 && SIGFPE == 8 &&
+              SIGSEGV == 11 && SIGTERM == 15,
+              "phase203 the signal numbers boxcxx picked, pinned");
+static_assert(std::is_integral_v<std::sig_atomic_t>);
+
+volatile std::sig_atomic_t g_signal_hits = 0;
+
+extern "C" void P203SignalHandler(int sig)
+{
+    if (sig == SIGABRT) g_signal_hits = g_signal_hits + 1;
+}
+
+bool Signals()
+{
+    // The disposition every signal starts at.
+    if (std::signal(SIGABRT, P203SignalHandler) != SIG_DFL) return false;
+
+    g_signal_hits = 0;
+    if (std::raise(SIGABRT) != 0) return false;
+    if (g_signal_hits != 1) return false;      // delivered here, and raise returned
+
+    // Installing returns the PREVIOUS disposition — and it is not reset by a
+    // delivery, which is the choice this implementation made and documents.
+    if (std::signal(SIGABRT, SIG_IGN) != P203SignalHandler) return false;
+    if (std::raise(SIGABRT) != 0) return false;
+    if (g_signal_hits != 1) return false;      // ignored: no call, and no death
+
+    // A number this implementation does not have is refused by both, and
+    // refusing must not disturb anything.
+    if (std::signal(9, P203SignalHandler) != SIG_ERR) return false;
+    if (std::raise(9) == 0) return false;
+    if (std::signal(SIGABRT, SIG_ERR) != SIG_ERR) return false;
+
+    // Restore the default — a later real abort must not land in the handler.
+    return std::signal(SIGABRT, SIG_DFL) == SIG_IGN;
+}
+
+// ── the termination contract, witnessed from outside ────────────────────
+// exit() runs the __cxa_finalize callbacks and the .fini_array; abort() runs
+// neither. No process can watch its own teardown, so the child does it: its
+// static destructor calls _Exit(77), a status nothing else in the program can
+// produce. 77 means teardown ran, 134 (128 + SIGABRT) means it did not.
+bool WriteChildMode(const char *mode)
+{
+    std::ofstream out("exitmode");        // ios_base::out truncates (Ф36)
+    if (!out) return false;
+    out << mode << '\n';
+    out.flush();
+    return out.good();
+}
+
+// Runs the child in `mode` and returns its exit status, or a negative marker
+// for a fixture failure so a broken fixture can never look like a pass.
+int RunChild(const char *mode)
+{
+    if (!WriteChildMode(mode)) return -2;
+    box::result<box::child> c = box::child::spawn("exitpaths");
+    if (!c) return -3;
+    box::result<int> status = c->wait();
+    if (!status) return -4;
+    return *status;
+}
+
+} // namespace p203
+
+void Phase203()
+{
+    Check(p203::Ctype(), "phase203 <cctype> relations and counts over every value");
+    Check(p203::CtypeAtEof(), "phase203 <cctype> at EOF");
+
+    Check(p203::ErrnoIsPerStrand(), "phase203 errno is per-strand and starts at zero");
+    Check(p203::ErrnoMeetsErrorCode(), "phase203 the errno macros ARE the generic category");
+
+    Check(p203::Varargs(), "phase203 <cstdarg> va_copy walks the same arguments twice");
+    Check(P203AssertDisabledDoesNotEvaluate(),
+          "phase203 <cassert> with NDEBUG does not evaluate the expression");
+    Check(P203AssertEnabledEvaluatesOnce(),
+          "phase203 <cassert> re-armed on the second inclusion");
+
+    Check(p203::Signals(), "phase203 <csignal> install/deliver/ignore/refuse");
+
+    // The child half. As in phase58, an unavailable spawn is reported and
+    // skipped rather than failed — but the FIXTURE failures (-2/-3/-4) are
+    // never treated as a pass.
+    {
+        int normal = p203::RunChild("normal");
+        if (normal == -3) {
+            printf("[CXX] note phase203: proc_exec unavailable; teardown witness skipped\n");
+        } else {
+            Check(normal == 77,
+                  "phase203 returning from main RUNS teardown (child exits 77)");
+            Check(p203::RunChild("throw") == 134,
+                  "phase203 an uncaught exception runs NO teardown (child exits 134)");
+            Check(p203::RunChild("raise") == 134,
+                  "phase203 raise(SIGABRT) at SIG_DFL runs NO teardown (child exits 134)");
+            Check(p203::RunChild("assert") == 134,
+                  "phase203 a failed assert ends the process even with SIGABRT ignored");
+        }
+    }
+
+    printf("[CXX] PASS phase203: the C-compatibility foundation, and what ends a process\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -46246,6 +46643,7 @@ int main()
     Phase200();
     Phase201();
     Phase202();
+    Phase203();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

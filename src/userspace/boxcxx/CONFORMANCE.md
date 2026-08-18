@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **89** — 85 of C++23 (20 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 131 |
-| Header source | ~92 800 lines |
+| Standard headers provided | **96** — 91 of the 105 C++23 [headers] name (14 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 132 |
+| Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 217 phases (198 of them the numbered `PhaseN` series), 5 469 runtime checks, 1 867 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 218 phases (199 of them the numbered `PhaseN` series), 5 481 runtime checks, 1 908 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -96,23 +96,61 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (20)
+## 1.1 Headers that do not exist (14)
 
-82 of the C++23 headers are provided and 23 are absent, which accounts for the
-whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
-headers are provided on top of that — `<inplace_vector>` (§2), `<debugging>`
-(§2), `<stdbit.h>` and `<stdckdint.h>` (§2) — so the tree holds 86 standard
-headers in all.
+**These counts are now derived, not maintained by hand.** The two tables of
+[headers] name 105 headers in C++23; 91 of them are in the tree and 14 are not,
+which accounts for the whole list apart from the deprecated `<codecvt>`. Five
+more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
+those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 91 + 5 = the 96 files in
+`include/std`.
 
-### C library wrappers — 17
+Deriving them found something a hand-maintained list had been hiding since the
+document was written: **`<ctime>` was in neither column.** It was not listed as
+absent and it was not in the tree; it simply never appeared, and the totals
+still added up because they were adjusted to each other rather than to the
+standard. It is absent, it is listed below, and the count above is now the
+output of a diff between [headers] and `ls include/std`.
 
-`<cassert>` `<cctype>` `<cerrno>` `<cfenv>` `<cfloat>` `<cinttypes>`
-`<climits>` `<clocale>` `<csetjmp>` `<csignal>` `<cstdarg>` `<cstdio>`
-`<cstdlib>` `<cstring>` `<cuchar>` `<cwchar>` `<cwctype>`
+### C library wrappers — 11 absent, 10 provided
 
-BoxOS has no libc. Userspace links `boxlib`, the native BoxOS library, whose
-vocabulary is Manifests, Crates, Touch and TagFS rather than POSIX. A `<cstdio>`
-would have to invent a `FILE*` that nothing below it implements.
+Absent: `<cfenv>` `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<cstdlib>`
+`<cstring>` `<ctime>` `<cuchar>` `<cwchar>` `<cwctype>`
+
+Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
+`<cstdarg>` `<csignal>` (§2).
+
+**The entry here used to name all seventeen and give one reason for all of
+them — "BoxOS has no libc" — and that reason was doing two different jobs.**
+It is true, and it says something real about `<cstdio>`, which needs a `FILE*`
+that nothing below it implements. It says nothing at all about `<cctype>`,
+whose fourteen functions are the classification of the only locale that exists;
+about `<cfloat>` and `<climits>`, which are the compiler's own macros; about
+`<cstdarg>`, whose contents only the compiler can provide in the first place;
+or about `<cassert>` and `<csignal>`, which are two dozen lines over a
+termination path the runtime already had to have. Seven headers were absent
+because of a sentence about the eighth.
+
+What each of the seven turned out to rest on is in §2. Two of them cost more
+than they looked: `<climits>` cannot be the one-line wrapper `<cfloat>` is
+(the compiler's `<limits.h>` withholds the long long limits from C++), and
+`<csignal>` is the reason `std::abort` exists at all here — which is the reason
+the library's fatal path stopped running teardown on the way out (§2
+`<csignal>`).
+
+Userspace links `boxlib`, the native BoxOS library, whose vocabulary is
+Manifests, Crates, Touch and TagFS rather than POSIX. That remains the shape of
+everything underneath these headers: `<cerrno>`'s `errno` is a C contract and
+not a BoxOS one, and nothing in boxlib or `box::` will ever set it (§2
+`<cerrno>`).
+
+`<cwchar>` and `<cwctype>` are absent for a different reason than the rest of
+that list: they belong to the wide-character exclusion of §1.2, not to the
+libc question. `<cwchar>` carries an entire second formatted-I/O engine and
+`<cwctype>` carries `wctype`/`wctrans`, which are locales. If the wide layer is
+ever built it will be built as one piece, with `wcout` and `wformat`, and those
+two headers come with it.
 
 `<stdatomic.h>` used to be listed here as absent. It is **provided** as of Ф34:
 it is a pure using-declaration header over `<atomic>`, so `_Atomic(T)` means
@@ -123,11 +161,21 @@ aliases, which [atomics.syn] has listed since C++11 and `<atomic>` never had.
 The two C23 headers C++26 adopts, `<stdbit.h>` and `<stdckdint.h>`, are
 provided for the same reason and on the same terms (§2).
 
-Two of the C wrappers **are** provided — `<cstddef>` and `<cstdint>` — because
-they are pure type and macro headers with no runtime behind them. Independently,
-the compiler's own freestanding C headers remain available and are used by the
-library itself: `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`,
-`<float.h>` come from GCC, not from a libc, and resolve normally.
+`<cstddef>` and `<cstdint>` were provided long before Ф41, because they are pure
+type and macro headers with no runtime behind them, and `<cmath>` since Ф10; ten
+of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
+freestanding C headers remain available and are used by the library itself:
+`<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`, `<float.h>` come from
+GCC, not from a libc, and resolve normally — with one measured hole, recorded
+in §2 `<climits>`, where the compiler's header is deliberately C-only.
+
+**The `<name.h>` forms are not provided.** [depr.c.headers] keeps `<string.h>`,
+`<stdlib.h>` and the rest as deprecated compatibility headers that put their
+names in the global namespace; boxcxx ships only the `<cX>` spellings. The
+names still reach the global namespace — every `<cX>` header here declares them
+in `std` and then makes them visible unqualified, which [headers]/5 explicitly
+leaves free — so ported code that calls `isdigit(c)` compiles; code that
+`#include <ctype.h>` does not.
 
 ### Excluded by decision — 3
 
@@ -250,6 +298,11 @@ and line — is recorded there.
   `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts.
   Every class template involved is still generic in `CharT`, so the exclusion
   is a decision about what is shipped and tested, not a structural block.
+  Ф41 drew one more line into this bullet rather than into the libc question:
+  `<cwchar>` and `<cwctype>` are absent **because of this exclusion**. The first
+  carries an entire second formatted-I/O engine (`fwprintf`, `fgetwc`, …) and
+  the second carries `wctype`/`wctrans`, which are locales. If the wide layer is
+  ever built, those two headers arrive with `wcout` and `wformat`, as one piece.
 - **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
   machinery needs. The `L` format specifier is accepted and ignored.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
@@ -257,8 +310,14 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **201** `__cpp_lib_*` macros. Two properties were verified across
-the whole set, not sampled:
+boxcxx defines **209** `__cpp_lib_*` macros. Two properties were verified across
+the whole set, not sampled.
+
+> This section said **201** until Ф41, and the number at the top of the document
+> said 209 in the same breath, because Ф40 updated the summary table and not the
+> prose. Every count below is now the output of the audit script rather than a
+> figure carried forward by hand — the same correction §1.1 needed, for the same
+> reason.
 
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
@@ -268,9 +327,20 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 206 macros × 86 headers by
+  checked over the full cross-product of 209 macros × 96 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
+
+  **That transcription had seven holes, and Ф41 found them by diffing it
+  against [version.syn] rather than reading it.** `__cpp_lib_chrono`,
+  `filesystem`, `format`, `formatters`, `is_implicit_lifetime`, `ranges` and
+  `result_of_sfinae` were simply not in the file. No false green came of it —
+  the audit skips macros boxcxx does not define, and boxcxx defines none of the
+  seven — but the gap was a trap armed for the day any one of them is defined,
+  at which point its ownership would have gone unchecked in silence. The one
+  macro still absent from the file, `__cpp_lib_modules`, is absent on purpose:
+  [version.syn] gives it no "also in" list at all, so `<version>` is its only
+  owner and there is nothing for the file to say.
 
   This entry used to claim the same thing without the tool, on the strength of
   one hand-check. **By Ф32-i it was false**: `__cpp_lib_nonmember_container_access`
@@ -317,9 +387,25 @@ the whole set, not sampled:
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-**14 of the macros [version.syn] names are not defined**, and `<version>` lists
-every one by name with its specific reason — that list, not this section, is the authoritative
-backlog. The governing rule is that a macro is defined only when the feature
+**39 of the 248 macros [version.syn] names are not defined** — measured as a
+set difference between the transcription and what a translation unit including
+only `<version>` reports, not counted by hand. They divide cleanly:
+
+| Why undefined | Count | Which |
+|---|---|---|
+| freestanding-subset markers: not features, an unrun [compliance] audit | 26 | all 25 `__cpp_lib_freestanding_*` plus `__cpp_lib_ratio` |
+| whole-clause requirements relaxations, unprovable by inspection | 2 | `ranges`, `algorithm_iterator_requirements` |
+| the feature is excluded or absent here | 9 | `filesystem`, `char8_t`, `chrono`, `format`, `formatters`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+| C++26 draft additions no implementation has | 2 | `initializer_list` (202511L), `ranges_generate_random` (202403L) |
+
+That first row is the interesting one, and Ф41 is why it is a row at all: the
+transcription had **eleven** of the twenty-five freestanding markers, and
+`<version>`'s backlog had none of them. The library is built freestanding —
+`-ffreestanding -nostdlib`, no libc under it — and is very likely entitled to
+most of them; entitled is not audited, and the audit is against [compliance],
+per header. The last row is measured too: neither libstdc++ 16.1 nor libc++ 22
+defines either macro at any `-std` they accept. The governing rule is that a
+macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
 checking that the headline function exists. That has two consequences worth
 stating plainly:
@@ -333,17 +419,15 @@ stating plainly:
 - In exchange, a defined macro can be trusted. boxcxx never advertises a feature it
   only partly has.
 
-Of those, the largest single group is the freestanding-subset markers
-(`__cpp_lib_freestanding_*`): they do not name a feature at all but an
-assertion that a header meets the standard's freestanding subset, which is a
-separate audit against [compliance] and has not been done. `__cpp_lib_ratio`
-and `__cpp_lib_out_ptr`'s C++26 value are held back for the same reason. The
-rest belong to features whose owning header does not exist (`execution`,
-`filesystem`) or to
-whole-clause requirements relaxations (`__cpp_lib_ranges`,
-`__cpp_lib_algorithm_iterator_requirements`). The in-tree suite pins the absences
-as well as the values, so a macro cannot quietly appear — and when one is closed,
-the guard fires and forces the pin to be flipped in the same commit.
+`__cpp_lib_out_ptr`'s C++26 value is held back on the freestanding rule as well
+— the paper that raises it is a freestanding one. Only one macro is now
+undefined because its header is missing (`filesystem`); `execution` left that
+category in Ф40, when the header was built. The in-tree suite pins the absences
+as well as the values, so a macro cannot quietly appear — and when one is
+closed, the guard fires and forces the pin to be flipped in the same commit.
+Since Ф41 the audit script also refuses to run past a macro boxcxx defines that
+the ownership map does not know, which is how a hole in the map stops being
+invisible.
 
 **On pinning C++23 rather than "latest".** Under `-std=c++23` the reference
 libraries each report at least one post-N4950 value; boxcxx reports what C++23
@@ -613,6 +697,86 @@ nothing has been found since.
   meeting rather than the value the standard settled on. libc++ agrees with the
   draft; measured on both.
 
+## `<cassert>`
+
+The only header in the library with **no include guard around what it
+defines**, and that is the specification rather than an oversight:
+[assertions.assert]/1 redefines `assert` according to the current state of
+`NDEBUG` on *every* inclusion, so a translation unit may switch `NDEBUG` and
+include the header again to get the other behaviour. A guard would freeze
+whichever state came first. Phase203 is the only test in the suite that
+includes a header twice on purpose, and it observes both halves: with `NDEBUG`
+the expression must not be evaluated at all, without it exactly once.
+
+- **One parameter, as the standard writes it.** A variadic form would silently
+  accept `assert()` and `assert(a, b)`, which are ill-formed programs. Both
+  reference implementations take one parameter too, so — here as there — a
+  template argument list needs its own parentheses: `assert((is_same_v<A,B>))`.
+- **The diagnostic goes to the screen, not the serial log**, on two lines: the
+  expression, then file, line and function. Same call Ф36 made for `std::cerr`,
+  for the same reason — on a machine with no cable attached, a diagnostic that
+  only reaches the serial port is one nobody sees. The format is
+  implementation-defined and this one is not glibc's.
+- **Failure ends the process through `std::abort`**, so no `atexit` callback
+  and no static destructor runs. See `<csignal>` for why that sentence was not
+  true of anything in boxcxx before Ф41.
+
+## `<cctype>`
+
+Fourteen functions, all decided by the current C locale — and there is exactly
+one, `"C"` (§1.2). So the answers are not a table loaded from anywhere: they are
+the classification the standard fixes for that locale, written out as range
+tests. Nothing can invalidate them at run time and there is no table pointer to
+follow.
+
+- **Not constexpr**, deliberately: [constexpr.functions]/1 forbids an
+  implementation from adding `constexpr` to a standard library signature where
+  the standard does not, and the standard does not for these. Same rule that
+  keeps `hash<vector<bool>>` non-constexpr (§2 `<vector>`).
+- Every value from `0` to `255` and `EOF` answers *something* defined: the
+  predicates are ranges, so `EOF` (−1) matches none of them, and `tolower`/
+  `toupper` return their argument unchanged wherever there is no counterpart —
+  which is what makes folding a `getchar()` result safe. Above 127 the `"C"`
+  locale has nothing at all, and every predicate says so.
+- The names are visible unqualified as well as in `std`, which [headers]/5
+  leaves free and both reference implementations also do.
+
+## `<cerrno>`
+
+**BoxOS has no errno register, and this header does not give it one.** That
+idiom is deliberately absent from every BoxOS interface — boxlib returns an
+`error_t` from the call that failed, `box::error` carries it in C++, and
+`box/bay.h`, `box/brook.h` and `box/error.h` each say so in as many words.
+Nothing on that path touches the object this header defines, and nothing will.
+
+What the header is, then, is the C standard library's contract and only that:
+[cerrno.syn] requires a thread-local modifiable `int` lvalue named `errno`, and
+the C functions boxcxx provides (the `strto*` family, and the math functions on
+the paths where they choose to) are specified to set it. `errno = 0; x =
+strtod(s, &e); if (errno == ERANGE)` is correct C and has to work.
+
+- **`errno` is `thread_local`, as [errno] has required since C++11**, and on a
+  system whose whole point is that several strands share a cabin that is not a
+  formality. A fresh strand's `errno` starts at zero, which is what `.tbss`
+  buys; phase203 pins both properties from a second strand.
+- **The macro values are the `std::errc` enumerator values**, and phase203
+  static_asserts every single pair. That check is available here and not in
+  either reference implementation: theirs come from a libc they do not compile
+  against, so the two lists can drift and only a runtime `error_code`
+  comparison would notice. Both halves are in this tree.
+- The macro set is **exactly** the names `std::errc` has. There is no `EDQUOT`,
+  no `ENOTBLK`, no `EUSERS`: a macro naming a condition nothing here can report
+  would be an invitation to write a comparison that never comes true.
+
+## `<cfloat>`
+
+[cfloat.syn] says the contents are those of `<float.h>`, and the compiler's
+freestanding `<float.h>` is complete for it — measured against the whole
+[cfloat.syn] list, including `DECIMAL_DIG`, `FLT_EVAL_METHOD`, the
+`*_HAS_SUBNORM`, `*_TRUE_MIN` and `*_DECIMAL_DIG` families and `FLT_ROUNDS`.
+So this header is one `#include` and no deviations. Its neighbour `<climits>`
+looks identical and is not; see there.
+
 ## `<charconv>`
 
 - `~` `__int128` and `unsigned __int128` are deliberately unsupported. The standard
@@ -653,6 +817,31 @@ nothing has been found since.
   unspecified, and the three implementations genuinely differ.
   `year_month_weekday` resolves all date fields through `sys_days` while taking the
   validity of `%b`/`%a` from the stored month and weekday.
+
+## `<climits>`
+
+The header that looks like `<cfloat>` and is not. GCC's `<limits.h>` gates the
+three long long macros on
+
+```c
+#if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+```
+
+— a condition no C++ translation unit ever meets, because `__STDC_VERSION__` is
+a C macro. So the compiler's freestanding header is **missing `LLONG_MIN`,
+`LLONG_MAX` and `ULLONG_MAX` in C++**, all three of which [climits.syn]
+requires. boxcxx supplies them from the compiler's own `__LONG_LONG_MAX__`, so
+they cannot describe a different target than the rest of the header.
+
+Measured against the entire [climits.syn] list, those three are the only ones
+missing; `MB_LEN_MAX`, `CHAR_MIN` and the rest are all present. This was found
+the way such things are found here — by writing the static_asserts in phase203
+that compare every macro against `std::numeric_limits`, and watching the build
+stop.
+
+**One measured number worth carrying forward:** `MB_LEN_MAX` is **1**. Whatever
+the multibyte functions of `<cstdlib>` and `<cuchar>` do when those headers are
+built, they answer to that.
 
 ## `<cmath>`
 
@@ -731,6 +920,70 @@ nothing has been found since.
   public member with a reserved name, for the same reason libstdc++'s
   `__get_part` is: a free function template cannot be befriended without
   repeating `complex`'s own requires-clause on every declaration.
+
+## `<csignal>`
+
+**Nothing in BoxOS ever raises a signal at your process.** There is no
+asynchronous delivery here, by decision and not by omission: BoxOS already has
+an event vocabulary — Touch, a tag-multicast event with a named subscriber,
+delivered where the subscriber asked for it — and mapping the CPU's faults onto
+handler callbacks would have built a second, older, worse one beside it. The
+alternative was offered and declined when this header was planned.
+
+That does not make the header a stub, and the distinction is the standard's,
+not a convenience: [support.signal] never requires an implementation to raise a
+signal on its own. It specifies `signal` (install), `raise` (deliver, on this
+strand, now) and what the two default dispositions mean, and all of that is
+real here.
+
+- **Six signals** — `SIGINT` 2, `SIGILL` 4, `SIGABRT` 6, `SIGFPE` 8, `SIGSEGV`
+  11, `SIGTERM` 15 — and no more. A `SIGKILL` or `SIGPIPE` would name a concept
+  BoxOS does not have. The numbers follow the same de-facto convention
+  `<__bits/errc>` uses for its values, so a number a ported program already
+  wrote down means what it means elsewhere.
+- **A default-disposition death exits with 128 + signal**, which is the status
+  convention boxcxx already used before this header existed.
+- **The disposition is not reset to `SIG_DFL` when a handler runs.** C leaves
+  that to the implementation; a handler obliged to reinstall itself after every
+  delivery races any other strand raising the same signal in the window.
+- The table is one per process and every slot is atomic: signals are always
+  delivered by the strand that raises them, but two strands may install and
+  raise concurrently, and `raise` reads its slot exactly once so the decision
+  and the call cannot come from different answers.
+
+**`std::abort` is defined here**, because [support.start.term]/9 specifies it in
+terms of `raise(SIGABRT)` — and building it is what exposed the defect this
+header is really remembered for.
+
+> **The library's fatal path used to run the program's teardown.**
+> `boxcxx::Panic` — reached by an uncaught exception, a pure virtual call, a
+> failed guard, a `new` with no handler — ended with `exit(134)`. The status was
+> right (128 + SIGABRT); the road was not. `exit` runs `__cxa_finalize` and the
+> `.fini_array`, so every static destructor and every `std::atexit` callback ran
+> on the way out of a fatal error: destructors touching state an uncaught
+> exception had just abandoned, teardown printing after the diagnostic, an
+> `atexit` callback getting a turn [exception.terminate] never gives it. There
+> was no `abort` to call instead until `<csignal>` existed. Phase203 pins it
+> from outside, because no process can witness its own teardown: a child
+> registers a destructor that exits 77, and 77 must appear when it returns from
+> `main` and must NOT appear when it dies of a throw, a `raise` or a failed
+> `assert`.
+
+**One live edge is worth naming:** `abort()`'s own fallback — the termination
+after `raise` returns — is reachable only when a `SIGABRT` handler returns or
+the signal is ignored, because with the default disposition the `raise` itself
+ends the process. That branch is covered by the assert-with-`SIG_IGN` child in
+phase203; it was found by a mutation that changed the line and was not
+observed, which is the only way an unreachable branch announces itself.
+
+## `<cstdarg>`
+
+The macros are the compiler's, because only the compiler knows where the
+register save area is; a library that "implemented" them would be guessing at
+the ABI it is compiled against. `std::va_list` is `::va_list` — the same type
+the macros walk, which matters more here than usual: `<cstdio>`'s `vprintf`
+family will take it by value, and on x86-64 SysV a `va_list` is an array of one
+struct and therefore decays on the way in. No deviations.
 
 ## `<debugging>`
 

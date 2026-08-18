@@ -1,0 +1,80 @@
+// boxcxx — <csignal>
+//
+// [support.signal]. What this header does NOT do is the part worth reading
+// first: **nothing in BoxOS ever raises a signal at your process.** There is
+// no asynchronous delivery here, by decision, not by omission — BoxOS already
+// has an event vocabulary, and it is Touch: a tag-multicast event with a
+// named subscriber, delivered where the subscriber asked for it. Mapping the
+// CPU's faults onto handler callbacks would have been building a second,
+// older, worse one alongside it.
+//
+// That does not make the header a stub. The standard never requires an
+// implementation to raise a signal on its own: [support.signal] specifies
+// `signal` (install), `raise` (deliver, right here, on this strand) and what
+// the two default dispositions mean. All of that is real below, and
+// std::abort is specified in terms of it — abort() is `raise(SIGABRT)`
+// followed by termination whether the handler returns or ignores it, which is
+// exactly what happens. Ported code that installs a SIGABRT handler to print
+// a last word before dying gets its last word.
+//
+// The signal NUMBERS follow the same de-facto convention <__bits/errc> uses
+// for its values, for the same reason: a number a ported program may already
+// have written down (`if (sig == 6)`) should mean what it means everywhere
+// else. The exit status of a default-disposition death is 128 + signal, which
+// is the convention boxcxx's own Panic has been using since Ф1 (it exits 134,
+// and 134 is 128 + SIGABRT).
+#ifndef BOXCXX_CSIGNAL
+#define BOXCXX_CSIGNAL
+
+// [csignal.syn] gives the handler type C language linkage. The alias is
+// declared inside a linkage specification, which is what puts the *function
+// type* — not just some function — into extern "C", so a handler written in C
+// and a handler written in C++ are the same type here.
+extern "C" {
+using __boxcxx_signal_handler = void(int);
+}
+
+namespace std {
+
+// [support.signal]/2: an integer type an object of which can be accessed as an
+// atomic entity even in the presence of asynchronous signals. On x86-64 a
+// naturally aligned int is exactly that.
+using sig_atomic_t = int;
+
+// Installs `func` as the disposition of `sig` and returns the previous one, or
+// SIG_ERR if `sig` is not one of the six below (or `func` is SIG_ERR itself).
+// The disposition is NOT reset to SIG_DFL when a handler runs — C leaves that
+// choice to the implementation, and a handler that has to reinstall itself
+// after every delivery is a race waiting for a second strand.
+__boxcxx_signal_handler *signal(int sig, __boxcxx_signal_handler *func) noexcept;
+
+// Delivers `sig` to the calling strand NOW, on this stack, and returns zero on
+// success. SIG_IGN returns immediately; SIG_DFL ends the process with status
+// 128 + sig; anything else is called with `sig` and raise returns when it does.
+int raise(int sig) noexcept;
+
+} // namespace std
+
+// As with <cctype>, the names are also visible unqualified: ported code writes
+// signal(SIGABRT, h), and [headers]/5 leaves that free.
+using std::raise;
+using std::sig_atomic_t;
+using std::signal;
+
+// The three dispositions. Distinct values, none of which can be the address of
+// a declarable function: 0 is the null pointer and 1 and (uintptr_t)-1 are not
+// aligned to any function's entry.
+#define SIG_DFL (static_cast<__boxcxx_signal_handler *>(nullptr))
+#define SIG_IGN (reinterpret_cast<__boxcxx_signal_handler *>(1))
+#define SIG_ERR (reinterpret_cast<__boxcxx_signal_handler *>(-1))
+
+// The six [support.signal] requires, and no more: a macro named SIGKILL or
+// SIGPIPE would name a concept BoxOS does not have.
+#define SIGINT   2
+#define SIGILL   4
+#define SIGABRT  6
+#define SIGFPE   8
+#define SIGSEGV 11
+#define SIGTERM 15
+
+#endif // BOXCXX_CSIGNAL

@@ -1,0 +1,43 @@
+// boxcxx — <climits>
+//
+// [climits.syn]: "The contents of the header <climits> are the same as the C
+// standard library header <limits.h>." Macros only — nothing to place in
+// namespace std.
+//
+// …except that this one is NOT a pure wrapper, and finding out why is the
+// reason it is not a one-line header. GCC's <limits.h> gates the three long
+// long macros on
+//
+//     #if defined (__STDC_VERSION__) && __STDC_VERSION__ >= 199901L
+//
+// — a condition no C++ translation unit ever meets, because __STDC_VERSION__
+// is a C macro. So in C++ the compiler's freestanding <limits.h> is missing
+// LLONG_MIN, LLONG_MAX and ULLONG_MAX, all three of which [climits.syn]
+// requires. Measured against the whole [climits.syn] list, they are the ONLY
+// three missing (MB_LEN_MAX, CHAR_MIN and the rest are all there), and
+// <float.h> is complete for [cfloat.syn] with nothing to add — which is why
+// <cfloat> next door really is one line.
+//
+// The values come from the compiler's own __LONG_LONG_MAX__ rather than from
+// a literal, so they cannot describe a different target than the rest of the
+// header does.
+//
+// One measured number worth knowing before writing anything that converts
+// multibyte characters: MB_LEN_MAX here is **1**. The mb* family in <cstdlib>
+// and the conversions in <cuchar> answer to that.
+#ifndef BOXCXX_CLIMITS
+#define BOXCXX_CLIMITS
+
+#include <limits.h>
+
+#ifndef LLONG_MAX
+#  define LLONG_MAX __LONG_LONG_MAX__
+#endif
+#ifndef LLONG_MIN
+#  define LLONG_MIN (-LLONG_MAX - 1LL)
+#endif
+#ifndef ULLONG_MAX
+#  define ULLONG_MAX (LLONG_MAX * 2ULL + 1ULL)
+#endif
+
+#endif // BOXCXX_CLIMITS

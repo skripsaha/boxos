@@ -1,0 +1,84 @@
+// boxcxx — <cctype>
+//
+// [cctype.syn]. Fourteen functions, all of them decided by the current C
+// locale — and BoxOS has exactly one, "C" ([locale] is the minimum the stream
+// machinery needs, CONFORMANCE §1.2). So the answers here are not a table
+// loaded from anywhere: they are the classification the standard fixes for the
+// "C" locale, written out. That is why there is no table and no pointer to
+// one, and why nothing can invalidate these answers at run time.
+//
+// The argument's contract is C's: the value shall be representable as an
+// `unsigned char` or shall equal EOF. Every predicate below is written as a
+// range test, so EOF (-1) falls outside every range and answers 0 — and
+// `tolower`/`toupper` return their argument unchanged — which is what a
+// caller feeding it a getchar() result needs. A value that is neither (a
+// negative char that is not EOF) is undefined by the standard; here it simply
+// matches no range.
+//
+// NOT constexpr, deliberately: [constexpr.functions]/1 forbids an
+// implementation from declaring a standard library function signature
+// constexpr where the standard does not, and the standard does not for these.
+// The same rule kept hash<vector<bool>> non-constexpr in Ф39.
+#ifndef BOXCXX_CCTYPE
+#define BOXCXX_CCTYPE
+
+namespace std {
+
+inline int isdigit(int c) noexcept { return c >= '0' && c <= '9'; }
+inline int islower(int c) noexcept { return c >= 'a' && c <= 'z'; }
+inline int isupper(int c) noexcept { return c >= 'A' && c <= 'Z'; }
+inline int isalpha(int c) noexcept { return islower(c) || isupper(c); }
+inline int isalnum(int c) noexcept { return isalpha(c) || isdigit(c); }
+
+inline int isxdigit(int c) noexcept
+{
+    return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+// [character.seq] fixes the "C" locale's white space as exactly these six.
+inline int isspace(int c) noexcept
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' ||
+           c == '\r';
+}
+
+inline int isblank(int c) noexcept { return c == ' ' || c == '\t'; }
+
+// The "C" locale's execution character set is ASCII: control characters are
+// the two ranges below, printable characters are one contiguous run, and
+// graphic characters are that run minus the space.
+inline int iscntrl(int c) noexcept { return (c >= 0 && c <= 0x1F) || c == 0x7F; }
+inline int isprint(int c) noexcept { return c >= 0x20 && c <= 0x7E; }
+inline int isgraph(int c) noexcept { return c >= 0x21 && c <= 0x7E; }
+inline int ispunct(int c) noexcept { return isgraph(c) && !isalnum(c); }
+
+// C requires the two conversions to return the argument UNCHANGED when there
+// is no corresponding character of the other case — not a wrong-case letter
+// and not zero. That is what makes tolower(EOF) == EOF, which callers rely on
+// when they fold a getchar() result before testing it.
+inline int tolower(int c) noexcept { return isupper(c) ? c - 'A' + 'a' : c; }
+inline int toupper(int c) noexcept { return islower(c) ? c - 'a' + 'A' : c; }
+
+} // namespace std
+
+// [headers]/5 leaves it unspecified whether a <cX> header's names also reach
+// the global namespace; both reference implementations put them there, because
+// theirs arrive from a C header in the first place. Ported code says
+// `isdigit(c)` far more often than `std::isdigit(c)`, so they are here too —
+// and as using-declarations, so there is exactly one function either way.
+using std::isalnum;
+using std::isalpha;
+using std::isblank;
+using std::iscntrl;
+using std::isdigit;
+using std::isgraph;
+using std::islower;
+using std::isprint;
+using std::ispunct;
+using std::isspace;
+using std::isupper;
+using std::isxdigit;
+using std::tolower;
+using std::toupper;
+
+#endif // BOXCXX_CCTYPE

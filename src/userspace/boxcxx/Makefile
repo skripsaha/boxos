@@ -28,6 +28,8 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I ../boxlib/include -I ../../include
 
 SRCS = src/runtime/cxa_runtime.cpp \
+       src/runtime/csignal.cpp \
+       src/runtime/cassert.cpp \
        src/runtime/new_delete.cpp \
        src/runtime/cxxabi_typeinfo.cpp \
        src/runtime/dynamic_cast.cpp \

@@ -17,31 +17,20 @@ extern "C" {
 #define HEAP_TAG_CAP       64
 
 // ---------------------------------------------------------------------------
-// Internal allocation functions — call via malloc() macro below
+// Allocation interface (thread-safe via the heap uspin_t — the allocator's
+// lock spins by design; see box/sync.h for why it cannot park).
+//
+// malloc() is a FUNCTION, not a macro. It used to be a variadic macro that
+// dispatched malloc(sz) to _malloc_impl and malloc(sz, "tag") to
+// malloc_tagged, and that could not survive <cstdlib>: the preprocessor does
+// not look at qualification, so `std::malloc(n)` would have expanded to
+// `std::_malloc_impl(n)` — a name that does not exist. boxcxx had already
+// been routing around the macro by hand (its runtime declares the impl symbol
+// itself). The tagged form keeps its own name.
 // ---------------------------------------------------------------------------
 
-void* _malloc_impl(size_t size);
+void* malloc(size_t size);
 void* malloc_tagged(size_t size, const char *tag);
-
-// ---------------------------------------------------------------------------
-// Variadic malloc dispatch:
-//   malloc(size)        -> _malloc_impl(size)
-//   malloc(size, "tag") -> malloc_tagged(size, "tag")
-// ---------------------------------------------------------------------------
-
-#define _MALLOC_NARG(...)              _MALLOC_NARG_I(__VA_ARGS__, 2, 1)
-#define _MALLOC_NARG_I(_1, _2, N, ...) N
-#define _MALLOC_CAT(a, b)              _MALLOC_CAT_I(a, b)
-#define _MALLOC_CAT_I(a, b)            a##b
-#define _malloc_1(sz)                  _malloc_impl(sz)
-#define _malloc_2(sz, tag)             malloc_tagged((sz), (tag))
-#define malloc(...)  _MALLOC_CAT(_malloc_, _MALLOC_NARG(__VA_ARGS__))(__VA_ARGS__)
-
-// ---------------------------------------------------------------------------
-// Standard allocator interface (thread-safe via the heap uspin_t — the
-// allocator's lock spins by design; see box/sync.h for why it cannot park)
-// ---------------------------------------------------------------------------
-
 void  free(void* ptr);
 void* calloc(size_t nmemb, size_t size);
 void* realloc(void* ptr, size_t size);
