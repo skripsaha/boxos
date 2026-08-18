@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **98** — 93 of the 105 C++23 [headers] name (12 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Standard headers provided | **99** — 94 of the 105 C++23 [headers] name (11 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 133 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 219 phases (200 of them the numbered `PhaseN` series), 5 495 runtime checks, 1 929 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 220 phases (201 of them the numbered `PhaseN` series), 5 501 runtime checks, 1 930 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -96,14 +96,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (12)
+## 1.1 Headers that do not exist (11)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 93 of them are in the tree and 12 are not,
+[headers] name 105 headers in C++23; 94 of them are in the tree and 11 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 93 + 5 = the 98 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 94 + 5 = the 99 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -113,13 +113,14 @@ still added up because they were adjusted to each other rather than to the
 standard. It is absent, it is listed below, and the count above is now the
 output of a diff between [headers] and `ls include/std`.
 
-### C library wrappers — 9 absent, 12 provided
+### C library wrappers — 8 absent, 13 provided
 
-Absent: `<cfenv>` `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<ctime>`
-`<cuchar>` `<cwchar>` `<cwctype>`
+Absent: `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<ctime>` `<cuchar>`
+`<cwchar>` `<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
-`<cstdarg>` `<csignal>` (Ф41-a) and `<cstring>` `<cstdlib>` (Ф41-b) — all §2.
+`<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b) and `<cfenv>`
+(Ф41-c) — all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -163,7 +164,7 @@ provided for the same reason and on the same terms (§2).
 
 `<cstddef>` and `<cstdint>` were provided long before Ф41, because they are pure
 type and macro headers with no runtime behind them, and `<cmath>` since Ф10;
-twelve of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
+thirteen of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
 freestanding C headers remain available and are used by the library itself:
 `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`, `<float.h>` come from
 GCC, not from a libc, and resolve normally — with one measured hole, recorded
@@ -847,8 +848,61 @@ default. Ф41-b made the `"C"` locale's multibyte encoding UTF-8 (§2
 `MB_LEN_MAX`. The alternative was a second, narrower encoding living inside the
 C functions of a system that is UTF-8 everywhere else.
 
+## `<cfenv>`
+
+The header that made an old claim checkable, and the claim did not survive.
+
+- **Both floating-point units, always.** `float` and `double` report into
+  MXCSR; `long double` is genuine 80-bit x87 (Ф27) and reports into the x87
+  status word. A `<cfenv>` that read only MXCSR would answer "no exception" for
+  every `long double` operation that raised one, so every function here reads
+  or writes both, `fenv_t` carries both, and `fesetround` sets both — phase205
+  checks the rounding change on a `long double` quotient precisely because a
+  MXCSR-only implementation would pass everything else.
+- **`feraiseexcept` performs the operation rather than writing the bit.** A
+  written status bit is a claim; an executed `1.0/0.0` is the thing itself, and
+  it keeps working if a trap is ever unmasked. `fesetexceptflag` is the other
+  one — it sets the state WITHOUT raising, which is exactly the distinction
+  [cfenv.syn] draws between them. Raising overflow or underflow also raises
+  inexact here, which C explicitly makes implementation-defined.
+- **No way to unmask an exception.** `feenableexcept` is a glibc extension, not
+  [cfenv.syn], and it would be a promise BoxOS cannot keep: an unmasked SIMD
+  fault has nowhere to go, because `<csignal>` deliberately has no asynchronous
+  half. `FE_DENORMAL` is x86's own extra flag and is named because the hardware
+  has it.
+- **`#pragma STDC FENV_ACCESS` is not supported by the compiler.** GCC ignores
+  it with a warning, so the optimizer is formally entitled to move
+  floating-point operations across these calls. Every BoxOS application is
+  compiled at `-O0` (see the note in "What the library is, in numbers"), where
+  it does not, and the library itself at `-O2` does not reorder across the
+  inline asm these functions are built from. It remains a real caveat rather
+  than a solved problem.
+
+> **‼ What `<cfenv>` measured on its first run, and what it means for
+> `<cmath>`.** `math_errhandling == MATH_ERREXCEPT` has been declared since
+> Ф10 — "errors are reported by raising the IEEE-754 flags, not through
+> errno". Until this header there was no `stmxcsr` anywhere in the tree, so
+> the claim was unverifiable. Measured now: `sqrt(-1)` raises `FE_INVALID`,
+> because boxcxx's `sqrt` IS `sqrtsd` and the hardware raises it; `log(0)`,
+> `log(-1)` and `exp(1000)` raise **nothing at all**. They return `-inf`, NaN
+> and `+inf` correctly — and returning a constant is not an operation, and
+> only operations raise. So the claim overpromises for every function boxcxx
+> computes in software, which is nearly all of them. phase205 pins the
+> measured state in both directions, so neither the behaviour nor this
+> paragraph can drift without the suite failing.
+
 ## `<cmath>`
 
+- `!` **`math_errhandling` overpromises.** It expands to `MATH_ERREXCEPT`, and
+  only the hardware-backed paths honour it: `sqrt` raises `FE_INVALID` on a
+  negative argument because `sqrtsd` does. The software paths — `log` at its
+  pole and outside its domain, `exp` on overflow, and by construction every
+  other function that returns a constant on an error — raise nothing. Measured
+  by phase205 the day `<cfenv>` made measuring possible (§2 `<cfenv>`); C gives
+  no third value for `math_errhandling` (it must be `MATH_ERRNO`,
+  `MATH_ERREXCEPT`, or both), so the honest fix is to make the error paths
+  raise, which is a piece of work across the whole header rather than a
+  correction to this line.
 - `✓` Closed in Ф31e-b-1: `std::lerp` did not exist. It is now P0811R3's exact
   shape — the only one that keeps exactness at both ends, boundedness inside
   `[0,1]` and monotonicity at once — which with `midpoint` closes

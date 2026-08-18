@@ -587,6 +587,7 @@
 #include <climits>
 #include <csignal>
 #include <cstdarg>
+#include <cfenv>
 #include <cstdlib>
 #include <cstring>
 
@@ -46870,6 +46871,221 @@ void Phase204()
     printf("[CXX] PASS phase204: <cstring> and <cstdlib>, and what they rest on\n");
 }
 
+// ── phase205 — Ф41-c: <cfenv>, and a claim that was never checkable ─────
+namespace p205 {
+
+// Everything here runs with the environment restored afterwards: a rounding
+// mode left installed would quietly change every phase that follows.
+struct EnvGuard {
+    std::fenv_t saved{};
+    EnvGuard() { std::fegetenv(&saved); }
+    ~EnvGuard()
+    {
+        std::fesetenv(&saved);
+        std::feclearexcept(FE_ALL_EXCEPT);
+    }
+};
+
+// volatile everywhere: a compile-time 1.0/0.0 raises nothing at run time, and
+// the whole point is to make the hardware do it.
+bool RaisesFromArithmetic()
+{
+    EnvGuard guard;
+    std::feclearexcept(FE_ALL_EXCEPT);
+    if (std::fetestexcept(FE_ALL_EXCEPT) != 0) return false;
+
+    volatile double one  = 1.0;
+    volatile double zero = 0.0;
+    volatile double r    = one / zero;
+    (void)r;
+    if ((std::fetestexcept(FE_DIVBYZERO) & FE_DIVBYZERO) == 0) return false;
+
+    std::feclearexcept(FE_DIVBYZERO);
+    if (std::fetestexcept(FE_DIVBYZERO) != 0) return false;
+
+    volatile double neg = -1.0;
+    volatile double q   = std::sqrt(neg);   // boxcxx's sqrt IS the sqrtsd
+    (void)q;
+    return (std::fetestexcept(FE_INVALID) & FE_INVALID) != 0;
+}
+
+// ‼ The half a MXCSR-only <cfenv> would miss entirely. boxcxx's long double is
+// genuine 80-bit x87 (Ф27), and x87 reports into its own status word.
+bool SeesTheX87Unit()
+{
+    EnvGuard guard;
+    std::feclearexcept(FE_ALL_EXCEPT);
+
+    volatile long double one  = 1.0L;
+    volatile long double zero = 0.0L;
+    volatile long double r    = one / zero;
+    (void)r;
+    const bool seen = (std::fetestexcept(FE_DIVBYZERO) & FE_DIVBYZERO) != 0;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    // ...and clearing must reach x87 too, or the flag would stick forever.
+    return seen && std::fetestexcept(FE_ALL_EXCEPT) == 0;
+}
+
+bool FlagSaveAndRestore()
+{
+    EnvGuard guard;
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::feraiseexcept(FE_INVALID | FE_DIVBYZERO);
+    if ((std::fetestexcept(FE_INVALID | FE_DIVBYZERO)) !=
+        (FE_INVALID | FE_DIVBYZERO))
+        return false;
+
+    std::fexcept_t saved{};
+    if (std::fegetexceptflag(&saved, FE_ALL_EXCEPT) != 0) return false;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    if (std::fetestexcept(FE_ALL_EXCEPT) != 0) return false;
+
+    if (std::fesetexceptflag(&saved, FE_INVALID) != 0) return false;
+    // Exactly the one asked for: fesetexceptflag SETS state, it does not raise,
+    // so nothing else may appear alongside it.
+    if (std::fetestexcept(FE_ALL_EXCEPT) != FE_INVALID) return false;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    return true;
+}
+
+// Rounding is checked by ROUNDING something, not by reading back the mode: the
+// mode is a claim, the quotient is the evidence. And it is checked for double
+// AND long double, because those are two different units that must agree.
+bool RoundingModes()
+{
+    EnvGuard guard;
+
+    volatile double one   = 1.0;
+    volatile double three = 3.0;
+
+    if (std::fesetround(FE_TONEAREST) != 0) return false;
+    if (std::fegetround() != FE_TONEAREST) return false;
+    const double nearest = one / three;
+
+    if (std::fesetround(FE_UPWARD) != 0) return false;
+    if (std::fegetround() != FE_UPWARD) return false;
+    const double up = one / three;
+
+    if (std::fesetround(FE_DOWNWARD) != 0) return false;
+    const double down = one / three;
+
+    if (std::fesetround(FE_TOWARDZERO) != 0) return false;
+    const double zero_ward = one / three;
+
+    if (!(down < up)) return false;
+    if (!(down <= nearest && nearest <= up)) return false;
+    if (zero_ward != down) return false;          // positive: toward zero == down
+
+    // The x87 side: same input, same directions. If fesetround had touched only
+    // MXCSR this would compare equal in every mode.
+    volatile long double lone   = 1.0L;
+    volatile long double lthree = 3.0L;
+    std::fesetround(FE_UPWARD);
+    const long double lup = lone / lthree;
+    std::fesetround(FE_DOWNWARD);
+    const long double ldown = lone / lthree;
+    if (!(ldown < lup)) return false;
+
+    // An unknown mode is refused with a nonzero return and changes nothing.
+    std::fesetround(FE_TONEAREST);
+    if (std::fesetround(0x1234) == 0) return false;
+    return std::fegetround() == FE_TONEAREST;
+}
+
+bool EnvironmentHoldAndUpdate()
+{
+    EnvGuard guard;
+
+    std::fesetround(FE_UPWARD);
+    std::feclearexcept(FE_ALL_EXCEPT);
+    std::feraiseexcept(FE_OVERFLOW);
+
+    std::fenv_t held{};
+    if (std::feholdexcept(&held) != 0) return false;
+    // feholdexcept saves the environment and clears the flags.
+    if (std::fetestexcept(FE_ALL_EXCEPT) != 0) return false;
+
+    std::feraiseexcept(FE_INVALID);
+
+    // feupdateenv restores the saved environment AND keeps what was raised
+    // while it was held — that is the difference from fesetenv.
+    if (std::feupdateenv(&held) != 0) return false;
+    if ((std::fetestexcept(FE_INVALID) & FE_INVALID) == 0) return false;
+    if ((std::fetestexcept(FE_OVERFLOW) & FE_OVERFLOW) == 0) return false;
+    if (std::fegetround() != FE_UPWARD) return false;
+
+    // FE_DFL_ENV is the environment a program starts in.
+    if (std::fesetenv(FE_DFL_ENV) != 0) return false;
+    return std::fegetround() == FE_TONEAREST &&
+           std::fetestexcept(FE_ALL_EXCEPT) == 0;
+}
+
+// ‼ The claim <cmath> has been making since Ф10: math_errhandling ==
+// MATH_ERREXCEPT, "errors are reported through these flags". Nothing could read
+// them until this phase, so nothing ever checked it. What each function
+// actually raises is PRINTED as well as asserted, because the printout is the
+// evidence for the CONFORMANCE entry.
+int RaisedBy(double (*fn)(double), double arg)
+{
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile double sink = fn(arg);
+    (void)sink;
+    return std::fetestexcept(FE_ALL_EXCEPT);
+}
+
+bool MathErrorsAreReportedInFlags()
+{
+    EnvGuard guard;
+    static_assert(math_errhandling == MATH_ERREXCEPT,
+                  "phase205 <cmath> claims the flags, not errno");
+
+    const int sqrt_neg = RaisedBy([](double x) { return std::sqrt(x); }, -1.0);
+    const int log_zero = RaisedBy([](double x) { return std::log(x); }, 0.0);
+    const int log_neg  = RaisedBy([](double x) { return std::log(x); }, -1.0);
+    const int exp_big  = RaisedBy([](double x) { return std::exp(x); }, 1000.0);
+
+    // Plain %x on purpose: boxlib's printf has no '#' flag, which is one of the
+    // things <cstdio> will have to answer for in Ф41-g.
+    printf("[CXX] note phase205: raised sqrt(-1)=0x%x log(0)=0x%x log(-1)=0x%x "
+           "exp(1000)=0x%x\n",
+           sqrt_neg, log_zero, log_neg, exp_big);
+
+    // ‼ MEASURED, and this is the finding Ф41-c exists to have made possible.
+    //
+    // sqrt(-1) raises FE_INVALID because the hardware raises it: boxcxx's sqrt
+    // IS `sqrtsd`. Every function boxcxx computes in SOFTWARE returns the right
+    // value — -inf, NaN, +inf — and raises NOTHING, because returning a
+    // constant is not an operation and only operations raise. So
+    // math_errhandling promises more than <cmath> delivers, and it has since
+    // Ф10; what was missing until now was any way to find out.
+    //
+    // The current state is PINNED rather than wished away: if a later phase
+    // teaches log() to signal its pole, this check fails and forces the
+    // document to be corrected in the same commit.
+    const bool hardware_path_raises = (sqrt_neg & FE_INVALID) != 0;
+    const bool software_paths_silent =
+        log_zero == 0 && log_neg == 0 && exp_big == 0;
+    return hardware_path_raises && software_paths_silent;
+}
+
+} // namespace p205
+
+void Phase205()
+{
+    Check(p205::RaisesFromArithmetic(), "phase205 <cfenv> reads and clears the SSE flags");
+    Check(p205::SeesTheX87Unit(), "phase205 <cfenv> sees the x87 unit, where long double reports");
+    Check(p205::FlagSaveAndRestore(), "phase205 fegetexceptflag/fesetexceptflag set state without raising");
+    Check(p205::RoundingModes(), "phase205 fesetround changes what BOTH units compute");
+    Check(p205::EnvironmentHoldAndUpdate(), "phase205 feholdexcept/feupdateenv keep what was raised");
+    Check(p205::MathErrorsAreReportedInFlags(),
+          "phase205 the hardware path raises, every software path is silent (math_errhandling overpromises)");
+
+    printf("[CXX] PASS phase205: <cfenv> — the flags <cmath> has been promising since Ф10\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -47096,6 +47312,7 @@ int main()
     Phase202();
     Phase203();
     Phase204();
+    Phase205();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
