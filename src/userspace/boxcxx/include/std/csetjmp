@@ -1,0 +1,57 @@
+// boxcxx — <csetjmp>
+//
+// [csetjmp.syn]. Two functions and a macro, and the interesting half is what
+// they have to do about CET.
+//
+// A longjmp travels UP the stack, so by the time it runs the shadow stack holds
+// an entry for every frame the jump is about to discard. Leaving them would
+// fault the first time the resumed function returned — the return address on
+// the normal stack would not match the shadow one, and the CPU raises #CP. So
+// the implementation pops them with INCSSPQ back to where setjmp stood, and
+// then RETURNS to the saved address rather than jumping to it, which consumes
+// both stacks in step. Details in `src/runtime/csetjmp.asm`; on QEMU/TCG, where
+// shadow stacks are off, RDSSPQ reads 0 and the whole block is skipped.
+//
+// **What C++ adds to C here is a restriction, not a feature.**
+// [csetjmp.syn]/2: a setjmp/longjmp pair has undefined behaviour if replacing
+// them with `catch` and `throw` would destroy any object with a non-trivial
+// destructor. boxcxx cannot diagnose that — nobody can — so the rule is stated
+// and not enforced. In a library with working exceptions there is almost never
+// a reason to reach for this pair; it exists because C code being ported does.
+#ifndef BOXCXX_CSETJMP
+#define BOXCXX_CSETJMP
+
+extern "C" {
+
+// The buffer. An ARRAY type, as [csetjmp.syn] requires — that is what makes
+// `jmp_buf` decay to a pointer when passed, so `longjmp(env, 1)` works without
+// the caller writing an ampersand. Nine words: six callee-saved registers, the
+// stack pointer, the resume address, and the shadow-stack pointer.
+using __boxcxx_jmp_buf = unsigned long long[9];
+
+int  __boxcxx_setjmp(__boxcxx_jmp_buf env);
+[[noreturn]] void __boxcxx_longjmp(__boxcxx_jmp_buf env, int val);
+
+} // extern "C"
+
+namespace std {
+
+using jmp_buf = __boxcxx_jmp_buf;
+
+// longjmp(env, 0) makes setjmp return 1: C forbids a second return of 0,
+// because 0 is how the first one is recognised.
+[[noreturn]] inline void longjmp(jmp_buf env, int val)
+{
+    __boxcxx_longjmp(env, val);
+}
+
+} // namespace std
+
+using std::jmp_buf;
+using std::longjmp;
+
+// A MACRO, as the standard requires: the context saved must be the caller's,
+// and a macro is what guarantees no extra frame stands between the two.
+#define setjmp(env) __boxcxx_setjmp(env)
+
+#endif // BOXCXX_CSETJMP
