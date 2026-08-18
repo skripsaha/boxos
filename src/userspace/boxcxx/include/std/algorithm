@@ -61,4 +61,10 @@ void shuffle(RandomIt first, RandomIt last, URBG &&g)
 
 } // namespace std
 
+// [algorithm.syn] declares the execution-policy overloads in THIS header, so
+// they are here — in a leaf, because <numeric> and <memory> own their own
+// share of the same feature and all of them need the brigade declarations.
+// Last, because they build on everything above.
+#include <__bits/par_algo>
+
 #endif // BOXCXX_ALGORITHM

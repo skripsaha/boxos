@@ -1,0 +1,225 @@
+// boxcxx — <__bits/par_algo>
+//
+// The [algorithms] overloads that take an execution policy. They live in a
+// leaf rather than in <algorithm> itself only because <numeric> and <memory>
+// own their own share of the same feature and all three need the brigade
+// declarations; <algorithm> includes this at its end, so the overloads are
+// where [algorithm.syn] says they are.
+//
+// What a policy means here:
+//   seq, unseq        — run on the calling strand. unseq additionally permits
+//                       vectorisation, which is the compiler's business and
+//                       not something the library can promise.
+//   par, par_unseq    — split the range across the brigade (see
+//                       src/runtime/par_engine.cpp), caller included.
+// Every one of them is PERMISSION, not obligation: a range too short to be
+// worth splitting, a nested parallel region, or a cabin with one usable core
+// all run sequentially, and that is conforming.
+#ifndef BOXCXX_BITS_PAR_ALGO
+#define BOXCXX_BITS_PAR_ALGO
+
+#include <__bits/execution_policy>
+#include <__bits/par_engine>
+
+#include <atomic>
+#include <iterator>
+#include <type_traits>
+
+namespace std {
+
+namespace __par {
+
+// Fewer elements than this and the wake, the park and the cache traffic cost
+// more than the work they save. It is a grain, not a capacity: nothing is
+// bounded by it, and a range of any size still runs.
+inline constexpr size_t kGrain = 2048;
+
+template <class EP>
+inline constexpr bool WantsBrigade =
+    is_same_v<remove_cvref_t<EP>, execution::parallel_policy> ||
+    is_same_v<remove_cvref_t<EP>, execution::parallel_unsequenced_policy>;
+
+// Runs f(chunk, begin, end) over [0, n). Returns how many chunks were used --
+// which a reduction needs, and a plain traversal can ignore.
+template <class EP, class F>
+inline size_t Region(size_t n, F f)
+{
+    if (n == 0) return 0;
+    if constexpr (WantsBrigade<EP>) {
+        return Run(
+            [](void *ctx, size_t i, size_t b, size_t e) {
+                (*static_cast<F *>(ctx))(i, b, e);
+            },
+            static_cast<void *>(&f), n, kGrain);
+    } else {
+        f(size_t(0), size_t(0), n);
+        return 1;
+    }
+}
+
+// [algorithms.parallel.overloads] requires forward iterators, so stepping to a
+// chunk's first element is a walk for a list and a jump for a vector; advance
+// picks whichever the iterator supports.
+template <class It>
+inline It At(It first, size_t n)
+{
+    static_assert(
+        is_base_of_v<forward_iterator_tag, typename iterator_traits<It>::iterator_category>,
+        "the parallel overloads take forward iterators, not input iterators "
+        "[algorithms.parallel.overloads] — a single-pass range cannot be split");
+    advance(first, static_cast<typename iterator_traits<It>::difference_type>(n));
+    return first;
+}
+
+} // namespace __par
+
+// ── [alg.foreach] ───────────────────────────────────────────────────────
+// The parallel for_each returns void, unlike the sequential one which returns
+// its function object: there is no single object left to return once the work
+// has been split.
+template <class EP, class It, class Fn>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void for_each(EP &&, It first, It last, Fn f)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) f(*it);
+    });
+}
+
+template <class EP, class It, class Size, class Fn>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It for_each_n(EP &&, It first, Size count, Fn f)
+{
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) f(*it);
+    });
+    return __par::At(first, n);
+}
+
+// ── [alg.transform] ─────────────────────────────────────────────────────
+template <class EP, class In, class Out, class Op>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out transform(EP &&, In first, In last, Out out, Op op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) *o = op(*it);
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In1, class In2, class Out, class Op>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out transform(EP &&, In1 first1, In1 last1, In2 first2, Out out, Op op)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In1 a = __par::At(first1, b);
+        In2 c = __par::At(first2, b);
+        Out o = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++a, ++c, ++o) *o = op(*a, *c);
+    });
+    return __par::At(out, n);
+}
+
+// ── [alg.count] ─────────────────────────────────────────────────────────
+// One atomic add per CHUNK, not per element: the counting is local and only
+// the totals meet.
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+typename iterator_traits<It>::difference_type count_if(EP &&, It first, It last, Pred p)
+{
+    using Diff = typename iterator_traits<It>::difference_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    atomic<long long> total{0};
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        long long local = 0;
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it)
+            if (p(*it)) ++local;
+        total.fetch_add(local, memory_order_relaxed);
+    });
+    return static_cast<Diff>(total.load(memory_order_relaxed));
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+typename iterator_traits<It>::difference_type count(EP &&ep, It first, It last, const T &value)
+{
+    return count_if(static_cast<EP &&>(ep), first, last,
+                    [&](const auto &x) { return x == value; });
+}
+
+// ── [alg.all.of] / [alg.any.of] / [alg.none.of] ─────────────────────────
+// The shared flag is not only the answer, it is the brake: a chunk that sees
+// it already decided stops walking. The standard does not require the
+// short-circuit, and without the flag every chunk would read a range whose
+// answer is already known.
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool all_of(EP &&, It first, It last, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    atomic<bool> failed{false};
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) {
+            if ((i & 63) == 0 && failed.load(memory_order_relaxed)) return;
+            if (!p(*it)) {
+                failed.store(true, memory_order_relaxed);
+                return;
+            }
+        }
+    });
+    return !failed.load(memory_order_relaxed);
+}
+
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool any_of(EP &&ep, It first, It last, Pred p)
+{
+    return !all_of(static_cast<EP &&>(ep), first, last,
+                   [&](const auto &x) { return !p(x); });
+}
+
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool none_of(EP &&ep, It first, It last, Pred p)
+{
+    return all_of(static_cast<EP &&>(ep), first, last,
+                  [&](const auto &x) { return !p(x); });
+}
+
+// ── [alg.fill] ──────────────────────────────────────────────────────────
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void fill(EP &&, It first, It last, const T &value)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) *it = value;
+    });
+}
+
+template <class EP, class It, class Size, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It fill_n(EP &&, It first, Size count, const T &value)
+{
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) *it = value;
+    });
+    return __par::At(first, n);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_PAR_ALGO

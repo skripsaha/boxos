@@ -1,0 +1,35 @@
+// boxcxx — <execution>
+//
+// [execution.syn] is four policy objects and one trait, and it is the smallest
+// header in the library that changes the most about how a program runs. What
+// the policies mean HERE:
+//
+//   seq        run on the calling strand, in order.
+//   unseq      run on the calling strand; the compiler may vectorise.
+//   par        split the range across a brigade of strands that lives in the
+//              cabin -- built the first time anything asks, asleep on the
+//              kernel's address-park between jobs, reused by every call after.
+//   par_unseq  as par, and each chunk may also be vectorised.
+//
+// Every one of them is PERMISSION and not obligation, which is what lets a
+// short range, a nested region or a cabin with one usable core all run
+// sequentially without violating anything.
+//
+// The overloads the policies select are declared where the algorithms are --
+// <algorithm> and <numeric> -- because [algorithm.syn] and
+// [numeric.ops.overview] put them there. Including both here means a program
+// that reaches for this header can write the call it came to write.
+#ifndef BOXCXX_EXECUTION
+#define BOXCXX_EXECUTION
+
+#include <__bits/execution_policy>
+
+#include <algorithm>
+#include <numeric>
+
+// [version.syn] names this header as the owner of the macro below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_execution
+#include <__bits/version_execution>
+
+#endif // BOXCXX_EXECUTION

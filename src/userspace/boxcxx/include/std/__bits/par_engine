@@ -1,0 +1,41 @@
+// boxcxx — <__bits/par_engine>
+//
+// The declarations of the brigade std::execution::par runs on. The state and
+// the strands live in src/runtime/par_engine.cpp, because a cabin must have
+// exactly ONE brigade and only a translation unit can promise that — the same
+// reason <syncstream>'s lock registry is not a header either.
+//
+// Nothing here is templated: the boundary is a function pointer and a void*,
+// so the algorithm templates stay in headers and the crew stays in one place.
+#ifndef BOXCXX_BITS_PAR_ENGINE
+#define BOXCXX_BITS_PAR_ENGINE
+
+#include <cstddef>
+
+namespace std {
+namespace __par {
+
+// One piece of a split range: which chunk it is (a reduction needs the index
+// to put its partial somewhere), and the half-open element range it covers.
+using Chunk = void (*)(void *ctx, size_t idx, size_t begin, size_t end);
+
+// How many chunks a region could be split into at most — one per strand,
+// caller included. Asking builds the brigade if it does not exist yet; asking
+// from INSIDE a region answers 1 without touching the lock the region holds.
+size_t Width();
+
+// True while this strand is inside a parallel region. A nested region runs
+// sequentially: the standard permits it, and it is the only shape in which
+// the brigade cannot end up waiting for itself.
+bool Nested() noexcept;
+
+// Splits [0, n) into chunks of at least `grain` elements, runs one on the
+// calling strand and the rest on the brigade, and returns when they all have.
+// Returns how many chunks were used, which is 1 whenever the range was too
+// short, the region was nested, or the cabin has no spare cores.
+size_t Run(Chunk fn, void *ctx, size_t n, size_t grain);
+
+} // namespace __par
+} // namespace std
+
+#endif // BOXCXX_BITS_PAR_ENGINE

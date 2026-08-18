@@ -1,0 +1,135 @@
+// boxcxx — <__bits/par_numeric>
+//
+// The [numeric.ops] overloads that take an execution policy. Same shape as
+// <__bits/par_algo>, one difference that matters: a reduction has a RESULT per
+// chunk, so the chunks write into a small array indexed by the chunk number
+// the brigade hands them, and the caller folds that array afterwards.
+//
+// The order of that fold is the caller's to accept, not ours to promise:
+// [reduce] requires the operation to be associative AND commutative precisely
+// so an implementation may group and order the work as it likes. That is the
+// whole difference between reduce and accumulate, and it is why accumulate has
+// no parallel overload at all.
+#ifndef BOXCXX_BITS_PAR_NUMERIC
+#define BOXCXX_BITS_PAR_NUMERIC
+
+#include <__bits/execution_policy>
+#include <__bits/par_algo>
+#include <__bits/par_engine>
+
+#include <functional>
+#include <iterator>
+#include <optional>
+#include <vector>
+
+namespace std {
+
+namespace __par {
+
+// A partial per chunk. optional, not T, because [reduce] asks only that T be
+// move-constructible -- a T that cannot be assigned or default-constructed is
+// still a valid reduction type, and emplace is how the partial arrives without
+// requiring either.
+template <class EP, class T, class Chunked>
+inline T Fold(size_t n, const T &init, Chunked chunk, auto op)
+{
+    const size_t width = (WantsBrigade<EP> && !Nested()) ? Width() : 1;
+    vector<optional<T>> partial(width);
+    const size_t used = Region<EP>(n, [&](size_t idx, size_t b, size_t e) {
+        partial[idx].emplace(chunk(b, e));
+    });
+    T acc = init;
+    for (size_t i = 0; i < used; ++i)
+        if (partial[i]) acc = op(acc, *partial[i]);
+    return acc;
+}
+
+} // namespace __par
+
+// ── [reduce] ────────────────────────────────────────────────────────────
+template <class EP, class It, class T, class Binary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+T reduce(EP &&, It first, It last, T init, Binary op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return init;
+    return __par::Fold<EP, T>(
+        n, init,
+        [&](size_t b, size_t e) {
+            It it = __par::At(first, b);
+            T local(*it);
+            ++it;
+            for (size_t i = b + 1; i < e; ++i, ++it) local = op(std::move(local), *it);
+            return local;
+        },
+        op);
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+T reduce(EP &&ep, It first, It last, T init)
+{
+    return reduce(static_cast<EP &&>(ep), first, last, std::move(init), plus<>());
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+typename iterator_traits<It>::value_type reduce(EP &&ep, It first, It last)
+{
+    using T = typename iterator_traits<It>::value_type;
+    return reduce(static_cast<EP &&>(ep), first, last, T{}, plus<>());
+}
+
+// ── [transform.reduce] ──────────────────────────────────────────────────
+template <class EP, class It, class T, class Binary, class Unary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+T transform_reduce(EP &&, It first, It last, T init, Binary reduce_op, Unary transform_op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return init;
+    return __par::Fold<EP, T>(
+        n, init,
+        [&](size_t b, size_t e) {
+            It it = __par::At(first, b);
+            T local(transform_op(*it));
+            ++it;
+            for (size_t i = b + 1; i < e; ++i, ++it)
+                local = reduce_op(std::move(local), transform_op(*it));
+            return local;
+        },
+        reduce_op);
+}
+
+template <class EP, class It1, class It2, class T, class Binary1, class Binary2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+T transform_reduce(EP &&, It1 first1, It1 last1, It2 first2, T init, Binary1 reduce_op,
+                   Binary2 transform_op)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    if (n == 0) return init;
+    return __par::Fold<EP, T>(
+        n, init,
+        [&](size_t b, size_t e) {
+            It1 a = __par::At(first1, b);
+            It2 c = __par::At(first2, b);
+            T local(transform_op(*a, *c));
+            ++a;
+            ++c;
+            for (size_t i = b + 1; i < e; ++i, ++a, ++c)
+                local = reduce_op(std::move(local), transform_op(*a, *c));
+            return local;
+        },
+        reduce_op);
+}
+
+template <class EP, class It1, class It2, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+T transform_reduce(EP &&ep, It1 first1, It1 last1, It2 first2, T init)
+{
+    return transform_reduce(static_cast<EP &&>(ep), first1, last1, first2, std::move(init),
+                            plus<>(), multiplies<>());
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_PAR_NUMERIC

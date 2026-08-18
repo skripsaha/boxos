@@ -1,0 +1,67 @@
+// boxcxx — <__bits/execution_policy>
+//
+// The four policy types and is_execution_policy, split out from <execution>
+// because [algorithm.syn], [numeric.ops.overview] and [specialized.algorithms]
+// all declare overloads constrained on that trait — the headers that own those
+// declarations need the trait, and must not need the brigade behind it.
+#ifndef BOXCXX_BITS_EXECUTION_POLICY
+#define BOXCXX_BITS_EXECUTION_POLICY
+
+#include <type_traits>
+
+namespace std {
+
+namespace execution {
+
+// [execpol.type]: each is a distinct, empty class with no default constructor;
+// the objects below are the only way to name one, which is what keeps a policy
+// from being produced by accident (a defaulted `Policy{}` parameter, a
+// value-initialised member) where the caller meant to choose.
+class sequenced_policy {
+public:
+    sequenced_policy() = delete;
+    explicit constexpr sequenced_policy(int) noexcept {}
+};
+class parallel_policy {
+public:
+    parallel_policy() = delete;
+    explicit constexpr parallel_policy(int) noexcept {}
+};
+class parallel_unsequenced_policy {
+public:
+    parallel_unsequenced_policy() = delete;
+    explicit constexpr parallel_unsequenced_policy(int) noexcept {}
+};
+class unsequenced_policy {
+public:
+    unsequenced_policy() = delete;
+    explicit constexpr unsequenced_policy(int) noexcept {}
+};
+
+inline constexpr sequenced_policy            seq{0};
+inline constexpr parallel_policy             par{0};
+inline constexpr parallel_unsequenced_policy par_unseq{0};
+inline constexpr unsequenced_policy          unseq{0};
+
+} // namespace execution
+
+// [execpol.type]: the trait is false for everything the implementation does
+// not itself define as a policy — a user type cannot become one by
+// specialising this, and boxcxx defines no extra policies of its own.
+template <class T>
+struct is_execution_policy : false_type {};
+template <>
+struct is_execution_policy<execution::sequenced_policy> : true_type {};
+template <>
+struct is_execution_policy<execution::parallel_policy> : true_type {};
+template <>
+struct is_execution_policy<execution::parallel_unsequenced_policy> : true_type {};
+template <>
+struct is_execution_policy<execution::unsequenced_policy> : true_type {};
+
+template <class T>
+inline constexpr bool is_execution_policy_v = is_execution_policy<T>::value;
+
+} // namespace std
+
+#endif // BOXCXX_BITS_EXECUTION_POLICY

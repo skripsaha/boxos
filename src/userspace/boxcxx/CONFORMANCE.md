@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **88** — 84 of C++23 (21 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 125 |
-| Header source | ~91 000 lines |
+| Standard headers provided | **89** — 85 of C++23 (20 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 130 |
+| Header source | ~91 400 lines |
 | Feature-test macros defined | 207 — 161 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 215 phases (196 of them the numbered `PhaseN` series), 5 455 runtime checks, 1 854 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 216 phases (197 of them the numbered `PhaseN` series), 5 461 runtime checks, 1 865 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **215**. The
+there are exactly as many as there are phase definitions. That is **216**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -96,7 +96,7 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (21)
+## 1.1 Headers that do not exist (20)
 
 82 of the C++23 headers are provided and 23 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
@@ -156,11 +156,19 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 1
+### C++23 features not implemented — 0
 
-| Header | Status |
-|---|---|
-| `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
+Every C++23 header this library ever intended to provide now exists. What
+remains absent is the C-library wrappers above and the three excluded by
+decision; the feature list that used to sit here is empty.
+
+**`<execution>` left it in Ф40.** Its entry said "not implemented; the parallel
+overloads of the algorithms are absent with it", and the header was the easy
+half: four empty classes and a trait. The half that took the work is what
+`par` runs ON — a brigade of strands that lives in the cabin, sleeps on the
+kernel's address-park between jobs and is reused by every call. See
+`<execution>` in §2 for what it does, what it deliberately does not, and which
+overloads exist so far.
 
 **`<stdfloat>` left that list in Ф40, and its entry — "no extended
 floating-point types" — was the most wrong thing in this document.** The
@@ -737,6 +745,48 @@ nothing has been found since.
   program**. That is the standard's "otherwise the behavior is unspecified",
   and it is what an uncaught `SIGTRAP` does elsewhere; it is recorded here
   because the name does not suggest it.
+
+## `<execution>`
+
+- Complete as a header: `sequenced_policy`, `parallel_policy`,
+  `parallel_unsequenced_policy`, `unsequenced_policy`, the four objects and
+  `is_execution_policy`. New in Ф40; `__cpp_lib_execution` is 201902L
+  (P1001R2, the step that added `unseq`).
+- **What `par` runs on is the part worth reading.** A cabin keeps ONE brigade
+  of strands, built the first time anything asks for parallelism, asleep on
+  the kernel's address-park between jobs, and reused by every call after
+  (`src/runtime/par_engine.cpp`). The two alternatives were rejected on
+  purpose: hiring strands per call makes `par` slower than `seq` on anything
+  short, which is the opposite of what the policy is for, and running
+  everything sequentially — what libstdc++ ships when it has no TBB to hand —
+  would make the feature-test macro name something that is not true. Measured
+  on 12 app-cores: `par` used all twelve strands, `seq` used one, and a 400 k
+  `transform_reduce` went from 60 ms to 32 ms.
+- One brigade, one region at a time. A second strand asking for parallelism
+  while a region runs waits for it rather than splitting the crew. A NESTED
+  region — a parallel algorithm called from inside one — runs sequentially,
+  which the standard permits (a policy is permission, not obligation) and
+  which is the only shape in which the brigade cannot wait on itself.
+- Without strands (no FSGSBASE, so `strand_spawn` refuses) the brigade has
+  zero workers and every parallel call runs on its caller. Nothing degrades
+  except the speed, and that is what a machine with one usable core is.
+- `[algorithms.parallel.exceptions]`: an element access function that exits by
+  throwing calls `terminate()`. That is the specification, not a shortcut, and
+  the worker body catches everything and calls it rather than letting an
+  exception walk out of a strand entry point.
+- **`~` The overload set is partial, and `__cpp_lib_parallel_algorithm` stays
+  undefined until it is not.** Present so far: `for_each`, `for_each_n`, both
+  `transform`s, `count`, `count_if`, `all_of`, `any_of`, `none_of`, `fill`,
+  `fill_n` from [algorithms]; `reduce` ×3 and `transform_reduce` ×3 from
+  [numeric.ops]. The rest of [algorithms], and the [specialized.algorithms]
+  family in `<memory>`, are not built yet.
+- The predicate algorithms short-circuit through a shared flag: a chunk that
+  sees the answer already decided stops walking. The standard does not require
+  it; without it every chunk would read a range whose answer is known.
+- `accumulate` has no parallel overload and never will — that is the standard's
+  design. `reduce` is the one that may reorder, which is why it requires an
+  associative and commutative operation, and why this implementation folds
+  per-chunk partials in whatever order they finish.
 
 ## `<flat_map>` and `<flat_set>`
 

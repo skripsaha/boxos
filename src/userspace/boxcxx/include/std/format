@@ -1453,6 +1453,27 @@ template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<double> = true;
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<long double> = true;
+// The narrow extended floating-point types got formatters in Ф40, and a
+// formatter that reaches the same code float's does locks and allocates
+// exactly as little. Carried into Ф40's third commit rather than its second
+// only because the second's matrix had already run; float128_t is absent from
+// this list for the same reason it is absent from the formatters.
+#if defined(__STDCPP_FLOAT16_T__)
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<_Float16> = true;
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<__bf16> = true;
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<_Float32> = true;
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<_Float64> = true;
+#endif
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<char *> = true;
 template <> inline constexpr bool

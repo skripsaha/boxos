@@ -559,6 +559,7 @@
 #include <initializer_list>
 #include <scoped_allocator>
 #include <span>
+#include <execution>
 #include <spanstream>
 #include <sstream>
 #include <stdfloat>
@@ -29560,9 +29561,7 @@ static_assert(__cpp_lib_constexpr_vector == 201907L, "phase131: __cpp_lib_conste
     // and into phase133's value pin. Eight until Ф31b-2 shipped <flat_map>;
     // __cpp_lib_flat_map moved into phase135's. Seven until Ф37 shipped
     // <stacktrace>; __cpp_lib_stacktrace is a value pin right here now.)
-#ifdef __cpp_lib_execution
-#  error "phase131: __cpp_lib_execution must stay undefined"
-#endif
+static_assert(__cpp_lib_execution == 201902L, "phase131: __cpp_lib_execution — closed by Ф40");
 #ifdef __cpp_lib_filesystem
 #  error "phase131: __cpp_lib_filesystem must stay undefined"
 #endif
@@ -45440,6 +45439,213 @@ void Phase200()
     printf("[CXX] PASS phase200: <stdfloat> — five floating-point types the library finally admits to\n");
 }
 
+// ── phase201: <execution> — the brigade, and what it is for (Ф40) ────────
+// The policies are four empty classes; the interesting part is what par
+// actually does, which is hand chunks to a brigade of strands that lives in
+// the cabin and sleeps on the kernel's address-park between jobs. Three things
+// have to be true and all three are checked here: the answers must not depend
+// on the policy, par must really run on more than one strand, and seq must
+// really not.
+namespace p201 {
+
+using std::execution::par;
+using std::execution::par_unseq;
+using std::execution::seq;
+using std::execution::unseq;
+
+// Comfortably past the 2048-element grain, so par has something to split.
+constexpr size_t kBig = 60000;
+
+struct Cell {
+    int                v   = 0;
+    unsigned long long who = 0;
+};
+
+bool Policies()
+{
+    static_assert(std::is_execution_policy_v<std::execution::sequenced_policy>);
+    static_assert(std::is_execution_policy_v<std::execution::parallel_policy>);
+    static_assert(std::is_execution_policy_v<std::execution::parallel_unsequenced_policy>);
+    static_assert(std::is_execution_policy_v<std::execution::unsequenced_policy>);
+    static_assert(!std::is_execution_policy_v<int>);
+    static_assert(!std::is_execution_policy_v<void>);
+    // [execpol.type]: no policy is default-constructible, so one cannot arrive
+    // by value-initialisation where the caller meant to choose.
+    static_assert(!std::is_default_constructible_v<std::execution::parallel_policy>);
+    static_assert(!std::is_default_constructible_v<std::execution::sequenced_policy>);
+    static_assert(std::is_copy_constructible_v<std::execution::parallel_policy>);
+    static_assert(__cpp_lib_execution == 201902L);
+    return true;
+}
+
+// Every policy must give the answer the sequential algorithm gives.
+bool SameAnswers()
+{
+    std::vector<int> src(kBig);
+    for (size_t i = 0; i < kBig; ++i) src[i] = static_cast<int>(i % 97);
+
+    const long long want_sum = std::accumulate(src.begin(), src.end(), 0LL);
+    const auto want_count = std::count(src.begin(), src.end(), 5);
+
+    if (std::reduce(seq, src.begin(), src.end(), 0LL) != want_sum) return false;
+    if (std::reduce(unseq, src.begin(), src.end(), 0LL) != want_sum) return false;
+    if (std::reduce(par, src.begin(), src.end(), 0LL) != want_sum) return false;
+    if (std::reduce(par_unseq, src.begin(), src.end(), 0LL) != want_sum) return false;
+
+    if (std::count(par, src.begin(), src.end(), 5) != want_count) return false;
+    if (std::count_if(par, src.begin(), src.end(), [](int x) { return x == 5; }) != want_count)
+        return false;
+
+    if (!std::all_of(par, src.begin(), src.end(), [](int x) { return x < 97; })) return false;
+    if (std::all_of(par, src.begin(), src.end(), [](int x) { return x < 96; })) return false;
+    if (!std::any_of(par, src.begin(), src.end(), [](int x) { return x == 96; })) return false;
+    if (!std::none_of(par, src.begin(), src.end(), [](int x) { return x > 96; })) return false;
+
+    std::vector<int> out(kBig, 0);
+    std::transform(par, src.begin(), src.end(), out.begin(), [](int x) { return x * 2; });
+    for (size_t i = 0; i < kBig; ++i)
+        if (out[i] != src[i] * 2) return false;
+
+    std::vector<int> both(kBig, 0);
+    std::transform(par, src.begin(), src.end(), out.begin(), both.begin(),
+                   [](int a, int b) { return a + b; });
+    for (size_t i = 0; i < kBig; ++i)
+        if (both[i] != src[i] * 3) return false;
+
+    if (std::transform_reduce(par, src.begin(), src.end(), 0LL, std::plus<>(),
+                              [](int x) { return (long long)x * 2; }) != want_sum * 2)
+        return false;
+    if (std::transform_reduce(par, src.begin(), src.end(), src.begin(), 0LL) !=
+        std::inner_product(src.begin(), src.end(), src.begin(), 0LL))
+        return false;
+
+    std::vector<int> filled(kBig, 0);
+    std::fill(par, filled.begin(), filled.end(), 7);
+    for (int x : filled)
+        if (x != 7) return false;
+    std::fill_n(par, filled.begin(), (long)kBig, 9);
+    for (int x : filled)
+        if (x != 9) return false;
+
+    long long touched = 0;
+    std::for_each(seq, src.begin(), src.end(), [&](int x) { touched += x; });
+    if (touched != want_sum) return false;
+
+    // A range far below the grain still has to work -- it just runs on one
+    // strand, which is what "the policy is permission" means.
+    std::vector<int> tiny{1, 2, 3, 4};
+    if (std::reduce(par, tiny.begin(), tiny.end(), 0) != 10) return false;
+    std::for_each(par, tiny.begin(), tiny.end(), [](int &x) { x *= 2; });
+    if (tiny[3] != 8) return false;
+    return true;
+}
+
+// The proof that par is not a synonym for seq: every element records which
+// strand touched it, and more than one must appear. Each cell is written by
+// exactly one strand, so the vector needs no synchronisation of its own.
+size_t Spread(bool parallel)
+{
+    std::vector<Cell> cells(kBig);
+    auto body = [](Cell &c) {
+        c.who = std::hash<std::thread::id>{}(std::this_thread::get_id());
+        for (int k = 0; k < 40; ++k) c.v += k;      // enough work to overlap
+    };
+    if (parallel) std::for_each(par, cells.begin(), cells.end(), body);
+    else          std::for_each(seq, cells.begin(), cells.end(), body);
+
+    std::unordered_set<unsigned long long> seen;
+    for (const Cell &c : cells) {
+        if (c.v != 780) return 0;                  // 0+1+...+39
+        seen.insert(c.who);
+    }
+    return seen.size();
+}
+
+// A parallel algorithm called from inside one must not wait for a brigade that
+// is already busy with the outer region. It runs sequentially instead, which
+// the standard permits and which is the only shape that cannot deadlock.
+bool NestedRegions()
+{
+    // The outer range must be long enough to be SPLIT, or the nesting is not
+    // nesting: a short outer range runs on the caller and the inner call is an
+    // ordinary parallel call. 8192 with a 2048-element grain gives four
+    // chunks, so the inner reduce really does run inside a worker.
+    std::vector<int> outer(8192, 0);
+    std::vector<int> inner(20000, 1);
+    std::for_each(par, outer.begin(), outer.end(), [&](int &o) {
+        o = static_cast<int>(std::reduce(par, inner.begin(), inner.end(), 0));
+    });
+    for (int o : outer)
+        if (o != 20000) return false;
+    return true;
+}
+
+// The brigade is built once and reused: a hundred regions in a row must not
+// spawn a hundred crews. Nothing here can observe the spawn count directly --
+// what it can observe is that a hundred regions still answer correctly and do
+// not run out of strands.
+bool Reuse()
+{
+    std::vector<int> v(10000, 1);
+    for (int round = 0; round < 100; ++round) {
+        if (std::reduce(par, v.begin(), v.end(), 0) != 10000) return false;
+    }
+    return true;
+}
+
+// Not an assertion -- a measurement, printed. Whether a brigade pays for
+// itself depends on the work per element and on what the cores are doing, and
+// a timing assertion in this suite would be a flake generator (the lesson of
+// the phase39/40 ratio checks). What the number is FOR: the grain below which
+// splitting costs more than it saves is the one tuning constant in the engine,
+// and this is the only place it can be looked at on real cores.
+void Timing()
+{
+    using namespace std::chrono;
+    std::vector<double> v(400000);
+    for (size_t i = 0; i < v.size(); ++i) v[i] = (double)(i % 1000) * 0.5;
+    auto work = [](double x) { return x * x + 1.0; };
+
+    const auto t0 = steady_clock::now();
+    const double a = std::transform_reduce(seq, v.begin(), v.end(), 0.0, std::plus<>(), work);
+    const auto t1 = steady_clock::now();
+    const double b = std::transform_reduce(par, v.begin(), v.end(), 0.0, std::plus<>(), work);
+    const auto t2 = steady_clock::now();
+
+    const long long us_seq = duration_cast<microseconds>(t1 - t0).count();
+    const long long us_par = duration_cast<microseconds>(t2 - t1).count();
+    printf("[CXX] note phase201: 400k transform_reduce — seq %lld us, par %lld us (sums %s)\n",
+           us_seq, us_par, (a == b || (a - b < 1e-6 && b - a < 1e-6)) ? "agree" : "DIFFER");
+}
+
+} // namespace p201
+
+void Phase201()
+{
+    Check(p201::Policies(), "phase201 the four policies, the trait, and the macro");
+    Check(p201::SameAnswers(), "phase201 every policy gives the sequential answer");
+    Check(p201::NestedRegions(), "phase201 a parallel region inside one runs, and does not wedge");
+    Check(p201::Reuse(), "phase201 a hundred regions in a row on one brigade");
+
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase201: strands need FSGSBASE — brigade runs on the caller\n");
+    } else {
+        const size_t serial = p201::Spread(false);
+        const size_t wide   = p201::Spread(true);
+        Check(serial == 1, "phase201 seq runs on exactly one strand");
+        const unsigned cores = std::thread::hardware_concurrency();
+        if (cores > 1) {
+            Check(wide > 1, "phase201 par really spreads across strands");
+        }
+        printf("[CXX] note phase201: %u app-cores, par used %zu strands, seq used %zu\n", cores,
+               wide, serial);
+    }
+
+    p201::Timing();
+
+    printf("[CXX] PASS phase201: <execution> — par is a brigade, not a word\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -45662,6 +45868,7 @@ int main()
     Phase198();
     Phase199();
     Phase200();
+    Phase201();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

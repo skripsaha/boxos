@@ -1,0 +1,15 @@
+// boxcxx — <__bits/version_execution>
+//
+// __cpp_lib_execution names the POLICIES, not the algorithm overloads -- those
+// have their own macro, __cpp_lib_parallel_algorithm, which stays undefined
+// until every one of them exists. 201902L is P1001R2's value, the step that
+// added unseq to the three C++17 policies; all four are here.
+//
+// No include guard, by the same rule as every other version leaf: it is
+// re-entered once per owning header and defines only what that header declared
+// it owns. See <version>'s preamble.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_execution)) && !defined(__cpp_lib_execution)
+#  define __cpp_lib_execution 201902L
+#endif
+#undef BOXCXX_OWNS_execution
