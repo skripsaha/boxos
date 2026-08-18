@@ -56,7 +56,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/tls/tls_strand.cpp \
        src/unwind/dwarf_cfi.cpp \
        src/unwind/unwind_level1.cpp
-OBJS = $(SRCS:.cpp=.o) src/unwind/unwind_context.o
+OBJS = $(SRCS:.cpp=.o) src/unwind/unwind_context.o src/runtime/csetjmp.o
 
 all: libboxcxx.a
 

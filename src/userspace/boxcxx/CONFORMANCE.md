@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **99** — 94 of the 105 C++23 [headers] name (11 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Standard headers provided | **100** — 95 of the 105 C++23 [headers] name (10 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 133 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 220 phases (201 of them the numbered `PhaseN` series), 5 501 runtime checks, 1 930 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 221 phases (202 of them the numbered `PhaseN` series), 5 505 runtime checks, 1 930 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -96,14 +96,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (11)
+## 1.1 Headers that do not exist (10)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 94 of them are in the tree and 11 are not,
+[headers] name 105 headers in C++23; 95 of them are in the tree and 10 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 94 + 5 = the 99 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 95 + 5 = the 100 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -113,14 +113,14 @@ still added up because they were adjusted to each other rather than to the
 standard. It is absent, it is listed below, and the count above is now the
 output of a diff between [headers] and `ls include/std`.
 
-### C library wrappers — 8 absent, 13 provided
+### C library wrappers — 7 absent, 14 provided
 
-Absent: `<cinttypes>` `<clocale>` `<csetjmp>` `<cstdio>` `<ctime>` `<cuchar>`
-`<cwchar>` `<cwctype>`
+Absent: `<cinttypes>` `<clocale>` `<cstdio>` `<ctime>` `<cuchar>` `<cwchar>`
+`<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
-`<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b) and `<cfenv>`
-(Ф41-c) — all §2.
+`<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
+(Ф41-c) and `<csetjmp>` (Ф41-d) — all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -164,7 +164,7 @@ provided for the same reason and on the same terms (§2).
 
 `<cstddef>` and `<cstdint>` were provided long before Ф41, because they are pure
 type and macro headers with no runtime behind them, and `<cmath>` since Ф10;
-thirteen of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
+fourteen of the twenty-one C headers are therefore in the tree today. Independently, the compiler's own
 freestanding C headers remain available and are used by the library itself:
 `<stdint.h>`, `<stddef.h>`, `<stdarg.h>`, `<limits.h>`, `<float.h>` come from
 GCC, not from a libc, and resolve normally — with one measured hole, recorded
@@ -1087,6 +1087,42 @@ returns a mutable one.
   a shared buffer would have. A condition BoxOS cannot surface gets
   `"generic error N"` rather than a cargo-culted Unix string — the policy
   `<system_error>` already had.
+
+## `<csetjmp>`
+
+Four instructions of register shuffling and one genuine problem: CET.
+
+A `longjmp` travels UP the stack, so by the time it runs the shadow stack holds
+an entry for every frame the jump is about to discard. Leaving them does not
+fault at the jump — it faults later, the first time the resumed function
+returns and its return address no longer matches the shadow one (#CP). So
+`longjmp` pops them with `INCSSPQ` back to where `setjmp` stood, and then
+**returns** to the saved address rather than jumping to it: at that point the
+top shadow entry IS `setjmp`'s own return address, so a `RET` consumes both
+stacks in step and lands exactly where `setjmp` would have returned. An
+indirect `JMP` would leave the entry behind and, under IBT, demand an `ENDBR64`
+at a target that has none — the unwinder's NOTRACK jump is right for a DWARF
+landing pad and wrong here. `RDSSPQ` reads 0 when shadow stacks are off
+(QEMU/TCG), so the same code takes the ordinary path there and the CET path on
+real hardware.
+
+- `jmp_buf` is nine words — six callee-saved registers, `rsp`, the resume
+  address, and the shadow-stack pointer — and it is an **array type**, as
+  [csetjmp.syn] requires, which is what lets `longjmp(env, 1)` be written
+  without an ampersand.
+- `setjmp` is a **macro**, also as required: the context saved must be the
+  caller's, and a macro is what guarantees no extra frame stands between them.
+- `longjmp(env, 0)` makes `setjmp` return 1, because 0 is how the first return
+  is recognised.
+- **[csetjmp.syn]/2's restriction is stated and not enforced**: the pair is
+  undefined if replacing it with `catch` and `throw` would destroy an object
+  with a non-trivial destructor. Nothing can enforce that. In a library with
+  working exceptions there is almost never a reason to reach for this pair; it
+  is here because ported C code reaches for it.
+
+phase206's fourth check is the one that matters: it jumps out of five nested
+frames and then RETURNS from the frame that caught the jump — the return that
+would #CP if the shadow stack had been left one entry too deep.
 
 ## `<csignal>`
 

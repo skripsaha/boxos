@@ -585,6 +585,7 @@
 #include <cerrno>
 #include <cfloat>
 #include <climits>
+#include <csetjmp>
 #include <csignal>
 #include <cstdarg>
 #include <cfenv>
@@ -47172,6 +47173,86 @@ void Phase205()
     printf("[CXX] PASS phase205: <cfenv> — the flags <cmath> has been promising since Ф10\n");
 }
 
+// ── phase206 — Ф41-d: <csetjmp> under CET ───────────────────────────────
+namespace p206 {
+
+std::jmp_buf g_env;
+volatile int g_depth = 0;
+
+// The frames a longjmp discards. Each one is a real call, so on hardware with
+// shadow stacks each leaves an entry that longjmp must pop — five of them, plus
+// its own. Nothing here has a destructor: [csetjmp.syn]/2 makes a jump past one
+// undefined, and this test stays inside the rule it documents.
+[[noreturn]] void Deep(int n)
+{
+    g_depth = n;
+    if (n > 0) Deep(n - 1);
+    std::longjmp(g_env, 42);
+}
+
+bool ReturnsZeroThenTheValue()
+{
+    volatile int visits = 0;
+    const int    r      = setjmp(g_env);
+    visits = visits + 1;
+    if (r == 0) {
+        std::longjmp(g_env, 7);
+    }
+    return r == 7 && visits == 2;
+}
+
+// longjmp(env, 0) must not make setjmp return 0 a second time — 0 is how the
+// first return is recognised, so C requires 1 instead.
+bool ZeroBecomesOne()
+{
+    const int r = setjmp(g_env);
+    if (r == 0) std::longjmp(g_env, 0);
+    return r == 1;
+}
+
+// ‼ The CET check, and the reason this phase exists. Five discarded frames on
+// the way back, and then — crucially — the function RETURNS normally. That
+// return is what would #CP if the shadow stack had been left one entry too
+// deep, because the return address on the normal stack would no longer match
+// the shadow one. On QEMU shadow stacks are off and this proves the ordinary
+// path; on real hardware it proves the INCSSPQ loop.
+bool JumpsOutOfFiveFramesAndStillReturns()
+{
+    g_depth     = -1;
+    const int r = setjmp(g_env);
+    if (r == 0) Deep(5);
+    return r == 42 && g_depth == 0;
+}
+
+// Callee-saved registers must come back. `keep` is used on both sides of the
+// jump and after it, which is what makes the compiler want it in one of the
+// registers setjmp saves; volatile keeps the value observable either way.
+bool RestoresTheCallerContext()
+{
+    volatile long keep = 0x5EEDF00Dl;
+    volatile int  round = 0;
+
+    const int r = setjmp(g_env);
+    if (r < 3) {
+        round = round + 1;
+        std::longjmp(g_env, r + 1);
+    }
+    return r == 3 && round == 3 && keep == 0x5EEDF00Dl;
+}
+
+} // namespace p206
+
+void Phase206()
+{
+    Check(p206::ReturnsZeroThenTheValue(), "phase206 setjmp returns 0, then what longjmp passed");
+    Check(p206::ZeroBecomesOne(), "phase206 longjmp(env, 0) makes setjmp return 1");
+    Check(p206::JumpsOutOfFiveFramesAndStillReturns(),
+          "phase206 five frames discarded, and the frame that caught it still returns");
+    Check(p206::RestoresTheCallerContext(), "phase206 the caller's context survives three round trips");
+
+    printf("[CXX] PASS phase206: <csetjmp> — and a shadow stack left exactly where it was\n");
+}
+
 
 } // namespace
 
@@ -47400,6 +47481,7 @@ int main()
     Phase203();
     Phase204();
     Phase205();
+    Phase206();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
