@@ -2344,4 +2344,8 @@ using polymorphic = std::polymorphic<T, polymorphic_allocator<T>>;
 #define BOXCXX_OWNS_transparent_operators
 #include <__bits/version_memory>
 
+// [specialized.algorithms] declares the execution-policy overloads in THIS
+// header; the brigade behind them is <__bits/par_engine>.
+#include <__bits/par_memory>
+
 #endif // BOXCXX_MEMORY

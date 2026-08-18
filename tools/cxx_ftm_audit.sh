@@ -42,6 +42,13 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф40's fourth commit raised it 169 -> 170, and the delta is ONE
+#           macro: __cpp_lib_parallel_algorithm, whose owners are <algorithm>
+#           and <numeric> and which therefore reaches everything <algorithm>
+#           reaches, which is most of the library. Measured as a set
+#           difference against the previous run: exactly that macro, nothing
+#           else, and nothing stopped leaking either.
+#
 #           Ф40's third commit raised it 165 -> 169, and the delta is FOUR
 #           macros, all of them <numeric>'s: constexpr_numeric, gcd_lcm,
 #           ranges_iota and saturation_arithmetic. None of them had ever
@@ -101,7 +108,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=169
+LEAK_BUDGET=170
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

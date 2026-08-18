@@ -29581,9 +29581,7 @@ static_assert(__cpp_lib_mdspan == 202406L, "phase131: __cpp_lib_mdspan — close
 #ifdef __cpp_lib_modules
 #  error "phase131: __cpp_lib_modules must stay undefined"
 #endif
-#ifdef __cpp_lib_parallel_algorithm
-#  error "phase131: __cpp_lib_parallel_algorithm must stay undefined"
-#endif
+static_assert(__cpp_lib_parallel_algorithm == 201603L, "phase131: __cpp_lib_parallel_algorithm — closed by Ф40");
     // Ф31a-5 dropped these two: __cpp_lib_ranges is short 23 entities
     // (take_while, drop_while, istream_view, seven [range.access] CPOs,
     // range_rvalue_reference_t, range_common_reference_t, subrange's two
@@ -45646,6 +45644,384 @@ void Phase201()
     printf("[CXX] PASS phase201: <execution> — par is a brigade, not a word\n");
 }
 
+// ── phase202: the rest of the ExecutionPolicy overloads (Ф40) ────────────
+// Every check is the same shape: run the algorithm under par, run the
+// sequential one, and require the same answer. The ranges are 50 000 elements
+// so the brigade really does cut them — under the 2 048-element grain the
+// parallel path is never taken and the test would be about nothing.
+//
+// The three shapes the implementations come in are visible here too: the
+// first-match ones (find, mismatch, is_sorted_until) have to agree on WHICH
+// match, not just that there was one; the two-pass ones (copy_if, the scans)
+// have to agree element for element, which is where an off-by-one in the
+// offsets would show; and the ones that run on the calling strand still have
+// to answer.
+namespace p202 {
+
+using std::execution::par;
+using std::execution::par_unseq;
+using std::execution::seq;
+
+constexpr size_t kN = 50000;
+
+std::vector<int> Ramp()
+{
+    std::vector<int> v(kN);
+    for (size_t i = 0; i < kN; ++i) v[i] = static_cast<int>(i % 1000);
+    return v;
+}
+
+bool FirstMatch()
+{
+    std::vector<int> v = Ramp();
+    v[31337] = -7;
+
+    if (std::find(par, v.begin(), v.end(), -7) != std::find(v.begin(), v.end(), -7)) return false;
+    if (std::find_if(par, v.begin(), v.end(), [](int x) { return x < 0; }) !=
+        std::find_if(v.begin(), v.end(), [](int x) { return x < 0; }))
+        return false;
+    if (std::find_if_not(par, v.begin(), v.end(), [](int x) { return x >= 0; }) !=
+        std::find_if_not(v.begin(), v.end(), [](int x) { return x >= 0; }))
+        return false;
+    // no match at all: the answer is last, from both
+    if (std::find(par, v.begin(), v.end(), -99999) != v.end()) return false;
+
+    std::vector<int> w = v;
+    w[40000] = w[40001];
+    if (std::adjacent_find(par, w.begin(), w.end()) != std::adjacent_find(w.begin(), w.end()))
+        return false;
+
+    const std::vector<int> needle{500, 501, 502, 503};
+    if (std::search(par, v.begin(), v.end(), needle.begin(), needle.end()) !=
+        std::search(v.begin(), v.end(), needle.begin(), needle.end()))
+        return false;
+    if (std::find_end(par, v.begin(), v.end(), needle.begin(), needle.end()) !=
+        std::find_end(v.begin(), v.end(), needle.begin(), needle.end()))
+        return false;
+    const std::vector<int> any{997, 998};
+    if (std::find_first_of(par, v.begin(), v.end(), any.begin(), any.end()) !=
+        std::find_first_of(v.begin(), v.end(), any.begin(), any.end()))
+        return false;
+
+    std::vector<int> runs(kN, 4);
+    runs[20000] = runs[20001] = runs[20002] = 9;
+    if (std::search_n(par, runs.begin(), runs.end(), 3, 9) !=
+        std::search_n(runs.begin(), runs.end(), 3, 9))
+        return false;
+
+    std::vector<int> u = v;
+    u[12345] = 4242;
+    const auto got  = std::mismatch(par, v.begin(), v.end(), u.begin());
+    const auto want = std::mismatch(v.begin(), v.end(), u.begin());
+    if (got.first != want.first || got.second != want.second) return false;
+    if (std::equal(par, v.begin(), v.end(), u.begin())) return false;
+    if (!std::equal(par, v.begin(), v.end(), v.begin())) return false;
+    if (!std::equal(par, v.begin(), v.end(), v.begin(), v.end())) return false;
+
+    if (std::lexicographical_compare(par, v.begin(), v.end(), u.begin(), u.end()) !=
+        std::lexicographical_compare(v.begin(), v.end(), u.begin(), u.end()))
+        return false;
+    return true;
+}
+
+bool MinMaxAndPredicates()
+{
+    std::vector<int> v = Ramp();
+    v[7777]  = -100;   // a unique minimum
+    v[8888]  = 5000;   // a unique maximum
+    // Twenty rounds, not one: BestIndex settles ties through a compare-and-
+    // exchange across chunks, and a race there would show as an occasional
+    // wrong answer rather than a wrong one. One round would be a coin toss
+    // dressed as a test.
+    for (int round = 0; round < 20; ++round) {
+        if (std::min_element(par, v.begin(), v.end()) != std::min_element(v.begin(), v.end()))
+            return false;
+        if (std::max_element(par, v.begin(), v.end()) != std::max_element(v.begin(), v.end()))
+            return false;
+        const auto got  = std::minmax_element(par, v.begin(), v.end());
+        const auto want = std::minmax_element(v.begin(), v.end());
+        if (got.first != want.first || got.second != want.second) return false;
+    }
+
+    // ties: min_element takes the leftmost, max_element the leftmost, and
+    // minmax_element's max takes the LAST -- three different rules, and the
+    // sequential algorithms are the oracle for all three.
+    std::vector<int> flat(kN, 3);
+    for (int round = 0; round < 20; ++round) {
+        if (std::min_element(par, flat.begin(), flat.end()) != flat.begin()) return false;
+        if (std::max_element(par, flat.begin(), flat.end()) != flat.begin()) return false;
+        const auto tie = std::minmax_element(par, flat.begin(), flat.end());
+        const auto tw  = std::minmax_element(flat.begin(), flat.end());
+        if (tie.first != tw.first || tie.second != tw.second) return false;
+    }
+
+    std::vector<int> sorted = v;
+    std::sort(sorted.begin(), sorted.end());
+    if (!std::is_sorted(par, sorted.begin(), sorted.end())) return false;
+    if (std::is_sorted(par, v.begin(), v.end())) return false;
+    if (std::is_sorted_until(par, v.begin(), v.end()) != std::is_sorted_until(v.begin(), v.end()))
+        return false;
+
+    std::vector<int> heap = v;
+    std::make_heap(heap.begin(), heap.end());
+    if (!std::is_heap(par, heap.begin(), heap.end())) return false;
+    if (std::is_heap_until(par, v.begin(), v.end()) != std::is_heap_until(v.begin(), v.end()))
+        return false;
+
+    std::vector<int> parted = v;
+    auto            odd    = [](int x) { return x % 2 != 0; };
+    std::partition(parted.begin(), parted.end(), odd);
+    if (!std::is_partitioned(par, parted.begin(), parted.end(), odd)) return false;
+    if (std::is_partitioned(par, v.begin(), v.end(), odd)) return false;
+    return true;
+}
+
+bool ElementWise()
+{
+    const std::vector<int> src = Ramp();
+    std::vector<int>       a(kN, 0), b(kN, 0);
+
+    std::copy(par, src.begin(), src.end(), a.begin());
+    if (a != src) return false;
+    std::fill(par, a.begin(), a.end(), 0);
+    std::copy_n(par, src.begin(), (long)kN, a.begin());
+    if (a != src) return false;
+
+    std::vector<int> movable = src;
+    std::move(par, movable.begin(), movable.end(), b.begin());
+    if (b != src) return false;
+
+    std::vector<int> x = src, y(kN, 0);
+    std::swap_ranges(par, x.begin(), x.end(), y.begin());
+    if (y != src) return false;
+
+    a = src;
+    std::replace(par, a.begin(), a.end(), 5, -5);
+    std::vector<int> want = src;
+    std::replace(want.begin(), want.end(), 5, -5);
+    if (a != want) return false;
+
+    std::replace_copy(par, src.begin(), src.end(), b.begin(), 7, -7);
+    want = src;
+    std::replace_copy(src.begin(), src.end(), want.begin(), 7, -7);
+    if (b != want) return false;
+
+    int counter = 0;
+    std::generate(par, a.begin(), a.end(), [&counter] { return 11; });
+    for (int v : a)
+        if (v != 11) return false;
+    std::generate_n(par, a.begin(), (long)kN, [] { return 12; });
+    for (int v : a)
+        if (v != 12) return false;
+    (void)counter;
+
+    a = src;
+    std::reverse(par, a.begin(), a.end());
+    want = src;
+    std::reverse(want.begin(), want.end());
+    if (a != want) return false;
+
+    std::reverse_copy(par, src.begin(), src.end(), b.begin());
+    if (b != want) return false;
+
+    std::rotate_copy(par, src.begin(), src.begin() + 12345, src.end(), b.begin());
+    want.assign(kN, 0);
+    std::rotate_copy(src.begin(), src.begin() + 12345, src.end(), want.begin());
+    if (b != want) return false;
+    return true;
+}
+
+bool TwoPass()
+{
+    const std::vector<int> src = Ramp();
+    auto                   keep = [](int x) { return x % 3 == 0; };
+
+    std::vector<int> out(kN, -1), want(kN, -1);
+    auto             got_end  = std::copy_if(par, src.begin(), src.end(), out.begin(), keep);
+    auto             want_end = std::copy_if(src.begin(), src.end(), want.begin(), keep);
+    if (got_end - out.begin() != want_end - want.begin()) return false;
+    if (!std::equal(out.begin(), got_end, want.begin())) return false;
+
+    out.assign(kN, -1);
+    want.assign(kN, -1);
+    got_end  = std::remove_copy(par, src.begin(), src.end(), out.begin(), 5);
+    want_end = std::remove_copy(src.begin(), src.end(), want.begin(), 5);
+    if (got_end - out.begin() != want_end - want.begin()) return false;
+    if (!std::equal(out.begin(), got_end, want.begin())) return false;
+
+    std::vector<int> runs(kN);
+    for (size_t i = 0; i < kN; ++i) runs[i] = static_cast<int>(i / 7);
+    out.assign(kN, -1);
+    want.assign(kN, -1);
+    got_end  = std::unique_copy(par, runs.begin(), runs.end(), out.begin());
+    want_end = std::unique_copy(runs.begin(), runs.end(), want.begin());
+    if (got_end - out.begin() != want_end - want.begin()) return false;
+    if (!std::equal(out.begin(), got_end, want.begin())) return false;
+
+    std::vector<int> yes(kN, -1), no(kN, -1), wy(kN, -1), wn(kN, -1);
+    const auto       gp = std::partition_copy(par, src.begin(), src.end(), yes.begin(), no.begin(), keep);
+    const auto       wp = std::partition_copy(src.begin(), src.end(), wy.begin(), wn.begin(), keep);
+    if (gp.first - yes.begin() != wp.first - wy.begin()) return false;
+    if (gp.second - no.begin() != wp.second - wn.begin()) return false;
+    if (!std::equal(yes.begin(), gp.first, wy.begin())) return false;
+    if (!std::equal(no.begin(), gp.second, wn.begin())) return false;
+    return true;
+}
+
+bool Scans()
+{
+    std::vector<long long> src(kN);
+    for (size_t i = 0; i < kN; ++i) src[i] = static_cast<long long>(i % 17) + 1;
+    std::vector<long long> got(kN, 0), want(kN, 0);
+
+    std::inclusive_scan(par, src.begin(), src.end(), got.begin());
+    std::inclusive_scan(src.begin(), src.end(), want.begin());
+    if (got != want) return false;
+
+    std::inclusive_scan(par, src.begin(), src.end(), got.begin(), std::plus<>(), 100LL);
+    std::inclusive_scan(src.begin(), src.end(), want.begin(), std::plus<>(), 100LL);
+    if (got != want) return false;
+
+    std::exclusive_scan(par, src.begin(), src.end(), got.begin(), 0LL);
+    std::exclusive_scan(src.begin(), src.end(), want.begin(), 0LL);
+    if (got != want) return false;
+
+    auto twice = [](long long x) { return x * 2; };
+    std::transform_inclusive_scan(par, src.begin(), src.end(), got.begin(), std::plus<>(), twice);
+    std::transform_inclusive_scan(src.begin(), src.end(), want.begin(), std::plus<>(), twice);
+    if (got != want) return false;
+
+    std::transform_exclusive_scan(par, src.begin(), src.end(), got.begin(), 5LL, std::plus<>(),
+                                  twice);
+    std::transform_exclusive_scan(src.begin(), src.end(), want.begin(), 5LL, std::plus<>(), twice);
+    if (got != want) return false;
+
+    std::adjacent_difference(par, src.begin(), src.end(), got.begin());
+    std::adjacent_difference(src.begin(), src.end(), want.begin());
+    if (got != want) return false;
+    return true;
+}
+
+bool SortAndTheSequentialOnes()
+{
+    std::vector<int> v(kN);
+    unsigned         seed = 12345;
+    for (size_t i = 0; i < kN; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        v[i] = static_cast<int>((seed >> 16) % 10000);
+    }
+    std::vector<int> want = v;
+    std::sort(want.begin(), want.end());
+
+    std::vector<int> a = v;
+    std::sort(par, a.begin(), a.end());
+    if (a != want) return false;
+
+    a = v;
+    std::stable_sort(par_unseq, a.begin(), a.end());
+    if (a != want) return false;
+
+    // Stability needs a payload to be visible at all: equal ints are
+    // indistinguishable, so a vector<int> cannot tell a stable sort from an
+    // unstable one. Keys collide 500 ways here, and every group has to come out
+    // in the order it went in.
+    struct Keyed {
+        int key;
+        int seq;
+    };
+    std::vector<Keyed> k(kN);
+    for (size_t i = 0; i < kN; ++i) k[i] = {static_cast<int>(i % 500), static_cast<int>(i)};
+    std::stable_sort(par, k.begin(), k.end(),
+                     [](const Keyed &x, const Keyed &y) { return x.key < y.key; });
+    for (size_t i = 1; i < kN; ++i) {
+        if (k[i - 1].key > k[i].key) return false;
+        if (k[i - 1].key == k[i].key && k[i - 1].seq > k[i].seq) return false;
+    }
+
+    a = v;
+    std::sort(par, a.begin(), a.end(), std::greater<>());
+    std::vector<int> desc = want;
+    std::reverse(desc.begin(), desc.end());
+    if (a != desc) return false;
+
+    // the ones that run on the calling strand still have to answer
+    a = v;
+    std::rotate(par, a.begin(), a.begin() + 777, a.end());
+    std::vector<int> r = v;
+    std::rotate(r.begin(), r.begin() + 777, r.end());
+    if (a != r) return false;
+
+    a = want;
+    const auto ge  = std::unique(par, a.begin(), a.end());
+    std::vector<int> u = want;
+    const auto we  = std::unique(u.begin(), u.end());
+    if (ge - a.begin() != we - u.begin()) return false;
+
+    a = v;
+    const auto re = std::remove(par, a.begin(), a.end(), 42);
+    std::vector<int> rr = v;
+    const auto we2 = std::remove(rr.begin(), rr.end(), 42);
+    if (re - a.begin() != we2 - rr.begin()) return false;
+
+    std::vector<int> m1 = want, m2 = want, merged(kN * 2, 0), wmerged(kN * 2, 0);
+    std::merge(par, m1.begin(), m1.end(), m2.begin(), m2.end(), merged.begin());
+    std::merge(m1.begin(), m1.end(), m2.begin(), m2.end(), wmerged.begin());
+    if (merged != wmerged) return false;
+
+    a = v;
+    std::nth_element(par, a.begin(), a.begin() + 100, a.end());
+    if (a[100] != want[100]) return false;
+    return true;
+}
+
+bool Memory()
+{
+    constexpr size_t kSmall = 20000;
+    std::vector<int> storage(kSmall, 0);
+    std::uninitialized_fill(par, storage.begin(), storage.end(), 8);
+    for (int x : storage)
+        if (x != 8) return false;
+
+    std::vector<int> src(kSmall, 3);
+    std::vector<int> dst(kSmall, 0);
+    std::uninitialized_copy(par, src.begin(), src.end(), dst.begin());
+    if (dst != src) return false;
+
+    std::vector<int> dst2(kSmall, 0);
+    std::uninitialized_move(par, src.begin(), src.end(), dst2.begin());
+    if (dst2 != std::vector<int>(kSmall, 3)) return false;
+
+    std::vector<int> zeroed(kSmall, 7);
+    std::uninitialized_value_construct(par, zeroed.begin(), zeroed.end());
+    for (int x : zeroed)
+        if (x != 0) return false;
+
+    std::destroy(par, zeroed.begin(), zeroed.end());   // trivial, but it must compile and run
+    std::uninitialized_fill_n(par, zeroed.begin(), (long)kSmall, 6);
+    for (int x : zeroed)
+        if (x != 6) return false;
+    return true;
+}
+
+} // namespace p202
+
+void Phase202()
+{
+    Check(p202::FirstMatch(), "phase202 the first-match family agrees with the sequential answer");
+    Check(p202::MinMaxAndPredicates(), "phase202 min/max/sorted/heap/partitioned, ties included");
+    Check(p202::ElementWise(), "phase202 copy/move/replace/generate/reverse/rotate_copy");
+    Check(p202::TwoPass(), "phase202 copy_if/remove_copy/unique_copy/partition_copy offsets");
+    Check(p202::Scans(), "phase202 the scans and adjacent_difference");
+    Check(p202::SortAndTheSequentialOnes(), "phase202 parallel sort, and the ones that run on the caller");
+    Check(p202::Memory(), "phase202 [specialized.algorithms] under a policy");
+
+    static_assert(__cpp_lib_parallel_algorithm == 201603L,
+                  "phase202 __cpp_lib_parallel_algorithm is the C++23 value");
+    Check(__cpp_lib_parallel_algorithm == 201603L, "phase202 __cpp_lib_parallel_algorithm FTM");
+
+    printf("[CXX] PASS phase202: the ExecutionPolicy overload set is complete\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -45869,6 +46245,7 @@ int main()
     Phase199();
     Phase200();
     Phase201();
+    Phase202();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

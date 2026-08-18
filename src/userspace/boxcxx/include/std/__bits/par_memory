@@ -1,0 +1,185 @@
+// boxcxx — <__bits/par_memory>
+//
+// [specialized.algorithms] takes execution policies too, and every one of these
+// is element-wise: constructing or destroying the i-th object says nothing
+// about the j-th. They are the easiest members of the whole parallel surface
+// and the last to arrive, because nothing else needed the brigade first.
+//
+// One thing they do NOT need, and it is worth saying why: the sequential
+// uninitialized_* algorithms unwind what they built if an element constructor
+// throws. The parallel ones do not, because [algorithms.parallel.exceptions]
+// says an element access function that exits by throwing calls terminate() --
+// there is no "after the throw" in which to clean up.
+#ifndef BOXCXX_BITS_PAR_MEMORY
+#define BOXCXX_BITS_PAR_MEMORY
+
+#include <__bits/execution_policy>
+#include <__bits/par_algo>
+#include <__bits/par_engine>
+
+#include <iterator>
+#include <type_traits>
+
+namespace std {
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void uninitialized_default_construct(EP &&, It first, It last)
+{
+    using T        = typename iterator_traits<It>::value_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) T;
+    });
+}
+
+template <class EP, class It, class Size>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It uninitialized_default_construct_n(EP &&, It first, Size count)
+{
+    using T        = typename iterator_traits<It>::value_type;
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) T;
+    });
+    return __par::At(first, n);
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void uninitialized_value_construct(EP &&, It first, It last)
+{
+    using T        = typename iterator_traits<It>::value_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) T();
+    });
+}
+
+template <class EP, class It, class Size>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It uninitialized_value_construct_n(EP &&, It first, Size count)
+{
+    using T        = typename iterator_traits<It>::value_type;
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) T();
+    });
+    return __par::At(first, n);
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out uninitialized_copy(EP &&, In first, In last, Out out)
+{
+    using T        = typename iterator_traits<Out>::value_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o)
+            ::new (static_cast<void *>(addressof(*o))) T(*it);
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Size, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out uninitialized_copy_n(EP &&, In first, Size count, Out out)
+{
+    using T        = typename iterator_traits<Out>::value_type;
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o)
+            ::new (static_cast<void *>(addressof(*o))) T(*it);
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out uninitialized_move(EP &&, In first, In last, Out out)
+{
+    using T        = typename iterator_traits<Out>::value_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o)
+            ::new (static_cast<void *>(addressof(*o))) T(std::move(*it));
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Size, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<In, Out> uninitialized_move_n(EP &&, In first, Size count, Out out)
+{
+    using T        = typename iterator_traits<Out>::value_type;
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o)
+            ::new (static_cast<void *>(addressof(*o))) T(std::move(*it));
+    });
+    return {__par::At(first, n), __par::At(out, n)};
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void uninitialized_fill(EP &&, It first, It last, const T &value)
+{
+    using V        = typename iterator_traits<It>::value_type;
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) V(value);
+    });
+}
+
+template <class EP, class It, class Size, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It uninitialized_fill_n(EP &&, It first, Size count, const T &value)
+{
+    using V        = typename iterator_traits<It>::value_type;
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) ::new (static_cast<void *>(addressof(*it))) V(value);
+    });
+    return __par::At(first, n);
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void destroy(EP &&, It first, It last)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) destroy_at(addressof(*it));
+    });
+}
+
+template <class EP, class It, class Size>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It destroy_n(EP &&, It first, Size count)
+{
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) destroy_at(addressof(*it));
+    });
+    return __par::At(first, n);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_PAR_MEMORY

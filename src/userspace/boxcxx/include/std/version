@@ -130,7 +130,7 @@
 // list is the backlog: when the reason is fixed, the macro moves into the
 // owning header's leaf. The count read "eight" until Ф39 recounted it; it had
 // been true when it was written and five headers have been built since. There
-// are twelve entries, and filesystem is the last of them whose header is
+// are eleven entries, and filesystem is the last of them whose header is
 // missing rather than whose feature is partial.
 //
 // C++26 macros are NOT listed here. This list is the C++23 backlog and is
@@ -202,13 +202,6 @@
 //                          that half of its Mandates for the same reason,
 //                          and says so at the call site.
 // modules                  no `import std;` — boxcxx ships headers only.
-// parallel_algorithm       <execution> exists as of Ф40 and so do the
-//                          policies, but this macro stands for the WHOLE
-//                          ExecutionPolicy overload set across [algorithms],
-//                          [numeric.ops] and [specialized.algorithms], and
-//                          only part of it is built. It moves into
-//                          <algorithm>'s and <numeric>'s leaves when the last
-//                          one lands, not before.
 // ranges                   the widest macro in [version.syn] — it stands for
 //                          the whole of [ranges] plus [specialized.
 //                          algorithms] — and 23 of the entities it promises
@@ -243,6 +236,13 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
+//
+// parallel_algorithm LEFT this list in Ф40's last commit, when the overload
+// set stopped being partial. Its entry had been honest about the distinction
+// that matters here: the header and the policies arrived one commit earlier,
+// and this macro is not about them — it stands for every ExecutionPolicy
+// overload in [algorithms], [numeric.ops] and [specialized.algorithms], which
+// is a different and much longer list.
 //
 // execution LEFT this list in Ф40, when <execution> was built. Its entry read
 // "no <execution> header", and behind those four words was a decision rather

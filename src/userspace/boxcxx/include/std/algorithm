@@ -22,6 +22,7 @@
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_algorithm_default_value_type
+#define BOXCXX_OWNS_parallel_algorithm
 #define BOXCXX_OWNS_clamp
 #define BOXCXX_OWNS_ranges_contains
 #define BOXCXX_OWNS_ranges_find_last
