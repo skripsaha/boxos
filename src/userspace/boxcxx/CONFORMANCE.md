@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~87 000 lines |
 | Feature-test macros defined | 203 — 157 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 209 phases (190 of them the numbered `PhaseN` series), 5 387 runtime checks, 1 781 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 210 phases (191 of them the numbered `PhaseN` series), 5 404 runtime checks, 1 784 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **209**. The
+there are exactly as many as there are phase definitions. That is **210**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -1924,6 +1924,44 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   constructors are only reachable by naming the character type, which is most of
   the point of having them.
 ## `<tuple>`
+
+- `!` `✓` Closed in Ф38, reported as a debt by the commit that found it and
+  fixed in the next one: **the entire allocator-extended half of
+  [tuple.cnstr] was missing** — all fourteen `allocator_arg_t` constructors,
+  and the `uses_allocator<tuple<Types...>, Alloc>` specialization
+  [tuple.syn] requires. Without the specialization the answer to "does a
+  tuple want an allocator" was **false**, so uses-allocator construction
+  stopped at the tuple and every element inside was built without one. A
+  `vector<tuple<pmr::string, pmr::string>>` under a
+  `scoped_allocator_adaptor` silently sent both strings to the global heap.
+  Pinned by Phase195, which walks all fourteen with values taken from
+  libstdc++ 16.1 and finishes with exactly that container.
+- **The elements are constructed in place, and getting there is the one
+  subtle part.** The obvious spelling —
+  `value(make_obj_using_allocator<T>(a, args...))` — looks like guaranteed
+  copy elision and is not: `TupleLeaf::value` carries
+  `[[no_unique_address]]`, and elision into a potentially-overlapping
+  subobject is not guaranteed. Measured rather than reasoned about: g++-16,
+  clang and the cross compiler all three reject it for a non-movable
+  element. So the argument list the rule produces is expanded straight into
+  `value`'s initializer, which is what libstdc++ does and for the same
+  reason. Phase195 builds a `tuple` of a type that is neither copyable nor
+  movable; restoring the prvalue spelling fails to compile exactly there.
+- The constraint on each allocator-extended constructor is its non-allocator
+  twin's, which means it asks whether the element is constructible from the
+  argument **alone** — a type constructible only *with* an allocator is
+  therefore rejected. That reads backwards and is what the standard says;
+  libstdc++ rejects it too, and Phase195 pins the rejection.
+- `<tuple>` names one thing it cannot define: `__bits::UsesAllocArgs`, a
+  forwarder to `uses_allocator_construction_args`, declared here and defined
+  in `<__bits/uses_allocator>` which this header includes at its end. The
+  rule is written in terms of `tuple`, so its file cannot come first; this
+  is the single name that crosses back, and it restates nothing.
+- `~` The two ordinary (non-allocator) `pair` constructors [tuple.cnstr]
+  gained in C++23 — `pair<U1,U2>&` and `const pair<U1,U2>&&` — are still not
+  declared by name; those calls reach the tuple-like constructor instead,
+  which produces the same elements. All four exist in the allocator-extended
+  set, because there they are what the fourteen are counted as.
 
 - `✓` Closed in Ф31e-g-3: `apply`, `tuple_cat` and `make_from_tuple` were not
   constrained by the *tuple-like* concept, which C++23 applies to all three. They

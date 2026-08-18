@@ -291,6 +291,21 @@ constexpr T *uninitialized_construct_using_allocator(T *p, const Alloc &a, Args 
         std::uses_allocator_construction_args<T>(a, std::forward<Args>(args)...));
 }
 
+namespace __bits {
+
+// The definition of the name <tuple> declared before its TupleLeaf, so
+// tuple's allocator-extended constructors can reach the rule that is
+// written in terms of tuple. A forwarder and nothing else -- see the
+// comment at the declaration for why the LIST is what crosses back and not
+// the finished object.
+template <class T, class Alloc, class... Args>
+constexpr auto UsesAllocArgs(const Alloc &a, Args &&...args)
+{
+    return std::uses_allocator_construction_args<T>(a, std::forward<Args>(args)...);
+}
+
+} // namespace __bits
+
 } // namespace std
 
 #endif // BOXCXX_BITS_USES_ALLOCATOR

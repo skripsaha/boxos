@@ -2,6 +2,7 @@
 #ifndef BOXCXX_TUPLE
 #define BOXCXX_TUPLE
 
+#include <__bits/allocator_core>  // allocator_arg_t, uses_allocator
 #include <type_traits>
 #include <utility>
 #include <functional>   // invoke (std::apply), reference_wrapper unwrap
@@ -23,6 +24,41 @@
 namespace std {
 
 namespace __bits {
+
+// Which flavour of allocator-aware construction a leaf is being asked for:
+// one argument (or a whole argument list) per element, or none at all.
+struct UsesAllocTag {};
+struct UsesAllocNoArgsTag {};
+// A third, for the leaf's own delegation below. It has to be a distinct
+// tag rather than a distinct arity: deducing UsesAllocArgs' return type
+// instantiates its body, so a candidate that merely fails to be the best
+// match still fires the rule's static_assert as a hard error. Nothing may
+// be a candidate that was not meant to be one.
+struct UsesAllocListTag {};
+
+// Declared here, DEFINED in <__bits/uses_allocator>, which this header
+// includes at its very end. The dependency runs one way on paper —
+// [allocator.uses.construction] is written in terms of tuple, so its file
+// cannot come first — but tuple's own allocator-extended constructors need
+// the rule, so this is the one name that crosses back. It forwards
+// verbatim to std::uses_allocator_construction_args; the rule is stated
+// once and this is not a second statement of it.
+//
+// The return type is deduced, and nothing here needs to NAME it: the leaf
+// below passes the value straight into a constructor that deduces it, and
+// the one place that does need its size asks at instantiation time, when
+// the definition is in scope.
+//
+// Why the argument LIST and not the finished object: the obvious spelling,
+// value(make_obj_using_allocator<T>(a, args...)), reads as a prvalue and
+// looks like guaranteed elision — and is not, because `value` is a
+// [[no_unique_address]] member and elision into a potentially-overlapping
+// subobject is not guaranteed. Measured, not assumed: g++-16, clang and
+// the cross compiler all three reject it for a non-movable element. So the
+// arguments are expanded into value's initializer directly, which is also
+// what libstdc++ does and for the same reason.
+template <class T, class Alloc, class... Args>
+constexpr auto UsesAllocArgs(const Alloc &a, Args &&...args);
 
 #if defined(__has_builtin) && __has_builtin(__type_pack_element)
 template <size_t I, class... Ts>
@@ -47,6 +83,38 @@ struct TupleLeaf {
     constexpr explicit TupleLeaf(U &&u) : value(forward<U>(u))
     {
     }
+
+    // Uses-allocator construction of this one element, in place. The
+    // argument list the rule produced is expanded straight into value's
+    // initializer by the first of these; the second is what computes it.
+    // See the note on UsesAllocArgs above for why it is done this way
+    // round.
+    // get is UNQUALIFIED: std::get for tuple is declared further down this
+    // file, so a qualified call here would be bound to the pair overloads
+    // <utility> has already declared and nothing else. ADL finds the rest
+    // at instantiation, which is when it matters.
+    template <class ArgsTuple, size_t... Js>
+    constexpr TupleLeaf(UsesAllocListTag, ArgsTuple &&args, index_sequence<Js...>)
+        : value(get<Js>(std::move(args))...)
+    {
+    }
+    // The list's length is spelled out here rather than carried in a
+    // default template argument, and that is not a style choice: a default
+    // template argument is substituted while the candidate is being FORMED,
+    // before overload resolution gets as far as noticing that the tag does
+    // not match. Deducing UsesAllocArgs' return type instantiates its body,
+    // so this constructor would fire the rule's static_assert for calls
+    // that were never meant for it. In the mem-initializer the same
+    // expression is instantiated only when the constructor is really
+    // called.
+    template <class Alloc, class... Args>
+    constexpr TupleLeaf(UsesAllocTag, const Alloc &a, Args &&...args)
+        : TupleLeaf(UsesAllocListTag{}, UsesAllocArgs<T>(a, forward<Args>(args)...),
+                    make_index_sequence<tuple_size_v<decltype(UsesAllocArgs<T>(
+                        declval<const Alloc &>(), declval<Args>()...))>>{})
+    {
+    }
+
     TupleLeaf(const TupleLeaf &) = default;
     TupleLeaf(TupleLeaf &&)      = default;
     TupleLeaf &operator=(const TupleLeaf &) = default;
@@ -63,6 +131,21 @@ struct TupleBase<index_sequence<Is...>, Ts...> : TupleLeaf<Is, Ts>... {
         requires(sizeof...(Us) == sizeof...(Ts))
     constexpr explicit TupleBase(Us &&...us)
         : TupleLeaf<Is, Ts>(forward<Us>(us))...
+    {
+    }
+
+    // One argument per element, and none at all. Two constructors rather
+    // than one because the pack expansion differs: the first walks Is, Ts
+    // and Us in lockstep, the second walks only Is and Ts.
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts))
+    constexpr TupleBase(UsesAllocTag t, const Alloc &a, Us &&...us)
+        : TupleLeaf<Is, Ts>(t, a, forward<Us>(us))...
+    {
+    }
+    template <class Alloc>
+    constexpr TupleBase(UsesAllocNoArgsTag, const Alloc &a)
+        : TupleLeaf<Is, Ts>(UsesAllocTag{}, a)...
     {
     }
 
@@ -125,6 +208,17 @@ class tuple : __bits::TupleBase<index_sequence_for<Ts...>, Ts...> {
     template <class OtherTuple, size_t... Is>
     constexpr tuple(OtherTuple &&other, index_sequence<Is...>)
         : Base(get<Is>(forward<OtherTuple>(other))...)
+    {
+    }
+
+    // The allocator-aware twin of the above: every allocator-extended
+    // constructor that takes a tuple-shaped SOURCE lands here, so the
+    // element-by-element get<> lives in one place exactly as it already
+    // does for the ordinary ones.
+    template <class Alloc, class OtherTuple, size_t... Is>
+    constexpr tuple(__bits::UsesAllocTag t, const Alloc &a, OtherTuple &&other,
+                    index_sequence<Is...>)
+        : Base(t, a, get<Is>(forward<OtherTuple>(other))...)
     {
     }
 
@@ -322,6 +416,135 @@ public:
     tuple(tuple &&)      = default;
     tuple &operator=(const tuple &) = default;
     tuple &operator=(tuple &&) = default;
+
+    // ── allocator-extended ([tuple.cnstr]) ──────────────────────────────
+    // Fourteen constructors, one per ordinary constructor above, and each
+    // is "equivalent to the corresponding constructor except that each
+    // element is constructed with uses-allocator construction". So each
+    // repeats its twin's constraints verbatim and differs only in where
+    // the elements come from. None of this existed before Ф38 — the whole
+    // allocator-extended half of [tuple.cnstr] was absent, which is why
+    // tuple could not be an element of anything allocator-aware.
+
+    template <class Alloc>
+    explicit((... || !__bits::ImplicitlyDefaultConstructible<Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a)
+            requires((... && is_default_constructible_v<Ts>))
+        : Base(__bits::UsesAllocNoArgsTag{}, a)
+    {
+    }
+
+    template <class Alloc>
+    explicit((... || !is_convertible_v<const Ts &, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, const Ts &...args)
+            requires(sizeof...(Ts) >= 1 && (... && is_copy_constructible_v<Ts>))
+        : Base(__bits::UsesAllocTag{}, a, args...)
+    {
+    }
+
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) && sizeof...(Ts) >= 1 &&
+                 (... && is_constructible_v<Ts, Us>))
+    explicit((... || !is_convertible_v<Us, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, Us &&...args)
+        : Base(__bits::UsesAllocTag{}, a, forward<Us>(args)...)
+    {
+    }
+
+    template <class Alloc>
+    constexpr tuple(allocator_arg_t, const Alloc &a, const tuple &other)
+        : tuple(__bits::UsesAllocTag{}, a, other, index_sequence_for<Ts...>{})
+    {
+    }
+    template <class Alloc>
+    constexpr tuple(allocator_arg_t, const Alloc &a, tuple &&other)
+        : tuple(__bits::UsesAllocTag{}, a, move(other), index_sequence_for<Ts...>{})
+    {
+    }
+
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, Us &>))
+    explicit((... || !is_convertible_v<Us &, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, tuple<Us...> &other)
+        : tuple(__bits::UsesAllocTag{}, a, other, index_sequence_for<Ts...>{})
+    {
+    }
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, const Us &>))
+    explicit((... || !is_convertible_v<const Us &, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, const tuple<Us...> &other)
+        : tuple(__bits::UsesAllocTag{}, a, other, index_sequence_for<Ts...>{})
+    {
+    }
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, Us>))
+    explicit((... || !is_convertible_v<Us, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, tuple<Us...> &&other)
+        : tuple(__bits::UsesAllocTag{}, a, move(other), index_sequence_for<Ts...>{})
+    {
+    }
+    template <class Alloc, class... Us>
+        requires(sizeof...(Us) == sizeof...(Ts) &&
+                 (... && is_constructible_v<Ts, const Us>))
+    explicit((... || !is_convertible_v<const Us, Ts>))
+        constexpr tuple(allocator_arg_t, const Alloc &a, const tuple<Us...> &&other)
+        : tuple(__bits::UsesAllocTag{}, a, move(other), index_sequence_for<Ts...>{})
+    {
+    }
+
+    // All four pair forms, including the two ([tuple.cnstr] gained them in
+    // C++23) that the ordinary constructors above still reach through the
+    // tuple-like path rather than by name.
+    template <class Alloc, class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, U1 &> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, U2 &>)
+    constexpr tuple(allocator_arg_t, const Alloc &a, pair<U1, U2> &p)
+        : Base(__bits::UsesAllocTag{}, a, p.first, p.second)
+    {
+    }
+    template <class Alloc, class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, const U1 &> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, const U2 &>)
+    constexpr tuple(allocator_arg_t, const Alloc &a, const pair<U1, U2> &p)
+        : Base(__bits::UsesAllocTag{}, a, p.first, p.second)
+    {
+    }
+    template <class Alloc, class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, U1> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, U2>)
+    constexpr tuple(allocator_arg_t, const Alloc &a, pair<U1, U2> &&p)
+        : Base(__bits::UsesAllocTag{}, a, forward<U1>(p.first), forward<U2>(p.second))
+    {
+    }
+    template <class Alloc, class U1, class U2>
+        requires(sizeof...(Ts) == 2 &&
+                 is_constructible_v<__bits::NthType<0, Ts...>, const U1> &&
+                 is_constructible_v<__bits::NthType<1, Ts...>, const U2>)
+    constexpr tuple(allocator_arg_t, const Alloc &a, const pair<U1, U2> &&p)
+        : Base(__bits::UsesAllocTag{}, a, move(p.first), move(p.second))
+    {
+    }
+
+    template <class Alloc, __bits::TupleLike UTuple>
+        requires(__bits::DifferentFrom<UTuple, tuple> &&
+                 !__bits::IsSubrangeType<remove_cvref_t<UTuple>> &&
+                 sizeof...(Ts) == tuple_size_v<remove_cvref_t<UTuple>> &&
+                 TupleLikeConstructible<UTuple>(index_sequence_for<Ts...>{}) &&
+                 !TupleLikeDangles<UTuple>(index_sequence_for<Ts...>{}) &&
+                 (sizeof...(Ts) != 1 ||
+                  (!is_convertible_v<UTuple, __bits::NthType<0, Ts...>> &&
+                   !is_constructible_v<__bits::NthType<0, Ts...>, UTuple>)))
+    explicit(!TupleLikeConvertible<UTuple>(index_sequence_for<Ts...>{}))
+        constexpr tuple(allocator_arg_t, const Alloc &a, UTuple &&u)
+        : tuple(__bits::UsesAllocTag{}, a, forward<UTuple>(u), index_sequence_for<Ts...>{})
+    {
+    }
 
     template <class... Us>
         requires(sizeof...(Us) == sizeof...(Ts) &&
@@ -791,6 +1014,24 @@ constexpr pair<T1, T2>::pair(piecewise_construct_t,
 {
 }
 
+// [tuple.syn]: unconditionally true, and it has to be — the adaptor asking
+// the question cannot know whether any ELEMENT wants an allocator, so tuple
+// always accepts one and passes it down element by element, where each
+// element decides for itself. Without this specialization every
+// allocator-extended constructor above is unreachable through
+// uses-allocator construction, which is the only way containers get there.
+template <class... Types, class Alloc>
+struct uses_allocator<tuple<Types...>, Alloc> : true_type {};
+
 } // namespace std
+
+// LAST, and after everything above: this defines the
+// make_obj_using_allocator declared at the top, and it is written in terms
+// of tuple, make_tuple, forward_as_tuple, apply and make_from_tuple — all
+// of which are now complete. Either include order works: reached from here
+// it finds <tuple> already guarded and proceeds; reached first (through
+// <memory>, say) it includes <tuple>, whose own trailing include is then
+// the no-op.
+#include <__bits/uses_allocator>
 
 #endif // BOXCXX_TUPLE
