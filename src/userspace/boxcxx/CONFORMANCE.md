@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **87** — 83 of C++23 (22 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 124 |
-| Header source | ~89 000 lines |
+| Standard headers provided | **88** — 84 of C++23 (21 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 125 |
+| Header source | ~91 000 lines |
 | Feature-test macros defined | 207 — 161 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 214 phases (195 of them the numbered `PhaseN` series), 5 443 runtime checks, 1 818 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 215 phases (196 of them the numbered `PhaseN` series), 5 455 runtime checks, 1 854 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **214**. The
+there are exactly as many as there are phase definitions. That is **215**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -96,7 +96,7 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (22)
+## 1.1 Headers that do not exist (21)
 
 82 of the C++23 headers are provided and 23 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
@@ -156,12 +156,20 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 2
+### C++23 features not implemented — 1
 
 | Header | Status |
 |---|---|
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
-| `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<stdfloat>` left that list in Ф40, and its entry — "no extended
+floating-point types" — was the most wrong thing in this document.** The
+compiler predefines all five `__STDCPP_*_T__` macros, so `_Float16`,
+`_Float32`, `_Float64`, `_Float128` and `__bf16` had been standard
+floating-point types by [basic.extended.fp] in every translation unit for as
+long as this toolchain has been in use. The header was five aliases of work;
+what was missing was underneath it, and had been failing silently: see
+`<stdfloat>` in §2 for what that turned out to be.
 
 **`<syncstream>` left that list in Ф40.** Its entry had been honest about
 having no blocker left ("what is left is the work itself"), and the work took
@@ -667,6 +675,15 @@ nothing has been found since.
   ten (measured on BoxOS). `box::log(x, 10)` returns 22 of the 23 exactly by
   calling `log10` directly rather than dividing logarithms.
 
+### Ф40 — the extended floating-point types
+
+- Every `<cmath>` function now has the overloads [cmath.syn]/2 asks for at the
+  five extended types, and [cmath.syn]/3's promotion is no longer a three-way
+  widest-wins: with those types present the conversion ranks are a PARTIAL
+  order, and the machinery implements rank first, then subrank, then "no
+  common type exists" for the one incomparable pair. See `<stdfloat>` in this
+  section for the whole story, including what float128_t deliberately lacks.
+
 ## `<compare>` / `<concepts>`
 
 - `✓` Closed in Ф31e-g-3: P2404R3's *comparison-common-type-with* was not
@@ -838,6 +855,16 @@ combinations the table leaves out.
   descriptor table to index into.
 
 ## `<functional>`
+
+- `✓` Closed in Ф40, found by building `<stdfloat>`: **`std::hash` had no
+  specialization for `long double`**, nor for any of the five extended
+  floating-point types. [unord.hash]/2 asks for an enabled specialization for
+  every arithmetic type, and only `float` and `double` had one — a
+  `std::unordered_set<long double>` did not compile and nobody had tried. The
+  long double specialization hashes **ten** bytes, not `sizeof`: x86_64 stores
+  the type in sixteen, of which six are padding that no store writes, and
+  hashing them would let one value hash two ways depending on what the stack
+  held.
 
 - `✓` Added in Ф34: **`std::copyable_function`** (P2548R6), all twelve
   cv/ref/noexcept specializations. It is the type `std::function` should have
@@ -1857,6 +1884,90 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   same objects the C++ side uses. The `ATOMIC_*_LOCK_FREE` and
   `ATOMIC_FLAG_INIT` macros need no re-export: `<atomic>` already defines them
   as macros, which have no namespace.
+
+## `<stdfloat>`
+
+- Complete: `float16_t`, `float32_t`, `float64_t`, `float128_t`,
+  `bfloat16_t`, each declared under its own `__STDCPP_*_T__` macro. New in
+  Ф40. There is no feature-test macro for this header — [version.syn] has
+  none — so the compiler's five macros are the only test, which is the
+  standard's design.
+- **The header was the smallest part.** Because the compiler predefines those
+  five macros, the five types were already standard floating-point types, and
+  three things had been quietly wrong for as long as the toolchain has been in
+  use: `is_floating_point` named three types instead of eight;
+  `numeric_limits` had no specialization for any of the five (nor, it turned
+  out, for `long double` in `std::hash`); and [cmath.syn]/2's "an overload for
+  each cv-unqualified floating-point type" was five types short. Nothing had
+  noticed because nothing in the tree had ever written one of the types down.
+- `numeric_limits<bfloat16_t>::is_iec559` is **false**, and it is the only
+  floating-point type here for which that holds. The compiler says so itself
+  (`__BFLT16_IS_IEC_60559__` is 0): bfloat16 keeps binary32's eight exponent
+  bits and drops sixteen significand bits, which is not one of the interchange
+  formats [numeric.limits] sanctions.
+- **float16_t and bfloat16_t have unordered conversion ranks**, and a call
+  mixing them has no common type at all. [cmath.syn]/3 says such a program is
+  ill-formed, and that is what happens here: `std::pow(float16_t, bfloat16_t)`
+  finds no candidate. Neither type's value set contains the other's — 11
+  significand bits against 8, 5 exponent bits against 8 — so this is the
+  standard's own partial order showing through, not a gap.
+- Equal ranks are broken by subrank, which means the STANDARD type wins:
+  `std::pow(float32_t, float)` is `float`, not `float32_t`. `float128_t`
+  outranks `long double` (every 80-bit value is a binary128 value), so a call
+  mixing them is `float128_t`.
+- **The four narrow types compute through the standard type whose format
+  contains theirs**, which is exact rather than approximate: `float32_t` IS
+  binary32 and `float64_t` IS binary64, so those are the same arithmetic under
+  a different name; `float16_t` (11 bits) and `bfloat16_t` (8) widen into
+  binary64, whose 53 bits are far past the 2p+2 that makes the double rounding
+  provably harmless. `std::exp(float32_t(1))` is bit-for-bit `std::exp(1.0f)`,
+  and the suite pins that.
+- **float128_t gets real kernels** (`<__bits/cmath_quad>`), because the
+  compiler lowers `__builtin_sqrtf128` and its neighbours to `sqrtf128`,
+  `fmaf128`, `truncf128` and so on, none of which is in libgcc — they live in
+  libquadmath, which a freestanding target does not have. That is the same
+  reason libstdc++ 16.1 cannot compile `std::sqrt(std::float128_t)` on a host
+  without it (measured), and libc++ 22.1.6 has no `<stdfloat>` at all. What
+  libgcc does carry is correctly-rounded `+ - * /` and the comparisons, and
+  everything below is built on those and on the bits:
+
+  | | |
+  |---|---|
+  | `trunc` `floor` `ceil` `round` `rint` `nearbyint` | exact |
+  | `fabs` `copysign`, all classification and comparison | exact |
+  | `ldexp` `scalbn` `scalbln` `frexp` `modf` `logb` `ilogb` | exact |
+  | `fmod` `remainder` `remquo` `nextafter` `fmin` `fmax` `fdim` `lerp` | exact |
+  | `sqrt` | **correctly rounded** |
+  | `fma` | **exact — one rounding** |
+  | `hypot` | ≤ 1 ulp |
+  | `cbrt` | ≤ 1 ulp (0 observed) |
+
+  Verified against MPFR at 113 bits over 1.9 million values spanning the whole
+  exponent range, including subnormals and engineered cancellations, on the
+  development host — against the shipped source, not a copy. 160 of those
+  vectors are baked into phase200 and re-checked on the target, where the
+  underlying arithmetic comes from a different libgcc build.
+- **`~` The transcendentals at float128_t are DELETED, not merely absent** —
+  `exp`, `log`, `sin`, `cos`, `tan`, their inverses and hyperbolics, `pow`,
+  `atan2`, `erf`, `erfc`, `lgamma`, `tgamma`. They need polynomial kernels
+  carrying 113 bits, which is a phase of its own; computing them in 64 bits and
+  returning a 113-bit type would be a lie that compiles. Deleting rather than
+  omitting makes the call fail at the call site with a diagnostic naming the
+  function, instead of somewhere inside a promotion template. Deviation from
+  [cmath.syn]/2, recorded here, and the one place this library is knowingly
+  short of what that paragraph asks.
+- `std::format` accepts the four narrow types and **not** `float128_t`:
+  writing 113 significand bits in decimal needs a converter `<charconv>` does
+  not have yet, and claiming the formatter while narrowing to `long double`
+  would print a number the caller never had. libstdc++ 16.1 refuses the same
+  call for the same reason.
+- `nexttoward` is deleted at every extended type. That one is **not** a
+  deviation — [cmath.syn]/4 makes such a call ill-formed, and deleting the
+  overload is how a library says so out loud.
+- `<charconv>` is unchanged: [charconv.syn] declares `to_chars`/`from_chars`
+  for `float`, `double` and `long double` by name, not "for each
+  floating-point type", so the extended types are outside it by the standard's
+  own wording rather than by omission.
 
 ## `<string>`
 

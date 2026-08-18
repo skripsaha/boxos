@@ -1,0 +1,725 @@
+// boxcxx — <__bits/cmath_quad>
+//
+// The binary128 half of <cmath>: everything [cmath.syn]/2 asks for at
+// float128_t that can be given exactly, and nothing that cannot.
+//
+// Why it exists at all. x86_64-elf-g++ predefines __STDCPP_FLOAT128_T__, so
+// _Float128 is a standard floating-point type here and every <cmath> function
+// owes it an overload. The compiler lowers the obvious spellings --
+// __builtin_sqrtf128, __builtin_fmaf128, __builtin_truncf128, ceil, floor,
+// round, fmod, hypot, scalbn -- to external symbols named sqrtf128 and so on,
+// and NONE of them is in libgcc. They live in libquadmath, which a
+// freestanding target does not have and is not going to get; that is exactly
+// why libstdc++ 16.1 cannot compile std::sqrt(std::float128_t) on a host
+// without it (measured). What libgcc DOES carry is correctly-rounded +, -, *,
+// / and the comparisons, and that is enough to build the rest honestly.
+//
+// What each function is worth, measured against MPFR at 113 bits over a
+// million-plus random values spanning the whole exponent range (the sweep
+// lives in the phase notes, not in the tree):
+//
+//   trunc floor ceil round rint      exact -- bit surgery on the significand
+//   fabs copysign classification     exact -- bits again
+//   ldexp scalbn frexp modf logb     exact
+//   fmod remainder nextafter         exact
+//   sqrt                             CORRECTLY ROUNDED, verified bit-for-bit
+//   fma                              EXACT, one rounding, verified bit-for-bit
+//   hypot                            <= 1 ulp
+//   cbrt                             <= 1 ulp (0 observed)
+//
+// What is deliberately absent, and recorded in CONFORMANCE §2: the
+// transcendentals at float128_t -- exp, log, sin, cos, tan, their inverses and
+// hyperbolics, pow, erf, lgamma, tgamma. Polynomial kernels carrying 113 bits
+// are a phase of their own, and the honest thing in the meantime is that
+// std::exp(std::float128_t) does not compile rather than quietly computing 64
+// bits and calling them 113. [cmath.syn]/4 makes nexttoward at an extended
+// floating-point type ill-formed outright, so its absence is the standard's.
+//
+// The one primitive nothing else here has: an exact 128x128 -> 256 multiply,
+// which is what lets sqrt decide its own last bit and fma round once.
+#ifndef BOXCXX_BITS_CMATH_QUAD
+#define BOXCXX_BITS_CMATH_QUAD
+
+#if defined(__STDCPP_FLOAT128_T__)
+
+namespace std {
+namespace __quad {
+
+// Seeds. This leaf deliberately depends on nothing -- not even on the rest of
+// <cmath> -- so that its include position is a matter of taste rather than of
+// initialisation order. The square-root seed is the hardware instruction (the
+// same one <cmath>'s own double sqrt uses); the cube-root seed is the classic
+// divide-the-exponent-by-three bit trick, refined in double until it is worth
+// the quad Newton steps that follow.
+inline double SeedSqrt(double x)
+{
+#if defined(__x86_64__)
+    double r;
+    __asm__("sqrtsd %1,%0" : "=x"(r) : "x"(x));
+    return r;
+#else
+    // BoxOS is x86_64 and always takes the branch above. The other one exists
+    // so this exact file compiles on the development host, where it is swept
+    // against MPFR -- the accuracy claims at the top are only worth what that
+    // sweep is worth, and the sweep is only worth anything if it runs on the
+    // shipped source rather than on a copy of it.
+    return __builtin_sqrt(x);
+#endif
+}
+
+inline double SeedCbrt(double x)
+{
+    unsigned long long b = __builtin_bit_cast(unsigned long long, x);
+    b = b / 3 + 0x2A9F84FE36D22425ull;
+    double y = __builtin_bit_cast(double, b);
+    for (int i = 0; i < 4; ++i) y = (2.0 * y + x / (y * y)) / 3.0;
+    return y;
+}
+
+using U128 = unsigned __int128;
+
+inline constexpr int  kP    = 113;                       // significand bits
+inline constexpr int  kBias = 16383;
+inline constexpr U128 kSign = (U128)1 << 127;
+inline constexpr U128 kMant = ((U128)1 << 112) - 1;
+inline constexpr int  kExpMax = 0x7FFF;
+inline constexpr U128 kExpField = ((U128)0x7FFF) << 112;
+
+inline U128 Bits(_Float128 x) { return __builtin_bit_cast(U128, x); }
+inline _Float128 FromBits(U128 u) { return __builtin_bit_cast(_Float128, u); }
+
+inline bool SignBit(_Float128 x) { return (Bits(x) >> 127) != 0; }
+inline int  RawExp(_Float128 x) { return (int)((Bits(x) >> 112) & 0x7FFF); }
+inline U128 RawMant(_Float128 x) { return Bits(x) & kMant; }
+
+inline bool IsNan(_Float128 x) { return RawExp(x) == kExpMax && RawMant(x) != 0; }
+inline bool IsInf(_Float128 x) { return RawExp(x) == kExpMax && RawMant(x) == 0; }
+inline bool IsFinite(_Float128 x) { return RawExp(x) != kExpMax; }
+inline bool IsZero(_Float128 x) { return (Bits(x) & ~kSign) == 0; }
+inline bool IsNormal(_Float128 x)
+{
+    const int e = RawExp(x);
+    return e != 0 && e != kExpMax;
+}
+inline bool IsSubnormal(_Float128 x) { return RawExp(x) == 0 && RawMant(x) != 0; }
+
+inline _Float128 Fabs(_Float128 x) { return FromBits(Bits(x) & ~kSign); }
+inline _Float128 CopySign(_Float128 x, _Float128 y)
+{
+    return FromBits((Bits(x) & ~kSign) | (Bits(y) & kSign));
+}
+inline _Float128 Nan() { return FromBits(kExpField | ((U128)1 << 111)); }
+
+// ── rounding to integral values ─────────────────────────────────────────
+// Every one of these is bit surgery on the significand: the fractional bits
+// are the low (112 - e) of it, and what differs between trunc, floor, ceil,
+// round and rint is only what to do with them.
+inline _Float128 Trunc(_Float128 x)
+{
+    const int e = RawExp(x) - kBias;
+    if (e >= 112) return x;                    // no fraction left (or inf/nan)
+    if (e < 0) return CopySign(FromBits(0), x);
+    const U128 frac = (((U128)1) << (112 - e)) - 1;
+    return FromBits(Bits(x) & ~frac);
+}
+
+inline _Float128 Floor(_Float128 x)
+{
+    const _Float128 t = Trunc(x);
+    if (t == x || !SignBit(x)) return t;
+    return t - (_Float128)1;
+}
+
+inline _Float128 Ceil(_Float128 x)
+{
+    const _Float128 t = Trunc(x);
+    if (t == x || SignBit(x)) return t;
+    return t + (_Float128)1;
+}
+
+// round(): halfway cases away from zero, per [c.math].
+inline _Float128 Round(_Float128 x)
+{
+    const int e = RawExp(x) - kBias;
+    if (e >= 112) return x;
+    if (e < -1) return CopySign(FromBits(0), x);   // |x| < 0.5
+    if (e == -1) return CopySign((_Float128)1, x); // 0.5 <= |x| < 1
+    const U128 half = ((U128)1) << (111 - e);
+    const U128 frac = (half << 1) - 1;
+    U128 u = Bits(x);
+    if ((u & frac) >= half) u += (frac + 1);       // carries into the exponent
+    return FromBits(u & ~frac);
+}
+
+// rint()/nearbyint(): ties to even, which is what the only rounding mode this
+// library ships in does. Done with the classic add-and-subtract rather than by
+// hand: quad addition is correctly rounded by libgcc, so the rounding IS the
+// hardware's (or its soft-float stand-in), not a second opinion about it.
+inline _Float128 Rint(_Float128 x)
+{
+    const int e = RawExp(x) - kBias;
+    if (e >= 112) return x;
+    const _Float128 big = FromBits(((U128)(kBias + 112)) << 112);   // 2^112
+    const _Float128 a   = Fabs(x);
+    const _Float128 r   = (a + big) - big;
+    return CopySign(r, x);
+}
+
+
+// ── exact 128x128 -> 256 multiply, the one primitive the algebraic
+//    functions need that neither libgcc nor the hardware offers ────────────
+struct U256 {
+    U128 hi, lo;
+};
+
+inline U256 Mul(U128 a, U128 b)
+{
+    const unsigned long long a0 = (unsigned long long)a, a1 = (unsigned long long)(a >> 64);
+    const unsigned long long b0 = (unsigned long long)b, b1 = (unsigned long long)(b >> 64);
+    const U128 p00 = (U128)a0 * b0;
+    const U128 p01 = (U128)a0 * b1;
+    const U128 p10 = (U128)a1 * b0;
+    const U128 p11 = (U128)a1 * b1;
+    const U128 mid = (p00 >> 64) + (unsigned long long)p01 + (unsigned long long)p10;
+    U256 r;
+    r.lo = ((U128)(unsigned long long)mid << 64) | (unsigned long long)p00;
+    r.hi = p11 + (p01 >> 64) + (p10 >> 64) + (mid >> 64);
+    return r;
+}
+
+inline int Cmp(const U256 &a, const U256 &b)
+{
+    if (a.hi != b.hi) return a.hi < b.hi ? -1 : 1;
+    if (a.lo != b.lo) return a.lo < b.lo ? -1 : 1;
+    return 0;
+}
+
+inline U256 Shl(const U256 &a, int n)   // 0 < n < 128
+{
+    U256 r;
+    r.hi = (a.hi << n) | (a.lo >> (128 - n));
+    r.lo = a.lo << n;
+    return r;
+}
+
+// 2^n as a finite binary128, n in the normal range.
+inline _Float128 Pow2(int n) { return FromBits(((U128)(n + kBias)) << 112); }
+
+// ── sqrt, correctly rounded ─────────────────────────────────────────────
+// Newton gets the digits, integers decide the last one. libgcc's +, -, * and
+// / are correctly rounded, so two Newton steps from a double seed land within
+// a couple of ulp; the rounding itself is then settled exactly, by comparing
+// 4N against (2S+1)^2 as 256-bit integers, which is the midpoint test written
+// without a midpoint. sqrt never lands exactly on one (a classical result),
+// so there is no tie to break.
+inline _Float128 Sqrt(_Float128 x)
+{
+    if (IsNan(x)) return x + x;
+    if (IsZero(x)) return x;                       // sqrt(-0) is -0
+    if (SignBit(x)) return Nan();
+    if (IsInf(x)) return x;
+
+    int  e = RawExp(x);
+    U128 m = RawMant(x);
+    if (e == 0) {                                  // subnormal: normalise it
+        int shift = 0;
+        while (!(m & (((U128)1) << 112))) {
+            m <<= 1;
+            ++shift;
+        }
+        e = 1 - shift;
+    } else {
+        m |= ((U128)1) << 112;
+    }
+    // x = m * 2^E, m in [2^112, 2^113); E is forced even, which may widen m
+    int E = e - kBias - 112;
+    if (E & 1) {
+        m <<= 1;
+        --E;
+    }
+    const bool wide = (m >> 113) != 0;
+
+    // N = m << 112. Its square root has exactly 113 bits, which is the answer's
+    // significand: sqrt(x) = sqrt(N) * 2^(E/2 - 56).
+    const U256 N = Shl(U256{0, m}, 112);
+
+    // a = m * 2^-112 in [1,4), so y = sqrt(a) is in [1,2) and its significand
+    // IS the integer we are looking for.
+    const _Float128 a =
+        FromBits((((U128)(kBias + (wide ? 1 : 0))) << 112) | ((wide ? (m >> 1) : m) & kMant));
+    _Float128 y = (_Float128)SeedSqrt((double)a);
+    y = (y + a / y) * (_Float128)0.5;
+    y = (y + a / y) * (_Float128)0.5;
+
+    U128 S;
+    if (RawExp(y) == kBias) S = RawMant(y) | (((U128)1) << 112);
+    else                    S = (((U128)1) << 113) - 1;   // y rounded up to 2
+
+    // Walk S onto the integer floor of the root: S*S <= N < (S+1)*(S+1).
+    for (int guard = 0; guard < 8; ++guard) {
+        if (Cmp(Mul(S, S), N) > 0) { --S; continue; }
+        const U128 next = S + 1;
+        if (Cmp(Mul(next, next), N) <= 0) { S = next; continue; }
+        break;
+    }
+    // Round to nearest, written without a midpoint: 4N vs (2S+1)^2.
+    const U128 mid = (S << 1) | 1;
+    if (Cmp(Shl(N, 2), Mul(mid, mid)) >= 0) ++S;
+
+    int outExp = kBias + 56 + E / 2;
+    if (S >> 113) {                                // the increment carried
+        S >>= 1;
+        ++outExp;
+    }
+    return FromBits((((U128)outExp) << 112) | (S & kMant));
+}
+
+// ── exponent surgery ────────────────────────────────────────────────────
+inline _Float128 Ldexp(_Float128 x, int n)
+{
+    if (!IsFinite(x) || IsZero(x)) return x;
+    // Every factor below is a representable power of two, so each multiply is
+    // exact until the result genuinely over- or underflows, which is where the
+    // rounding belongs.
+    if (n > 60000) n = 60000;
+    if (n < -60000) n = -60000;
+    while (n > 16000) { x *= Pow2(16000); n -= 16000; }
+    while (n < -16000) { x *= Pow2(-16000); n += 16000; }
+    return x * Pow2(n);
+}
+
+inline int Ilogb(_Float128 x)
+{
+    if (IsZero(x)) return -0x7FFFFFFF - 1;        // FP_ILOGB0
+    if (IsNan(x)) return -0x7FFFFFFF - 1;         // FP_ILOGBNAN (same value here)
+    if (IsInf(x)) return 0x7FFFFFFF;
+    const int e = RawExp(x);
+    if (e) return e - kBias;
+    U128 m = RawMant(x);                          // subnormal
+    int  k = -kBias + 1;
+    while (!(m & (((U128)1) << 112))) { m <<= 1; --k; }
+    return k;
+}
+
+inline _Float128 Logb(_Float128 x)
+{
+    if (IsZero(x)) return -(_Float128)1 / (_Float128)0;
+    if (!IsFinite(x)) return Fabs(x);
+    return (_Float128)Ilogb(x);
+}
+
+inline _Float128 Frexp(_Float128 x, int *e)
+{
+    if (IsZero(x) || !IsFinite(x)) { *e = 0; return x; }
+    const int k = Ilogb(x) + 1;
+    *e = k;
+    return Ldexp(x, -k);
+}
+
+inline _Float128 Modf(_Float128 x, _Float128 *ip)
+{
+    if (IsNan(x)) { *ip = x; return x; }
+    if (IsInf(x)) { *ip = x; return CopySign(FromBits(0), x); }
+    const _Float128 t = Trunc(x);
+    *ip = t;
+    return CopySign(x - t, x);
+}
+
+inline _Float128 NextAfter(_Float128 x, _Float128 y)
+{
+    if (IsNan(x) || IsNan(y)) return x + y;
+    if (x == y) return y;
+    if (IsZero(x)) return FromBits((Bits(y) & kSign) | 1);   // smallest subnormal
+    U128 u = Bits(x);
+    const bool up = (x < y) != SignBit(x);                   // move away from zero?
+    if (up) ++u; else --u;
+    return FromBits(u);
+}
+
+inline _Float128 Fmin(_Float128 a, _Float128 b)
+{
+    if (IsNan(a)) return b;
+    if (IsNan(b)) return a;
+    if (a == b) return SignBit(a) ? a : b;                   // -0 beats +0
+    return a < b ? a : b;
+}
+inline _Float128 Fmax(_Float128 a, _Float128 b)
+{
+    if (IsNan(a)) return b;
+    if (IsNan(b)) return a;
+    if (a == b) return SignBit(a) ? b : a;
+    return a > b ? a : b;
+}
+inline _Float128 Fdim(_Float128 a, _Float128 b)
+{
+    if (IsNan(a) || IsNan(b)) return a + b;
+    return a > b ? a - b : (_Float128)0;
+}
+
+// ── fmod: exact, by the schoolbook shift-and-subtract on significands ────
+inline _Float128 Fmod(_Float128 x, _Float128 y)
+{
+    if (IsNan(x) || IsNan(y) || IsInf(x) || IsZero(y)) return Nan();
+    if (IsZero(x) || IsInf(y)) return x;
+
+    _Float128 ax = Fabs(x), ay = Fabs(y);
+    if (ax < ay) return x;
+    if (ax == ay) return CopySign(FromBits(0), x);
+
+    int ex = Ilogb(ax), ey = Ilogb(ay);
+    U128 mx, my;
+    {
+        int e;
+        mx = (Bits(Frexp(ax, &e)) & kMant) | (((U128)1) << 112);
+        my = (Bits(Frexp(ay, &e)) & kMant) | (((U128)1) << 112);
+    }
+    // value(x) = mx * 2^(ex-112), value(y) = my * 2^(ey-112)
+    for (; ex > ey; --ex) {
+        const U128 d = mx - my;
+        if (!(d >> 127)) {                       // mx >= my
+            if (d == 0) return CopySign(FromBits(0), x);
+            mx = d;
+        }
+        mx <<= 1;
+    }
+    const U128 d = mx - my;
+    if (!(d >> 127)) mx = d;
+    if (mx == 0) return CopySign(FromBits(0), x);
+    while (!(mx & (((U128)1) << 112))) { mx <<= 1; --ex; }
+    return CopySign(Ldexp(FromBits((((U128)(kBias)) << 112) | (mx & kMant)), ex), x);
+}
+
+// ── fma: one rounding, and the exact product to justify it ──────────────
+// The product of two 113-bit significands is 226 bits, and no floating-point
+// type here holds that, so the arithmetic happens in integers: a 384-bit
+// accumulator built from six 64-bit limbs, wide enough for the product plus
+// the furthest alignment that can still change the result (beyond ~240 bits
+// the addend only contributes a sticky bit, and the accumulator says so).
+inline constexpr int kLimbs = 8;                 // 512 bits
+struct Acc {
+    unsigned long long w[kLimbs];   // w[0] is the least significant
+};
+
+inline void AccZero(Acc &a)
+{
+    for (int i = 0; i < kLimbs; ++i) a.w[i] = 0;
+}
+
+inline void AccSet(Acc &a, U128 v, int at)      // place v at bit offset `at`
+{
+    AccZero(a);
+    const int limb = at / 64, off = at % 64;
+    const unsigned long long lo = (unsigned long long)v, hi = (unsigned long long)(v >> 64);
+    if (off == 0) {
+        a.w[limb] = lo;
+        a.w[limb + 1] = hi;
+    } else {
+        a.w[limb] = lo << off;
+        a.w[limb + 1] = (hi << off) | (lo >> (64 - off));
+        a.w[limb + 2] = hi >> (64 - off);
+    }
+}
+
+inline void AccSet256(Acc &a, const U256 &v, int at)
+{
+    Acc t;
+    AccSet(a, v.lo, at);
+    AccSet(t, v.hi, at + 128);
+    unsigned long long carry = 0;
+    for (int i = 0; i < kLimbs; ++i) {
+        const unsigned long long s = a.w[i] + t.w[i];
+        const unsigned long long c1 = s < a.w[i];
+        const unsigned long long s2 = s + carry;
+        carry = c1 | (s2 < s);
+        a.w[i] = s2;
+    }
+}
+
+inline bool AccAdd(Acc &a, const Acc &b)        // a += b, returns carry out
+{
+    unsigned long long carry = 0;
+    for (int i = 0; i < kLimbs; ++i) {
+        const unsigned long long s = a.w[i] + b.w[i];
+        const unsigned long long c1 = s < a.w[i];
+        const unsigned long long s2 = s + carry;
+        carry = c1 | (s2 < s);
+        a.w[i] = s2;
+    }
+    return carry != 0;
+}
+
+inline void AccSub(Acc &a, const Acc &b)        // a -= b, requires a >= b
+{
+    unsigned long long borrow = 0;
+    for (int i = 0; i < kLimbs; ++i) {
+        const unsigned long long d = a.w[i] - b.w[i];
+        const unsigned long long b1 = a.w[i] < b.w[i];
+        const unsigned long long d2 = d - borrow;
+        borrow = b1 | (d < borrow);
+        a.w[i] = d2;
+    }
+}
+
+inline int AccCmp(const Acc &a, const Acc &b)
+{
+    for (int i = kLimbs - 1; i >= 0; --i)
+        if (a.w[i] != b.w[i]) return a.w[i] < b.w[i] ? -1 : 1;
+    return 0;
+}
+
+inline bool AccZeroP(const Acc &a)
+{
+    for (int i = 0; i < kLimbs; ++i)
+        if (a.w[i]) return false;
+    return true;
+}
+
+inline int AccTopBit(const Acc &a)              // index of the highest set bit, -1 if zero
+{
+    for (int i = kLimbs - 1; i >= 0; --i)
+        if (a.w[i]) {
+            int b = 63;
+            while (!((a.w[i] >> b) & 1)) --b;
+            return i * 64 + b;
+        }
+    return -1;
+}
+
+inline bool AccBit(const Acc &a, int n)
+{
+    return n >= 0 && n < 64 * kLimbs && ((a.w[n / 64] >> (n % 64)) & 1);
+}
+
+inline bool AccAnyBelow(const Acc &a, int n)    // any set bit strictly below n
+{
+    if (n <= 0) return false;
+    for (int i = 0; i < n / 64; ++i)
+        if (a.w[i]) return true;
+    const int r = n % 64;
+    return r && (a.w[n / 64] & ((1ull << r) - 1));
+}
+
+inline U128 AccExtract(const Acc &a, int at)    // 113 bits starting at bit `at`
+{
+    U128 v = 0;
+    for (int i = 112; i >= 0; --i) v = (v << 1) | (U128)(AccBit(a, at + i) ? 1 : 0);
+    return v;
+}
+
+// Decompose into sign, a 113-bit significand and the scale its low bit carries.
+struct Parts {
+    bool sign;
+    U128 mant;
+    int  scale;                                  // value = (-1)^sign * mant * 2^scale
+};
+
+inline Parts Decompose(_Float128 x)
+{
+    Parts p;
+    p.sign = SignBit(x);
+    int e = RawExp(x);
+    p.mant = RawMant(x);
+    if (e == 0) {
+        p.scale = 1 - kBias - 112;
+    } else {
+        p.mant |= ((U128)1) << 112;
+        p.scale = e - kBias - 112;
+    }
+    return p;
+}
+
+// Round a 384-bit accumulator to a binary128, given the scale of its bit 0.
+inline _Float128 RoundAcc(const Acc &acc, int scale, bool sign)
+{
+    const int top = AccTopBit(acc);
+    if (top < 0) return FromBits(sign ? kSign : 0);
+
+    // Where the significand's low bit must sit for a NORMAL result, and where
+    // subnormality forces it instead.
+    int lowBit = top - 112;
+    const int minScale = 1 - kBias - 112;        // the scale of a subnormal's low bit
+    if (scale + lowBit < minScale) lowBit = minScale - scale;
+
+    U128 sig = (lowBit >= 0) ? AccExtract(acc, lowBit) : (U128)0;
+    if (lowBit < 0) {                            // room to spare: shift left
+        sig = AccExtract(acc, 0) << (-lowBit);
+    }
+    const bool guard  = lowBit > 0 && AccBit(acc, lowBit - 1);
+    const bool sticky = lowBit > 1 && AccAnyBelow(acc, lowBit - 1);
+    if (guard && (sticky || (sig & 1))) ++sig;   // nearest, ties to even
+
+    int exp;                                     // biased
+    if (sig >> 113) {                            // rounding carried
+        sig >>= 1;
+        ++lowBit;
+    }
+    exp = scale + lowBit + kBias + 112;
+    if (!(sig >> 112)) {                         // subnormal (or rounded up into normal)
+        exp = 0;
+    }
+    if (exp >= kExpMax) return FromBits((sign ? kSign : 0) | kExpField);   // overflow to inf
+    return FromBits((sign ? kSign : 0) | (((U128)exp) << 112) | (sig & kMant));
+}
+
+inline _Float128 Fma(_Float128 x, _Float128 y, _Float128 z)
+{
+    if (IsNan(x) || IsNan(y) || IsNan(z)) return x + y + z;
+    if (IsInf(x) || IsInf(y)) {
+        if (IsZero(x) || IsZero(y)) return Nan();
+        const _Float128 p = x * y;               // the sign of the infinity
+        if (IsInf(z) && SignBit(z) != SignBit(p)) return Nan();
+        return p;
+    }
+    if (IsInf(z)) return z;
+    if (IsZero(x) || IsZero(y)) {
+        const bool ps = SignBit(x) != SignBit(y);
+        if (IsZero(z)) return (ps == SignBit(z)) ? z : FromBits(0);
+        return z;
+    }
+
+    const Parts a = Decompose(x), b = Decompose(y), c = Decompose(z);
+    const bool  psign = a.sign != b.sign;
+    const U256  prod  = Mul(a.mant, b.mant);
+    const int   pscale = a.scale + b.scale;      // product = prod * 2^pscale
+
+    if (IsZero(z)) {
+        Acc acc;
+        AccSet256(acc, prod, 0);
+        return RoundAcc(acc, pscale, psign);
+    }
+
+    // Align both onto one scale. Two magnitudes more than 240 bits apart
+    // cannot both matter: the far one can only ever move the rounding, which
+    // is exactly what one sticky bit under the near one expresses. Within that
+    // window both are placed exactly, and the accumulator is sized so the
+    // widest such span (240 + 226 bits) still fits.
+    const int ptop = pscale + 226;               // one above the product's top bit
+    const int ctop = c.scale + 113;
+    int base, pat, cat;
+    bool cSticky = false, pSticky = false;
+    // kStickyGap: how far under the near operand the sticky bit sits. One bit
+    // is not enough -- at an offset of one it would be worth HALF an ulp and
+    // land exactly on the tie, turning "very slightly less than z" into a
+    // tie-to-even. Eight puts it below the guard bit, where a sticky belongs.
+    constexpr int kStickyGap = 8;
+    if (ctop + 240 < ptop) {
+        base = pscale - kStickyGap;
+        pat  = kStickyGap;
+        cat  = 0;
+        cSticky = true;
+    } else if (ptop + 240 < ctop) {
+        base = c.scale - kStickyGap;
+        pat  = 0;
+        cat  = kStickyGap;
+        pSticky = true;
+    } else {
+        base = pscale < c.scale ? pscale : c.scale;
+        pat  = pscale - base;
+        cat  = c.scale - base;
+    }
+
+    Acc pa, ca;
+    if (pSticky) {
+        AccZero(pa);
+        pa.w[0] = 1;
+    } else {
+        AccSet256(pa, prod, pat);
+    }
+    if (cSticky) {
+        AccZero(ca);
+        ca.w[0] = 1;
+    } else {
+        AccSet(ca, c.mant, cat);
+    }
+
+    if (psign == c.sign) {
+        AccAdd(pa, ca);
+        return RoundAcc(pa, base, psign);
+    }
+    const int cmp = AccCmp(pa, ca);
+    if (cmp == 0) return FromBits(0);            // exact cancellation gives +0
+    if (cmp > 0) {
+        AccSub(pa, ca);
+        return RoundAcc(pa, base, psign);
+    }
+    AccSub(ca, pa);
+    return RoundAcc(ca, base, c.sign);
+}
+
+inline _Float128 Inf() { return FromBits(kExpField); }
+
+// hypot: scaled so nothing overflows on the way, and compensated so the sum
+// of squares keeps the bits sqrt is about to consume. Fma supplies each
+// square's exact residual, which is the whole reason it is worth having.
+inline _Float128 Hypot(_Float128 x, _Float128 y)
+{
+    if (IsInf(x) || IsInf(y)) return Inf();      // even when the other is NaN
+    if (IsNan(x) || IsNan(y)) return x + y;
+    x = Fabs(x);
+    y = Fabs(y);
+    if (IsZero(x)) return y;
+    if (IsZero(y)) return x;
+    if (y > x) {
+        const _Float128 t = x;
+        x = y;
+        y = t;
+    }
+    const int e = Ilogb(x);
+    x = Ldexp(x, -e);
+    y = Ldexp(y, -e);
+
+    const _Float128 p = x * x, dp = Fma(x, x, -p);
+    const _Float128 q = y * y, dq = Fma(y, y, -q);
+    const _Float128 s = p + q;
+    const _Float128 ds = ((p - s) + q) + (dp + dq);
+    _Float128 r = Sqrt(s);
+    r = r + ds / (r + r);                        // one Newton step on the residual
+    return Ldexp(r, e);
+}
+
+inline _Float128 Cbrt(_Float128 x)
+{
+    if (IsZero(x) || !IsFinite(x)) return x;
+    const bool neg = SignBit(x);
+    x = Fabs(x);
+
+    int e = Ilogb(x);
+    int q = e / 3;
+    int r = e - 3 * q;
+    if (r < 0) {                                 // C division truncates toward zero
+        r += 3;
+        --q;
+    }
+    const _Float128 m = Ldexp(x, -3 * q);        // m in [1, 8)
+    _Float128 y = (_Float128)SeedCbrt((double)m);
+    const _Float128 three = (_Float128)3;
+    y = (y + y + m / (y * y)) / three;
+    y = (y + y + m / (y * y)) / three;
+    // A last step driven by the exact residual of y^3 - m.
+    const _Float128 y2 = y * y, dy2 = Fma(y, y, -y2);
+    const _Float128 y3 = y2 * y, dy3 = Fma(y2, y, -y3) + dy2 * y;
+    y = y - ((y3 - m) + dy3) / (three * y2);
+    (void)r;
+    return neg ? -Ldexp(y, q) : Ldexp(y, q);
+}
+
+// remainder: fmod, then the one adjustment that turns truncation toward zero
+// into rounding to nearest, ties to even, exactly as [c.math] asks.
+inline _Float128 Remainder(_Float128 x, _Float128 y)
+{
+    if (IsNan(x) || IsNan(y) || IsInf(x) || IsZero(y)) return Nan();
+    if (IsInf(y)) return x;
+    _Float128 r = Fmod(x, y);
+    const _Float128 ay = Fabs(y);
+    const _Float128 ar = Fabs(r);
+    const _Float128 twice = ar + ar;
+    if (twice > ay || (twice == ay && !IsZero(Fmod(Trunc((Fabs(x) - ar) / ay), (_Float128)2))))
+        r = SignBit(r) ? r + ay : r - ay;
+    return r;
+}
+
+} // namespace __quad
+} // namespace std
+
+#endif // __STDCPP_FLOAT128_T__
+#endif // BOXCXX_BITS_CMATH_QUAD

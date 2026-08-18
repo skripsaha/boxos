@@ -1,0 +1,51 @@
+// boxcxx — <stdfloat>
+//
+// [stdfloat.syn] is five type aliases and nothing else, each present only if
+// the implementation supports the corresponding extended floating-point type.
+// The header is small; what it names is not, and the reason it took until Ф40
+// is worth writing down where it will be read.
+//
+// x86_64-elf-g++ 15.2.0 predefines all five __STDCPP_*_T__ macros. That is a
+// LANGUAGE fact, not a library one: it means _Float16, _Float32, _Float64,
+// _Float128 and __bf16 have been standard floating-point types in every
+// boxcxx translation unit for as long as this toolchain has been in use, with
+// the conversion ranks of [basic.extended.fp] enforced by the compiler. The
+// library simply did not know. is_floating_point said no, numeric_limits had
+// no specialization, and [cmath.syn]/2's "an overload for each cv-unqualified
+// floating-point type" was five types short — all of it wrong before this
+// header existed and none of it because of this header. Ф40 fixes the layer
+// that was wrong and then adds the five aliases on top, which is the smaller
+// half of the work.
+//
+// What is NOT here, deliberately and documented in CONFORMANCE §2: the
+// transcendental <cmath> functions at float128_t. The algebraic ones are
+// exact and the classifying ones are bit tests, so both are provided; exp,
+// log, sin and their neighbours would need polynomial kernels carrying 113
+// bits, which is a phase of its own and not this one. libstdc++ provides none
+// of the float128_t <cmath> surface at all here (it needs libquadmath, which
+// a freestanding target does not have), and libc++ 22.1.6 has no <stdfloat>
+// whatsoever — both measured, both recorded.
+#ifndef BOXCXX_STDFLOAT
+#define BOXCXX_STDFLOAT
+
+namespace std {
+
+#if defined(__STDCPP_FLOAT16_T__)
+using float16_t = _Float16;
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+using float32_t = _Float32;
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+using float64_t = _Float64;
+#endif
+#if defined(__STDCPP_FLOAT128_T__)
+using float128_t = _Float128;
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+using bfloat16_t = __bf16;
+#endif
+
+} // namespace std
+
+#endif // BOXCXX_STDFLOAT
