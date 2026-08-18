@@ -19,6 +19,7 @@
 #include <new>
 #include <cstddef>
 #include <cstdint>
+#include <__bits/c_terminate>
 
 #include "box/print.h"
 #include "box/system.h"
@@ -27,7 +28,7 @@
 #include "box/core/strand_self.h"   // strand_self() — guard owner token
 
 extern "C" {
-void *_malloc_impl(size_t size);
+void *malloc(size_t size);
 void *realloc(void *ptr, size_t size);
 void  free(void *ptr);
 int  *__boxcxx_uncaught_count();   // cxa_exception.cpp
@@ -35,11 +36,21 @@ int  *__boxcxx_uncaught_count();   // cxa_exception.cpp
 
 namespace boxcxx {
 
+// The library's fatal path: an uncaught exception, a pure virtual call, a
+// failed guard, a new that could not be satisfied and had no handler.
+//
+// It used to end with exit(134) — 128 + SIGABRT, the right STATUS, reached the
+// wrong way. exit() runs __cxa_finalize and the .fini_array, so every static
+// destructor and every std::atexit callback in the program ran on the way out
+// of a fatal error: destructors touching state an uncaught exception had just
+// abandoned, teardown code printing after the diagnostic, an atexit callback
+// getting a turn the standard never gives it. [exception.terminate]/2 says the
+// default terminate handler calls abort, and [support.start.term]/9 says abort
+// runs none of that. Until <csignal> existed there was no abort to call.
 [[noreturn]] void Panic(const char *msg)
 {
     printf("[boxcxx] FATAL: %s\n", msg);
-    exit(134u);   // 128 + SIGABRT by convention; BoxOS treats it as plain code
-    __builtin_unreachable();
+    std::abort();
 }
 
 } // namespace boxcxx
@@ -187,7 +198,7 @@ extern "C" int __cxa_thread_atexit(void (*fn)(void *), void *arg, void *dso)
     (void)dso;
     if (!fn) return -1;
 
-    auto *node = static_cast<ThreadExitNode *>(_malloc_impl(sizeof(ThreadExitNode)));
+    auto *node = static_cast<ThreadExitNode *>(malloc(sizeof(ThreadExitNode)));
     if (!node) return -1;
 
     node->fn   = fn;

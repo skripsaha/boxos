@@ -41,7 +41,7 @@ extern "C" {
 // BoxOS userspace spells the allocator this way — box/memory.h keeps `malloc`
 // as a macro over it, and a library that is not allowed to include box headers
 // asks for the function itself. The host test harness supplies the same name.
-void  *_malloc_impl(size_t);
+void  *malloc(size_t);
 void   free(void *);
 size_t strlen(const char *);
 void  *memcpy(void *, const void *, size_t);
@@ -76,7 +76,7 @@ struct Arena {
             return p;
         }
         size_t cap   = n > 4096u ? n : 4096u;
-        Block *block = (Block *)_malloc_impl(sizeof(Block) + cap);
+        Block *block = (Block *)malloc(sizeof(Block) + cap);
         if (!block) {
             Bad = true;
             return nullptr;
@@ -2094,7 +2094,7 @@ extern "C" char *__cxa_demangle(const char *mangled, char *buf, size_t *n, int *
     if (buf && n && *n >= need) {
         dst = buf;
     } else {
-        dst = (char *)_malloc_impl(need);
+        dst = (char *)malloc(need);
         if (!dst) {
             arena.Release();
             return finish(kMemory);

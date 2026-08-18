@@ -41,7 +41,19 @@ typedef struct {
 } system_info_t;
 
 int proc_info(uint16_t pid, proc_info_t* info);
-void exit(uint32_t exit_code);
+
+/* Normal termination: runs __cxa_finalize callbacks (std::atexit + static
+ * destructors) and the .fini_array, flushes the console, then ends the
+ * process. The parameter is `int` because [support.start.term] says so and
+ * because the C++ <cstdlib> exports this very function as std::exit — it used
+ * to be uint32_t, which no translation unit could reconcile with <cstdlib>.
+ * The kernel masks the code to [0, INT32_MAX]. */
+void exit(int exit_code) __attribute__((noreturn));
+
+/* Abnormal-immediate termination: no atexit callbacks, no static destructors,
+ * no .fini_array, no flush. C's _Exit, and the primitive std::quick_exit and
+ * std::abort are built on. */
+void _Exit(int exit_code) __attribute__((noreturn));
 int proc_exec(const char* filename);                          /* unchanged ABI */
 int proc_exec_tagged(const char* filename, const char* tags); /* child = file-tags ∪ caller-tags */
 /* Like proc_exec_tagged, but also reports the child's pid-allocator generation

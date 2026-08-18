@@ -161,6 +161,20 @@ while IFS='|' read -r m owners; do
     done
 done < "$MAP"
 
+# MAPPED — every macro boxcxx defines must be IN the map, or the OWNED check
+# above skipped it in silence. Ф41 found seven [version.syn] macros missing
+# from the transcription and one that does not exist in [version.syn] at all
+# (__cpp_lib_spans, a phantom). Neither could produce a false green that day,
+# because boxcxx defines none of them — but "the day boxcxx defines one" is
+# exactly when a missing line stops being harmless, and nothing was watching
+# for it. Now something is: this check makes the map's completeness a property
+# of the gate rather than of whoever last edited the file.
+while read -r m; do
+    grep -q "^$m|" "$MAP" || {
+        printf 'MAPPED %s is defined but has no [version.syn] ownership line in %s\n' \
+            "$m" "$MAP"; FAIL=1; }
+done < "$WORK/version.txt"
+
 # SYNOPSIS — a macro an owning header defines must reach <version> as well.
 for f in "$WORK"/vis.*; do
     n=${f##*/vis.}

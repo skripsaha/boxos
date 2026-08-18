@@ -1,0 +1,18 @@
+// boxcxx — <cfloat>
+//
+// [cfloat.syn]: "The contents of the header <cfloat> are the same as the C
+// standard library header <float.h>." That is the whole specification — the
+// header defines macros and nothing else, no types and no functions, so there
+// is nothing to place in namespace std.
+//
+// BoxOS has no libc, but it does not need one here: <float.h> is one of the
+// headers a freestanding C implementation must provide, and the compiler
+// provides it. The macros come out of the compiler's own model of the target's
+// floating-point formats (__DBL_DIG__, __LDBL_MANT_DIG__, …), which is the
+// same model <limits> and <cmath> are built on, so the three cannot disagree.
+#ifndef BOXCXX_CFLOAT
+#define BOXCXX_CFLOAT
+
+#include <float.h>
+
+#endif // BOXCXX_CFLOAT

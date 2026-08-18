@@ -658,7 +658,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
 // Public API
 // ---------------------------------------------------------------------------
 
-void* _malloc_impl(size_t size) {
+void* malloc(size_t size) {
     if (size == 0) return NULL;
 
     /* Resolve this strand's pool (claiming one lazily) and its error cell up
@@ -797,7 +797,7 @@ void* calloc(size_t nmemb, size_t size) {
         return NULL;
     }
 
-    void* ptr = _malloc_impl(total);
+    void* ptr = malloc(total);
     if (ptr) {
         memset(ptr, 0, total);
     }
@@ -805,7 +805,7 @@ void* calloc(size_t nmemb, size_t size) {
 }
 
 void* realloc(void* ptr, size_t size) {
-    if (!ptr) return _malloc_impl(size);
+    if (!ptr) return malloc(size);
     if (size == 0) {
         free(ptr);
         return NULL;
@@ -867,7 +867,7 @@ void* realloc(void* ptr, size_t size) {
     uint8_t old_tag = block->tag;
     uspin_unlock(&heap_lock);
 
-    void* new_ptr = _malloc_impl(size);
+    void* new_ptr = malloc(size);
     if (!new_ptr) return NULL;
 
     memcpy(new_ptr, ptr, old_size);

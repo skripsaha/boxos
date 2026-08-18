@@ -130,8 +130,18 @@
 // list is the backlog: when the reason is fixed, the macro moves into the
 // owning header's leaf. The count read "eight" until Ф39 recounted it; it had
 // been true when it was written and five headers have been built since. There
-// are eleven entries, and filesystem is the last of them whose header is
-// missing rather than whose feature is partial.
+// are twelve entries covering twenty-three macros, because the last of them
+// (freestanding_*) is a group of twelve; filesystem is the only one whose
+// header is missing rather than whose feature is partial.
+//
+// Ф41 measured this list against reality instead of reading it, and the
+// freestanding group is what the measurement found: eleven macros [version.syn]
+// names had no entry here at all, which made a list that calls itself the
+// backlog quietly incomplete. Two macros are STILL not here on purpose —
+// __cpp_lib_initializer_list (202511L) and __cpp_lib_ranges_generate_random
+// (202403L) — because both are C++26 additions, and this list is the C++23
+// backlog. Neither reference implementation defines them either (measured:
+// libstdc++ 16.1 and libc++ 22 at every -std they accept).
 //
 // C++26 macros are NOT listed here. This list is the C++23 backlog and is
 // meant to be finishable; the C++26 surface is an open frontier, and
@@ -236,6 +246,25 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
+// freestanding_*           TWELVE macros, and Ф41 put them on this list
+//                          because they had never been on it: freestanding_
+//                          charconv, _cstdlib, _errc, _functional, _iterator,
+//                          _memory, _numeric, _ranges, _ratio, _tuple,
+//                          _utility, plus __cpp_lib_ratio, which is held back
+//                          for the same reason. They are not features at all
+//                          — each asserts that a header meets the standard's
+//                          freestanding subset ([compliance]), which is a
+//                          per-header audit nobody has run. The irony is on
+//                          the record: boxcxx IS built freestanding
+//                          (-ffreestanding -nostdlib, no libc under it) and
+//                          is very likely entitled to most of them. Entitled
+//                          is not audited. One of the twelve additionally
+//                          waits on a header: freestanding_cstdlib names
+//                          <cstdlib> and <cmath>, and <cstdlib> arrives later
+//                          in Ф41. freestanding_errc's two headers — <cerrno>
+//                          and <system_error> — both exist as of Ф41-a, so
+//                          nothing but the audit stands between it and being
+//                          claimed.
 //
 // parallel_algorithm LEFT this list in Ф40's last commit, when the overload
 // set stopped being partial. Its entry had been honest about the distinction

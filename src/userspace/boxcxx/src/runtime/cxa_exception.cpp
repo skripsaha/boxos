@@ -18,7 +18,7 @@
 #include "box/print.h"
 
 extern "C" {
-void *_malloc_impl(size_t size);
+void *malloc(size_t size);
 void  free(void *ptr);
 }
 
@@ -135,7 +135,7 @@ extern "C" int *__boxcxx_uncaught_count()
 
 extern "C" void *__cxa_allocate_exception(size_t thrown_size) noexcept
 {
-    void *raw = _malloc_impl(sizeof(CxaException) + thrown_size);
+    void *raw = malloc(sizeof(CxaException) + thrown_size);
     if (!raw) {
         if (thrown_size <= kEmergencySlotPayload) {
             // Shared pool across strands: claim a slot with an atomic
@@ -311,7 +311,7 @@ extern "C" [[noreturn]] void __cxa_rethrow_primary_exception(void *obj)
 
     CxaException *primary = static_cast<CxaException *>(obj) - 1;
     CxaException *dep =
-        static_cast<CxaException *>(_malloc_impl(sizeof(CxaException)));
+        static_cast<CxaException *>(malloc(sizeof(CxaException)));
     if (!dep)
         boxcxx::Panic("__cxa_rethrow_primary_exception: out of memory");
 

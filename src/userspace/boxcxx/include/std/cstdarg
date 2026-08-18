@@ -1,0 +1,26 @@
+// boxcxx — <cstdarg>
+//
+// [cstdarg.syn]: va_list as a type in std, and va_start / va_arg / va_end /
+// va_copy as macros. The macros are the compiler's — there is no way to write
+// them, because only the compiler knows where the register save area is; a
+// library that "implemented" them would be guessing at the ABI it is compiled
+// against. <stdarg.h> is one of the headers a freestanding implementation
+// must provide, so they are simply reused.
+//
+// The type is placed in std as well, which is what makes `std::va_list` name
+// the same type the macros walk. That matters here more than usual: <cstdio>'s
+// vprintf family takes std::va_list by value, and a va_list that came from a
+// different definition would be a different type on x86-64 SysV, where
+// va_list is an array of one struct and therefore decays on the way in.
+#ifndef BOXCXX_CSTDARG
+#define BOXCXX_CSTDARG
+
+#include <stdarg.h>
+
+namespace std {
+
+using va_list = ::va_list;
+
+} // namespace std
+
+#endif // BOXCXX_CSTDARG

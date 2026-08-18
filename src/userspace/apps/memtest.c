@@ -156,7 +156,7 @@ static void test_large_alloc(void) {
 // ── Tagged malloc tests ───────────────────────────────────────────────────────
 
 static void test_tagged_basic(void) {
-    void *p = malloc(64, "mt:buf");
+    void *p = malloc_tagged(64, "mt:buf");
     if (!p) { test_result("tagged malloc alloc", false); return; }
 
     // Verify tag registered and counted
@@ -178,9 +178,9 @@ static void test_tagged_basic(void) {
 }
 
 static void test_tagged_multi(void) {
-    void *a = malloc(32,  "mt:net");
-    void *b = malloc(64,  "mt:net");
-    void *c = malloc(128, "mt:ui");
+    void *a = malloc_tagged(32,  "mt:net");
+    void *b = malloc_tagged(64,  "mt:net");
+    void *c = malloc_tagged(128, "mt:ui");
     bool ok = (a && b && c);
 
     if (ok) {
@@ -206,9 +206,9 @@ static void iter_cb(void *ptr, size_t size, const char *tag_name, void *userdata
 }
 
 static void test_tagged_iterate(void) {
-    void *p1 = malloc(16, "mt:iter");
-    void *p2 = malloc(32, "mt:iter");
-    void *p3 = malloc(48, "mt:iter");
+    void *p1 = malloc_tagged(16, "mt:iter");
+    void *p2 = malloc_tagged(32, "mt:iter");
+    void *p3 = malloc_tagged(48, "mt:iter");
     bool ok = (p1 && p2 && p3);
 
     if (ok) {
@@ -232,7 +232,7 @@ static void test_tagged_iterate(void) {
 }
 
 static void test_tagged_realloc_preserves(void) {
-    void *p = malloc(32, "mt:realloc");
+    void *p = malloc_tagged(32, "mt:realloc");
     if (!p) { test_result("tagged realloc preserves tag", false); return; }
 
     memset(p, 0xAB, 32);
@@ -255,7 +255,7 @@ static void test_tagged_realloc_preserves(void) {
 }
 
 static void test_tagged_name_lookup(void) {
-    void *p = malloc(16, "mt:named");
+    void *p = malloc_tagged(16, "mt:named");
     if (!p) { test_result("heap_tag_name lookup", false); return; }
 
     uint8_t id = heap_lookup_tag("mt:named");
@@ -271,8 +271,8 @@ static void test_tagged_name_lookup(void) {
 }
 
 static void test_tagged_dump(void) {
-    void *p1 = malloc(64,  "mt:dump_a");
-    void *p2 = malloc(128, "mt:dump_b");
+    void *p1 = malloc_tagged(64,  "mt:dump_a");
+    void *p2 = malloc_tagged(128, "mt:dump_b");
 
     // Just verify dump doesn't crash
     heap_dump_tags();

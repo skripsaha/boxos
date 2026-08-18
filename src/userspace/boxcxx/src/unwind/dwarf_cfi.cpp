@@ -16,7 +16,7 @@
 #include "unwind_internal.h"
 
 extern "C" {
-void *_malloc_impl(size_t size);
+void *malloc(size_t size);
 void  free(void *ptr);
 extern const uint8_t __eh_frame_start[];
 extern const uint8_t __eh_frame_end[];
@@ -215,7 +215,7 @@ void IndexAppend(const FdeIndexEntry &entry, size_t *cap)
     if (g_index_count == *cap) {
         size_t new_cap = *cap ? *cap * 2 : 64;
         auto *grown = static_cast<FdeIndexEntry *>(
-            _malloc_impl(new_cap * sizeof(FdeIndexEntry)));
+            malloc(new_cap * sizeof(FdeIndexEntry)));
         if (!grown) Panic("dwarf: FDE index allocation failed");
         for (size_t i = 0; i < g_index_count; ++i) grown[i] = g_index[i];
         free(g_index);
