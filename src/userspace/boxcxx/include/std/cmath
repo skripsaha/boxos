@@ -28,6 +28,54 @@ constexpr double kQNaN  = __builtin_nan("");
 constexpr float  kInfF  = __builtin_huge_valf();
 constexpr float  kQNaNF = __builtin_nanf("");
 
+// ── error reporting: PERFORMED, not asserted ─────────────────────────────
+// math_errhandling here is MATH_ERREXCEPT — errors are reported by raising the
+// IEEE-754 flags. Ф41-c measured what that was actually worth and the answer
+// was: nothing, outside sqrt. Every function below returned kInf or kQNaN on
+// its error paths, and returning a CONSTANT raises no flag, because only
+// operations raise. <cfenv> is what made the gap visible; these four helpers
+// are what closes it.
+//
+// Each one produces the value the standard asks for by doing the arithmetic
+// that produces it, so the hardware raises the flag as a side effect of being
+// right. That also means they keep working if a trap is ever unmasked — a
+// written status bit would not.
+//
+// The `volatile` is belt and braces, and the measurement says so: GCC compiles
+// with -ftrapping-math by default, so it will NOT fold an operation whose only
+// observable effect is the flag it raises — a mutation dropping the volatile
+// raised FE_OVERFLOW at -O0 and at -O2 alike (measured on the host, both
+// compilers). What the volatile buys is a guarantee that survives someone
+// adding -ffast-math or -fno-trapping-math to a build, which would otherwise
+// silently turn every error path below back into a constant.
+//
+// Only ERROR branches call these. The computation kernels are untouched, which
+// matters because several of them are the correctly-rounded chains of Ф27e.
+inline double raise_domain()               // NaN + FE_INVALID
+{
+    volatile double zero = 0.0;
+    return zero / zero;
+}
+inline double raise_pole(double sign)      // ±inf + FE_DIVBYZERO
+{
+    volatile double s = sign, zero = 0.0;
+    return s / zero;
+}
+// M15 was a mutation that dropped the volatile from raise_overflow and was NOT
+// observable — see the note above. Recorded because an unobservable mutation is
+// evidence about the test AND about the compiler, and the second one is why
+// this comment no longer claims what it used to.
+inline double raise_overflow(double sign)  // ±inf + FE_OVERFLOW (and INEXACT)
+{
+    volatile double big = 0x1p1023;
+    return sign * (big * big);
+}
+inline double raise_underflow(double sign) // ±0 + FE_UNDERFLOW (and INEXACT)
+{
+    volatile double tiny = 0x1p-1022;
+    return sign * (tiny * tiny);
+}
+
 constexpr double kPi      = 3.14159265358979311599796346854;
 constexpr double kPiOver2 = 1.57079632679489655799898173427;
 constexpr double kPiOver4 = 0.785398163397448278999490867136;
@@ -123,7 +171,8 @@ inline float  nearbyint(float x)  { return float(rint(double(x))); }
 
 // ── fmod : exact, shift-and-subtract (each step exact by Sterbenz) ─────────
 inline double fmod(double x, double y) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) return kQNaN;
+    if (isnan(x) || isnan(y)) return kQNaN;              // propagation, not error
+    if (isinf(x) || y == 0.0) return raise_domain();     // F.10.7.1 domain error
     if (isinf(y)) return x;
     double r = fabs(x), dy = fabs(y);
     if (r < dy) return x;
@@ -140,7 +189,8 @@ inline float fmod(float x, float y) { return float(fmod(double(x), double(y))); 
 
 // ── remainder : round-to-nearest-even quotient ─────────────────────────────
 inline double remainder(double x, double y) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) return kQNaN;
+    if (isnan(x) || isnan(y)) return kQNaN;
+    if (isinf(x) || y == 0.0) return raise_domain();     // F.10.7.2 domain error
     if (isinf(y)) return x;
     double ax = fabs(x), ay = fabs(y);
     double r = fmod(ax, ay);                        // r in [0, ay)
@@ -234,8 +284,8 @@ inline double expm1_series(double r) {
 // ── exp : x = k·ln2 + r, e^x = 2^k·(1 + (e^r−1)); corr separated ───────────
 inline double exp(double x) {
     if (isnan(x)) return x;
-    if (x > 709.782712893384) return kInf;          // overflow
-    if (x < -745.1332191019412) return 0.0;          // underflow → +0
+    if (x > 709.782712893384) return raise_overflow(1.0);   // range error
+    if (x < -745.1332191019412) return raise_underflow(1.0); // range error
     int k = (int)rint(x * kLog2e);
     double r = (x - k * kLn2Hi) - k * kLn2Lo;        // |r| ≤ ln2/2
     return scalbn(1.0 + expm1_series(r), k);
@@ -245,8 +295,8 @@ inline float exp(float x) { return float(exp(double(x))); }
 // ── expm1 : e^x − 1 (direct series near 0 avoids 1+x cancellation) ─────────
 inline double expm1(double x) {
     if (isnan(x)) return x;
-    if (x > 709.782712893384) return kInf;
-    if (x < -37.0) return -1.0;                      // e^x ≈ 0
+    if (x > 709.782712893384) return raise_overflow(1.0);   // range error
+    if (x < -37.0) return -1.0;                      // e^x ≈ 0, exact enough
     if (fabs(x) < 0.6) return expm1_series(x);       // direct, no cancellation
     return exp(x) - 1.0;
 }
@@ -255,8 +305,8 @@ inline float expm1(float x) { return float(expm1(double(x))); }
 // ── exp2 : 2^x = 2^k · e^(r·ln2), r ∈ [−0.5,0.5] ───────────────────────────
 inline double exp2(double x) {
     if (isnan(x)) return x;
-    if (x >= 1024.0) return kInf;
-    if (x <= -1075.0) return 0.0;
+    if (x >= 1024.0) return raise_overflow(1.0);
+    if (x <= -1075.0) return raise_underflow(1.0);
     int k = (int)rint(x);
     double r = (x - k) * kLn2;                        // |r·ln2| ≤ ln2/2
     return scalbn(1.0 + expm1_series(r), k);
@@ -272,8 +322,8 @@ inline double atanh_tail(double s) {            // (atanh(f)/f − 1)/s, |s|≤0
 }
 inline double log(double x) {
     if (isnan(x)) return x;
-    if (x < 0.0) return kQNaN;
-    if (x == 0.0) return -kInf;
+    if (x < 0.0) return raise_domain();       // outside the domain
+    if (x == 0.0) return raise_pole(-1.0);    // the pole: -inf, FE_DIVBYZERO
     if (isinf(x)) return kInf;
     u64 b = dbits(x);
     int e = (int)((b >> 52) & 0x7ff);
@@ -292,8 +342,8 @@ inline float log(float x) { return float(log(double(x))); }
 // ── log2 / log10 : reuse the m-reduction of log ────────────────────────────
 inline double log2(double x) {
     if (isnan(x)) return x;
-    if (x < 0.0) return kQNaN;
-    if (x == 0.0) return -kInf;
+    if (x < 0.0) return raise_domain();
+    if (x == 0.0) return raise_pole(-1.0);
     if (isinf(x)) return kInf;
     u64 b = dbits(x);
     int e = (int)((b >> 52) & 0x7ff);
@@ -311,8 +361,8 @@ inline float log2(float x) { return float(log2(double(x))); }
 
 inline double log10(double x) {
     if (isnan(x)) return x;
-    if (x < 0.0) return kQNaN;
-    if (x == 0.0) return -kInf;
+    if (x < 0.0) return raise_domain();
+    if (x == 0.0) return raise_pole(-1.0);
     if (isinf(x)) return kInf;
     u64 b = dbits(x);
     int e = (int)((b >> 52) & 0x7ff);
@@ -332,8 +382,8 @@ inline float log10(float x) { return float(log10(double(x))); }
 // ── log1p : log(1+x); f = x/(2+x) avoids 1+x cancellation for small x ──────
 inline double log1p(double x) {
     if (isnan(x)) return x;
-    if (x < -1.0) return kQNaN;
-    if (x == -1.0) return -kInf;
+    if (x < -1.0) return raise_domain();
+    if (x == -1.0) return raise_pole(-1.0);
     if (isinf(x)) return kInf;
     if (fabs(x) < 0.29) {
         double f = x / (2.0 + x);
@@ -555,7 +605,7 @@ inline double atan(double x) {
 inline double asin(double x) {
     if (isnan(x)) return x;
     double ax = fabs(x);
-    if (ax > 1.0) return kQNaN;
+    if (ax > 1.0) return raise_domain();
     if (ax == 1.0) return copysign(kPiO2Hi, x) + copysign(kPiO2Lo, x);
     if (ax <= 0.5) { double s = ax * ax; return copysign(ax + ax * s * asin_poly(s), x); }
     double t = (1.0 - ax) * 0.5, s = sqrt(t);         // asin(ax)=π/2−2·asin(√t)
@@ -566,7 +616,7 @@ inline double asin(double x) {
 inline double acos(double x) {
     if (isnan(x)) return x;
     double ax = fabs(x);
-    if (ax > 1.0) return kQNaN;
+    if (ax > 1.0) return raise_domain();
     if (x == 1.0) return 0.0;
     if (x == -1.0) return kPiHi + kPiLo;
     if (ax <= 0.5) { double s = x * x; double r = x + x * s * asin_poly(s); return (kPiO2Hi - r) + kPiO2Lo; }
@@ -656,8 +706,11 @@ inline double pow(double x, double y) {
         if (y > 0) return (ax > 1.0) ? kInf : 0.0;
         return (ax > 1.0) ? 0.0 : kInf;
     }
-    if (x == 0.0) { if (y < 0) return yodd ? copysign(kInf, x) : kInf; return yodd ? x : 0.0; }
-    if (signbit(x) && !yint) return kQNaN;
+    if (x == 0.0) {
+        if (y < 0) return raise_pole(yodd ? copysign(1.0, x) : 1.0);   // pole
+        return yodd ? x : 0.0;
+    }
+    if (signbit(x) && !yint) return raise_domain();   // negative base, non-integer y
     double lhi, llo; log_dd(ax, lhi, llo);             // ln|x| in dd
     double phi, plo; two_prod(y, lhi, phi, plo); plo += y * llo;   // y·ln|x| in dd
     double res = exp_dd(phi, plo);
@@ -700,7 +753,7 @@ inline double asinh(double x) {
 }
 inline double acosh(double x) {
     if (isnan(x)) return x;
-    if (x < 1.0) return kQNaN;
+    if (x < 1.0) return raise_domain();
     if (x == 1.0) return 0.0;
     if (isinf(x)) return x;
     if (x > 0x1p28) return log(x) + kLn2;              // ≈ln(2x)
@@ -711,8 +764,8 @@ inline double acosh(double x) {
 inline double atanh(double x) {
     if (isnan(x)) return x;
     double a = fabs(x), s = copysign(1.0, x);
-    if (a > 1.0) return kQNaN;
-    if (a == 1.0) return copysign(kInf, x);
+    if (a > 1.0) return raise_domain();
+    if (a == 1.0) return raise_pole(s);       // ±1 is the pole, not the edge
     if (a < 1e-8) return x;
     return s * 0.5 * log1p(2.0 * a / (1.0 - a));
 }
@@ -831,9 +884,9 @@ inline void stirling_lngamma_dd(double x, double &hi, double &lo) {
 // Γ via Stirling (x≥7) + upward recurrence for 0.5≤x<7 (no Lanczos cancellation).
 inline double tgamma(double x) {
     if (isnan(x)) return x;
-    if (isinf(x)) return signbit(x) ? kQNaN : kInf;
-    if (x == 0.0) return copysign(kInf, x);
-    if (x < 0.0 && x == floor(x)) return kQNaN;        // negative integer poles
+    if (isinf(x)) return signbit(x) ? raise_domain() : kInf;
+    if (x == 0.0) return raise_pole(copysign(1.0, x)); // F.10.5.4: ±inf, DIVBYZERO
+    if (x < 0.0 && x == floor(x)) return raise_domain();  // negative integers
     if (x < 0.5) return kPi / (sinpi(x) * tgamma(1.0 - x));   // reflection
     double denom = 1.0, z = x;
     while (z < 7.0) { denom *= z; z += 1.0; }          // Γ(x)=Γ(z)/∏, z≥7
@@ -843,8 +896,8 @@ inline double tgamma(double x) {
 inline double lgamma(double x) {
     if (isnan(x)) return x;
     if (isinf(x)) return kInf;
-    if (x == 0.0) return kInf;
-    if (x < 0.0 && x == floor(x)) return kInf;         // poles
+    if (x == 0.0) return raise_pole(1.0);              // pole error
+    if (x < 0.0 && x == floor(x)) return raise_pole(1.0);  // poles
     if (x < 0.5) return log(kPi / fabs(sinpi(x))) - lgamma(1.0 - x);
     double logd = 0.0, z = x;
     while (z < 7.0) { logd += log(z); z += 1.0; }      // lnΓ(x)=lnΓ(z)−Σln
@@ -879,7 +932,7 @@ inline int ilogb(double x) {
     return e - 1023;
 }
 inline double logb(double x) {
-    if (x == 0.0) return -kInf;
+    if (x == 0.0) return raise_pole(-1.0);            // F.10.3.11 pole error
     if (isinf(x)) return kInf;
     if (isnan(x)) return x;
     return (double)ilogb(x);
@@ -900,7 +953,8 @@ inline double nextafter(double x, double y) {
 }
 inline double nexttoward(double x, double y) { return nextafter(x, y); }   // long double = double
 inline double remquo(double x, double y, int *quo) {
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0) { *quo = 0; return kQNaN; }
+    if (isnan(x) || isnan(y)) { *quo = 0; return kQNaN; }
+    if (isinf(x) || y == 0.0) { *quo = 0; return raise_domain(); }
     if (isinf(y)) { *quo = 0; return x; }
     double r = remainder(x, y);
     double n = rint((x - r) / y);                                    // integer quotient (snap)
@@ -1047,6 +1101,30 @@ inline int  fpclassify(long double x){
 
 constexpr long double kInfL   = __builtin_infl();
 constexpr long double kQNaNL  = __builtin_nanl("");
+
+// The long double half of the four helpers above. Separate because the
+// arithmetic must happen in x87 — that is where long double reports, and a
+// double-precision division would raise the flag in the WRONG unit.
+inline long double raise_domain_l()
+{
+    volatile long double zero = 0.0L;
+    return zero / zero;
+}
+inline long double raise_pole_l(long double sign)
+{
+    volatile long double s = sign, zero = 0.0L;
+    return s / zero;
+}
+inline long double raise_overflow_l(long double sign)
+{
+    volatile long double big = 0x1p16383L;
+    return sign * (big * big);
+}
+inline long double raise_underflow_l(long double sign)
+{
+    volatile long double tiny = 0x1p-16382L;
+    return sign * (tiny * tiny);
+}
 constexpr long double kTwoPiL = 6.283185307179586476925286766559005768L;
 constexpr long double kLn2L   = 0.693147180559945309417232121458176568L;
 
@@ -1099,7 +1177,7 @@ inline long double scalbln(long double x, long n){
 }
 
 inline long double logb(long double x){
-    if (x == 0.0L) return -kInfL;
+    if (x == 0.0L) return raise_pole_l(-1.0L);           // F.10.3.11 pole error
     if (isinf(x))  return kInfL;
     if (isnan(x))  return x;
     long double e; __asm__("fxtract\n\tfstp %%st(0)" : "=t"(e) : "0"(x) : "st(1)");
@@ -1211,7 +1289,7 @@ inline long double round_dd_to_subnormal_l(long double eh, long double el, int n
 // 2^(Xhi+Xlo) for a double-double exponent argument (Xlo=0 for the plain 2^x,
 // nonzero for e^x = 2^(x·log2 e)). Correctly rounded to 80-bit.
 inline long double exp2_dd_core(long double Xhi, long double Xlo){
-    if (Xhi >=  16384.0L) return kInfL;                  // 2^16384 overflows to +Inf
+    if (Xhi >=  16384.0L) return raise_overflow_l(1.0L); // range error
     if (Xhi <= -16446.0L) return 0.0L;                   // below smallest subnormal → +0
     long double n = rint(Xhi);
     long double fh, fl; two_sum_l(Xhi - n, Xlo, fh, fl); // f = (Xhi−n)+Xlo, |f| ≤ 0.5 (dd)
@@ -1230,7 +1308,7 @@ inline long double exp2(long double x){
 inline long double exp(long double x){
     if (isnan(x)) return x;
     if (isinf(x)) return signbit(x) ? 0.0L : kInfL;
-    if (x >  12000.0L) return kInfL;                     // e^x overflows well below here
+    if (x >  12000.0L) return raise_overflow_l(1.0L);    // range error
     if (x < -12000.0L) return 0.0L;                      // e^x underflows to +0 below here
     LdDd X = dd_mul_ld(LdDd{x, 0.0L}, LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});  // x·log2 e (dd)
     return exp2_dd_core(X.hi, X.lo);                     // e^x = 2^(x·log2 e)
@@ -1300,8 +1378,8 @@ inline LdDd log_dd_core_dd(LdDd x){
 }
 inline long double log(long double x){
     if (isnan(x))  return x;
-    if (x < 0.0L)  return kQNaNL;                        // domain error
-    if (x == 0.0L) return -kInfL;
+    if (x < 0.0L)  return raise_domain_l();              // domain error
+    if (x == 0.0L) return raise_pole_l(-1.0L);           // pole: FE_DIVBYZERO
     if (isinf(x))  return kInfL;                         // +Inf (x<0 already ruled out)
     if (x == 1.0L) return 0.0L;                          // ln(1) = +0 exactly
     LdDd r = log_dd_core_l(x);
@@ -1309,8 +1387,8 @@ inline long double log(long double x){
 }
 inline long double log2(long double x){
     if (isnan(x))  return x;
-    if (x < 0.0L)  return kQNaNL;                        // domain error
-    if (x == 0.0L) return -kInfL;
+    if (x < 0.0L)  return raise_domain_l();              // domain error
+    if (x == 0.0L) return raise_pole_l(-1.0L);           // pole: FE_DIVBYZERO
     if (isinf(x))  return kInfL;
     if (x == 1.0L) return 0.0L;                          // log2(1)=+0; log2(2^k)=k exactly
     LdDd r = dd_mul_ld(log_dd_core_l(x), LdDd{KLOG2E_DD_HI_L, KLOG2E_DD_LO_L});  // ln(x)·log2 e
@@ -1318,8 +1396,8 @@ inline long double log2(long double x){
 }
 inline long double log10(long double x){
     if (isnan(x))  return x;
-    if (x < 0.0L)  return kQNaNL;                        // domain error
-    if (x == 0.0L) return -kInfL;
+    if (x < 0.0L)  return raise_domain_l();              // domain error
+    if (x == 0.0L) return raise_pole_l(-1.0L);           // pole: FE_DIVBYZERO
     if (isinf(x))  return kInfL;
     if (x == 1.0L) return 0.0L;                          // log10(1) = +0 exactly
     LdDd r = dd_mul_ld(log_dd_core_l(x), LdDd{KLOG10E_DD_HI_L, KLOG10E_DD_LO_L}); // ln(x)·log10 e
@@ -1335,8 +1413,8 @@ inline long double log10(long double x){
 // x==±0→±0.
 inline long double log1p(long double x){
     if (isnan(x))    return x;
-    if (x < -1.0L)   return kQNaNL;                      // domain error (incl −Inf)
-    if (x == -1.0L)  return -kInfL;
+    if (x < -1.0L)   return raise_domain_l();            // domain error (incl −Inf)
+    if (x == -1.0L)  return raise_pole_l(-1.0L);         // pole
     if (x == 0.0L)   return x;                           // ±0 preserved
     if (isinf(x))    return kInfL;                       // +Inf
     long double wh, wl; two_sum_l(1.0L, x, wh, wl);      // W = 1+x (exact dd)
@@ -1706,7 +1784,8 @@ inline long double tan(long double x){
 }
 
 inline long double fmod(long double x, long double y){
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) return kQNaNL;
+    if (isnan(x) || isnan(y)) return kQNaNL;
+    if (isinf(x) || y == 0.0L) return raise_domain_l();  // domain error
     if (isinf(y)) return x;
     long double r;
     __asm__("1:\n\tfprem\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
@@ -1714,7 +1793,8 @@ inline long double fmod(long double x, long double y){
     return r;
 }
 inline long double remainder(long double x, long double y){
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) return kQNaNL;
+    if (isnan(x) || isnan(y)) return kQNaNL;
+    if (isinf(x) || y == 0.0L) return raise_domain_l();  // domain error
     if (isinf(y)) return x;
     long double r;
     __asm__("1:\n\tfprem1\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
@@ -1722,7 +1802,8 @@ inline long double remainder(long double x, long double y){
     return r;
 }
 inline long double remquo(long double x, long double y, int *quo){
-    if (isnan(x) || isnan(y) || isinf(x) || y == 0.0L) { *quo = 0; return kQNaNL; }
+    if (isnan(x) || isnan(y)) { *quo = 0; return kQNaNL; }
+    if (isinf(x) || y == 0.0L) { *quo = 0; return raise_domain_l(); }
     if (isinf(y)) { *quo = 0; return x; }
     long double r = remainder(x, y);                     // IEEE remainder via fprem1
     long double n = rint((x - r) / y);                   // exact integer quotient (snap)
@@ -1865,7 +1946,7 @@ inline LdDd asin_small_dd(LdDd a){
 inline long double asin(long double x){
     if (isnan(x)) return x;
     long double a = fabs(x);
-    if (a > 1.0L)     return kQNaNL;                     // domain
+    if (a > 1.0L)     return raise_domain_l();           // domain
     if (a < 0x1p-32L) return x;                          // asin(x)=x (odd; ±0)
     LdDd res;
     if (a <= KSQRT1_2_L)
@@ -1882,7 +1963,7 @@ inline long double asin(long double x){
 inline long double acos(long double x){
     if (isnan(x)) return x;
     long double a = fabs(x);
-    if (a > 1.0L) return kQNaNL;                         // domain
+    if (a > 1.0L) return raise_domain_l();               // domain
     LdDd hp{ld_from_bits_l(kHalfPiHiM, kHalfPiHiS), ld_from_bits_l(kHalfPiLoM, kHalfPiLoS)};
     LdDd res;
     if (a <= KSQRT1_2_L){                                // π/2 ∓ asin(|x|)
@@ -1967,7 +2048,7 @@ inline long double expm1(long double x){
 inline long double cosh(long double x){
     if (isnan(x)) return x;
     long double a = fabs(x);
-    if (a > 11400.0L) return kInfL;                       // cosh(±inf)/overflow → +inf
+    if (a > 11400.0L) return isinf(x) ? kInfL : raise_overflow_l(1.0L);  // overflow
     int na, nb;
     LdDd Ma = exp_reduce_dd(a, na);                       // e^a  = 2^na·Ma
     LdDd Mb = exp_reduce_dd(-a, nb);                      // e^-a = 2^nb·Mb  (na ≥ nb)
@@ -2025,7 +2106,7 @@ inline long double asinh(long double x){
 }
 inline long double acosh(long double x){
     if (isnan(x)) return x;
-    if (x < 1.0L)  return kQNaNL;                        // domain (covers x<−1)
+    if (x < 1.0L)  return raise_domain_l();              // domain (covers x<−1)
     if (x == 1.0L) return 0.0L;                          // acosh(1)=+0
     if (isinf(x))  return kInfL;                         // acosh(+Inf)=+Inf
     LdDd r;
@@ -2040,8 +2121,8 @@ inline long double acosh(long double x){
 inline long double atanh(long double x){
     if (isnan(x)) return x;
     long double a = fabs(x);
-    if (a > 1.0L)  return kQNaNL;                        // domain
-    if (a == 1.0L) return copysign(kInfL, x);            // atanh(±1)=±Inf
+    if (a > 1.0L)  return raise_domain_l();              // domain
+    if (a == 1.0L) return raise_pole_l(copysign(1.0L, x));   // ±1 is the pole
     if (a < 0x1p-32L) return x;                          // atanh(x)=x (odd; keeps ±0)
     LdDd num; two_sum_l(1.0L,  a, num.hi, num.lo);       // 1+a (exact dd)
     LdDd den; two_sum_l(1.0L, -a, den.hi, den.lo);       // 1−a (exact dd)
@@ -2132,7 +2213,7 @@ inline long double pow(long double x, long double y){
         return (odd && negz) ? -kInfL : kInfL;
     }
     if (signbit(x)){                                     // 7: x < 0, finite, nonzero
-        if (!ld_is_integer(y)) return kQNaNL;
+        if (!ld_is_integer(y)) return raise_domain_l();
         long double r; bool ok = false;
         if (fabs(y) < 0x1p63L) r = pow_int_dd(-x, (long)y, ok);   // |x|^n via dd
         if (!ok){                                         // over/underflow → dd exp2
@@ -2343,9 +2424,9 @@ inline LdDd lgamma_dd(LdDd x){                           // lnΓ(x) as dd, x ≥
 }
 inline long double tgamma(long double x){
     if (isnan(x)) return x;
-    if (isinf(x)) return signbit(x) ? kQNaNL : kInfL;
-    if (x == 0.0L) return copysign(kInfL, x);
-    if (x < 0.0L && x == floor(x)) return kQNaNL;        // negative-integer poles
+    if (isinf(x)) return signbit(x) ? raise_domain_l() : kInfL;
+    if (x == 0.0L) return raise_pole_l(copysign(1.0L, x));
+    if (x < 0.0L && x == floor(x)) return raise_domain_l();  // negative integers
     if (x >= 11.0L){                                     // no recurrence: Γ=exp(lnΓ), exp2_dd_core
         LdDd P = dd_mul_ld(stirling_lngamma_dd(LdDd{x, 0.0L}), LdDd{KLOG2E_G_HI, KLOG2E_G_LO});
         return exp2_dd_core(P.hi, P.lo);                 // clean overflow to +Inf past x≈1755
@@ -2359,8 +2440,8 @@ inline long double tgamma(long double x){
 inline long double lgamma(long double x){
     if (isnan(x)) return x;
     if (isinf(x)) return kInfL;
-    if (x == 0.0L) return kInfL;
-    if (x < 0.0L && x == floor(x)) return kInfL;         // poles
+    if (x == 0.0L) return raise_pole_l(1.0L);            // pole error
+    if (x < 0.0L && x == floor(x)) return raise_pole_l(1.0L);   // poles
     if (x == 1.0L || x == 2.0L) return 0.0L;             // lnΓ(1)=lnΓ(2)=0 exactly
     if (fabs(x - 1.0L) <= 0x1p-5L){ LdDd r = lgamma1p_dd(x - 1.0L); return r.hi + r.lo; } // near 1
     if (fabs(x - 2.0L) <= 0x1p-5L){                      // near 2: lnΓ(2+t)=ln(1+t)+lnΓ(1+t)
