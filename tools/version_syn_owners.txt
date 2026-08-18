@@ -77,6 +77,7 @@ __cpp_lib_endian|bit
 __cpp_lib_erase_if|string,deque,forward_list,list,vector,map,set,unordered_map,unordered_set
 __cpp_lib_exception_ptr_cast|exception
 __cpp_lib_exchange_function|utility
+__cpp_lib_execution|execution
 __cpp_lib_expected|expected
 __cpp_lib_flat_map|flat_map
 __cpp_lib_flat_set|flat_set

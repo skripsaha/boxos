@@ -42,6 +42,17 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф40's third commit raised it 165 -> 169, and the delta is FOUR
+#           macros, all of them <numeric>'s: constexpr_numeric, gcd_lcm,
+#           ranges_iota and saturation_arithmetic. None of them had ever
+#           leaked ANYWHERE, because nothing in the tree included <numeric> --
+#           and <execution> does, since [numeric.ops.overview] is where half
+#           the policy overloads are declared. Measured as a set difference
+#           with the header moved aside: without <execution> the count is
+#           exactly 165 again, so nothing else in that commit widened
+#           anything. The new leaves (execution_policy, par_engine, par_algo,
+#           par_numeric) define no macros at all.
+#
 #           Ф40's first commit raised it 164 -> 165, and the delta is ONE
 #           macro: __cpp_lib_syncbuf. Its owners are <syncstream> and
 #           <iosfwd>, and <iosfwd> is the most widely included header in the
@@ -90,7 +101,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=165
+LEAK_BUDGET=169
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

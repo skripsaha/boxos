@@ -547,4 +547,9 @@ constexpr T saturate_cast(U x) noexcept
 
 } // namespace std
 
+// [numeric.ops.overview] declares the execution-policy overloads in THIS
+// header; see <__bits/par_algo> for the shape and <__bits/par_engine> for the
+// brigade underneath both.
+#include <__bits/par_numeric>
+
 #endif // BOXCXX_NUMERIC
