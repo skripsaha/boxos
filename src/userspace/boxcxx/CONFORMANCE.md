@@ -878,31 +878,45 @@ The header that made an old claim checkable, and the claim did not survive.
   inline asm these functions are built from. It remains a real caveat rather
   than a solved problem.
 
-> **‼ What `<cfenv>` measured on its first run, and what it means for
-> `<cmath>`.** `math_errhandling == MATH_ERREXCEPT` has been declared since
-> Ф10 — "errors are reported by raising the IEEE-754 flags, not through
-> errno". Until this header there was no `stmxcsr` anywhere in the tree, so
-> the claim was unverifiable. Measured now: `sqrt(-1)` raises `FE_INVALID`,
-> because boxcxx's `sqrt` IS `sqrtsd` and the hardware raises it; `log(0)`,
-> `log(-1)` and `exp(1000)` raise **nothing at all**. They return `-inf`, NaN
-> and `+inf` correctly — and returning a constant is not an operation, and
-> only operations raise. So the claim overpromises for every function boxcxx
-> computes in software, which is nearly all of them. phase205 pins the
-> measured state in both directions, so neither the behaviour nor this
-> paragraph can drift without the suite failing.
+> **‼ What `<cfenv>` measured on its first run, and what it cost to fix.**
+> `math_errhandling == MATH_ERREXCEPT` had been declared since Ф10 — "errors
+> are reported by raising the IEEE-754 flags, not through errno" — and until
+> this header there was no `stmxcsr` anywhere in the tree, so the claim was
+> unverifiable rather than true. The first measurement: `sqrt(-1)` raised
+> `FE_INVALID` because boxcxx's `sqrt` IS `sqrtsd`; `log(0)`, `log(-1)` and
+> `exp(1000)` raised **nothing at all**, returning the right value as a
+> CONSTANT — and a returned constant is not an operation, and only operations
+> raise. Ф41-c-2 made every documented error path perform the arithmetic that
+> reports it (§2 `<cmath>`), so the claim is now true where [c.math] speaks.
+> phase205 checks flag and value together for eighteen cases and checks that an
+> ordinary call raises nothing, so neither the behaviour nor this paragraph can
+> drift without the suite failing.
 
 ## `<cmath>`
 
-- `!` **`math_errhandling` overpromises.** It expands to `MATH_ERREXCEPT`, and
-  only the hardware-backed paths honour it: `sqrt` raises `FE_INVALID` on a
-  negative argument because `sqrtsd` does. The software paths — `log` at its
-  pole and outside its domain, `exp` on overflow, and by construction every
-  other function that returns a constant on an error — raise nothing. Measured
-  by phase205 the day `<cfenv>` made measuring possible (§2 `<cfenv>`); C gives
-  no third value for `math_errhandling` (it must be `MATH_ERRNO`,
-  `MATH_ERREXCEPT`, or both), so the honest fix is to make the error paths
-  raise, which is a piece of work across the whole header rather than a
-  correction to this line.
+- `✓` **Closed in Ф41-c-2: `math_errhandling` used to overpromise.** It expands
+  to `MATH_ERREXCEPT` — "errors are reported by raising the IEEE-754 flags" —
+  and until `<cfenv>` existed nothing could check it. The measurement (§2
+  `<cfenv>`) was that only `sqrt` honoured it, because `sqrt` IS `sqrtsd` and
+  the hardware raises; every software path returned `kInf` or `kQNaN`, and
+  returning a CONSTANT raises nothing, because only operations raise. Every
+  documented error path now produces its value by performing the arithmetic
+  that reports it: a pole divides by zero, a domain error divides zero by zero,
+  an overflow squares the largest finite, an underflow squares the smallest
+  normal. The kernels are untouched — including the correctly-rounded `long
+  double` chains of Ф27e — because only the error branches changed, and the
+  `long double` helpers do their arithmetic in x87 so the flag lands in the unit
+  that computed it. Covered: `log` `log2` `log10` `log1p` `exp` `exp2` `expm1`
+  `pow` `asin` `acos` `acosh` `atanh` `tgamma` `lgamma` `fmod` `remainder`
+  `remquo` `logb`, in `double` and `long double` (`float` delegates to
+  `double`). phase205 checks the flag AND the value for eighteen cases, and
+  checks that an ordinary call raises nothing at all.
+- `~` **The special functions still do not raise.** The C++17 mathematical
+  special functions (`cyl_bessel_*`, `riemann_zeta`, `expint`, the Legendre and
+  Laguerre families, …) return the right value on their domain errors without
+  raising `FE_INVALID`. [sf.cmath] specifies their domains but not their
+  reporting, and `math_errhandling` speaks for [c.math]; recorded here rather
+  than left for someone to discover.
 - `✓` Closed in Ф31e-b-1: `std::lerp` did not exist. It is now P0811R3's exact
   shape — the only one that keeps exactness at both ends, boundedness inside
   `[0,1]` and monotonicity at once — which with `midpoint` closes

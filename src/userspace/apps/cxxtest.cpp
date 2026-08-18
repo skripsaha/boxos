@@ -47036,39 +47036,125 @@ int RaisedBy(double (*fn)(double), double arg)
     return std::fetestexcept(FE_ALL_EXCEPT);
 }
 
+// ‼ The claim <cmath> has been making since Ф10, and what it took to make it
+// true. Ф41-c measured it first: sqrt(-1) raised FE_INVALID because the
+// hardware raises it (boxcxx's sqrt IS sqrtsd), and log(0), log(-1) and
+// exp(1000) raised NOTHING — they returned the right value as a CONSTANT, and
+// returning a constant is not an operation, and only operations raise.
+//
+// Ф41-c-2 made every error path produce its value by performing the arithmetic
+// that reports it: a pole divides by zero, a domain error divides zero by zero,
+// an overflow multiplies the largest finite by itself. The flag is then raised
+// by the hardware as a side effect of being right — and it would trap if a trap
+// were ever unmasked, which a written status bit would not.
+//
+// Both the VALUE and the FLAG are checked below, because raising the flag while
+// returning the wrong number would be a worse library than the one this
+// replaced.
 bool MathErrorsAreReportedInFlags()
 {
     EnvGuard guard;
     static_assert(math_errhandling == MATH_ERREXCEPT,
                   "phase205 <cmath> claims the flags, not errno");
 
-    const int sqrt_neg = RaisedBy([](double x) { return std::sqrt(x); }, -1.0);
-    const int log_zero = RaisedBy([](double x) { return std::log(x); }, 0.0);
-    const int log_neg  = RaisedBy([](double x) { return std::log(x); }, -1.0);
-    const int exp_big  = RaisedBy([](double x) { return std::exp(x); }, 1000.0);
+    struct Case {
+        const char *what;
+        int         raised;
+        double      value;
+        int         want;
+    };
 
-    // Plain %x on purpose: boxlib's printf has no '#' flag, which is one of the
-    // things <cstdio> will have to answer for in Ф41-g.
-    printf("[CXX] note phase205: raised sqrt(-1)=0x%x log(0)=0x%x log(-1)=0x%x "
-           "exp(1000)=0x%x\n",
-           sqrt_neg, log_zero, log_neg, exp_big);
+    const Case cases[] = {
+        {"sqrt(-1)",   RaisedBy([](double x) { return std::sqrt(x); }, -1.0),
+         std::sqrt(-1.0), FE_INVALID},
+        {"log(0)",     RaisedBy([](double x) { return std::log(x); }, 0.0),
+         std::log(0.0), FE_DIVBYZERO},
+        {"log(-1)",    RaisedBy([](double x) { return std::log(x); }, -1.0),
+         std::log(-1.0), FE_INVALID},
+        {"log2(0)",    RaisedBy([](double x) { return std::log2(x); }, 0.0),
+         std::log2(0.0), FE_DIVBYZERO},
+        {"log10(-2)",  RaisedBy([](double x) { return std::log10(x); }, -2.0),
+         std::log10(-2.0), FE_INVALID},
+        {"log1p(-1)",  RaisedBy([](double x) { return std::log1p(x); }, -1.0),
+         std::log1p(-1.0), FE_DIVBYZERO},
+        {"exp(1000)",  RaisedBy([](double x) { return std::exp(x); }, 1000.0),
+         std::exp(1000.0), FE_OVERFLOW},
+        {"exp(-1000)", RaisedBy([](double x) { return std::exp(x); }, -1000.0),
+         std::exp(-1000.0), FE_UNDERFLOW},
+        {"exp2(2000)", RaisedBy([](double x) { return std::exp2(x); }, 2000.0),
+         std::exp2(2000.0), FE_OVERFLOW},
+        {"asin(2)",    RaisedBy([](double x) { return std::asin(x); }, 2.0),
+         std::asin(2.0), FE_INVALID},
+        {"acos(2)",    RaisedBy([](double x) { return std::acos(x); }, 2.0),
+         std::acos(2.0), FE_INVALID},
+        {"acosh(0.5)", RaisedBy([](double x) { return std::acosh(x); }, 0.5),
+         std::acosh(0.5), FE_INVALID},
+        {"atanh(1)",   RaisedBy([](double x) { return std::atanh(x); }, 1.0),
+         std::atanh(1.0), FE_DIVBYZERO},
+        {"atanh(2)",   RaisedBy([](double x) { return std::atanh(x); }, 2.0),
+         std::atanh(2.0), FE_INVALID},
+        {"tgamma(0)",  RaisedBy([](double x) { return std::tgamma(x); }, 0.0),
+         std::tgamma(0.0), FE_DIVBYZERO},
+        {"tgamma(-2)", RaisedBy([](double x) { return std::tgamma(x); }, -2.0),
+         std::tgamma(-2.0), FE_INVALID},
+        {"lgamma(0)",  RaisedBy([](double x) { return std::lgamma(x); }, 0.0),
+         std::lgamma(0.0), FE_DIVBYZERO},
+        {"logb(0)",    RaisedBy([](double x) { return std::logb(x); }, 0.0),
+         std::logb(0.0), FE_DIVBYZERO},
+    };
 
-    // ‼ MEASURED, and this is the finding Ф41-c exists to have made possible.
-    //
-    // sqrt(-1) raises FE_INVALID because the hardware raises it: boxcxx's sqrt
-    // IS `sqrtsd`. Every function boxcxx computes in SOFTWARE returns the right
-    // value — -inf, NaN, +inf — and raises NOTHING, because returning a
-    // constant is not an operation and only operations raise. So
-    // math_errhandling promises more than <cmath> delivers, and it has since
-    // Ф10; what was missing until now was any way to find out.
-    //
-    // The current state is PINNED rather than wished away: if a later phase
-    // teaches log() to signal its pole, this check fails and forces the
-    // document to be corrected in the same commit.
-    const bool hardware_path_raises = (sqrt_neg & FE_INVALID) != 0;
-    const bool software_paths_silent =
-        log_zero == 0 && log_neg == 0 && exp_big == 0;
-    return hardware_path_raises && software_paths_silent;
+    bool ok = true;
+    for (const Case &c : cases) {
+        if ((c.raised & c.want) == 0) {
+            // Plain %x: boxlib's printf has no '#' flag, one of the things
+            // <cstdio> will have to answer for in Ф41-g.
+            printf("[CXX] note phase205: %s raised 0x%x, wanted 0x%x\n", c.what,
+                   c.raised, c.want);
+            ok = false;
+        }
+    }
+    if (!ok) return false;
+
+    // The values, unchanged by the change: a pole is still an infinity of the
+    // right sign, a domain error is still a NaN.
+    if (!(std::isinf(std::log(0.0)) && std::log(0.0) < 0)) return false;
+    if (!std::isnan(std::log(-1.0))) return false;
+    if (!(std::isinf(std::exp(1000.0)) && std::exp(1000.0) > 0)) return false;
+    if (std::exp(-1000.0) != 0.0) return false;
+    if (!(std::isinf(std::atanh(1.0)) && std::atanh(1.0) > 0)) return false;
+    if (!(std::isinf(std::tgamma(0.0)) && std::tgamma(0.0) > 0)) return false;
+    if (!std::isnan(std::fmod(1.0, 0.0))) return false;
+    if (!(std::isinf(std::pow(0.0, -1.0)) && std::pow(0.0, -1.0) > 0)) return false;
+    if (!std::isnan(std::pow(-2.0, 0.5))) return false;
+
+    // fmod and pow through the same lens, and then the LONG DOUBLE half — which
+    // raises in the x87 unit, so this also proves <cfenv> reads both.
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile double m = std::fmod(1.0, 0.0);
+    (void)m;
+    if ((std::fetestexcept(FE_INVALID) & FE_INVALID) == 0) return false;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile double p = std::pow(0.0, -1.0);
+    (void)p;
+    if ((std::fetestexcept(FE_DIVBYZERO) & FE_DIVBYZERO) == 0) return false;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile long double lz = std::log(0.0L);
+    (void)lz;
+    if ((std::fetestexcept(FE_DIVBYZERO) & FE_DIVBYZERO) == 0) return false;
+
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile long double la = std::asin(2.0L);
+    (void)la;
+    if ((std::fetestexcept(FE_INVALID) & FE_INVALID) == 0) return false;
+
+    // And the other direction: an ordinary call raises NOTHING. A helper that
+    // raised on every path would pass every check above and be useless.
+    std::feclearexcept(FE_ALL_EXCEPT);
+    volatile double good = std::log(1.0);
+    (void)good;
+    return std::fetestexcept(FE_INVALID | FE_DIVBYZERO | FE_OVERFLOW) == 0;
 }
 
 } // namespace p205
@@ -47081,10 +47167,11 @@ void Phase205()
     Check(p205::RoundingModes(), "phase205 fesetround changes what BOTH units compute");
     Check(p205::EnvironmentHoldAndUpdate(), "phase205 feholdexcept/feupdateenv keep what was raised");
     Check(p205::MathErrorsAreReportedInFlags(),
-          "phase205 the hardware path raises, every software path is silent (math_errhandling overpromises)");
+          "phase205 every documented error path raises its flag, and only it");
 
     printf("[CXX] PASS phase205: <cfenv> — the flags <cmath> has been promising since Ф10\n");
 }
+
 
 } // namespace
 

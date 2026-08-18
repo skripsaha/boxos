@@ -109,8 +109,10 @@ int feraiseexcept(int excepts) noexcept
 {
     const unsigned int mask = static_cast<unsigned int>(excepts) & FE_ALL_EXCEPT;
 
-    // Performed, not asserted. volatile keeps the operations out of the
-    // constant folder — a compile-time 1.0/0.0 raises nothing at run time.
+    // Performed, not asserted: an executed division IS the exception, and it
+    // would trap if a trap were ever unmasked. The volatile is insurance
+    // against a build that adds -ffast-math; GCC's default -ftrapping-math
+    // already refuses to fold these away (measured at -O0 and -O2).
     if (mask & FE_INVALID) {
         volatile double zero = 0.0;
         volatile double r    = zero / zero;
