@@ -1,0 +1,116 @@
+// boxcxx — <cfenv>
+//
+// [cfenv.syn], and the header that makes an old claim checkable.
+//
+// `<cmath>` has declared `math_errhandling == MATH_ERREXCEPT` since Ф10 — "I
+// report errors by raising the IEEE-754 exception flags, not by setting errno".
+// Until this header there was **no way in the entire tree to read those
+// flags**: not one `stmxcsr` anywhere. The claim was neither true nor false; it
+// was unverifiable, which is worse, because it reads as a promise. phase205 is
+// the first code in BoxOS that asks the hardware.
+//
+// **x86-64 has TWO floating-point units and this header answers for both.**
+// `float` and `double` arithmetic goes through SSE and reports in MXCSR;
+// `long double` goes through x87 and reports in its own status word — and
+// boxcxx's `long double` is genuine 80-bit (Ф27), so ignoring x87 would mean
+// `fetestexcept` silently missed every long double operation. Every function
+// here reads or writes both, and `fenv_t` carries both.
+//
+// **What this header deliberately does NOT offer:** a way to unmask an
+// exception so it traps. That is not in [cfenv.syn] — `feenableexcept` is a
+// glibc extension — and it would be a promise BoxOS cannot keep: an unmasked
+// SIMD fault has nowhere to go here. BoxOS's event road is Touch, and
+// `<csignal>` deliberately has no asynchronous half.
+//
+// **`#pragma STDC FENV_ACCESS` is not supported by the compiler** (GCC ignores
+// it with a warning), which means the optimizer is entitled to move
+// floating-point operations across these calls. At -O0, where every BoxOS
+// application is compiled, it does not. That is a real caveat and it is
+// recorded in CONFORMANCE §2 rather than papered over.
+#ifndef BOXCXX_CFENV
+#define BOXCXX_CFENV
+
+// The bit positions are the hardware's, in both units: MXCSR bits 0..5 are the
+// exception flags and x87's status word uses the same six in the same order,
+// which is why one set of macros can describe both.
+#define FE_INVALID   0x01
+#define FE_DENORMAL  0x02   // x86 has it; C does not require it, and names it
+#define FE_DIVBYZERO 0x04
+#define FE_OVERFLOW  0x08
+#define FE_UNDERFLOW 0x10
+#define FE_INEXACT   0x20
+
+#define FE_ALL_EXCEPT                                                          \
+    (FE_INVALID | FE_DENORMAL | FE_DIVBYZERO | FE_OVERFLOW | FE_UNDERFLOW |    \
+     FE_INEXACT)
+
+// The rounding modes, given the values [cfenv.syn] expects them to have on
+// x86: these ARE the two-bit field of MXCSR (bits 13-14) and of the x87
+// control word (bits 10-11), shifted into place by the setter.
+#define FE_TONEAREST  0x0000
+#define FE_DOWNWARD   0x0400
+#define FE_UPWARD     0x0800
+#define FE_TOWARDZERO 0x0C00
+
+namespace std {
+
+// [cfenv.syn]: fexcept_t represents the flags collectively. Here it is exactly
+// the six bits, so a saved set can be examined — the standard permits an opaque
+// type, and an opaque one would hide something the hardware does not.
+using fexcept_t = unsigned int;
+
+// The whole environment of BOTH units: the two control words (rounding modes
+// and masks) and the two status words (the raised flags).
+struct fenv_t {
+    unsigned short X87ControlWord;
+    unsigned short X87StatusWord;
+    unsigned int   Mxcsr;
+};
+
+} // namespace std
+
+// The default environment: x87 control word 0x037F (all exceptions masked,
+// round to nearest, 64-bit precision — the 80-bit mantissa boxcxx's long
+// double depends on) and MXCSR 0x1F80 (all masked, round to nearest).
+extern "C" const ::std::fenv_t __boxcxx_fe_dfl_env;
+#define FE_DFL_ENV (&__boxcxx_fe_dfl_env)
+
+namespace std {
+
+int feclearexcept(int excepts) noexcept;
+int fetestexcept(int excepts) noexcept;
+
+// Raising is done by PERFORMING an operation that raises, not by writing the
+// status bit: a written bit is a claim, an executed division by zero is the
+// thing itself. It also means that if a future BoxOS ever unmasks a trap, this
+// function traps like the arithmetic it imitates.
+int feraiseexcept(int excepts) noexcept;
+
+int fegetexceptflag(fexcept_t *flagp, int excepts) noexcept;
+int fesetexceptflag(const fexcept_t *flagp, int excepts) noexcept;
+
+int fegetround() noexcept;
+int fesetround(int round) noexcept;
+
+int fegetenv(fenv_t *envp) noexcept;
+int fesetenv(const fenv_t *envp) noexcept;
+int feholdexcept(fenv_t *envp) noexcept;
+int feupdateenv(const fenv_t *envp) noexcept;
+
+} // namespace std
+
+using std::fegetenv;
+using std::fegetexceptflag;
+using std::fegetround;
+using std::feclearexcept;
+using std::fenv_t;
+using std::feholdexcept;
+using std::feraiseexcept;
+using std::fesetenv;
+using std::fesetexceptflag;
+using std::fesetround;
+using std::fetestexcept;
+using std::feupdateenv;
+using std::fexcept_t;
+
+#endif // BOXCXX_CFENV
