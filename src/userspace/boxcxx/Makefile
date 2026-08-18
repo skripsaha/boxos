@@ -39,6 +39,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/system_error.cpp \
        src/runtime/ios.cpp \
        src/runtime/iostream.cpp \
+       src/runtime/syncstream.cpp \
        src/runtime/box_error.cpp \
        src/runtime/vocab_exceptions.cpp \
        src/runtime/memory_resource.cpp \

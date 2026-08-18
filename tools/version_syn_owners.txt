@@ -213,6 +213,7 @@ __cpp_lib_string_subview|string,string_view
 __cpp_lib_string_udls|string
 __cpp_lib_submdspan|mdspan
 __cpp_lib_string_view|string,string_view
+__cpp_lib_syncbuf|iosfwd,syncstream
 __cpp_lib_three_way_comparison|compare
 __cpp_lib_to_address|memory
 __cpp_lib_to_array|array

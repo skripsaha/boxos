@@ -1,0 +1,276 @@
+// boxcxx — <syncstream>
+//
+// [syncstream]: a stream buffer that HOLDS what is written to it and hands
+// the whole run to its target in one indivisible transfer. It is the answer
+// to the one thing a shared output stream cannot do on its own — when several
+// strands of a cabin write to the same screen, the characters arrive
+// interleaved at whatever granularity the sink happens to use, and no amount
+// of locking around each `<<` fixes it, because a formatted insertion is many
+// writes. basic_syncbuf makes the unit of interleaving the PROGRAMMER'S: one
+// emit(), one run, one lock.
+//
+// Two decisions worth naming:
+//
+//   * the associated output is a basic_stringbuf, not a hand-rolled put area.
+//     Growing a character buffer with an allocator, tracking a high-water
+//     mark and moving it out in one piece is exactly what <sstream> already
+//     does and has been tested doing since Ф30e; a second copy of that logic
+//     here would be a second place for it to be wrong. The syncbuf keeps no
+//     get/put area of its own at all — overflow()/xsputn() forward, and
+//     everything else a basic_streambuf can be asked is inert, which is what
+//     [syncstream.syncbuf] describes.
+//
+//   * the lock is per WRAPPED BUFFER and exact, not drawn from a hashed pool
+//     of fixed size — see <__bits/syncbuf_base> for why that word "uniquely"
+//     in [syncstream.syncbuf.virtuals] is worth an allocation.
+//
+// What emit() promises reaches only as far as the target: two syncbufs
+// wrapping the same buffer serialise against each other, and a writer that
+// bypasses the syncbuf and writes to that buffer directly is outside the
+// contract — in every implementation, not only this one.
+#ifndef BOXCXX_SYNCSTREAM
+#define BOXCXX_SYNCSTREAM
+
+#include <__bits/syncbuf_base>
+
+#include <ios>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <sstream>
+#include <streambuf>
+#include <string>
+#include <utility>
+
+// [version.syn] names this header as an owner of the macro below;
+// nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_syncbuf
+#include <__bits/version_iostreams>
+
+namespace std {
+
+// ── basic_syncbuf<CharT,Traits,Allocator> [syncstream.syncbuf] ────────────
+// Default template arguments come from <iosfwd> (via <ios>), so they are not
+// repeated here — the same split <sstream> uses for basic_stringbuf.
+template <class CharT, class Traits, class Allocator>
+class basic_syncbuf : public __syncbuf_base<CharT, Traits> {
+    using __base   = __syncbuf_base<CharT, Traits>;
+    using __string = basic_string<CharT, Traits, Allocator>;
+
+public:
+    using char_type      = CharT;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using traits_type    = Traits;
+    using allocator_type = Allocator;
+    using streambuf_type = basic_streambuf<CharT, Traits>;
+
+    basic_syncbuf() : basic_syncbuf(nullptr) {}
+    explicit basic_syncbuf(streambuf_type *obuf) : basic_syncbuf(obuf, Allocator()) {}
+    basic_syncbuf(streambuf_type *obuf, const Allocator &a)
+        : __wrapped(obuf), __lock(obuf), __impl(ios_base::out, a)
+    {
+    }
+
+    // The moved-from syncbuf must produce NO output when it dies, which is
+    // what dropping its wrapped pointer buys: its destructor still calls
+    // emit(), and emit() on a syncbuf wrapping nothing writes nothing.
+    basic_syncbuf(basic_syncbuf &&other)
+        : __wrapped(other.__wrapped),
+          __lock(std::move(other.__lock)),
+          __impl(std::move(other.__impl))
+    {
+        this->__emit_on_sync = other.__emit_on_sync;
+        this->__needs_sync   = other.__needs_sync;
+        other.__wrapped      = nullptr;
+        other.__needs_sync   = false;
+    }
+
+    basic_syncbuf(const basic_syncbuf &)            = delete;
+    basic_syncbuf &operator=(const basic_syncbuf &) = delete;
+
+    // [syncstream.syncbuf.cons]: "Throws: nothing. If an exception is thrown
+    // from emit(), the destructor catches and ignores that exception." A sink
+    // that refuses at the very end of a program is not a reason to terminate.
+    ~basic_syncbuf()
+    {
+        try {
+            emit();
+        } catch (...) {
+        }
+    }
+
+    basic_syncbuf &operator=(basic_syncbuf &&rhs)
+    {
+        if (this == &rhs) return *this;
+        emit();
+        __wrapped            = rhs.__wrapped;
+        __lock               = std::move(rhs.__lock);
+        __impl               = std::move(rhs.__impl);
+        this->__emit_on_sync = rhs.__emit_on_sync;
+        this->__needs_sync   = rhs.__needs_sync;
+        rhs.__wrapped        = nullptr;
+        rhs.__needs_sync     = false;
+        return *this;
+    }
+
+    void swap(basic_syncbuf &other)
+    {
+        if (this == &other) return;
+        using std::swap;
+        swap(__wrapped, other.__wrapped);
+        __lock.swap(other.__lock);
+        __impl.swap(other.__impl);
+        swap(this->__emit_on_sync, other.__emit_on_sync);
+        swap(this->__needs_sync, other.__needs_sync);
+    }
+
+    bool emit() override
+    {
+        if (!__wrapped) return false;
+
+        // Taken out from under the buffer BEFORE the lock is taken: moving
+        // the characters out is this syncbuf's own business, and every other
+        // writer to this target would otherwise queue behind it.
+        __string out = std::move(__impl).str();
+
+        lock_guard<__sync::Ref> guard(__lock);
+        if (const size_t n = out.size()) {
+            const streamsize wrote = __wrapped->sputn(out.data(), static_cast<streamsize>(n));
+            if (wrote != static_cast<streamsize>(n)) {
+                // A partial transfer splits the run in two: what got through
+                // is gone from us, what did not is still ours to emit later.
+                // Keeping all of it would print the accepted prefix twice;
+                // dropping it would lose output that was never refused.
+                out.erase(0, wrote > 0 ? static_cast<size_t>(wrote) : 0);
+                __impl.str(std::move(out));
+                return false;
+            }
+        }
+        if (this->__needs_sync) {
+            this->__needs_sync = false;
+            if (__wrapped->pubsync() != 0) return false;
+        }
+        return true;
+    }
+
+    streambuf_type *get_wrapped() const noexcept { return __wrapped; }
+    allocator_type get_allocator() const noexcept { return __impl.get_allocator(); }
+
+protected:
+    // [syncstream.syncbuf.virtuals]: sync() does not flush the target — it
+    // RECORDS that the target owes a flush, which emit() then pays. That is
+    // the whole point of the type: an ostream's flush must not reach past the
+    // syncbuf, or the run would leave in pieces.
+    int sync() override
+    {
+        this->__needs_sync = true;
+        if (this->__emit_on_sync && !emit()) return -1;
+        return 0;
+    }
+
+    int_type overflow(int_type c = Traits::eof()) override
+    {
+        if (Traits::eq_int_type(c, Traits::eof())) return Traits::not_eof(c);
+        return __impl.sputc(Traits::to_char_type(c));
+    }
+
+    streamsize xsputn(const char_type *s, streamsize n) override { return __impl.sputn(s, n); }
+
+private:
+    streambuf_type *__wrapped = nullptr;
+    __sync::Ref     __lock;
+    basic_stringbuf<CharT, Traits, Allocator> __impl;
+};
+
+template <class CharT, class Traits, class Allocator>
+void swap(basic_syncbuf<CharT, Traits, Allocator> &a, basic_syncbuf<CharT, Traits, Allocator> &b)
+{
+    a.swap(b);
+}
+
+// ── basic_osyncstream<CharT,Traits,Allocator> [syncstream.osyncstream] ────
+template <class CharT, class Traits, class Allocator>
+class basic_osyncstream : public basic_ostream<CharT, Traits> {
+public:
+    using char_type      = CharT;
+    using int_type       = typename Traits::int_type;
+    using pos_type       = typename Traits::pos_type;
+    using off_type       = typename Traits::off_type;
+    using traits_type    = Traits;
+    using allocator_type = Allocator;
+    using streambuf_type = basic_streambuf<CharT, Traits>;
+    using syncbuf_type   = basic_syncbuf<CharT, Traits, Allocator>;
+
+    // The base is initialised with the address of a member that does not
+    // exist yet, which [syncstream.osyncstream.cons] asks for verbatim and
+    // which is well-defined: basic_ostream stores the pointer and does not
+    // touch the buffer until someone writes.
+    basic_osyncstream(streambuf_type *obuf, const Allocator &a)
+        : basic_ostream<CharT, Traits>(addressof(__sb)), __sb(obuf, a)
+    {
+    }
+    explicit basic_osyncstream(streambuf_type *obuf) : basic_osyncstream(obuf, Allocator()) {}
+    basic_osyncstream(basic_ostream<CharT, Traits> &os, const Allocator &a)
+        : basic_osyncstream(os.rdbuf(), a)
+    {
+    }
+    explicit basic_osyncstream(basic_ostream<CharT, Traits> &os)
+        : basic_osyncstream(os, Allocator())
+    {
+    }
+
+    // set_rdbuf is not decoration: [basic.ios.members] leaves the moved-INTO
+    // stream with a null rdbuf(), which is right for a bare basic_ostream and
+    // wrong for a class that owns its buffer. The source needs no such fixup —
+    // it keeps its own rdbuf() pointer, and the syncbuf it names is now
+    // disarmed (wrapping nothing), so it will emit nothing when it dies. Same
+    // shape the three <sstream> wrappers use.
+    basic_osyncstream(basic_osyncstream &&other) noexcept
+        : basic_ostream<CharT, Traits>(std::move(other)), __sb(std::move(other.__sb))
+    {
+        this->set_rdbuf(addressof(__sb));
+    }
+
+    ~basic_osyncstream() = default;
+
+    basic_osyncstream &operator=(basic_osyncstream &&rhs)
+    {
+        basic_ostream<CharT, Traits>::operator=(std::move(rhs));
+        __sb = std::move(rhs.__sb);
+        this->set_rdbuf(addressof(__sb));
+        return *this;
+    }
+
+    // [syncstream.osyncstream.members]: an unformatted output function whose
+    // "output" is the whole accumulated run.
+    void emit()
+    {
+        typename basic_ostream<CharT, Traits>::sentry ok(*this);
+        if (ok) {
+            try {
+                if (!__sb.emit()) this->setstate(ios_base::badbit);
+            } catch (...) {
+                __ios::HandleException(*this);
+            }
+        }
+    }
+
+    streambuf_type *get_wrapped() const noexcept { return __sb.get_wrapped(); }
+    syncbuf_type *rdbuf() const noexcept { return const_cast<syncbuf_type *>(addressof(__sb)); }
+
+private:
+    syncbuf_type __sb;
+};
+
+using syncbuf     = basic_syncbuf<char>;
+using osyncstream = basic_osyncstream<char>;
+
+// Deliberately NOT provided: wsyncbuf / wosyncstream — wide streams are a
+// documented, out-of-scope exclusion (CONFORMANCE §1.2), the same one
+// <iosfwd> makes for every other wide stream typedef.
+
+} // namespace std
+
+#endif // BOXCXX_SYNCSTREAM

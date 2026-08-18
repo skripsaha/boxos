@@ -21,6 +21,7 @@
 
 #include <ios>
 #include <streambuf>
+#include <__bits/syncbuf_base>  // the type the three sync manipulators recognise
 #include <charconv>
 #include <exception>
 #include <format>       // [ostream.formatted.print]
@@ -88,6 +89,17 @@ public:
         {
             if (os.good()) {
                 if (os.tie()) os.tie()->flush();
+                // A stream can be good and still have nowhere to write.
+                // [basic.ios.members] says rdbuf(sb) calls clear(), so
+                // `os.rdbuf(nullptr)` leaves a good stream with no buffer, and
+                // a moved-into stream is left the same way. Every output
+                // function past this point dereferences rdbuf() the moment the
+                // sentry says yes, so this is the one place where "nowhere to
+                // write" can still become badbit. Both reference libraries
+                // dereference the null pointer instead; on an OS with no net
+                // under ring 3 that is a page fault raised from inside the
+                // standard library, which is not a diagnosis anyone can act on.
+                if (os.rdbuf() == nullptr) os.setstate(ios_base::badbit);
                 __ok = os.good();
             }
         }
@@ -245,9 +257,16 @@ public:
 protected:
     basic_ostream() { this->init(nullptr); }
     basic_ostream(basic_ostream &&rhs) { this->move(rhs); }
+    // [ostream.assign]: move ASSIGNMENT is "equivalent to swap(rhs)", which is
+    // a different operation from the move CONSTRUCTOR's basic_ios::move above:
+    // swap leaves BOTH rdbuf() pointers where they were and exchanges the rest,
+    // where move nulls this->rdbuf() and keeps rhs's. This used to call move()
+    // for both, so `os1 = std::move(os2)` left os1 with no buffer at all --
+    // invisible to the stream wrappers, which repoint themselves with
+    // set_rdbuf() straight afterwards, and total for a bare basic_ostream.
     basic_ostream &operator=(basic_ostream &&rhs)
     {
-        this->move(rhs);
+        swap(rhs);
         return *this;
     }
     void swap(basic_ostream &rhs) { basic_ios<CharT, Traits>::swap(rhs); }
@@ -364,25 +383,44 @@ basic_ostream<CharT, Traits> &flush(basic_ostream<CharT, Traits> &os)
     return os;
 }
 
-// [ostream.manip]: C++20 sync-stream manipulators. Their real job is toggling
-// emit-on-sync on a basic_syncbuf rdbuf (<syncstream>, not yet implemented in
-// boxcxx) -- with no such buffer type to detect, emit_on_flush/noemit_on_flush
-// are inert by construction, and flush_emit degrades to a plain flush(). All
-// three still need to exist so generic code that names them compiles.
+// [ostream.manip]: the sync-stream manipulators. All three are worded as "if
+// os.rdbuf() is a basic_syncbuf<charT, traits, Allocator>*" for an Allocator
+// the manipulator is never told, so the question is asked of the allocator-
+// blind base <__bits/syncbuf_base> gives every syncbuf, at run time, through
+// the RTTI the library already carries. Until Ф40 these three were inert --
+// there was no buffer type in the tree that could answer, and the comment
+// that stood here said as much.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &emit_on_flush(basic_ostream<CharT, Traits> &os)
 {
+    if (auto *buf = dynamic_cast<__syncbuf_base<CharT, Traits> *>(os.rdbuf()))
+        buf->set_emit_on_sync(true);
     return os;
 }
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &noemit_on_flush(basic_ostream<CharT, Traits> &os)
 {
+    if (auto *buf = dynamic_cast<__syncbuf_base<CharT, Traits> *>(os.rdbuf()))
+        buf->set_emit_on_sync(false);
     return os;
 }
+// The flush comes FIRST and unconditionally -- on a syncbuf it only records
+// that the target owes a sync, which the emit() below then pays; on any other
+// buffer it is the whole of the manipulator.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &flush_emit(basic_ostream<CharT, Traits> &os)
 {
     os.flush();
+    if (auto *buf = dynamic_cast<__syncbuf_base<CharT, Traits> *>(os.rdbuf())) {
+        typename basic_ostream<CharT, Traits>::sentry ok(os);
+        if (ok) {
+            try {
+                if (!buf->emit()) os.setstate(ios_base::badbit);
+            } catch (...) {
+                __ios::HandleException(os);
+            }
+        }
+    }
     return os;
 }
 

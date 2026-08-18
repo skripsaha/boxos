@@ -65,6 +65,15 @@ public:
                 is.setstate(ios_base::failbit);
                 return;
             }
+            // Good, and still nowhere to read from: rdbuf(nullptr) clears the
+            // state by its own Effects and a moved-into stream is left with a
+            // null buffer. The skipws loop below and every extractor past this
+            // point dereference it — see the same guard, and the same
+            // reasoning, in basic_ostream::sentry.
+            if (is.rdbuf() == nullptr) {
+                is.setstate(ios_base::badbit);
+                return;
+            }
             if (is.tie()) is.tie()->flush();
             if (!noskipws && (is.flags() & ios_base::skipws) != ios_base::fmtflags{}) {
                 auto *buf = is.rdbuf();
@@ -483,10 +492,13 @@ protected:
         __gcount = rhs.__gcount;
         this->move(rhs);
     }
+    // [istream.assign]: "equivalent to swap(rhs)" -- see the same note on
+    // basic_ostream::operator=. swap() below already exchanges gcount(), so
+    // doing it by hand here was both wrong (a copy, not an exchange) and
+    // redundant.
     basic_istream &operator=(basic_istream &&rhs)
     {
-        __gcount = rhs.__gcount;
-        this->move(rhs);
+        swap(rhs);
         return *this;
     }
     void swap(basic_istream &rhs)
@@ -641,10 +653,11 @@ protected:
         this->__SetGcount(rhs.gcount());
         this->move(rhs);
     }
+    // [iostream.assign]: "equivalent to swap(rhs)", same correction as the
+    // two classes it derives from.
     basic_iostream &operator=(basic_iostream &&rhs)
     {
-        this->__SetGcount(rhs.gcount());
-        this->move(rhs);
+        swap(rhs);
         return *this;
     }
     void swap(basic_iostream &rhs)

@@ -49,3 +49,12 @@
 #  define __cpp_lib_fstream_native_handle 202306L
 #endif
 #undef BOXCXX_OWNS_fstream_native_handle
+// Ф40: <syncstream> exists. P0053R7's macro has TWO owners in [version.syn],
+// <iosfwd> and <syncstream>, and both claim it -- <iosfwd> because the
+// forward declarations of basic_syncbuf/basic_osyncstream are its share of
+// the feature. <ostream>, where the three sync manipulators live, is NOT an
+// owner and does not claim it.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_syncbuf)) && !defined(__cpp_lib_syncbuf)
+#  define __cpp_lib_syncbuf 201803L
+#endif
+#undef BOXCXX_OWNS_syncbuf

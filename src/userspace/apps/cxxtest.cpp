@@ -470,6 +470,15 @@
 #  error "__cpp_lib_stdatomic_h is not visible from <stdatomic.h> alone"
 #endif
 
+// [version.syn] gives __cpp_lib_syncbuf TWO owners, and <iosfwd> -- which
+// declares basic_syncbuf/basic_osyncstream and their typedefs -- is the
+// surprising one. It is also the only macro in the tree owned by <iosfwd>,
+// so it is the one worth proving here by hand (Ф40).
+#include <iosfwd>
+#ifndef __cpp_lib_syncbuf
+#  error "__cpp_lib_syncbuf is not visible from <iosfwd> alone"
+#endif
+
 #ifdef BOXCXX_VERSION
 #  error "one of the owning headers above drags in <version>"
 #endif
@@ -552,6 +561,7 @@
 #include <span>
 #include <spanstream>
 #include <sstream>
+#include <syncstream>
 #include <iomanip>
 #include <stack>
 #include <cxxabi.h>
@@ -29596,9 +29606,7 @@ static_assert(__cpp_lib_stacktrace == 202011L, "phase131: __cpp_lib_stacktrace �
 static_assert(__cpp_lib_stdatomic_h == 202011L, "phase131: __cpp_lib_stdatomic_h -- <stdatomic.h> built in F34");
 static_assert(__cpp_lib_stdbit_h == 202603L, "phase131: __cpp_lib_stdbit_h -- F34");
 static_assert(__cpp_lib_stdckdint_h == 202603L, "phase131: __cpp_lib_stdckdint_h -- F34");
-#ifdef __cpp_lib_syncbuf
-#  error "phase131: __cpp_lib_syncbuf must stay undefined"
-#endif
+static_assert(__cpp_lib_syncbuf == 201803L, "phase131: __cpp_lib_syncbuf — closed by Ф40");
 static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_transparent_operators — closed by Ф31e");
 
     // ── (C) <utility> ───────────────────────────────────────────────────
@@ -44552,6 +44560,419 @@ void Phase198()
     printf("[CXX] PASS phase198: <vector> is constexpr, packed bits included\n");
 }
 
+// ── phase199: <syncstream> (Ф40) ─────────────────────────────────────────
+// [syncstream] end to end: nothing reaches the target until emit(), the
+// destructor emits, move/assign/swap move the pending output with the target
+// it belongs to, sync() only RECORDS the flush that emit() then pays, the
+// three <ostream> manipulators finally do something, and — the reason the
+// header exists — sixteen strands writing to one target produce whole records
+// and never a spliced one.
+//
+// Every expectation below was first run against libstdc++ 16.1 on the host,
+// which agrees on all of them but one: [syncstream.osyncstream.members] says
+// a failed emit() sets BADBIT, and libstdc++ sets failbit (and builds no
+// sentry). libc++ 22.1.6 does what the standard says, and so does this.
+namespace p199 {
+
+// A target that records what it is given, counts pubsync() calls, and can be
+// told to accept only part of a run — the only way to reach emit()'s
+// partial-transfer path deliberately.
+struct Sink : std::streambuf {
+    std::string     got;
+    int             syncs  = 0;
+    std::streamsize accept = -1;   // -1 = take everything
+
+protected:
+    std::streamsize xsputn(const char_type *s, std::streamsize n) override
+    {
+        std::streamsize take = (accept < 0 || accept > n) ? n : accept;
+        got.append(s, static_cast<size_t>(take));
+        return take;
+    }
+    int_type overflow(int_type c) override
+    {
+        if (traits_type::eq_int_type(c, traits_type::eof())) return traits_type::not_eof(c);
+        if (accept == 0) return traits_type::eof();
+        got.push_back(traits_type::to_char_type(c));
+        return c;
+    }
+    int sync() override
+    {
+        ++syncs;
+        return 0;
+    }
+};
+
+int g_allocs = 0;
+
+template <class T>
+struct CountingAlloc {
+    using value_type = T;
+    CountingAlloc() = default;
+    template <class U>
+    CountingAlloc(const CountingAlloc<U> &)
+    {
+    }
+    T *allocate(size_t n)
+    {
+        ++g_allocs;
+        return std::allocator<T>().allocate(n);
+    }
+    void deallocate(T *p, size_t n) { std::allocator<T>().deallocate(p, n); }
+    bool operator==(const CountingAlloc &) const { return true; }
+};
+
+// 1. held until emit; the destructor emits; sync() is not called by itself
+bool HeldUntilEmit()
+{
+    Sink t;
+    {
+        std::osyncstream os(&t);
+        os << "hello " << 42 << '\n';
+        if (!t.got.empty()) return false;
+    }
+    return t.got == "hello 42\n" && t.syncs == 0;
+}
+
+// 2. a syncbuf wrapping nothing emits nothing and says so
+bool NoTarget()
+{
+    std::syncbuf sb;
+    return sb.emit() == false && sb.get_wrapped() == nullptr;
+}
+
+// 3. move construction: the source is disarmed, the destination owns the run
+bool MoveConstruct()
+{
+    Sink t;
+    {
+        std::syncbuf a(&t);
+        a.sputn("xy", 2);
+        std::syncbuf b(std::move(a));
+        if (a.get_wrapped() != nullptr) return false;
+        if (b.get_wrapped() != &t) return false;
+        if (!t.got.empty()) return false;
+    }
+    return t.got == "xy";
+}
+
+// 4. move assignment emits the DESTINATION's pending output first
+bool MoveAssign()
+{
+    Sink t1, t2;
+    {
+        std::syncbuf a(&t1);
+        a.sputn("aa", 2);
+        std::syncbuf b(&t2);
+        b.sputn("bb", 2);
+        b = std::move(a);
+        if (t2.got != "bb") return false;    // b's own run left before the move
+        if (!t1.got.empty()) return false;
+        if (a.get_wrapped() != nullptr) return false;
+        if (b.get_wrapped() != &t1) return false;
+    }
+    return t1.got == "aa";
+}
+
+// 5. swap exchanges target AND pending output together
+bool Swap()
+{
+    Sink t1, t2;
+    {
+        std::syncbuf a(&t1);
+        a.sputn("A", 1);
+        std::syncbuf b(&t2);
+        b.sputn("B", 1);
+        a.swap(b);
+        if (a.get_wrapped() != &t2 || b.get_wrapped() != &t1) return false;
+    }
+    return t1.got == "A" && t2.got == "B";
+}
+
+// 6. emit-on-sync: a plain flush records; with the flag it also emits, and the
+//    recorded flush reaches the target exactly once
+bool EmitOnSync()
+{
+    Sink t;
+    std::osyncstream os(&t);
+    os << "q";
+    os.flush();
+    if (!t.got.empty() || t.syncs != 0) return false;
+    os.rdbuf()->set_emit_on_sync(true);
+    os << "w";
+    os.flush();
+    return t.got == "qw" && t.syncs == 1;
+}
+
+// 7. the three [ostream.manip] manipulators, which were no-ops before Ф40
+bool Manipulators()
+{
+    Sink t;
+    std::osyncstream os(&t);
+    os << "1" << std::emit_on_flush << std::flush;
+    if (t.got != "1") return false;
+    os << "2" << std::noemit_on_flush << std::flush;
+    if (t.got != "1") return false;
+    os << std::flush_emit;
+    if (t.got != "12" || t.syncs < 1) return false;
+
+    // and they stay harmless on a stream that is not synchronized at all
+    std::ostringstream oss;
+    oss << "p" << std::emit_on_flush << std::flush_emit << "q";
+    return oss.str() == "pq";
+}
+
+// 8. the accessors, and an osyncstream built from an ostream
+bool Accessors()
+{
+    Sink t;
+    std::ostream dst(&t);
+    {
+        std::osyncstream os(dst);
+        if (os.get_wrapped() != &t) return false;
+        if (static_cast<std::streambuf *>(os.rdbuf()) != os.std::ostream::rdbuf()) return false;
+        os << "via";
+    }
+    return t.got == "via";
+}
+
+// 9. a partial transfer: what got through is gone, the rest is still ours
+bool PartialTransfer()
+{
+    Sink t;
+    t.accept = 2;
+    std::syncbuf sb(&t);
+    sb.sputn("abcd", 4);
+    if (sb.emit() != false) return false;
+    if (t.got != "ab") return false;
+    t.accept = -1;
+    if (sb.emit() != true) return false;
+    return t.got == "abcd";
+}
+
+// 10. a refused run sets badbit — the standard's bit, not libstdc++'s failbit.
+//     Asserted on rdstate() exactly, because "some error bit" would pass for
+//     both and the whole point is which one.
+bool FailedEmitSetsBadbit()
+{
+    Sink t;
+    t.accept = 0;
+    std::osyncstream os(&t);
+    os << "nope";
+    os.emit();
+    return os.rdstate() == std::ios_base::badbit;
+}
+
+// 11. the allocator is real and reaches the buffer
+bool AllocatorAware()
+{
+    Sink t;
+    g_allocs = 0;
+    {
+        std::basic_syncbuf<char, std::char_traits<char>, CountingAlloc<char>> sb(
+            &t, CountingAlloc<char>{});
+        for (int i = 0; i < 64; ++i) sb.sputn("0123456789", 10);
+        (void)sb.get_allocator();
+    }
+    return g_allocs > 0 && t.got.size() == 640;
+}
+
+// 12. moving an osyncstream carries the pending run AND repoints the stream
+//     at its own buffer — without the set_rdbuf, the write after the move
+//     would land on a null rdbuf and be lost
+bool MoveStream()
+{
+    Sink t;
+    {
+        std::osyncstream a(&t);
+        a << "car";
+        std::osyncstream b(std::move(a));
+        if (b.get_wrapped() != &t) return false;
+        if (a.get_wrapped() != nullptr) return false;
+        b << "ried";
+        if (!t.got.empty()) return false;
+    }
+    return t.got == "carried";
+}
+
+// 13. move-assigning one: the destination's own run leaves first, then it
+//     takes over the source's target and pending characters
+bool MoveAssignStream()
+{
+    Sink t1, t2;
+    {
+        std::osyncstream a(&t1);
+        a << "x";
+        std::osyncstream b(&t2);
+        b << "y";
+        b = std::move(a);
+        if (b.get_wrapped() != &t1) return false;
+        b << "z";
+    }
+    return t1.got == "xz" && t2.got == "y";
+}
+
+// 14. the defect underneath, found while writing the two above:
+//     [ostream.assign] makes move ASSIGNMENT equivalent to swap(rhs), not to
+//     basic_ios::move — so neither rdbuf() moves and everything else is
+//     exchanged. boxcxx used to call move() for both, leaving the assigned-to
+//     stream with no buffer at all. Both host libraries agree with what is
+//     asserted here.
+struct BareOstream : std::ostream {
+    explicit BareOstream(std::streambuf *b) : std::ostream(b) {}
+    BareOstream(BareOstream &&o) : std::ostream(std::move(o)) {}
+    BareOstream &operator=(BareOstream &&o)
+    {
+        std::ostream::operator=(std::move(o));
+        return *this;
+    }
+};
+
+bool OstreamMoveAssignIsSwap()
+{
+    Sink t1, t2;
+    BareOstream a(&t1), b(&t2);
+    a.width(7);
+    b = std::move(a);
+    if (b.rdbuf() != &t2 || a.rdbuf() != &t1) return false;
+    if (b.width() != 7 || a.width() != 0) return false;
+    b << "hi";
+    return t2.got == "     hi" && t1.got.empty();
+}
+
+// 15. a stream that is good and has NO buffer must refuse, not fault. Found
+//     by mutation while pinning 12: dropping the set_rdbuf there left a good
+//     stream with a null rdbuf(), and the very next insertion took a page
+//     fault from inside the library. rdbuf(nullptr) reaches the same state
+//     without any move at all, because [basic.ios.members] has rdbuf(sb) call
+//     clear(). Both host libraries dereference the null pointer here.
+struct BareIstream : std::istream {
+    explicit BareIstream(std::streambuf *b) : std::istream(b) {}
+    BareIstream(BareIstream &&o) : std::istream(std::move(o)) {}
+};
+
+bool NullBufferRefusesInsteadOfFaulting()
+{
+    // rdbuf(nullptr) does NOT produce this state — [iostate.flags] has clear()
+    // OR in badbit when there is no buffer, and boxcxx does. The one way in is
+    // the move constructor, whose postcondition in [basic.ios.members] is
+    // exactly "the state rhs had, except that rdbuf() returns nullptr" — a
+    // good stream with nowhere to write, which clear() would never allow.
+    Sink t;
+    BareOstream src(&t);
+    BareOstream moved(std::move(src));
+    if (moved.rdbuf() != nullptr || !moved.good()) return false;
+    moved << "x" << 42;                    // none of these may fault
+    moved.put('y');
+    moved.write("z", 1);
+    if (!moved.bad() || !t.got.empty()) return false;
+
+    std::istringstream backing("42");
+    BareIstream isrc(backing.rdbuf());
+    BareIstream imoved(std::move(isrc));
+    if (imoved.rdbuf() != nullptr || !imoved.good()) return false;
+    int v = -1;
+    imoved >> v;                           // nor this
+    // The sentry refused, so [istream.formatted.reqmts] means no input was
+    // attempted at all and the target keeps the value it had.
+    return imoved.bad() && v == -1;
+}
+
+// 16. the reason the header exists: many strands, one target, whole records.
+//     Every strand writes its own letter kRounds times as '[' + 64 letters +
+//     ']' through its own osyncstream, and the emit at each destructor is the
+//     only thing that ever touches the Sink — which is why appending to a
+//     plain std::string from sixteen strands is safe here and would be a data
+//     race without the syncbuf. A single spliced record fails the scan.
+constexpr int    kBody   = 64;
+constexpr int    kRounds = 16;
+constexpr size_t kRecord = kBody + 2;
+
+// Scans the collected bytes: every record must be a complete
+// '[' + 64 identical letters + ']', and every strand must have written
+// exactly kRounds of them.
+bool ScanRecords(const std::string &s, int strands, int *per_letter)
+{
+    if (s.size() != kRecord * static_cast<size_t>(strands) * kRounds) return false;
+    for (size_t at = 0; at < s.size(); at += kRecord) {
+        if (s[at] != '[' || s[at + kRecord - 1] != ']') return false;
+        const char letter = s[at + 1];
+        if (letter < 'A' || letter >= static_cast<char>('A' + strands)) return false;
+        for (int i = 1; i <= kBody; ++i)
+            if (s[at + static_cast<size_t>(i)] != letter) return false;
+        per_letter[letter - 'A']++;
+    }
+    for (int i = 0; i < strands; ++i)
+        if (per_letter[i] != kRounds) return false;
+    return true;
+}
+
+} // namespace p199
+
+void Phase199()
+{
+    Check(p199::HeldUntilEmit(), "phase199 output is held until emit; the destructor emits");
+    Check(p199::NoTarget(), "phase199 a syncbuf wrapping nothing emits nothing and returns false");
+    Check(p199::MoveConstruct(), "phase199 move ctor disarms the source, destination owns the run");
+    Check(p199::MoveAssign(), "phase199 move assignment emits the destination's pending run first");
+    Check(p199::Swap(), "phase199 swap exchanges target and pending output together");
+    Check(p199::EmitOnSync(), "phase199 sync() records the flush; emit-on-sync pays it exactly once");
+    Check(p199::Manipulators(),
+          "phase199 emit_on_flush/noemit_on_flush/flush_emit act on a syncbuf, stay inert elsewhere");
+    Check(p199::Accessors(), "phase199 get_wrapped/rdbuf identity and the ostream constructor");
+    Check(p199::PartialTransfer(),
+          "phase199 a partial transfer keeps exactly the untransferred remainder");
+    Check(p199::FailedEmitSetsBadbit(),
+          "phase199 a refused emit sets badbit [syncstream.osyncstream.members], not failbit");
+    Check(p199::AllocatorAware(), "phase199 the allocator reaches the associated output");
+    Check(p199::MoveStream(), "phase199 a moved osyncstream keeps writing into its own buffer");
+    Check(p199::MoveAssignStream(),
+          "phase199 move-assigning an osyncstream emits the destination's run first");
+    Check(p199::OstreamMoveAssignIsSwap(),
+          "phase199 basic_ostream move assignment is swap(rhs) [ostream.assign], not move()");
+    Check(p199::NullBufferRefusesInsteadOfFaulting(),
+          "phase199 a good stream with a null rdbuf() sets badbit instead of faulting");
+
+    // The concurrency proof. A strand is a strand: without FSGSBASE there is
+    // no per-strand TLS and std::thread's ctor would throw, so this half
+    // skips exactly the way Phase35/36/37 do.
+    if (!cpu_has_fsgsbase()) {
+        printf("[CXX] note phase199: strands need FSGSBASE — skipping the interleaving proof\n");
+    } else {
+        p199::Sink sink;
+        int strands = static_cast<int>(std::thread::hardware_concurrency());
+        if (strands < 2) strands = 2;
+        if (strands > 16) strands = 16;
+
+        std::vector<std::thread> ts;
+        ts.reserve(static_cast<size_t>(strands));
+        for (int id = 0; id < strands; ++id) {
+            ts.emplace_back([&sink, id] {
+                for (int r = 0; r < p199::kRounds; ++r) {
+                    std::osyncstream os(&sink);
+                    os << '[';
+                    for (int i = 0; i < p199::kBody; ++i)
+                        os << static_cast<char>('A' + id);
+                    os << ']';
+                }
+            });
+        }
+        for (auto &t : ts) t.join();
+
+        int per[16] = {};
+        Check(p199::ScanRecords(sink.got, strands, per),
+              "phase199 many strands, one target: every record whole, none spliced");
+        printf("[CXX] note phase199: %d strands x %d records survived intact\n",
+               strands, p199::kRounds);
+    }
+
+    static_assert(__cpp_lib_syncbuf == 201803L,
+                  "phase199 __cpp_lib_syncbuf is P0053R7's value");
+    Check(__cpp_lib_syncbuf == 201803L, "phase199 __cpp_lib_syncbuf FTM");
+
+    printf("[CXX] PASS phase199: <syncstream> — one emit, one run, one lock\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -44772,6 +45193,7 @@ int main()
     Phase196();
     Phase197();
     Phase198();
+    Phase199();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

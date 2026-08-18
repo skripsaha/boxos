@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **86** — 82 of C++23 (23 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 123 |
-| Header source | ~87 000 lines |
-| Feature-test macros defined | 206 — 160 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Standard headers provided | **87** — 83 of C++23 (22 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 124 |
+| Header source | ~89 000 lines |
+| Feature-test macros defined | 207 — 161 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 213 phases (194 of them the numbered `PhaseN` series), 5 430 runtime checks, 1 816 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 214 phases (195 of them the numbered `PhaseN` series), 5 443 runtime checks, 1 818 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **213**. The
+there are exactly as many as there are phase definitions. That is **214**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -96,7 +96,7 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (23)
+## 1.1 Headers that do not exist (22)
 
 82 of the C++23 headers are provided and 23 are absent, which accounts for the
 whole C++23 header list apart from the deprecated `<codecvt>`. Four C++26
@@ -156,13 +156,21 @@ new content**, and had done since TagFS was written. Ф36 built the primitive
 `current_resize`); the C++ header is what finally asked for it. Its two
 refusals are recorded in §2 `<fstream>`.
 
-### C++23 features not implemented — 3
+### C++23 features not implemented — 2
 
 | Header | Status |
 |---|---|
-| `<syncstream>` | Not implemented. The blocker this entry used to name — that its contract is written against `<iostream>` — went away in Ф36; what is left is the work itself (`basic_syncbuf`, `basic_osyncstream`, and the emit-on-destruction contract), which nothing has done. |
 | `<execution>` | Not implemented; the parallel overloads of the algorithms are absent with it. |
 | `<stdfloat>` | Not implemented — no extended floating-point types. |
+
+**`<syncstream>` left that list in Ф40.** Its entry had been honest about
+having no blocker left ("what is left is the work itself"), and the work took
+one header — but it did not take it alone. The three manipulators
+[ostream.manip] gives the feature live in `<ostream>`, and they had been
+shipping as no-ops, with a comment that said so and was true: nothing in the
+tree could answer `dynamic_cast<basic_syncbuf*>`, so `emit_on_flush` had
+nothing to flip. A header that only holds characters would have been half the
+feature.
 
 **`<scoped_allocator>` left that list in Ф38 as well**, and its "Not
 implemented." was hiding a dependency rather than an absence: the adaptor's
@@ -315,7 +323,7 @@ assertion that a header meets the standard's freestanding subset, which is a
 separate audit against [compliance] and has not been done. `__cpp_lib_ratio`
 and `__cpp_lib_out_ptr`'s C++26 value are held back for the same reason. The
 rest belong to features whose owning header does not exist (`execution`,
-`filesystem`, `spanstream`, `syncbuf`) or to
+`filesystem`) or to
 whole-clause requirements relaxations (`__cpp_lib_ranges`,
 `__cpp_lib_algorithm_iterator_requirements`). The in-tree suite pins the absences
 as well as the values, so a macro cannot quietly appear — and when one is closed,
@@ -1319,6 +1327,16 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<ostream>`
 
+- `✓` Closed in Ф40, found by building `<syncstream>`: **`emit_on_flush`,
+  `noemit_on_flush` and `flush_emit` had been no-ops.** They were honest about
+  it — the comment above them said there was no buffer type in the tree to
+  detect — but a manipulator that compiles and does nothing is the kind of
+  thing generic code takes for a working one. All three now find a syncbuf
+  through the allocator-blind base `<__bits/syncbuf_base>` gives it, using the
+  RTTI the library already carries, and `flush_emit` does the whole of its
+  clause: `os.flush()` first, then a sentry, then `emit()`, then `badbit` if
+  that was refused. On a stream whose buffer is not a syncbuf all three stay
+  exactly as inert as before, which Phase199 pins as well.
 - `✓` Closed in Ф38, found by building `<spanstream>`: **a formatted inserter
   that could not write everything reported success anyway.**
   [ostream.formatted.reqmts] says a generation failure calls
@@ -1722,6 +1740,15 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   copy-list-initialization is well-formed there. Split into the standard's three
   on `basic_stringbuf` and on all three stream wrappers; the two-argument
   `(t, which)` form stays `explicit`, and the suite pins that it does.
+- `✓` Closed in Ф40, found by building `<syncstream>`: **`void
+  str(basic_string&&)` did not exist** on `basic_stringbuf` or on any of the
+  three stream wrappers. It is the other half of P0408R7 — `str() &&` hands
+  the characters out without a copy, the rvalue setter takes them back the
+  same way — and only the getter had been built. It is not covered by the
+  documented cross-allocator omission this header records elsewhere: the
+  allocator is the same one. Found because a syncbuf whose target accepted
+  part of a run must hand the remainder back to its own buffer, and copying
+  it would have been a copy of everything not yet printed.
 - `+` The constraint boxcxx uses is the standard's, in full:
   `is_convertible_v<const T&, basic_string_view<charT, traits>>` **and**
   `!is_convertible_v<const T&, const charT*>`. libstdc++ 16.1 writes only the
@@ -1961,6 +1988,49 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
 - `✓` Both deduction guides from [string.view.synop]. Without them the two
   constructors are only reachable by naming the character type, which is most of
   the point of having them.
+## `<syncstream>`
+
+- Complete: `basic_syncbuf`, `basic_osyncstream`, the free `swap`, and the
+  `syncbuf` / `osyncstream` typedefs (the wide pair is excluded with every
+  other wide stream, §1.2). New in Ф40; `__cpp_lib_syncbuf` is 201803L, and
+  [version.syn] gives it two owners — `<syncstream>` and `<iosfwd>`, which
+  declares the two class templates. It is the only macro in the tree whose
+  owner is `<iosfwd>`.
+- **The lock is per wrapped buffer and exact.** [syncstream.syncbuf.virtuals]
+  permits `emit()` to touch the wrapped buffer "while holding a lock uniquely
+  associated with `*wrapped`". libstdc++ draws that lock from a fixed pool
+  indexed by a hash of the pointer, so two unrelated targets serialise against
+  each other whenever they collide, and the pool's size caps how many targets
+  can be independent. boxcxx allocates one entry per distinct wrapped buffer,
+  refcounted by the syncbufs naming it and freed when the last one lets go
+  (`src/runtime/syncstream.cpp`). Unbounded, and unique in the sense the
+  clause uses the word.
+- The associated output is a `basic_stringbuf`, composed rather than
+  reimplemented: `overflow`/`xsputn` forward into it and the syncbuf keeps no
+  get/put area of its own. Same choice libstdc++ makes, for the same reason —
+  growing an allocator-aware character buffer correctly is already solved one
+  header over.
+- **boxcxx sets `badbit` where libstdc++ 16.1 sets `failbit`.**
+  [syncstream.osyncstream.members] says `basic_osyncstream::emit()` "behaves as
+  an unformatted output function. After constructing a sentry object, calls
+  `_sb_.emit()`. If that call returns false, calls `setstate(badbit)`."
+  libstdc++ constructs no sentry and sets `failbit`; libc++ 22.1.6 does what
+  the standard says, and so does this. Phase199 asserts on `rdstate()` exactly,
+  because "some error bit" would pass for both spellings and which bit it is
+  is the whole difference.
+- A partial transfer keeps exactly the untransferred remainder. `emit()`
+  returns false and the accepted prefix is dropped from the associated output,
+  so the next `emit()` neither reprints it nor loses the rest. The postcondition
+  the standard states ("on success, the associated output is empty") says
+  nothing about the failing case, and the two ways of getting it wrong —
+  keeping everything, dropping everything — are a duplicated prefix and lost
+  output respectively.
+- What the type promises reaches exactly as far as the target: two syncbufs
+  wrapping the same buffer serialise, a writer that bypasses them and writes to
+  that buffer directly does not. That is true of every implementation, and on
+  BoxOS it is worth saying plainly, because `std::cout` is one such direct
+  writer — its buffer is the screen Current and it holds nothing back.
+
 ## `<tuple>`
 
 - `!` `✓` Closed in Ф38, reported as a debt by the commit that found it and

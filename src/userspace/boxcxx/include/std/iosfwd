@@ -22,6 +22,14 @@
 
 #include <cstddef>
 
+// [version.syn] names THIS header an owner of __cpp_lib_syncbuf alongside
+// <syncstream> — basic_syncbuf/basic_osyncstream and their typedefs are
+// declared below, which is this header's whole share of the feature, and a
+// program that asks the question here must get the answer here. The leaf
+// included next includes nothing itself, so <iosfwd> stays a leaf too.
+#define BOXCXX_OWNS_syncbuf
+#include <__bits/version_iostreams>
+
 namespace std {
 
 template <class CharT> struct char_traits;
@@ -101,6 +109,10 @@ template <class CharT, class Traits = char_traits<CharT>, class Allocator = allo
 class basic_ostringstream;
 template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
 class basic_stringstream;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_syncbuf;
+template <class CharT, class Traits = char_traits<CharT>, class Allocator = allocator<CharT>>
+class basic_osyncstream;
 template <class CharT, class Traits = char_traits<CharT>>
 class basic_filebuf;
 template <class CharT, class Traits = char_traits<CharT>>
@@ -119,6 +131,8 @@ using istream       = basic_istream<char>;
 using ostream       = basic_ostream<char>;
 using iostream      = basic_iostream<char>;
 using stringbuf     = basic_stringbuf<char>;
+using syncbuf       = basic_syncbuf<char>;
+using osyncstream   = basic_osyncstream<char>;
 using istringstream = basic_istringstream<char>;
 using ostringstream = basic_ostringstream<char>;
 using stringstream  = basic_stringstream<char>;

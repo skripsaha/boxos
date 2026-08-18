@@ -1,0 +1,103 @@
+// boxcxx — <__bits/syncbuf_base>
+//
+// The allocator-blind half of basic_syncbuf, and the registry of locks its
+// emit() serialises on. This is a leaf because TWO headers need it and
+// neither may include the other: <syncstream> builds basic_syncbuf on top of
+// it, while <ostream>'s three sync manipulators must RECOGNISE such a buffer
+// through a basic_streambuf*. [ostream.manip] words all three as "if
+// os.rdbuf() is a basic_syncbuf<charT, traits, Allocator>*" — quantified over
+// an Allocator the manipulator was never told and cannot deduce. A
+// polymorphic base that does not mention the allocator is the only way to ask
+// that question at run time; libstdc++ answers the same clause the same way.
+//
+// The lock is NOT a hashed pool. [syncstream.syncbuf.virtuals] says emit()
+// may call the wrapped buffer's functions "while holding a lock uniquely
+// associated with *wrapped". A fixed table of N mutexes selected by hashing
+// the pointer — what libstdc++ ships — is correct but it is not unique: two
+// unrelated targets that collide serialise against each other although no
+// program asked them to, and a compile-time N decides how many targets a
+// cabin may have before that starts. boxcxx keeps one entry per DISTINCT
+// wrapped buffer, refcounted by the syncbufs naming it and freed when the
+// last one goes: unbounded by construction, unique by construction. The
+// entries live in one intrusive list because a cabin has a handful of output
+// targets, not thousands — the wrapped buffer is a stream's sink, not a
+// per-message object.
+#ifndef BOXCXX_BITS_SYNCBUF_BASE
+#define BOXCXX_BITS_SYNCBUF_BASE
+
+#include <streambuf>
+
+namespace std {
+
+namespace __sync {
+
+// Opaque everywhere; defined in src/runtime/syncstream.cpp together with the
+// registry, because a program must have exactly ONE registry and a header
+// cannot promise that.
+struct Target;
+
+Target *Acquire(const void *wrapped);   // nullptr in -> nullptr out; may throw bad_alloc
+void    Release(Target *t) noexcept;
+void    Lock(Target *t) noexcept;
+void    Unlock(Target *t) noexcept;
+
+// A syncbuf's share of one target's lock, held for as long as the syncbuf
+// names that wrapped buffer. lock()/unlock() are spelled lower-case so a
+// plain lock_guard<Ref> takes it (BasicLockable), and both tolerate the
+// null-target case — a syncbuf wrapping nothing emits nothing.
+class Ref {
+public:
+    Ref() noexcept = default;
+    explicit Ref(const void *wrapped) : __t(Acquire(wrapped)) {}
+    Ref(Ref &&o) noexcept : __t(o.__t) { o.__t = nullptr; }
+    Ref &operator=(Ref &&o) noexcept
+    {
+        if (this != &o) {
+            if (__t) Release(__t);
+            __t   = o.__t;
+            o.__t = nullptr;
+        }
+        return *this;
+    }
+    ~Ref()
+    {
+        if (__t) Release(__t);
+    }
+    Ref(const Ref &)            = delete;
+    Ref &operator=(const Ref &) = delete;
+
+    void swap(Ref &o) noexcept
+    {
+        Target *t = __t;
+        __t       = o.__t;
+        o.__t     = t;
+    }
+    void lock() noexcept { if (__t) Lock(__t); }
+    void unlock() noexcept { if (__t) Unlock(__t); }
+
+private:
+    Target *__t = nullptr;
+};
+
+} // namespace __sync
+
+// The part of [syncstream.syncbuf] that does not depend on the allocator:
+// the emit-on-sync flag, the record that a sync() is owed to the wrapped
+// buffer, and emit() itself as a virtual so a caller holding only a
+// basic_streambuf* can reach it after a dynamic_cast.
+template <class CharT, class Traits>
+class __syncbuf_base : public basic_streambuf<CharT, Traits> {
+public:
+    void set_emit_on_sync(bool b) noexcept { __emit_on_sync = b; }
+    virtual bool emit() = 0;
+
+protected:
+    __syncbuf_base() = default;
+
+    bool __emit_on_sync = false;
+    bool __needs_sync   = false;
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_SYNCBUF_BASE
