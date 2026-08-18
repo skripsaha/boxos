@@ -277,6 +277,9 @@
 #ifndef __cpp_lib_to_string
 #  error "__cpp_lib_to_string is not visible from <string> alone"
 #endif
+#ifndef __cpp_lib_constexpr_string
+#  error "__cpp_lib_constexpr_string is not visible from <string> alone"
+#endif
 #ifndef __cpp_lib_string_resize_and_overwrite
 #  error "__cpp_lib_string_resize_and_overwrite is not visible from <string> alone"
 #endif
@@ -29530,15 +29533,11 @@ void Phase131()
 #ifdef __cpp_lib_chrono
 #  error "phase131: __cpp_lib_chrono must stay undefined"
 #endif
-#ifdef __cpp_lib_constexpr_bitset
-#  error "phase131: __cpp_lib_constexpr_bitset must stay undefined"
-#endif
+static_assert(__cpp_lib_constexpr_bitset == 202207L, "phase131: __cpp_lib_constexpr_bitset — closed by Ф39");
 #ifdef __cpp_lib_constexpr_cmath
 #  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
 #endif
-#ifdef __cpp_lib_constexpr_string
-#  error "phase131: __cpp_lib_constexpr_string must stay undefined"
-#endif
+static_assert(__cpp_lib_constexpr_string == 201907L, "phase131: __cpp_lib_constexpr_string — closed by Ф39");
 #ifdef __cpp_lib_constexpr_vector
 #  error "phase131: __cpp_lib_constexpr_vector must stay undefined"
 #endif
@@ -43918,6 +43917,389 @@ void Phase195()
     printf("[CXX] PASS phase195: tuple's allocator-extended constructors\n");
 }
 
+// ── phase196: <string> in constant evaluation (P0980R1, Ф39) ────────────
+// Every scenario runs TWICE. As a static_assert it goes down the
+// constant-evaluated halves: the inline buffer has to be armed through its
+// own name before anything writes it through a pointer, SelfOffset answers
+// "does this alias me" by walking with ==, and char_traits<char> walks
+// instead of calling the two builtins. At run time the other halves run:
+// address comparisons and __builtin_strlen/__builtin_memcmp. A split like
+// that is only honest if both halves give the same answer, so the phase
+// asks each question both ways and compares.
+namespace p196 {
+
+using std::string;
+
+// 1. the inline buffer, start to finish
+constexpr bool Short()
+{
+    string s;
+    if (!s.empty() || s.size() != 0 || s.capacity() < 15) return false;
+    s.push_back('a');
+    s += "bc";
+    s.append(2, 'd');
+    if (s != "abcdd" || s.size() != 5) return false;
+    if (s[0] != 'a' || s.back() != 'd' || s.front() != 'a') return false;
+    if (s.c_str()[5] != '\0') return false;      // the NUL is really there
+    if (s.at(1) != 'b') return false;
+    return true;
+}
+
+// 2. allocated storage, start to finish
+constexpr bool Long()
+{
+    string s = "0123456789abcdefghijklmnopqrstuvwxyz";
+    if (s.size() != 36 || s.capacity() < 36) return false;
+    s.append("!!!");
+    if (s.size() != 39 || s.substr(36) != "!!!") return false;
+    s.resize(4);
+    if (s != "0123") return false;
+    s.shrink_to_fit();
+    if (s != "0123" || s.size() != 4) return false;
+    return true;
+}
+
+// 3. the transitions, which are where the union changes its active member
+constexpr bool Transitions()
+{
+    string s = "hi";
+    s.reserve(64);                          // short -> long
+    if (s != "hi" || s.capacity() < 64) return false;
+    s.append(30, 'x');
+    if (s.size() != 32) return false;
+    string t = "tiny";
+    s.swap(t);                              // long <-> short, the mixed swap
+    if (s != "tiny" || t.size() != 32 || t[2] != 'x') return false;
+    string u = "abc", v = "def";
+    u.swap(v);                              // short <-> short
+    if (u != "def" || v != "abc") return false;
+    string w(40, 'p'), y(40, 'q');
+    w.swap(y);                              // long <-> long
+    if (w[0] != 'q' || y[0] != 'p') return false;
+    t = "z";                                // long -> short by assignment
+    if (t != "z" || t.size() != 1) return false;
+    string m = std::move(w);                // move: steals the allocation
+    if (m.size() != 40 || m[39] != 'q') return false;
+    string n2 = "small", n3 = std::move(n2);   // move: copies the buffer
+    if (n3 != "small") return false;
+    return true;
+}
+
+// 4. modifiers, in place and through a reallocation
+constexpr bool Modifiers()
+{
+    string s = "hello world";
+    s.insert(5, ",");
+    if (s != "hello, world") return false;
+    s.erase(5, 1);
+    if (s != "hello world") return false;
+    s.replace(0, 5, "HELLO");
+    if (s != "HELLO world") return false;
+    s.replace(6, 5, "there, everyone");     // grows past the old capacity
+    if (s != "HELLO there, everyone") return false;
+    s.pop_back();
+    if (s.back() != 'n') return false;
+    s.clear();
+    if (!s.empty()) return false;
+    s.assign(3, 'q');
+    if (s != "qqq") return false;
+    s.resize(5, 'w');
+    if (s != "qqqww") return false;
+    s.insert(s.begin() + 1, 'Z');
+    if (s != "qZqqww") return false;
+    s.erase(s.begin());
+    if (s != "Zqqww") return false;
+    s.erase(s.begin(), s.begin() + 2);
+    if (s != "qww") return false;
+    return true;
+}
+
+// 5. a source that points INTO the string being modified -- the one question
+//    SelfOffset exists to answer, asked in all three of its callers and on
+//    both sides of a reallocation.
+constexpr bool SelfAliasing()
+{
+    string a = "abcdef";
+    a.append(a.data(), a.size());           // fits: no reallocation
+    if (a != "abcdefabcdef") return false;
+
+    string b = "0123456789abcde";           // exactly the inline capacity
+    b.append(b.data(), b.size());           // must reallocate mid-flight
+    if (b != "0123456789abcde0123456789abcde") return false;
+
+    string c = "abcdef";
+    c.insert(2, c.data(), 3);               // source before the gap, in place
+    if (c != "ababccdef") return false;
+
+    string d = "abcdef";
+    d.insert(4, d.data() + 1, 3);           // source straddles the gap
+    if (d != "abcdbcdef") return false;
+
+    string e = "0123456789abcde";
+    e.insert(3, e.data(), 8);               // aliasing AND reallocating
+    if (e != "012012345673456789abcde") return false;
+
+    string f = "abcdefgh";
+    f.replace(1, 2, f.data() + 4, 3);       // aliasing replace, in place
+    if (f != "aefgdefgh") return false;
+
+    string g = "abcdefgh";
+    g.replace(2, 3, g.data(), 8);           // aliasing replace, reallocating
+    if (g != "ababcdefghfgh") return false;
+    return true;
+}
+
+// 6. the search family, which runs on basic_string_view over the string's
+//    own storage -- allocated storage, where the two builtins cannot see
+constexpr bool Search()
+{
+    string s = "the quick brown fox jumps over the lazy dog";
+    if (s.find("quick") != 4) return false;
+    if (s.find("quick", 5) != string::npos) return false;
+    if (s.rfind("the") != 31) return false;
+    if (s.find_first_of("xyz") != 18) return false;
+    if (s.find_last_of("aeiou") != 41) return false;
+    if (s.find_first_not_of("the ") != 4) return false;
+    if (s.find_last_not_of("dog") != 39) return false;
+    if (s.find('z') != 37) return false;
+    if (!s.starts_with("the") || !s.ends_with("dog")) return false;
+    if (!s.contains("brown") || s.contains("cat")) return false;
+    if (s.compare(0, 3, "the") != 0) return false;
+    if (s.compare("the quick brown fox jumps over the lazy dog") != 0)
+        return false;
+    if (s.subview(4, 5) != "quick") return false;
+    return true;
+}
+
+// 7. iterators, and the constructors that take a pair of them
+constexpr bool Iterators()
+{
+    string s = "abcdef";
+    int n = 0;
+    for (char c : s) n += c;
+    if (n != 'a' + 'b' + 'c' + 'd' + 'e' + 'f') return false;
+    string r(s.rbegin(), s.rend());
+    if (r != "fedcba") return false;
+    string q(s.begin() + 1, s.begin() + 3);
+    if (q != "bc") return false;
+    if (*s.cbegin() != 'a' || *(s.cend() - 1) != 'f') return false;
+    if (*s.crbegin() != 'f') return false;
+    string il = {'x', 'y', 'z'};
+    if (il != "xyz") return false;
+    return true;
+}
+
+// 8. the non-member surface [string.syn] declares constexpr
+constexpr bool NonMembers()
+{
+    string a = "foo", b = "bar";
+    if (a + b != "foobar") return false;
+    if (a + "!" != "foo!") return false;
+    if ("!" + a != "!foo") return false;
+    if (a + '!' != "foo!") return false;
+    if ('!' + a != "!foo") return false;
+    if (string("x") + string("y") != "xy") return false;
+    if (string("x") + "y" != "xy") return false;
+    if ("x" + string("y") != "xy") return false;
+    if (a + std::string_view("sv") != "foosv") return false;
+    if (std::string_view("sv") + a != "svfoo") return false;
+    if ((a <=> b) <= 0 || (b <=> a) >= 0 || (a <=> a) != 0) return false;
+    if (a == b || !(a == "foo")) return false;
+    string c = "banana";
+    if (std::erase(c, 'a') != 3 || c != "bnn") return false;
+    string d = "abcdef";
+    if (std::erase_if(d, [](char ch) { return ch % 2 == 0; }) != 3) return false;
+    if (d != "ace") return false;
+    string e = "one", f = "two";
+    std::swap(e, f);
+    if (e != "two" || f != "one") return false;
+    return true;
+}
+
+constexpr bool Udl()
+{
+    using namespace std::string_literals;
+    auto s = "hi"s;
+    return s.size() == 2 && s == "hi" && (U"hi"s).size() == 2;
+}
+
+// 9. the C++20/23 members
+constexpr bool Modern()
+{
+    string s;
+    s.resize_and_overwrite(8, [](char *p, std::size_t n) {
+        for (std::size_t i = 0; i < n; ++i) p[i] = char('0' + i);
+        return 5;
+    });
+    if (s != "01234") return false;
+    char buf[4] = {};
+    if (s.copy(buf, 3, 1) != 3) return false;
+    if (buf[0] != '1' || buf[2] != '3') return false;
+    string r(std::from_range, std::string_view("ab"));
+    if (r != "ab") return false;
+    r.append_range(std::string_view("c"));
+    if (r != "abc") return false;
+    r.assign_range(std::string_view("z"));
+    if (r != "z") return false;
+    return true;
+}
+
+// 10. the character types that are not char
+constexpr bool OtherChars()
+{
+    std::u32string s = U"abc";
+    s += U"def";
+    if (s.size() != 6 || s[3] != U'd') return false;
+    std::u16string t(40, u'x');             // long, so it allocates
+    if (t.size() != 40 || t[39] != u'x') return false;
+    std::u8string u = u8"hi";
+    std::wstring w = L"wide";
+    return u.size() == 2 && w.size() == 4 && w[0] == L'w';
+}
+
+// 11. char_traits<char>::move, both overlap directions and neither
+constexpr bool TraitsMove()
+{
+    char buf[8] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};
+    std::char_traits<char>::move(buf + 2, buf, 4);       // dst above src
+    if (buf[2] != 'a' || buf[5] != 'd' || buf[0] != 'a') return false;
+    char b2[8] = {'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'};
+    std::char_traits<char>::move(b2, b2 + 2, 4);         // dst below src
+    if (b2[0] != 'c' || b2[3] != 'f') return false;
+    char b3[4] = {'w', 'x', 'y', 'z'};
+    char b4[4] = {};
+    std::char_traits<char>::move(b4, b3, 4);             // no overlap at all
+    if (b4[0] != 'w' || b4[3] != 'z') return false;
+    return std::char_traits<char>::compare(b3, "wxyz", 4) == 0 &&
+           std::char_traits<char>::length("wxyz") == 4;
+}
+
+// 12. the hole this phase found: a view over storage the allocator handed
+//     out during constant evaluation. Both mainstream libraries fold this;
+//     boxcxx did not, because char_traits<char> reached for two builtins
+//     GCC cannot see through.
+constexpr bool ViewOverAllocatorStorage()
+{
+    std::allocator<char> a;
+    char *p = a.allocate(6);
+    for (int i = 0; i < 5; ++i) std::construct_at(p + i, char('a' + i));
+    std::construct_at(p + 5, '\0');
+    std::string_view v(p);                  // char_traits::length
+    bool ok = v.size() == 5 && v == "abcde" &&   // char_traits::compare
+              v.find("cd") == 2;
+    std::destroy(p, p + 6);
+    a.deallocate(p, 6);
+    return ok;
+}
+
+// 13. a string that IS a constant, not one a constant expression computed.
+//     Short only: a long one owns an allocation, and no allocation outlives
+//     constant evaluation -- true of libstdc++ and libc++ as well, measured.
+constexpr string kConst = "boxos";
+static_assert(kConst.size() == 5, "phase196 a constexpr string variable");
+static_assert(kConst[0] == 'b' && kConst[4] == 's', "phase196 ...with content");
+static_assert(kConst == "boxos", "phase196 ...that compares");
+static_assert(kConst.find('x') == 2, "phase196 ...and searches");
+static_assert(std::string_view(kConst) == "boxos", "phase196 ...and views");
+
+} // namespace p196
+
+void Phase196()
+{
+    // Each scenario, both ways: the static_assert takes the constant-
+    // evaluated branches, the Check takes the run-time ones.
+    static_assert(p196::Short(), "phase196 short strings (compile time)");
+    Check(p196::Short(), "phase196 short strings (run time)");
+    static_assert(p196::Long(), "phase196 long strings (compile time)");
+    Check(p196::Long(), "phase196 long strings (run time)");
+    static_assert(p196::Transitions(), "phase196 transitions (compile time)");
+    Check(p196::Transitions(), "phase196 transitions (run time)");
+    static_assert(p196::Modifiers(), "phase196 modifiers (compile time)");
+    Check(p196::Modifiers(), "phase196 modifiers (run time)");
+    static_assert(p196::SelfAliasing(), "phase196 self-aliasing (compile time)");
+    Check(p196::SelfAliasing(), "phase196 self-aliasing (run time)");
+    static_assert(p196::Search(), "phase196 search family (compile time)");
+    Check(p196::Search(), "phase196 search family (run time)");
+    static_assert(p196::Iterators(), "phase196 iterators (compile time)");
+    Check(p196::Iterators(), "phase196 iterators (run time)");
+    static_assert(p196::NonMembers(), "phase196 non-members (compile time)");
+    Check(p196::NonMembers(), "phase196 non-members (run time)");
+    static_assert(p196::Udl(), "phase196 operator\"\"s (compile time)");
+    Check(p196::Udl(), "phase196 operator\"\"s (run time)");
+    static_assert(p196::Modern(), "phase196 C++20/23 members (compile time)");
+    Check(p196::Modern(), "phase196 C++20/23 members (run time)");
+    static_assert(p196::OtherChars(), "phase196 other char types (compile time)");
+    Check(p196::OtherChars(), "phase196 other char types (run time)");
+    static_assert(p196::TraitsMove(), "phase196 char_traits::move (compile time)");
+    Check(p196::TraitsMove(), "phase196 char_traits::move (run time)");
+    static_assert(p196::ViewOverAllocatorStorage(),
+                  "phase196 string_view over allocator storage (compile time)");
+    Check(p196::ViewOverAllocatorStorage(),
+          "phase196 string_view over allocator storage (run time)");
+
+    // The constant object is not merely readable at compile time: it is a
+    // real object with an address, and the characters live in the image.
+    Check(p196::kConst.size() == 5 && p196::kConst == "boxos",
+          "phase196 the constexpr string variable is readable at run time too");
+
+    static_assert(__cpp_lib_constexpr_string == 201907L,
+                  "phase196 __cpp_lib_constexpr_string is P0980R1's value");
+
+    printf("[CXX] PASS phase196: <string> is constexpr, inline buffer included\n");
+}
+
+// ── phase197: <bitset>'s string members in constant evaluation ──────────
+// P2417R2 asks for a constexpr bitset. Every bit operation here already was;
+// the string-taking constructor and both to_string() forms could not be,
+// because they touch basic_string. Nothing in <bitset> changed in Ф39 -- the
+// blocker was one layer down, and this phase is what says so out loud.
+namespace p197 {
+
+constexpr bool StringCtor()
+{
+    std::bitset<4> b(std::string("1011"));
+    if (b.to_ulong() != 11) return false;
+    std::bitset<4> c(std::string("ab"), 0, 2, 'a', 'b');   // zero='a', one='b'
+    if (c.to_ulong() != 1) return false;
+    std::bitset<8> d(std::string("11110000xxx"), 0, 8);
+    if (d.to_ulong() != 0xF0) return false;
+    std::bitset<8> e(std::string("XX1111"), 2);            // pos, then the rest
+    return e.to_ulong() == 0x0F;
+}
+
+constexpr bool ToString()
+{
+    std::bitset<8> b(0xA5ull);
+    if (b.to_string() != "10100101") return false;
+    if (b.to_string('.', '#') != "#.#..#.#") return false;
+    std::bitset<70> wide(1ull);
+    auto s = wide.to_string();              // 70 characters: it allocates
+    return s.size() == 70 && s[69] == '1' && s[0] == '0';
+}
+
+constexpr bool Zero()
+{
+    std::bitset<0> b(std::string(""));
+    return b.to_string().empty() && b.count() == 0;
+}
+
+} // namespace p197
+
+void Phase197()
+{
+    static_assert(p197::StringCtor(), "phase197 bitset(string) (compile time)");
+    Check(p197::StringCtor(), "phase197 bitset(string) (run time)");
+    static_assert(p197::ToString(), "phase197 to_string() (compile time)");
+    Check(p197::ToString(), "phase197 to_string() (run time)");
+    static_assert(p197::Zero(), "phase197 bitset<0> (compile time)");
+    Check(p197::Zero(), "phase197 bitset<0> (run time)");
+
+    static_assert(__cpp_lib_constexpr_bitset == 202207L,
+                  "phase197 __cpp_lib_constexpr_bitset is P2417R2's value");
+
+    printf("[CXX] PASS phase197: <bitset>'s string members in constant evaluation\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -44135,6 +44517,8 @@ int main()
     Phase193();
     Phase194();
     Phase195();
+    Phase196();
+    Phase197();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -42,6 +42,15 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф39 raised it 162 -> 163, and the delta is ONE macro:
+#           __cpp_lib_constexpr_string, owned by <string>, which almost
+#           everything includes -- it leaks into 20-odd headers and they are
+#           all headers that were already taking <string>'s other macros.
+#           Measured as a set difference: with the phase's <string> changes
+#           in place but the macro still undefined the count was 162.
+#           __cpp_lib_constexpr_bitset, defined in the same commit, leaks
+#           nowhere at all: nothing in the tree includes <bitset>.
+#
 #           Ф38 raised it 161 -> 162, and the delta is ONE macro:
 #           __cpp_lib_make_obj_using_allocator, owned by <memory>, which
 #           nearly every container pulls in. Measured as a set difference
@@ -64,7 +73,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=162
+LEAK_BUDGET=163
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

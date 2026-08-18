@@ -5,10 +5,14 @@
 // find/compare family delegates to basic_string_view — one algorithm
 // set, two types.
 //
-// Deferred (tracked in the epic's leftovers): constexpr strings (needs
-// the compiler-blessed constexpr allocator). to_string/stof/stod/stold
-// (Ф9A-2/9A-3) are wired on <charconv>; the integer sto* family below is
-// wired on <charconv> too.
+// P0980R1 (Ф39): the whole class is constexpr, SSO included, so a string
+// short enough to live in the inline buffer can be a constant object and not
+// merely a value computed at compile time. The one thing that took care is
+// the union: see BeginSso() below. A LONG string cannot be a constexpr
+// variable -- its characters come from an allocation, and no allocation
+// outlives constant evaluation -- which is also true of both mainstream
+// libraries, measured. to_string/stof/stod/stold (Ф9A-2/9A-3) are wired on
+// <charconv> and stay run-time-only, as the standard has them.
 //
 // [string.io] (Ф30e commit 4): operator<</operator>>/getline are declared
 // below using ONLY <iosfwd> (a forward-declared basic_ostream/
@@ -48,6 +52,7 @@
 #include <__bits/version_algorithm>   // algorithm_default_value_type
 #define BOXCXX_OWNS_nonmember_container_access
 #include <__bits/version_iterator>
+#define BOXCXX_OWNS_constexpr_string
 #define BOXCXX_OWNS_starts_ends_with
 #define BOXCXX_OWNS_string_contains
 #define BOXCXX_OWNS_string_resize_and_overwrite
@@ -96,22 +101,25 @@ private:
 public:
     // ── constructors ────────────────────────────────────────────────────
 
-    basic_string() noexcept(noexcept(Alloc())) : basic_string(Alloc()) {}
-    explicit basic_string(const Alloc &a) noexcept : __alloc(a)
+    constexpr basic_string() noexcept(noexcept(Alloc())) : basic_string(Alloc())
+    {
+    }
+    constexpr explicit basic_string(const Alloc &a) noexcept : __alloc(a)
     {
         SetShort(0);
     }
 
-    basic_string(size_type count, C ch, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr basic_string(size_type count, C ch, const Alloc &a = Alloc())
+        : __alloc(a)
     {
         InitFill(count, ch);
     }
-    basic_string(const C *s, size_type n, const Alloc &a = Alloc())
+    constexpr basic_string(const C *s, size_type n, const Alloc &a = Alloc())
         : __alloc(a)
     {
         InitCopy(s, n);
     }
-    basic_string(const C *s, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr basic_string(const C *s, const Alloc &a = Alloc()) : __alloc(a)
     {
         InitCopy(s, Traits::length(s));
     }
@@ -125,7 +133,8 @@ public:
     // The pointer branch cannot leak anyway — InitCopy allocates last, and
     // both of its throw points (the length check, the allocation) happen
     // before anything is owned.
-    basic_string(It first, It last, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr basic_string(It first, It last, const Alloc &a = Alloc())
+        : __alloc(a)
     {
         if constexpr (is_pointer_v<It>) {
             InitCopy(first, static_cast<size_type>(last - first));
@@ -140,13 +149,15 @@ public:
         }
     }
 
-    basic_string(initializer_list<C> il, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr basic_string(initializer_list<C> il, const Alloc &a = Alloc())
+        : __alloc(a)
     {
         InitCopy(il.begin(), il.size());
     }
 
     template <ContainerCompatibleRange<C> R>
-    basic_string(from_range_t, R &&rg, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr basic_string(from_range_t, R &&rg, const Alloc &a = Alloc())
+        : __alloc(a)
     {
         SetShort(0);
         try {
@@ -159,45 +170,47 @@ public:
 
     template <typename SV>
         requires IsViewLike<SV>
-    explicit basic_string(const SV &t, const Alloc &a = Alloc()) : __alloc(a)
+    constexpr explicit basic_string(const SV &t, const Alloc &a = Alloc())
+        : __alloc(a)
     {
         __view v(t);
         InitCopy(v.data(), v.size());
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string(const SV &t, size_type pos, size_type n,
-                 const Alloc &a = Alloc())
+    constexpr basic_string(const SV &t, size_type pos, size_type n,
+                           const Alloc &a = Alloc())
         : __alloc(a)
     {
         __view v = __view(t).substr(pos, n);
         InitCopy(v.data(), v.size());
     }
 
-    basic_string(const basic_string &other)
+    constexpr basic_string(const basic_string &other)
         : __alloc(AllocTraits::select_on_container_copy_construction(
               other.__alloc))
     {
         InitCopy(other.__data, other.__size);
     }
-    basic_string(const basic_string &other, const Alloc &a) : __alloc(a)
+    constexpr basic_string(const basic_string &other, const Alloc &a)
+        : __alloc(a)
     {
         InitCopy(other.__data, other.__size);
     }
-    basic_string(const basic_string &other, size_type pos,
-                 size_type n = npos, const Alloc &a = Alloc())
+    constexpr basic_string(const basic_string &other, size_type pos,
+                           size_type n = npos, const Alloc &a = Alloc())
         : __alloc(a)
     {
         __view v = __view(other).substr(pos, n);
         InitCopy(v.data(), v.size());
     }
 
-    basic_string(basic_string &&other) noexcept
+    constexpr basic_string(basic_string &&other) noexcept
         : __alloc(std::move(other.__alloc))
     {
         StealFrom(other);
     }
-    basic_string(basic_string &&other, const Alloc &a) : __alloc(a)
+    constexpr basic_string(basic_string &&other, const Alloc &a) : __alloc(a)
     {
         if (AllocTraits::is_always_equal::value || a == other.__alloc) {
             StealFrom(other);
@@ -210,11 +223,11 @@ public:
         }
     }
 
-    ~basic_string() { DropStorage(); }
+    constexpr ~basic_string() { DropStorage(); }
 
     // ── assignment ──────────────────────────────────────────────────────
 
-    basic_string &operator=(const basic_string &other)
+    constexpr basic_string &operator=(const basic_string &other)
     {
         if (this == &other) return *this;
         if constexpr (AllocTraits::propagate_on_container_copy_assignment::
@@ -230,7 +243,7 @@ public:
         return assign(other.__data, other.__size);
     }
 
-    basic_string &operator=(basic_string &&other) noexcept(
+    constexpr basic_string &operator=(basic_string &&other) noexcept(
         AllocTraits::propagate_on_container_move_assignment::value ||
         AllocTraits::is_always_equal::value)
     {
@@ -252,22 +265,25 @@ public:
         return *this;
     }
 
-    basic_string &operator=(const C *s) { return assign(s, Traits::length(s)); }
-    basic_string &operator=(C ch) { return assign(&ch, 1); }
-    basic_string &operator=(initializer_list<C> il)
+    constexpr basic_string &operator=(const C *s)
+    {
+        return assign(s, Traits::length(s));
+    }
+    constexpr basic_string &operator=(C ch) { return assign(&ch, 1); }
+    constexpr basic_string &operator=(initializer_list<C> il)
     {
         return assign(il.begin(), il.size());
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &operator=(const SV &t)
+    constexpr basic_string &operator=(const SV &t)
     {
         __view v(t);
         return assign(v.data(), v.size());
     }
     basic_string &operator=(nullptr_t) = delete;
 
-    basic_string &assign(const C *s, size_type n)
+    constexpr basic_string &assign(const C *s, size_type n)
     {
         // s may alias *this (self-assign substrings) — Traits::move.
         if (n > capacity()) {
@@ -279,132 +295,147 @@ public:
         SetSize(n);
         return *this;
     }
-    basic_string &assign(const C *s) { return assign(s, Traits::length(s)); }
-    basic_string &assign(const basic_string &other)
+    constexpr basic_string &assign(const C *s)
+    {
+        return assign(s, Traits::length(s));
+    }
+    constexpr basic_string &assign(const basic_string &other)
     {
         return assign(other.__data, other.__size);
     }
-    basic_string &assign(basic_string &&other) noexcept(
+    constexpr basic_string &assign(basic_string &&other) noexcept(
         noexcept(declval<basic_string &>() = std::move(other)))
     {
         return *this = std::move(other);
     }
-    basic_string &assign(size_type count, C ch)
+    constexpr basic_string &assign(size_type count, C ch)
     {
         if (count > capacity()) Reallocate(count, 0);
         Traits::assign(__data, count, ch);
         SetSize(count);
         return *this;
     }
-    basic_string &assign(initializer_list<C> il)
+    constexpr basic_string &assign(initializer_list<C> il)
     {
         return assign(il.begin(), il.size());
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &assign(const SV &t)
+    constexpr basic_string &assign(const SV &t)
     {
         __view v(t);
         return assign(v.data(), v.size());
     }
     template <ContainerCompatibleRange<C> R>
-    basic_string &assign_range(R &&rg)
+    constexpr basic_string &assign_range(R &&rg)
     {
         return assign(basic_string(from_range, std::forward<R>(rg), get_allocator()));
     }
 
-    allocator_type get_allocator() const noexcept { return __alloc; }
+    constexpr allocator_type get_allocator() const noexcept { return __alloc; }
 
     // ── element access ──────────────────────────────────────────────────
 
-    reference operator[](size_type i) { return __data[i]; }
-    const_reference operator[](size_type i) const { return __data[i]; }
-    reference at(size_type i)
+    constexpr reference operator[](size_type i) { return __data[i]; }
+    constexpr const_reference operator[](size_type i) const
+    {
+        return __data[i];
+    }
+    constexpr reference at(size_type i)
     {
         if (i >= __size) boxcxx::ThrowOutOfRange("string::at");
         return __data[i];
     }
-    const_reference at(size_type i) const
+    constexpr const_reference at(size_type i) const
     {
         if (i >= __size) boxcxx::ThrowOutOfRange("string::at");
         return __data[i];
     }
-    reference front() { return __data[0]; }
-    const_reference front() const { return __data[0]; }
-    reference back() { return __data[__size - 1]; }
-    const_reference back() const { return __data[__size - 1]; }
-    C *data() noexcept { return __data; }
-    const C *data() const noexcept { return __data; }
-    const C *c_str() const noexcept { return __data; }
-    operator __view() const noexcept { return __view(__data, __size); }
+    constexpr reference front() { return __data[0]; }
+    constexpr const_reference front() const { return __data[0]; }
+    constexpr reference back() { return __data[__size - 1]; }
+    constexpr const_reference back() const { return __data[__size - 1]; }
+    constexpr C *data() noexcept { return __data; }
+    constexpr const C *data() const noexcept { return __data; }
+    constexpr const C *c_str() const noexcept { return __data; }
+    constexpr operator __view() const noexcept
+    {
+        return __view(__data, __size);
+    }
 
     // ── iterators ───────────────────────────────────────────────────────
 
-    iterator begin() noexcept { return __data; }
-    const_iterator begin() const noexcept { return __data; }
-    const_iterator cbegin() const noexcept { return __data; }
-    iterator end() noexcept { return __data + __size; }
-    const_iterator end() const noexcept { return __data + __size; }
-    const_iterator cend() const noexcept { return __data + __size; }
-    reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
-    const_reverse_iterator rbegin() const noexcept
+    constexpr iterator begin() noexcept { return __data; }
+    constexpr const_iterator begin() const noexcept { return __data; }
+    constexpr const_iterator cbegin() const noexcept { return __data; }
+    constexpr iterator end() noexcept { return __data + __size; }
+    constexpr const_iterator end() const noexcept { return __data + __size; }
+    constexpr const_iterator cend() const noexcept { return __data + __size; }
+    constexpr reverse_iterator rbegin() noexcept
+    {
+        return reverse_iterator(end());
+    }
+    constexpr const_reverse_iterator rbegin() const noexcept
     {
         return const_reverse_iterator(end());
     }
-    reverse_iterator rend() noexcept { return reverse_iterator(begin()); }
-    const_reverse_iterator rend() const noexcept
+    constexpr reverse_iterator rend() noexcept
+    {
+        return reverse_iterator(begin());
+    }
+    constexpr const_reverse_iterator rend() const noexcept
     {
         return const_reverse_iterator(begin());
     }
-    const_reverse_iterator crbegin() const noexcept
+    constexpr const_reverse_iterator crbegin() const noexcept
     {
         return const_reverse_iterator(cend());
     }
-    const_reverse_iterator crend() const noexcept
+    constexpr const_reverse_iterator crend() const noexcept
     {
         return const_reverse_iterator(cbegin());
     }
 
     // ── capacity ────────────────────────────────────────────────────────
 
-    [[nodiscard]] bool empty() const noexcept { return __size == 0; }
-    size_type size() const noexcept { return __size; }
-    size_type length() const noexcept { return __size; }
-    size_type max_size() const noexcept
+    [[nodiscard]] constexpr bool empty() const noexcept { return __size == 0; }
+    constexpr size_type size() const noexcept { return __size; }
+    constexpr size_type length() const noexcept { return __size; }
+    constexpr size_type max_size() const noexcept
     {
         return (size_type(-1) / sizeof(C)) / 2;
     }
-    size_type capacity() const noexcept
+    constexpr size_type capacity() const noexcept
     {
         return IsLong() ? __cap : kSsoChars;
     }
 
-    void reserve(size_type want)
+    constexpr void reserve(size_type want)
     {
         if (want > capacity()) Reallocate(want, __size);
     }
 
-    void shrink_to_fit()
+    constexpr void shrink_to_fit()
     {
         if (!IsLong() || __size == __cap) return;
         basic_string tmp(__data, __size, __alloc);
         swap(tmp);
     }
 
-    void clear() noexcept { SetSize(0); }
+    constexpr void clear() noexcept { SetSize(0); }
 
     // ── modifiers ───────────────────────────────────────────────────────
 
-    void push_back(C ch)
+    constexpr void push_back(C ch)
     {
         if (__size == capacity()) Reallocate(GrownCapacity(__size + 1), __size);
         Traits::assign(__data[__size], ch);
         SetSize(__size + 1);
     }
 
-    void pop_back() { SetSize(__size - 1); }
+    constexpr void pop_back() { SetSize(__size - 1); }
 
-    basic_string &append(const C *s, size_type n)
+    constexpr basic_string &append(const C *s, size_type n)
     {
         if (__size + n > capacity()) {
             // s may point into *this — reallocation invalidates it.
@@ -416,18 +447,21 @@ public:
         SetSize(__size + n);
         return *this;
     }
-    basic_string &append(const C *s) { return append(s, Traits::length(s)); }
-    basic_string &append(const basic_string &other)
+    constexpr basic_string &append(const C *s)
+    {
+        return append(s, Traits::length(s));
+    }
+    constexpr basic_string &append(const basic_string &other)
     {
         return append(other.__data, other.__size);
     }
-    basic_string &append(const basic_string &other, size_type pos,
-                         size_type n = npos)
+    constexpr basic_string &append(const basic_string &other, size_type pos,
+                                   size_type n = npos)
     {
         __view v = __view(other).substr(pos, n);
         return append(v.data(), v.size());
     }
-    basic_string &append(size_type count, C ch)
+    constexpr basic_string &append(size_type count, C ch)
     {
         if (__size + count > capacity())
             Reallocate(GrownCapacity(__size + count), __size);
@@ -435,39 +469,45 @@ public:
         SetSize(__size + count);
         return *this;
     }
-    basic_string &append(initializer_list<C> il)
+    constexpr basic_string &append(initializer_list<C> il)
     {
         return append(il.begin(), il.size());
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &append(const SV &t)
+    constexpr basic_string &append(const SV &t)
     {
         __view v(t);
         return append(v.data(), v.size());
     }
     template <ContainerCompatibleRange<C> R>
-    basic_string &append_range(R &&rg)
+    constexpr basic_string &append_range(R &&rg)
     {
         return append(basic_string(from_range, std::forward<R>(rg), get_allocator()));
     }
 
-    basic_string &operator+=(const basic_string &other) { return append(other); }
-    basic_string &operator+=(const C *s) { return append(s); }
-    basic_string &operator+=(C ch)
+    constexpr basic_string &operator+=(const basic_string &other)
+    {
+        return append(other);
+    }
+    constexpr basic_string &operator+=(const C *s) { return append(s); }
+    constexpr basic_string &operator+=(C ch)
     {
         push_back(ch);
         return *this;
     }
-    basic_string &operator+=(initializer_list<C> il) { return append(il); }
+    constexpr basic_string &operator+=(initializer_list<C> il)
+    {
+        return append(il);
+    }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &operator+=(const SV &t)
+    constexpr basic_string &operator+=(const SV &t)
     {
         return append(t);
     }
 
-    basic_string &insert(size_type pos, const C *s, size_type n)
+    constexpr basic_string &insert(size_type pos, const C *s, size_type n)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::insert");
         if (n == 0) return *this;
@@ -500,15 +540,15 @@ public:
         SetSize(__size + n);
         return *this;
     }
-    basic_string &insert(size_type pos, const C *s)
+    constexpr basic_string &insert(size_type pos, const C *s)
     {
         return insert(pos, s, Traits::length(s));
     }
-    basic_string &insert(size_type pos, const basic_string &other)
+    constexpr basic_string &insert(size_type pos, const basic_string &other)
     {
         return insert(pos, other.__data, other.__size);
     }
-    basic_string &insert(size_type pos, size_type count, C ch)
+    constexpr basic_string &insert(size_type pos, size_type count, C ch)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::insert");
         if (count == 0) return *this;
@@ -519,7 +559,7 @@ public:
         SetSize(__size + count);
         return *this;
     }
-    iterator insert(const_iterator where, C ch)
+    constexpr iterator insert(const_iterator where, C ch)
     {
         size_type pos = static_cast<size_type>(where - __data);
         insert(pos, 1, ch);
@@ -527,20 +567,20 @@ public:
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &insert(size_type pos, const SV &t)
+    constexpr basic_string &insert(size_type pos, const SV &t)
     {
         __view v(t);
         return insert(pos, v.data(), v.size());
     }
     template <ContainerCompatibleRange<C> R>
-    iterator insert_range(const_iterator p, R &&rg)
+    constexpr iterator insert_range(const_iterator p, R &&rg)
     {
         size_type pos = static_cast<size_type>(p - __data);
         insert(pos, basic_string(from_range, std::forward<R>(rg), get_allocator()));
         return __data + pos;
     }
 
-    basic_string &erase(size_type pos = 0, size_type count = npos)
+    constexpr basic_string &erase(size_type pos = 0, size_type count = npos)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::erase");
         size_type n = count < __size - pos ? count : __size - pos;
@@ -548,21 +588,21 @@ public:
         SetSize(__size - n);
         return *this;
     }
-    iterator erase(const_iterator where)
+    constexpr iterator erase(const_iterator where)
     {
         size_type pos = static_cast<size_type>(where - __data);
         erase(pos, 1);
         return __data + pos;
     }
-    iterator erase(const_iterator first, const_iterator last)
+    constexpr iterator erase(const_iterator first, const_iterator last)
     {
         size_type pos = static_cast<size_type>(first - __data);
         erase(pos, static_cast<size_type>(last - first));
         return __data + pos;
     }
 
-    basic_string &replace(size_type pos, size_type count, const C *s,
-                          size_type n)
+    constexpr basic_string &replace(size_type pos, size_type count, const C *s,
+                                    size_type n)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::replace");
         size_type erased   = count < __size - pos ? count : __size - pos;
@@ -596,16 +636,17 @@ public:
         SetSize(new_size);
         return *this;
     }
-    basic_string &replace(size_type pos, size_type count, const C *s)
+    constexpr basic_string &replace(size_type pos, size_type count, const C *s)
     {
         return replace(pos, count, s, Traits::length(s));
     }
-    basic_string &replace(size_type pos, size_type count,
-                          const basic_string &other)
+    constexpr basic_string &replace(size_type pos, size_type count,
+                                    const basic_string &other)
     {
         return replace(pos, count, other.__data, other.__size);
     }
-    basic_string &replace(size_type pos, size_type count, size_type n, C ch)
+    constexpr basic_string &replace(size_type pos, size_type count, size_type n,
+                                    C ch)
     {
         if (pos > __size) boxcxx::ThrowOutOfRange("string::replace");
         size_type erased = count < __size - pos ? count : __size - pos;
@@ -615,7 +656,7 @@ public:
     }
     template <typename SV>
         requires IsViewLike<SV>
-    basic_string &replace(size_type pos, size_type count, const SV &t)
+    constexpr basic_string &replace(size_type pos, size_type count, const SV &t)
     {
         __view v(t);
         return replace(pos, count, v.data(), v.size());
@@ -624,19 +665,20 @@ public:
     // while surveying <string>'s range members) — same delegate-through-a-
     // temporary shape as insert_range/append_range above.
     template <ContainerCompatibleRange<C> R>
-    basic_string &replace_with_range(const_iterator i1, const_iterator i2, R &&rg)
+    constexpr basic_string &replace_with_range(const_iterator i1,
+                                               const_iterator i2, R &&rg)
     {
         size_type pos   = static_cast<size_type>(i1 - __data);
         size_type count = static_cast<size_type>(i2 - i1);
         return replace(pos, count, basic_string(from_range, std::forward<R>(rg), get_allocator()));
     }
 
-    void resize(size_type n, C ch)
+    constexpr void resize(size_type n, C ch)
     {
         if (n > __size) append(n - __size, ch);
         else SetSize(n);
     }
-    void resize(size_type n) { resize(n, C()); }
+    constexpr void resize(size_type n) { resize(n, C()); }
 
     // P1072R10 ([string.capacity]): grow to n and let the caller fill the raw
     // buffer, then TRUNCATE to what it says it wrote. The point is the one
@@ -646,7 +688,7 @@ public:
     // string; a returned length above n is undefined, so it is caught here
     // rather than silently trusted.
     template <typename Op>
-    void resize_and_overwrite(size_type n, Op op)
+    constexpr void resize_and_overwrite(size_type n, Op op)
     {
         reserve(n);
         size_type old = __size;
@@ -663,12 +705,12 @@ public:
         SetSize(written);
     }
 
-    size_type copy(C *dst, size_type count, size_type pos = 0) const
+    constexpr size_type copy(C *dst, size_type count, size_type pos = 0) const
     {
         return __view(*this).copy(dst, count, pos);
     }
 
-    void swap(basic_string &other) noexcept(
+    constexpr void swap(basic_string &other) noexcept(
         AllocTraits::propagate_on_container_swap::value ||
         AllocTraits::is_always_equal::value)
     {
@@ -697,6 +739,10 @@ public:
             basic_string &sso = l1 ? other : *this;
             C *d = lng.__data;
             size_type cap = lng.__cap;
+            // lng's union holds __cap right now; the copy below writes the
+            // inline buffer through a pointer, so its lifetime has to start
+            // first -- and only after cap has been read out of it.
+            lng.BeginSso();
             Traits::copy(lng.__sso, sso.__sso, sso.__size + 1);
             lng.__data = lng.__sso;
             sso.__data = d;
@@ -708,120 +754,141 @@ public:
 
     // ── search / comparison (delegated to string_view) ──────────────────
 
-    size_type find(__view v, size_type pos = 0) const noexcept
+    constexpr size_type find(__view v, size_type pos = 0) const noexcept
     {
         return __view(*this).find(v, pos);
     }
-    size_type find(C c, size_type pos = 0) const noexcept
+    constexpr size_type find(C c, size_type pos = 0) const noexcept
     {
         return __view(*this).find(c, pos);
     }
-    size_type find(const C *s, size_type pos = 0) const
+    constexpr size_type find(const C *s, size_type pos = 0) const
     {
         return __view(*this).find(s, pos);
     }
-    size_type find(const C *s, size_type pos, size_type n) const
+    constexpr size_type find(const C *s, size_type pos, size_type n) const
     {
         return __view(*this).find(s, pos, n);
     }
-    size_type rfind(__view v, size_type pos = npos) const noexcept
+    constexpr size_type rfind(__view v, size_type pos = npos) const noexcept
     {
         return __view(*this).rfind(v, pos);
     }
-    size_type rfind(C c, size_type pos = npos) const noexcept
+    constexpr size_type rfind(C c, size_type pos = npos) const noexcept
     {
         return __view(*this).rfind(c, pos);
     }
-    size_type rfind(const C *s, size_type pos = npos) const
+    constexpr size_type rfind(const C *s, size_type pos = npos) const
     {
         return __view(*this).rfind(s, pos);
     }
-    size_type find_first_of(__view v, size_type pos = 0) const noexcept
+    constexpr size_type find_first_of(__view v,
+                                      size_type pos = 0) const noexcept
     {
         return __view(*this).find_first_of(v, pos);
     }
-    size_type find_first_of(C c, size_type pos = 0) const noexcept
+    constexpr size_type find_first_of(C c, size_type pos = 0) const noexcept
     {
         return __view(*this).find_first_of(c, pos);
     }
-    size_type find_first_of(const C *s, size_type pos = 0) const
+    constexpr size_type find_first_of(const C *s, size_type pos = 0) const
     {
         return __view(*this).find_first_of(s, pos);
     }
-    size_type find_last_of(__view v, size_type pos = npos) const noexcept
+    constexpr size_type find_last_of(__view v,
+                                     size_type pos = npos) const noexcept
     {
         return __view(*this).find_last_of(v, pos);
     }
-    size_type find_last_of(C c, size_type pos = npos) const noexcept
+    constexpr size_type find_last_of(C c, size_type pos = npos) const noexcept
     {
         return __view(*this).find_last_of(c, pos);
     }
-    size_type find_last_of(const C *s, size_type pos = npos) const
+    constexpr size_type find_last_of(const C *s, size_type pos = npos) const
     {
         return __view(*this).find_last_of(s, pos);
     }
-    size_type find_first_not_of(__view v, size_type pos = 0) const noexcept
+    constexpr size_type find_first_not_of(__view v,
+                                          size_type pos = 0) const noexcept
     {
         return __view(*this).find_first_not_of(v, pos);
     }
-    size_type find_first_not_of(C c, size_type pos = 0) const noexcept
+    constexpr size_type find_first_not_of(C c, size_type pos = 0) const noexcept
     {
         return __view(*this).find_first_not_of(c, pos);
     }
-    size_type find_first_not_of(const C *s, size_type pos = 0) const
+    constexpr size_type find_first_not_of(const C *s, size_type pos = 0) const
     {
         return __view(*this).find_first_not_of(s, pos);
     }
-    size_type find_last_not_of(__view v, size_type pos = npos) const noexcept
+    constexpr size_type find_last_not_of(__view v,
+                                         size_type pos = npos) const noexcept
     {
         return __view(*this).find_last_not_of(v, pos);
     }
-    size_type find_last_not_of(C c, size_type pos = npos) const noexcept
+    constexpr size_type find_last_not_of(C c,
+                                         size_type pos = npos) const noexcept
     {
         return __view(*this).find_last_not_of(c, pos);
     }
-    size_type find_last_not_of(const C *s, size_type pos = npos) const
+    constexpr size_type find_last_not_of(const C *s, size_type pos = npos) const
     {
         return __view(*this).find_last_not_of(s, pos);
     }
 
-    int compare(__view v) const noexcept { return __view(*this).compare(v); }
-    int compare(const C *s) const { return __view(*this).compare(s); }
-    int compare(const basic_string &other) const noexcept
+    constexpr int compare(__view v) const noexcept
+    {
+        return __view(*this).compare(v);
+    }
+    constexpr int compare(const C *s) const { return __view(*this).compare(s); }
+    constexpr int compare(const basic_string &other) const noexcept
     {
         return __view(*this).compare(__view(other));
     }
-    int compare(size_type pos, size_type count, __view v) const
+    constexpr int compare(size_type pos, size_type count, __view v) const
     {
         return __view(*this).compare(pos, count, v);
     }
 
-    bool starts_with(__view v) const noexcept
+    constexpr bool starts_with(__view v) const noexcept
     {
         return __view(*this).starts_with(v);
     }
-    bool starts_with(C c) const noexcept
+    constexpr bool starts_with(C c) const noexcept
     {
         return __view(*this).starts_with(c);
     }
-    bool starts_with(const C *s) const
+    constexpr bool starts_with(const C *s) const
     {
         return __view(*this).starts_with(s);
     }
-    bool ends_with(__view v) const noexcept
+    constexpr bool ends_with(__view v) const noexcept
     {
         return __view(*this).ends_with(v);
     }
-    bool ends_with(C c) const noexcept { return __view(*this).ends_with(c); }
-    bool ends_with(const C *s) const { return __view(*this).ends_with(s); }
-    bool contains(__view v) const noexcept
+    constexpr bool ends_with(C c) const noexcept
+    {
+        return __view(*this).ends_with(c);
+    }
+    constexpr bool ends_with(const C *s) const
+    {
+        return __view(*this).ends_with(s);
+    }
+    constexpr bool contains(__view v) const noexcept
     {
         return __view(*this).contains(v);
     }
-    bool contains(C c) const noexcept { return __view(*this).contains(c); }
-    bool contains(const C *s) const { return __view(*this).contains(s); }
+    constexpr bool contains(C c) const noexcept
+    {
+        return __view(*this).contains(c);
+    }
+    constexpr bool contains(const C *s) const
+    {
+        return __view(*this).contains(s);
+    }
 
-    basic_string substr(size_type pos = 0, size_type count = npos) const
+    constexpr basic_string substr(size_type pos = 0,
+                                  size_type count = npos) const
     {
         __view v = __view(*this).substr(pos, count);
         return basic_string(v.data(), v.size(), __alloc);
@@ -841,25 +908,48 @@ public:
 private:
     // ── representation ──────────────────────────────────────────────────
 
-    bool IsLong() const noexcept { return __data != __sso; }
+    constexpr bool IsLong() const noexcept { return __data != __sso; }
 
-    void SetShort(size_type n) noexcept
+    // The inline buffer becomes the union's active member only when something
+    // writes it THROUGH ITS NAME ([class.union]/6). A write through __data
+    // does not count, and in constant evaluation GCC says exactly that:
+    // "initializing '__sso' requires a member access expression as the left
+    // operand of the assignment".
+    //
+    // Every element is written, not just one. A single element is enough to
+    // begin the array's lifetime -- measured -- and that is all a TRANSIENT
+    // string needs. A string that is itself a constant needs more: the value
+    // of a constexpr variable has to be complete, and GCC rejects one whose
+    // buffer is half indeterminate ("is not a constant expression because it
+    // refers to an incompletely initialized variable"). Since a short string
+    // being a real constant is the whole point of keeping SSO alive here, the
+    // loop fills the buffer. At run time a union has no active member to
+    // track and the fill would be pure waste, so it is not made.
+    constexpr void BeginSso() noexcept
     {
+        if (is_constant_evaluated())
+            for (size_type i = 0; i <= kSsoChars; ++i) __sso[i] = C();
+    }
+
+    constexpr void SetShort(size_type n) noexcept
+    {
+        BeginSso();
         __data         = __sso;
         __size         = n;
         __sso[n]       = C();
     }
 
-    void SetSize(size_type n) noexcept
+    constexpr void SetSize(size_type n) noexcept
     {
         __size     = n;
         __data[n] = C();
     }
 
-    void InitCopy(const C *s, size_type n)
+    constexpr void InitCopy(const C *s, size_type n)
     {
         if (n > max_size()) boxcxx::ThrowLengthError("string: too long");
         if (n <= kSsoChars) {
+            BeginSso();
             __data = __sso;
         } else {
             __data = AllocTraits::allocate(__alloc, n + 1);
@@ -869,10 +959,11 @@ private:
         SetSize(n);
     }
 
-    void InitFill(size_type n, C ch)
+    constexpr void InitFill(size_type n, C ch)
     {
         if (n > max_size()) boxcxx::ThrowLengthError("string: too long");
         if (n <= kSsoChars) {
+            BeginSso();
             __data = __sso;
         } else {
             __data = AllocTraits::allocate(__alloc, n + 1);
@@ -882,13 +973,14 @@ private:
         SetSize(n);
     }
 
-    void StealFrom(basic_string &other) noexcept
+    constexpr void StealFrom(basic_string &other) noexcept
     {
         if (other.IsLong()) {
             __data = other.__data;
             __size = other.__size;
             __cap  = other.__cap;
         } else {
+            BeginSso();
             __data = __sso;
             __size = other.__size;
             Traits::copy(__sso, other.__sso, other.__size + 1);
@@ -896,12 +988,12 @@ private:
         other.SetShort(0);
     }
 
-    void DropStorage() noexcept
+    constexpr void DropStorage() noexcept
     {
         if (IsLong()) AllocTraits::deallocate(__alloc, __data, __cap + 1);
     }
 
-    size_type GrownCapacity(size_type needed) const
+    constexpr size_type GrownCapacity(size_type needed) const
     {
         if (needed > max_size()) boxcxx::ThrowLengthError("string: too long");
         size_type doubled = capacity() * 2;
@@ -909,7 +1001,7 @@ private:
     }
 
     // Keeps the first `keep` chars; gives at least `want` capacity.
-    void Reallocate(size_type want, size_type keep)
+    constexpr void Reallocate(size_type want, size_type keep)
     {
         if (want > max_size()) boxcxx::ThrowLengthError("string: too long");
         C *fresh = AllocTraits::allocate(__alloc, want + 1);
@@ -921,8 +1013,24 @@ private:
     }
 
     // npos when `s` points outside this string's buffer.
-    size_type SelfOffset(const C *s) const noexcept
+    //
+    // Two evaluations, because the question has two different legal answers.
+    // At run time the address comparison decides it in two instructions.
+    // During constant evaluation it cannot be asked that way at all: `<` and
+    // `>=` between pointers into different objects are not constant
+    // expressions, and GCC refuses outright ("'(((const char*)"!!!") >=
+    // ((const char*)(& heap )))' is not a constant expression"). Equality is
+    // the one comparison a constant expression may make between unrelated
+    // pointers, so the compile-time answer is found by asking it -- once per
+    // character, which costs nothing next to the shift the callers are about
+    // to perform anyway.
+    constexpr size_type SelfOffset(const C *s) const noexcept
     {
+        if (is_constant_evaluated()) {
+            for (size_type i = 0; i <= __size; ++i)
+                if (__data + i == s) return i;
+            return npos;
+        }
         if (s >= __data && s <= __data + __size)
             return static_cast<size_type>(s - __data);
         return npos;
@@ -940,8 +1048,8 @@ private:
 // ── non-member operators ────────────────────────────────────────────────
 
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
-                                const basic_string<C, T, A> &b)
+constexpr basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                          const basic_string<C, T, A> &b)
 {
     basic_string<C, T, A> r;
     r.reserve(a.size() + b.size());
@@ -950,7 +1058,8 @@ basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, const C *b)
+constexpr basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                          const C *b)
 {
     basic_string<C, T, A> r;
     r.reserve(a.size() + T::length(b));
@@ -959,7 +1068,8 @@ basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, const C *b)
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const C *a, const basic_string<C, T, A> &b)
+constexpr basic_string<C, T, A> operator+(const C                     *a,
+                                          const basic_string<C, T, A> &b)
 {
     basic_string<C, T, A> r;
     r.reserve(T::length(a) + b.size());
@@ -968,34 +1078,34 @@ basic_string<C, T, A> operator+(const C *a, const basic_string<C, T, A> &b)
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, C ch)
+constexpr basic_string<C, T, A> operator+(const basic_string<C, T, A> &a, C ch)
 {
     basic_string<C, T, A> r(a);
     r.push_back(ch);
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(C ch, const basic_string<C, T, A> &b)
+constexpr basic_string<C, T, A> operator+(C ch, const basic_string<C, T, A> &b)
 {
     basic_string<C, T, A> r(1, ch);
     r.append(b);
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
-                                const basic_string<C, T, A> &b)
+constexpr basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
+                                          const basic_string<C, T, A> &b)
 {
     a.append(b);
     return std::move(a);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, const C *b)
+constexpr basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, const C *b)
 {
     a.append(b);
     return std::move(a);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, C ch)
+constexpr basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, C ch)
 {
     a.push_back(ch);
     return std::move(a);
@@ -1009,15 +1119,15 @@ basic_string<C, T, A> operator+(basic_string<C, T, A> &&a, C ch)
 // and `"x" + std::move(s)` prepend in place instead of allocating a third
 // string.
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
-                                basic_string<C, T, A>      &&b)
+constexpr basic_string<C, T, A> operator+(const basic_string<C, T, A> &a,
+                                          basic_string<C, T, A>      &&b)
 {
     b.insert(0, a);
     return std::move(b);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
-                                basic_string<C, T, A> &&b)
+constexpr basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
+                                          basic_string<C, T, A> &&b)
 {
     // Two buffers to choose from: appending to the left one keeps the
     // result in place unless b is the one with room to spare.
@@ -1029,13 +1139,13 @@ basic_string<C, T, A> operator+(basic_string<C, T, A> &&a,
     return std::move(a);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const C *a, basic_string<C, T, A> &&b)
+constexpr basic_string<C, T, A> operator+(const C *a, basic_string<C, T, A> &&b)
 {
     b.insert(0, a);
     return std::move(b);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(C ch, basic_string<C, T, A> &&b)
+constexpr basic_string<C, T, A> operator+(C ch, basic_string<C, T, A> &&b)
 {
     b.insert(b.begin(), ch);
     return std::move(b);
@@ -1049,8 +1159,9 @@ basic_string<C, T, A> operator+(C ch, basic_string<C, T, A> &&b)
 // what keeps the overload from hijacking `s + "literal"`: the view side is
 // a non-deduced context, so the const charT* overload still wins there.
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(const basic_string<C, T, A>      &a,
-                                type_identity_t<basic_string_view<C, T>> b)
+constexpr basic_string<C, T, A>
+operator+(const basic_string<C, T, A>             &a,
+          type_identity_t<basic_string_view<C, T>> b)
 {
     basic_string<C, T, A> r(a.get_allocator());
     r.reserve(a.size() + b.size());
@@ -1059,15 +1170,17 @@ basic_string<C, T, A> operator+(const basic_string<C, T, A>      &a,
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(basic_string<C, T, A>           &&a,
-                                type_identity_t<basic_string_view<C, T>> b)
+constexpr basic_string<C, T, A>
+operator+(basic_string<C, T, A>                  &&a,
+          type_identity_t<basic_string_view<C, T>> b)
 {
     a.append(b.data(), b.size());
     return std::move(a);
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(type_identity_t<basic_string_view<C, T>> a,
-                                const basic_string<C, T, A>             &b)
+constexpr basic_string<C, T, A>
+operator+(type_identity_t<basic_string_view<C, T>> a,
+          const basic_string<C, T, A>             &b)
 {
     basic_string<C, T, A> r(b.get_allocator());
     r.reserve(a.size() + b.size());
@@ -1076,46 +1189,49 @@ basic_string<C, T, A> operator+(type_identity_t<basic_string_view<C, T>> a,
     return r;
 }
 template <typename C, typename T, typename A>
-basic_string<C, T, A> operator+(type_identity_t<basic_string_view<C, T>> a,
-                                basic_string<C, T, A>                  &&b)
+constexpr basic_string<C, T, A>
+operator+(type_identity_t<basic_string_view<C, T>> a,
+          basic_string<C, T, A>                  &&b)
 {
     b.insert(0, a.data(), a.size());
     return std::move(b);
 }
 
 template <typename C, typename T, typename A>
-bool operator==(const basic_string<C, T, A> &a,
-                const basic_string<C, T, A> &b) noexcept
+constexpr bool operator==(const basic_string<C, T, A> &a,
+                          const basic_string<C, T, A> &b) noexcept
 {
     return basic_string_view<C, T>(a) == basic_string_view<C, T>(b);
 }
 template <typename C, typename T, typename A>
-bool operator==(const basic_string<C, T, A> &a, const C *b)
+constexpr bool operator==(const basic_string<C, T, A> &a, const C *b)
 {
     return basic_string_view<C, T>(a) == basic_string_view<C, T>(b);
 }
 template <typename C, typename T, typename A>
-strong_ordering operator<=>(const basic_string<C, T, A> &a,
-                            const basic_string<C, T, A> &b) noexcept
+constexpr strong_ordering operator<=>(const basic_string<C, T, A> &a,
+                                      const basic_string<C, T, A> &b) noexcept
 {
     return basic_string_view<C, T>(a) <=> basic_string_view<C, T>(b);
 }
 template <typename C, typename T, typename A>
-strong_ordering operator<=>(const basic_string<C, T, A> &a, const C *b)
+constexpr strong_ordering operator<=>(const basic_string<C, T, A> &a,
+                                      const C *b)
 {
     return basic_string_view<C, T>(a) <=> basic_string_view<C, T>(b);
 }
 
 template <typename C, typename T, typename A>
-void swap(basic_string<C, T, A> &a, basic_string<C, T, A> &b) noexcept(noexcept(a.swap(b)))
+constexpr void swap(basic_string<C, T, A> &a,
+                    basic_string<C, T, A> &b) noexcept(noexcept(a.swap(b)))
 {
     a.swap(b);
 }
 
 // C++20 uniform erasure.
 template <typename C, typename T, typename A, typename V = C>
-typename basic_string<C, T, A>::size_type erase(basic_string<C, T, A> &s,
-                                                const V &value)
+constexpr typename basic_string<C, T, A>::size_type
+erase(basic_string<C, T, A> &s, const V &value)
 {
     typename basic_string<C, T, A>::size_type removed = 0;
     typename basic_string<C, T, A>::size_type w       = 0;
@@ -1134,8 +1250,8 @@ typename basic_string<C, T, A>::size_type erase(basic_string<C, T, A> &s,
 // uniform-erasure overloads missing, which is why __cpp_lib_erase_if stayed
 // undefined while erase_if worked on every container.
 template <typename C, typename T, typename A, typename Pred>
-typename basic_string<C, T, A>::size_type erase_if(basic_string<C, T, A> &s,
-                                                   Pred pred)
+constexpr typename basic_string<C, T, A>::size_type
+erase_if(basic_string<C, T, A> &s, Pred pred)
 {
     typename basic_string<C, T, A>::size_type removed = 0;
     typename basic_string<C, T, A>::size_type w       = 0;
@@ -1164,23 +1280,23 @@ inline namespace string_literals {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wliteral-suffix"
 
-inline string operator""s(const char *s, size_t n)
+constexpr string operator""s(const char *s, size_t n)
 {
     return string(s, n);
 }
-inline wstring operator""s(const wchar_t *s, size_t n)
+constexpr wstring operator""s(const wchar_t *s, size_t n)
 {
     return wstring(s, n);
 }
-inline u8string operator""s(const char8_t *s, size_t n)
+constexpr u8string operator""s(const char8_t *s, size_t n)
 {
     return u8string(s, n);
 }
-inline u16string operator""s(const char16_t *s, size_t n)
+constexpr u16string operator""s(const char16_t *s, size_t n)
 {
     return u16string(s, n);
 }
-inline u32string operator""s(const char32_t *s, size_t n)
+constexpr u32string operator""s(const char32_t *s, size_t n)
 {
     return u32string(s, n);
 }

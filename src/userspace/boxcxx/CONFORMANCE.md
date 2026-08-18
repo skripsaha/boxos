@@ -40,9 +40,9 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Standard headers provided | **86** — 82 of C++23 (23 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 123 |
 | Header source | ~87 000 lines |
-| Feature-test macros defined | 203 — 157 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 205 — 159 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 210 phases (191 of them the numbered `PhaseN` series), 5 404 runtime checks, 1 784 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 212 phases (193 of them the numbered `PhaseN` series), 5 421 runtime checks, 1 804 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **210**. The
+there are exactly as many as there are phase definitions. That is **212**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -89,7 +89,7 @@ the library itself; there is no "no-exceptions" configuration.
 | `#include <filesystem>`, `std::filesystem::path` | no such header, no such name | There is no hierarchical path namespace to model, so the `path` overloads of `fstream`'s constructors and `open()` are absent with it. |
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
-| `constexpr` code building a `std::string` | not a constant expression | `basic_string` is not a literal type here (P0980 is not implemented). |
+| `constexpr std::string s = "a long one…";` | not a constant expression | A string that outgrows the inline buffer owns an allocation, and no allocation outlives constant evaluation. Up to 15 characters it works and the object lives in the image. Both mainstream libraries draw the line in the same place. (§2 `<string>`) |
 | a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
 
 ---
@@ -244,7 +244,7 @@ the whole set, not sampled:
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 203 macros × 86 headers by
+  checked over the full cross-product of 205 macros × 86 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -293,7 +293,7 @@ the whole set, not sampled:
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-**17 of the macros [version.syn] names are not defined**, and `<version>` lists
+**15 of the macros [version.syn] names are not defined**, and `<version>` lists
 every one by name with its specific reason — that list, not this section, is the authoritative
 backlog. The governing rule is that a macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -575,15 +575,19 @@ nothing has been found since.
 
 ## `<bitset>`
 
-- `~` `to_string()` is annotated `constexpr` and is correct at run time, but it
-  cannot be constant-evaluated, because it builds a `basic_string` and that is not
-  a literal type here (see `<string>`). Removing the annotation would be *less*
-  conformant; it folds automatically once `<string>` becomes constexpr. The rest
-  of P2417 is genuinely constant-evaluable.
-- `+` P2697R1's `basic_string_view` constructor is implemented, and unlike the
-  `basic_string` one it **is** constant-evaluable — which is worth stating
-  because the string constructor is precisely the reason
-  `__cpp_lib_constexpr_bitset` is still not claimed.
+- `✓` Closed in Ф39: `to_string()` and the `basic_string`-taking constructor were
+  annotated `constexpr`, correct at run time, and impossible to constant-evaluate,
+  because they build a `basic_string` and that was not a literal type. P0980R1
+  landed and both fold now, with **no change to this header at all** — which is
+  what the note that used to stand here predicted. `__cpp_lib_constexpr_bitset` is
+  claimed at 202207L.
+- `+` P2697R1's `basic_string_view` constructor is implemented and is likewise
+  constant-evaluable; it was the one that already worked while the string
+  constructor did not.
+- `+` `__cpp_lib_constexpr_bitset` is defined at **202207L**, which is what
+  [version.syn] says. libstdc++ 16.1 defines it as 202202L — P2417R2's adoption
+  meeting rather than the value the standard settled on. libc++ agrees with the
+  draft; measured on both.
 
 ## `<charconv>`
 
@@ -1851,11 +1855,45 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   `__cpp_lib_erase_if` stayed undefined while `erase_if` worked on every
   container. `basic_string_view` gained `crbegin`/`crend` in the same step,
   closing `__cpp_lib_string_view`.
-- `!` **`basic_string` is not a literal type — no part of it works in a constant
-  expression** (P0980 is unimplemented; `size()` itself is not `constexpr`). A
-  `constexpr` function that builds a `std::string` fails at the point of constant
-  evaluation, not at definition. This is what keeps `bitset::to_string()` and
-  several other correctly-annotated functions from folding.
+- `✓` Closed in Ф39: **`basic_string` was not a literal type — no part of it
+  worked in a constant expression** (P0980R1 unimplemented; `size()` itself was
+  not `constexpr`). All of it is `constexpr` now, `__cpp_lib_constexpr_string` is
+  claimed at 201907L, and `bitset::to_string()` folds with it. Three things had
+  to be true, and none of them was the one the old note in `<version>` blamed
+  (a "compiler-blessed constexpr allocator" — `std::allocator` and
+  `construct_at` had been constant-evaluable since Ф31e):
+  - The inline buffer is a **union member**, and a union member becomes active
+    only when something writes it *through its name* ([class.union]/6). Every
+    write in `<string>` went through the data pointer, which does not count.
+    `BeginSso()` is the one line that does, and it fills the buffer rather than
+    one element, because the value of a `constexpr` **variable** has to be
+    complete.
+  - `char_traits<char>::length` and `::compare` were bare `__builtin_strlen` /
+    `__builtin_memcmp`, and **GCC folds neither over storage `std::allocator`
+    handed out during constant evaluation**. That was not a string-only problem:
+    a `basic_string_view` built over such storage was already not a constant
+    expression here while it is one in both mainstream libraries.
+  - `SelfOffset` (does this pointer alias my buffer?) and `char_traits::move`
+    (which way do I walk?) both asked with `<` / `>=`, and a relational
+    comparison of pointers into different objects is not a constant expression.
+    Both now ask with `==` when constant-evaluated and keep the address
+    comparison at run time.
+- `~` **A `constexpr std::string` variable is limited to the inline buffer** — 15
+  characters for `char`. A longer one owns an allocation, and an allocation
+  cannot outlive constant evaluation. Measured: libstdc++ 16.1 and libc++ draw
+  the line in exactly the same place. Transient long strings inside a constant
+  expression are unrestricted.
+- `~` `__cpp_lib_constexpr_string` is defined at **201907L**, P0980R1's value and
+  the one C++23 carries. The working draft has since raised it to 202511L for a
+  C++26 change this library does not implement; libstdc++ 16.1 and libc++ both
+  report 201907L too.
+- The union-activation question above is not academic: **Apple's libc++ 19.1.2
+  answers it wrongly** — `shrink_to_fit()` from an allocated buffer back into the
+  inline one is not constant-evaluable there ("assignment to member `__s` of
+  union with active member `__l`"), and `std::erase(basic_string&, const U&)` is
+  not declared `constexpr` at all though [string.erasure] says it is. Both are
+  fixed in libc++ 22.1.6, which is this document's oracle, so neither is listed
+  in §4. Recorded because it is the same trap, sprung on someone else.
 - `✓` Closed in Ф31e-g-3: `pmr::basic_string`, `pmr::u8string` and
   `pmr::forward_list` did not exist. [string.syn] gives the string aliases an
   alias **template** first and spells the five concrete ones through it; boxcxx
@@ -2460,6 +2498,27 @@ standard has three, which cost the `(t, allocator)` form entirely and made the
 three-argument form `explicit`. Splitting it finished the paper, and its macro
 is the first C++26 one this library claims (§1.3).
 
+Ф39 made `basic_string` constexpr (phases 196 and 197), and what it had to fix
+was not in `<string>`. The entry in `<version>` had blamed "the
+compiler-blessed constexpr allocator path" for years; `std::allocator`,
+`allocator_traits` and `construct_at` had all been constant-evaluable since
+Ф31e, and measuring said so in a minute. Three real obstacles were underneath.
+The inline buffer is a **union member**, and nothing in `<string>` ever wrote it
+through its name, which is the only form that begins a union member's lifetime —
+so every constant evaluation of a short string died on a buffer the compiler
+considered uninitialized. `char_traits<char>::length` and `::compare` were bare
+`__builtin_strlen` / `__builtin_memcmp`, which GCC folds over literals and
+static arrays but **not over storage `std::allocator` handed out during constant
+evaluation** — that one was already costing something visible before this phase:
+a `basic_string_view` built over such storage was not a constant expression here
+while it is one in both mainstream libraries. And two "does this pointer come
+from my buffer" questions — `SelfOffset` and the direction choice inside
+`char_traits::move` — were asked with `<` and `>=`, which is not a constant
+expression between different objects; both now ask with `==` when
+constant-evaluated and keep the address comparison at run time. `<bitset>`
+needed no change at all: `__cpp_lib_constexpr_bitset` came back the moment its
+blocker lifted, exactly as the note in its leaf had predicted.
+
 What is left:
 
 - `<ranges>`: **every entity `__cpp_lib_ranges` promises now exists** (Ф31e-e),
@@ -2530,9 +2589,19 @@ What is left:
 
 ## Deliberately deferred to a future C++26 phase
 
-`constexpr` `stable_sort` / `stable_partition` / `inplace_merge` (P2562),
-`reserve_hint` (P2846), `views::concat` (P2542), LWG 2713, and the feature-test
-macro bumps to their C++26 values.
+This list named five things until Ф39 re-read it: `constexpr` `stable_sort` /
+`stable_partition` / `inplace_merge` (P2562), `reserve_hint` (P2846),
+`views::concat` (P2542), LWG 2713, and "the feature-test macro bumps to their
+C++26 values". **Every one of them had shipped in Ф32** — the first three are
+described in §3 by name, LWG 2713 in the Ф32-a paragraph above, and forty-six
+macros now carry a C++26 value. The list had simply not been re-read since it
+was written, which is the same failure mode §7 was written to prevent.
+
+What is genuinely deferred is stated where it can be checked rather than
+enumerated here: `<version>`'s own omission list names every undefined macro
+with its reason, and the rule that governs the C++26 surface is that a macro is
+defined only once its feature is complete. The open frontier beyond that is not
+a debt — nothing promises it.
 
 # 7. How the claims in this document were verified
 
