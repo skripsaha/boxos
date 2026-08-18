@@ -183,24 +183,26 @@ struct Inside {
     ~Inside() { t_inside = false; }
 };
 
-size_t Run(Chunk fn, void *ctx, size_t n, size_t grain)
+// Deciding whether the range is worth splitting happens WITHOUT the lock, and
+// so does running it when it is not. The first version of Run did the
+// short-range case under the lock, and a body that then called another
+// parallel algorithm blocked on a mutex its own caller was holding -- a
+// self-deadlock that only appears when the outer range is too short to split
+// and the inner one is not. Found by phase201.
+size_t Plan(size_t n, size_t grain)
 {
     if (n == 0) return 0;
-    if (t_inside || grain == 0) {
-        RunGuarded(fn, ctx, 0, 0, n);
-        return 1;
-    }
-
-    // Deciding whether the range is worth splitting happens WITHOUT the lock,
-    // and so does running it when it is not. The first version of this
-    // function ran the short-range case under the lock, and a body that then
-    // called another parallel algorithm blocked on a mutex its own caller was
-    // holding -- a self-deadlock that only appears when the outer range is too
-    // short to split and the inner one is not. Found by phase201.
+    if (t_inside || grain == 0) return 1;
     const size_t width = Width();
     size_t chunks = n / grain;
     if (chunks > width) chunks = width;
-    if (chunks < 2) {
+    return chunks < 2 ? 1 : chunks;
+}
+
+size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks)
+{
+    if (n == 0) return 0;
+    if (t_inside || chunks < 2) {
         RunGuarded(fn, ctx, 0, 0, n);
         return 1;
     }
@@ -237,6 +239,11 @@ size_t Run(Chunk fn, void *ctx, size_t n, size_t grain)
         box::park(g_brigade.done, got);    // value_mismatch if it already moved
     }
     return chunks;
+}
+
+size_t Run(Chunk fn, void *ctx, size_t n, size_t grain)
+{
+    return RunExact(fn, ctx, n, Plan(n, grain));
 }
 
 } // namespace __par

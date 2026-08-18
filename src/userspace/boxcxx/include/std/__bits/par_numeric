@@ -130,6 +130,170 @@ T transform_reduce(EP &&ep, It1 first1, It1 last1, It2 first2, T init)
                             plus<>(), multiplies<>());
 }
 
+// ── [numeric.ops.scan] : TWO PASS ───────────────────────────────────────
+namespace __par {
+
+// Chunk totals, a prefix over the totals, then each chunk writes its own scan
+// from the offset it was handed. The operation has to be associative for that
+// to be the same answer -- which every scan in [numeric.ops] requires, and
+// which is the whole reason a scan can be split at all.
+template <class EP, class It, class Out, class T, class Binary, class Unary>
+inline void ScanCore(It first, size_t n, Out out, const T &init, bool inclusive, Binary op,
+                     Unary tr)
+{
+    if (n == 0) return;
+
+    auto run = [&](size_t b, size_t e, T acc) {
+        It  it = At(first, b);
+        Out o  = At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) {
+            if (inclusive) {
+                acc = op(std::move(acc), tr(*it));
+                *o  = acc;
+            } else {
+                *o  = acc;
+                acc = op(std::move(acc), tr(*it));
+            }
+        }
+    };
+
+    const size_t chunks = PlanFor<EP>(n);
+    if (chunks < 2) {
+        run(0, n, init);
+        return;
+    }
+
+    vector<optional<T>> total(chunks);
+    RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) {
+        It it = At(first, b);
+        T   acc(tr(*it));
+        ++it;
+        for (size_t i = b + 1; i < e; ++i, ++it) acc = op(std::move(acc), tr(*it));
+        total[idx].emplace(std::move(acc));
+    });
+
+    vector<optional<T>> offset(chunks);
+    offset[0].emplace(init);
+    for (size_t i = 1; i < chunks; ++i) offset[i].emplace(op(*offset[i - 1], *total[i - 1]));
+
+    RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) { run(b, e, *offset[idx]); });
+}
+
+struct Identity {
+    template <class T>
+    constexpr T &&operator()(T &&x) const noexcept
+    {
+        return static_cast<T &&>(x);
+    }
+};
+
+} // namespace __par
+
+template <class EP, class It, class Out, class T, class Binary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out inclusive_scan(EP &&, It first, It last, Out out, Binary op, T init)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::ScanCore<EP>(first, n, out, init, true, op, __par::Identity{});
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out, class Binary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out inclusive_scan(EP &&, It first, It last, Out out, Binary op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return out;
+    // Without an init the first element IS the init, and the rest is the same
+    // scan one position along.
+    using T = typename iterator_traits<It>::value_type;
+    T first_value(*first);
+    *out = first_value;
+    __par::ScanCore<EP>(__par::At(first, 1), n - 1, __par::At(out, 1), first_value, true, op,
+                        __par::Identity{});
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out inclusive_scan(EP &&ep, It first, It last, Out out)
+{
+    return inclusive_scan(static_cast<EP &&>(ep), first, last, out, plus<>());
+}
+
+template <class EP, class It, class Out, class T, class Binary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out exclusive_scan(EP &&, It first, It last, Out out, T init, Binary op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::ScanCore<EP>(first, n, out, init, false, op, __par::Identity{});
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out exclusive_scan(EP &&ep, It first, It last, Out out, T init)
+{
+    return exclusive_scan(static_cast<EP &&>(ep), first, last, out, std::move(init), plus<>());
+}
+
+template <class EP, class It, class Out, class Binary, class Unary, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out transform_inclusive_scan(EP &&, It first, It last, Out out, Binary op, Unary tr, T init)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::ScanCore<EP>(first, n, out, init, true, op, tr);
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out, class Binary, class Unary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out transform_inclusive_scan(EP &&, It first, It last, Out out, Binary op, Unary tr)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return out;
+    auto seed = tr(*first);
+    *out      = seed;
+    __par::ScanCore<EP>(__par::At(first, 1), n - 1, __par::At(out, 1), seed, true, op, tr);
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out, class T, class Binary, class Unary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out transform_exclusive_scan(EP &&, It first, It last, Out out, T init, Binary op, Unary tr)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::ScanCore<EP>(first, n, out, init, false, op, tr);
+    return __par::At(out, n);
+}
+
+// ── [adjacent.difference] : ELEMENT-WISE ────────────────────────────────
+// Every output but the first depends on the element BEFORE it, which a chunk
+// can read: element b-1 belongs to the chunk before and nobody is writing it,
+// because [algorithms.parallel.overloads] forbids the ranges to overlap.
+template <class EP, class It, class Out, class Binary>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out adjacent_difference(EP &&, It first, It last, Out out, Binary op)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return out;
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        Out o = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++o) {
+            if (i == 0) *o = *first;
+            else *o = op(*__par::At(first, i), *__par::At(first, i - 1));
+        }
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class It, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out adjacent_difference(EP &&ep, It first, It last, Out out)
+{
+    return adjacent_difference(static_cast<EP &&>(ep), first, last, out, minus<>());
+}
+
 } // namespace std
 
 #endif // BOXCXX_BITS_PAR_NUMERIC

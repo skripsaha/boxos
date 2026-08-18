@@ -17,6 +17,7 @@
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_constexpr_numeric
 #define BOXCXX_OWNS_gcd_lcm
+#define BOXCXX_OWNS_parallel_algorithm
 #define BOXCXX_OWNS_interpolate
 #define BOXCXX_OWNS_ranges_iota
 #define BOXCXX_OWNS_saturation_arithmetic

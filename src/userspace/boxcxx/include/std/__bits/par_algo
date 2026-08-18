@@ -24,6 +24,7 @@
 #include <atomic>
 #include <iterator>
 #include <type_traits>
+#include <utility>
 
 namespace std {
 
@@ -218,6 +219,1031 @@ It fill_n(EP &&, It first, Size count, const T &value)
         for (size_t i = b; i < e; ++i, ++it) *it = value;
     });
     return __par::At(first, n);
+}
+
+// ════════════════════════════════════════════════════════════════════════
+//  The rest of [algorithms] (Ф40, fourth commit)
+// ════════════════════════════════════════════════════════════════════════
+// Three shapes cover almost everything below, and naming them is most of the
+// work:
+//
+//   ELEMENT-WISE   copy, replace, generate, reverse... every element is
+//                  independent, so the chunks are too. Genuinely parallel.
+//   FIRST MATCH    find, mismatch, search, is_sorted_until... every chunk
+//                  races to lower one shared index, and a chunk whose own
+//                  position is already past the winner stops walking.
+//                  Genuinely parallel, and it short-circuits.
+//   TWO PASS       copy_if, unique_copy, partition_copy, the scans... one
+//                  pass counts per chunk, the counts become offsets, the
+//                  second pass writes. Both passes must be cut the SAME way,
+//                  which is why the engine's plan is a separate call.
+//
+// What is left over is honest about itself: sort splits and merges (the split
+// is parallel, the merges are not), and the in-place rearrangers -- remove,
+// unique, partition, rotate, inplace_merge, the set operations, nth_element,
+// partial_sort -- run on the calling strand. Each of those is a different
+// algorithm in parallel, not a chunked version of the same one, and shipping a
+// chunked version that quietly serialises would be the sort of claim this
+// library does not make. CONFORMANCE §2 lists exactly which is which.
+
+namespace __par {
+
+// Every chunk races to lower one shared index; the winner is the leftmost.
+inline void AtomicMin(atomic<size_t> &best, size_t v)
+{
+    size_t cur = best.load(memory_order_relaxed);
+    while (v < cur && !best.compare_exchange_weak(cur, v, memory_order_relaxed)) {}
+}
+// Max, but with `none` meaning "nothing found yet" rather than "the largest
+// index there is" -- which is why this is not simply the mirror of AtomicMin.
+inline void AtomicMax2(atomic<size_t> &best, size_t v, size_t none)
+{
+    size_t cur = best.load(memory_order_relaxed);
+    while ((cur == none || v > cur) &&
+           !best.compare_exchange_weak(cur, v, memory_order_relaxed)) {}
+}
+
+// The first position in [0, n) at which `hit` holds, or n. The early exit is
+// not an optimisation only: without it every chunk reads a range whose answer
+// is already known to be to its left.
+template <class EP, class Hit>
+inline size_t FirstIndex(size_t n, Hit hit)
+{
+    if (n == 0) return 0;
+    atomic<size_t> best{n};
+    Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        for (size_t i = b; i < e; ++i) {
+            if (i >= best.load(memory_order_relaxed)) return;
+            if (hit(i)) {
+                AtomicMin(best, i);
+                return;
+            }
+        }
+    });
+    return best.load(memory_order_relaxed);
+}
+
+// The LAST position at which `hit` holds, or n. No early exit: a chunk cannot
+// know that a later one will beat it.
+template <class EP, class Hit>
+inline size_t LastIndex(size_t n, Hit hit)
+{
+    if (n == 0) return 0;
+    atomic<size_t> best{n};
+    Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        for (size_t i = e; i > b; --i) {
+            if (hit(i - 1)) {
+                AtomicMax2(best, i - 1, n);
+                return;
+            }
+        }
+    });
+    return best.load(memory_order_relaxed);
+}
+
+// The index of the best element. Allocation-free: each chunk finds its own
+// best and then argues with the current winner until one of them stops
+// changing. `better` must be STRICT -- and that word is not decoration.
+//
+// The first version of minmax_element passed a NON-strict "better" for its max
+// half (x >= y), reasoning that "greater or equal" is what "the last maximum"
+// wants. With equal elements that makes better(a,b) and better(b,a) both true,
+// so every chunk replaces every other and the winner is whichever strand
+// reached the compare-and-exchange last -- a race, and one that a single round
+// of testing passes by luck. It took twenty rounds to show. The tie rule
+// belongs in the COMBINE, not in the comparison, which is why there are two of
+// these and both take a strict predicate.
+template <class EP, class Better>
+inline size_t BestIndex(size_t n, Better better)   // ties go LEFT
+{
+    if (n == 0) return 0;
+    atomic<size_t> best{0};
+    Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        size_t local = b;
+        for (size_t i = b + 1; i < e; ++i)
+            if (better(i, local)) local = i;
+        size_t cur = best.load(memory_order_relaxed);
+        while ((better(local, cur) || (!better(cur, local) && local < cur)) &&
+               !best.compare_exchange_weak(cur, local, memory_order_relaxed)) {}
+    });
+    return best.load(memory_order_relaxed);
+}
+
+template <class EP, class Better>
+inline size_t BestIndexRight(size_t n, Better better)   // ties go RIGHT
+{
+    if (n == 0) return 0;
+    atomic<size_t> best{0};
+    Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        size_t local = b;
+        for (size_t i = b + 1; i < e; ++i)
+            if (better(i, local) || !better(local, i)) local = i;
+        size_t cur = best.load(memory_order_relaxed);
+        while ((better(local, cur) || (!better(cur, local) && local > cur)) &&
+               !best.compare_exchange_weak(cur, local, memory_order_relaxed)) {}
+    });
+    return best.load(memory_order_relaxed);
+}
+
+} // namespace __par
+
+// ── [alg.find] and its neighbours: FIRST MATCH ──────────────────────────
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It find_if(EP &&, It first, It last, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    const size_t at =
+        __par::FirstIndex<EP>(n, [&](size_t i) { return static_cast<bool>(p(*__par::At(first, i))); });
+    return at == n ? last : __par::At(first, at);
+}
+
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It find_if_not(EP &&ep, It first, It last, Pred p)
+{
+    return find_if(static_cast<EP &&>(ep), first, last,
+                   [&](const auto &x) { return !p(x); });
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It find(EP &&ep, It first, It last, const T &value)
+{
+    return find_if(static_cast<EP &&>(ep), first, last,
+                   [&](const auto &x) { return x == value; });
+}
+
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It adjacent_find(EP &&, It first, It last, Pred p)
+{
+    const size_t len = static_cast<size_t>(distance(first, last));
+    if (len < 2) return last;
+    // The search space is the PAIRS, not the elements: n-1 of them, and pair i
+    // is (i, i+1). Counting them that way is what removes the need for chunks
+    // to overlap.
+    const size_t at = __par::FirstIndex<EP>(len - 1, [&](size_t i) {
+        It a = __par::At(first, i);
+        It b = a;
+        ++b;
+        return static_cast<bool>(p(*a, *b));
+    });
+    return at == len - 1 ? last : __par::At(first, at);
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It adjacent_find(EP &&ep, It first, It last)
+{
+    return adjacent_find(static_cast<EP &&>(ep), first, last,
+                         [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 find_first_of(EP &&, It1 first1, It1 last1, It2 first2, It2 last2, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    const size_t at = __par::FirstIndex<EP>(n, [&](size_t i) {
+        const auto &x = *__par::At(first1, i);
+        for (It2 s = first2; s != last2; ++s)
+            if (p(x, *s)) return true;
+        return false;
+    });
+    return at == n ? last1 : __par::At(first1, at);
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 find_first_of(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return find_first_of(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                         [](const auto &a, const auto &b) { return a == b; });
+}
+
+// ── [alg.search] ────────────────────────────────────────────────────────
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 search(EP &&, It1 first1, It1 last1, It2 first2, It2 last2, Pred p)
+{
+    const size_t len = static_cast<size_t>(distance(first1, last1));
+    const size_t pat = static_cast<size_t>(distance(first2, last2));
+    if (pat == 0) return first1;
+    if (pat > len) return last1;
+    // Again the search space is the START POSITIONS, len-pat+1 of them, so a
+    // chunk never needs to read past what it owns.
+    const size_t starts = len - pat + 1;
+    const size_t at = __par::FirstIndex<EP>(starts, [&](size_t i) {
+        It1 a = __par::At(first1, i);
+        for (It2 b = first2; b != last2; ++a, ++b)
+            if (!p(*a, *b)) return false;
+        return true;
+    });
+    return at == starts ? last1 : __par::At(first1, at);
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 search(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return search(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                  [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It, class Size, class T, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It search_n(EP &&, It first, It last, Size count, const T &value, Pred p)
+{
+    const size_t len = static_cast<size_t>(distance(first, last));
+    if (count <= Size{}) return first;
+    const size_t run = static_cast<size_t>(count);
+    if (run > len) return last;
+    const size_t starts = len - run + 1;
+    const size_t at = __par::FirstIndex<EP>(starts, [&](size_t i) {
+        It a = __par::At(first, i);
+        for (size_t k = 0; k < run; ++k, ++a)
+            if (!p(*a, value)) return false;
+        return true;
+    });
+    return at == starts ? last : __par::At(first, at);
+}
+
+template <class EP, class It, class Size, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It search_n(EP &&ep, It first, It last, Size count, const T &value)
+{
+    return search_n(static_cast<EP &&>(ep), first, last, count, value,
+                    [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 find_end(EP &&, It1 first1, It1 last1, It2 first2, It2 last2, Pred p)
+{
+    const size_t len = static_cast<size_t>(distance(first1, last1));
+    const size_t pat = static_cast<size_t>(distance(first2, last2));
+    if (pat == 0) return last1;
+    if (pat > len) return last1;
+    const size_t starts = len - pat + 1;
+    const size_t at = __par::LastIndex<EP>(starts, [&](size_t i) {
+        It1 a = __par::At(first1, i);
+        for (It2 b = first2; b != last2; ++a, ++b)
+            if (!p(*a, *b)) return false;
+        return true;
+    });
+    return at == starts ? last1 : __par::At(first1, at);
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It1 find_end(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return find_end(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                    [](const auto &a, const auto &b) { return a == b; });
+}
+
+// ── [alg.mismatch] / [alg.equal] ────────────────────────────────────────
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It1, It2> mismatch(EP &&, It1 first1, It1 last1, It2 first2, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    const size_t at = __par::FirstIndex<EP>(n, [&](size_t i) {
+        return !static_cast<bool>(p(*__par::At(first1, i), *__par::At(first2, i)));
+    });
+    return {__par::At(first1, at), __par::At(first2, at)};
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It1, It2> mismatch(EP &&ep, It1 first1, It1 last1, It2 first2)
+{
+    return mismatch(static_cast<EP &&>(ep), first1, last1, first2,
+                    [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It1, It2> mismatch(EP &&, It1 first1, It1 last1, It2 first2, It2 last2, Pred p)
+{
+    const size_t n1 = static_cast<size_t>(distance(first1, last1));
+    const size_t n2 = static_cast<size_t>(distance(first2, last2));
+    const size_t n  = n1 < n2 ? n1 : n2;
+    const size_t at = __par::FirstIndex<EP>(n, [&](size_t i) {
+        return !static_cast<bool>(p(*__par::At(first1, i), *__par::At(first2, i)));
+    });
+    return {__par::At(first1, at), __par::At(first2, at)};
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It1, It2> mismatch(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return mismatch(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                    [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool equal(EP &&, It1 first1, It1 last1, It2 first2, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    return __par::FirstIndex<EP>(n, [&](size_t i) {
+               return !static_cast<bool>(p(*__par::At(first1, i), *__par::At(first2, i)));
+           }) == n;
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool equal(EP &&ep, It1 first1, It1 last1, It2 first2)
+{
+    return equal(static_cast<EP &&>(ep), first1, last1, first2,
+                 [](const auto &a, const auto &b) { return a == b; });
+}
+
+template <class EP, class It1, class It2, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool equal(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2, Pred p)
+{
+    if (distance(first1, last1) != distance(first2, last2)) return false;
+    return equal(static_cast<EP &&>(ep), first1, last1, first2, p);
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool equal(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return equal(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                 [](const auto &a, const auto &b) { return a == b; });
+}
+
+// ── [alg.min.max] ───────────────────────────────────────────────────────
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It min_element(EP &&, It first, It last, Comp comp)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return last;
+    return __par::At(first, __par::BestIndex<EP>(n, [&](size_t a, size_t b) {
+        return static_cast<bool>(comp(*__par::At(first, a), *__par::At(first, b)));
+    }));
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It min_element(EP &&ep, It first, It last)
+{
+    return min_element(static_cast<EP &&>(ep), first, last,
+                       [](const auto &a, const auto &b) { return a < b; });
+}
+
+// max_element's tie rule is the mirror of min_element's: the LEFTMOST largest,
+// which means "beats" is a strict less-than with the arguments swapped.
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It max_element(EP &&, It first, It last, Comp comp)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return last;
+    return __par::At(first, __par::BestIndex<EP>(n, [&](size_t a, size_t b) {
+        return static_cast<bool>(comp(*__par::At(first, b), *__par::At(first, a)));
+    }));
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It max_element(EP &&ep, It first, It last)
+{
+    return max_element(static_cast<EP &&>(ep), first, last,
+                       [](const auto &a, const auto &b) { return a < b; });
+}
+
+// [alg.min.max] gives minmax_element a different tie rule for its second half:
+// the LAST largest, not the first. That is why this is not two calls.
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It, It> minmax_element(EP &&, It first, It last, Comp comp)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return {last, last};
+    const size_t lo = __par::BestIndex<EP>(n, [&](size_t a, size_t b) {
+        return static_cast<bool>(comp(*__par::At(first, a), *__par::At(first, b)));
+    });
+    // [alg.min.max] gives the two halves different tie rules -- the FIRST
+    // smallest and the LAST largest -- and the difference lives in which
+    // combine is used, not in the comparison.
+    const size_t hi = __par::BestIndexRight<EP>(n, [&](size_t a, size_t b) {
+        return static_cast<bool>(comp(*__par::At(first, b), *__par::At(first, a)));
+    });
+    return {__par::At(first, lo), __par::At(first, hi)};
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<It, It> minmax_element(EP &&ep, It first, It last)
+{
+    return minmax_element(static_cast<EP &&>(ep), first, last,
+                          [](const auto &a, const auto &b) { return a < b; });
+}
+
+// ── [alg.lex.comparison] ────────────────────────────────────────────────
+// The first difference decides everything, so finding it in parallel is the
+// whole algorithm; what follows is one comparison.
+template <class EP, class It1, class It2, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool lexicographical_compare(EP &&, It1 first1, It1 last1, It2 first2, It2 last2, Comp comp)
+{
+    const size_t n1 = static_cast<size_t>(distance(first1, last1));
+    const size_t n2 = static_cast<size_t>(distance(first2, last2));
+    const size_t n  = n1 < n2 ? n1 : n2;
+    const size_t at = __par::FirstIndex<EP>(n, [&](size_t i) {
+        const auto &a = *__par::At(first1, i);
+        const auto &b = *__par::At(first2, i);
+        return static_cast<bool>(comp(a, b)) || static_cast<bool>(comp(b, a));
+    });
+    if (at == n) return n1 < n2;
+    return static_cast<bool>(comp(*__par::At(first1, at), *__par::At(first2, at)));
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool lexicographical_compare(EP &&ep, It1 first1, It1 last1, It2 first2, It2 last2)
+{
+    return lexicographical_compare(static_cast<EP &&>(ep), first1, last1, first2, last2,
+                                   [](const auto &a, const auto &b) { return a < b; });
+}
+
+// ── [alg.sorting] predicates, all of them first-match ───────────────────
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It is_sorted_until(EP &&, It first, It last, Comp comp)
+{
+    const size_t len = static_cast<size_t>(distance(first, last));
+    if (len < 2) return last;
+    const size_t at = __par::FirstIndex<EP>(len - 1, [&](size_t i) {
+        It a = __par::At(first, i);
+        It b = a;
+        ++b;
+        return static_cast<bool>(comp(*b, *a));
+    });
+    return at == len - 1 ? last : __par::At(first, at + 1);
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It is_sorted_until(EP &&ep, It first, It last)
+{
+    return is_sorted_until(static_cast<EP &&>(ep), first, last,
+                           [](const auto &a, const auto &b) { return a < b; });
+}
+
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool is_sorted(EP &&ep, It first, It last, Comp comp)
+{
+    return is_sorted_until(static_cast<EP &&>(ep), first, last, comp) == last;
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool is_sorted(EP &&ep, It first, It last)
+{
+    return is_sorted_until(static_cast<EP &&>(ep), first, last) == last;
+}
+
+// A heap's property is local: element i must not beat its parent. Every
+// position can be checked independently, which makes this one of the more
+// satisfying things on the list to parallelise.
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It is_heap_until(EP &&, It first, It last, Comp comp)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n < 2) return last;
+    const size_t at = __par::FirstIndex<EP>(n - 1, [&](size_t k) {
+        const size_t child = k + 1;
+        return static_cast<bool>(
+            comp(*__par::At(first, (child - 1) / 2), *__par::At(first, child)));
+    });
+    return at == n - 1 ? last : __par::At(first, at + 1);
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It is_heap_until(EP &&ep, It first, It last)
+{
+    return is_heap_until(static_cast<EP &&>(ep), first, last,
+                         [](const auto &a, const auto &b) { return a < b; });
+}
+
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool is_heap(EP &&ep, It first, It last, Comp comp)
+{
+    return is_heap_until(static_cast<EP &&>(ep), first, last, comp) == last;
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool is_heap(EP &&ep, It first, It last)
+{
+    return is_heap_until(static_cast<EP &&>(ep), first, last) == last;
+}
+
+// [alg.partitions]: everything satisfying the predicate comes first. Two
+// first-match passes answer it -- where the trues stop and where the last one
+// is -- and neither has to walk the whole range.
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+bool is_partitioned(EP &&, It first, It last, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n < 2) return true;
+    const size_t firstFalse =
+        __par::FirstIndex<EP>(n, [&](size_t i) { return !static_cast<bool>(p(*__par::At(first, i))); });
+    if (firstFalse == n) return true;
+    const size_t lastTrue =
+        __par::LastIndex<EP>(n, [&](size_t i) { return static_cast<bool>(p(*__par::At(first, i))); });
+    return lastTrue == n || lastTrue < firstFalse;
+}
+
+// ── [alg.copy] / [alg.move] / [alg.swap] : ELEMENT-WISE ─────────────────
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out copy(EP &&, In first, In last, Out out)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) *o = *it;
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Size, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out copy_n(EP &&, In first, Size count, Out out)
+{
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) *o = *it;
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out move(EP &&, In first, In last, Out out)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) *o = std::move(*it);
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class It1, class It2>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It2 swap_ranges(EP &&, It1 first1, It1 last1, It2 first2)
+{
+    const size_t n = static_cast<size_t>(distance(first1, last1));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It1 a = __par::At(first1, b);
+        It2 c = __par::At(first2, b);
+        for (size_t i = b; i < e; ++i, ++a, ++c) iter_swap(a, c);
+    });
+    return __par::At(first2, n);
+}
+
+// ── [alg.replace] / [alg.generate] ──────────────────────────────────────
+template <class EP, class It, class Pred, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void replace_if(EP &&, It first, It last, Pred p, const T &value)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it)
+            if (p(*it)) *it = value;
+    });
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void replace(EP &&ep, It first, It last, const T &old_value, const T &new_value)
+{
+    replace_if(static_cast<EP &&>(ep), first, last,
+               [&](const auto &x) { return x == old_value; }, new_value);
+}
+
+template <class EP, class In, class Out, class Pred, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out replace_copy_if(EP &&, In first, In last, Out out, Pred p, const T &value)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        In  it = __par::At(first, b);
+        Out o  = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++it, ++o) *o = p(*it) ? value : *it;
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Out, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out replace_copy(EP &&ep, In first, In last, Out out, const T &old_value, const T &new_value)
+{
+    return replace_copy_if(static_cast<EP &&>(ep), first, last, out,
+                           [&](const auto &x) { return x == old_value; }, new_value);
+}
+
+template <class EP, class It, class Gen>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void generate(EP &&, It first, It last, Gen g)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) *it = g();
+    });
+}
+
+template <class EP, class It, class Size, class Gen>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It generate_n(EP &&, It first, Size count, Gen g)
+{
+    const size_t n = count <= Size{} ? 0 : static_cast<size_t>(count);
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        It it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it) *it = g();
+    });
+    return __par::At(first, n);
+}
+
+// ── [alg.reverse] / [alg.rotate] / [alg.shift] ──────────────────────────
+// reverse is element-wise once it is written as "swap the i-th from each end";
+// the in-place rotate is not, and says so below.
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void reverse(EP &&, It first, It last)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n / 2, [&](size_t, size_t b, size_t e) {
+        for (size_t i = b; i < e; ++i) iter_swap(__par::At(first, i), __par::At(first, n - 1 - i));
+    });
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out reverse_copy(EP &&, In first, In last, Out out)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        Out o = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++o) *o = *__par::At(first, n - 1 - i);
+    });
+    return __par::At(out, n);
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out rotate_copy(EP &&, In first, In middle, In last, Out out)
+{
+    const size_t n   = static_cast<size_t>(distance(first, last));
+    const size_t cut = static_cast<size_t>(distance(first, middle));
+    __par::Region<EP>(n, [&](size_t, size_t b, size_t e) {
+        Out o = __par::At(out, b);
+        for (size_t i = b; i < e; ++i, ++o) *o = *__par::At(first, (cut + i) % n);
+    });
+    return __par::At(out, n);
+}
+
+// ── TWO PASS: count per chunk, turn the counts into offsets, then write ──
+namespace __par {
+
+// Region with a chunk count the caller already decided, so two passes can be
+// cut the same way. Without that, the offsets the first pass computes describe
+// a division the second pass might not repeat.
+template <class EP, class F>
+inline size_t RegionExact(size_t n, size_t chunks, F f)
+{
+    if (n == 0) return 0;
+    if constexpr (WantsBrigade<EP>) {
+        return RunExact(
+            [](void *ctx, size_t i, size_t b, size_t e) { (*static_cast<F *>(ctx))(i, b, e); },
+            static_cast<void *>(&f), n, chunks);
+    } else {
+        f(size_t(0), size_t(0), n);
+        return 1;
+    }
+}
+
+template <class EP>
+inline size_t PlanFor(size_t n)
+{
+    return WantsBrigade<EP> ? Plan(n, kGrain) : 1;
+}
+
+// A run of counters. This header CANNOT include <vector>: <vector> includes
+// <algorithm>, and <algorithm> includes this file at its end, so by the time
+// the two-pass algorithms below are parsed the vector template is only
+// declared. They carry their own scratch instead, which is four lines and
+// costs nothing a vector would not have cost anyway.
+struct Offsets {
+    size_t *p = nullptr;
+
+    explicit Offsets(size_t n) : p(static_cast<size_t *>(::operator new(n * sizeof(size_t))))
+    {
+        for (size_t i = 0; i < n; ++i) p[i] = 0;
+    }
+    ~Offsets() { ::operator delete(static_cast<void *>(p)); }
+    Offsets(const Offsets &)            = delete;
+    Offsets &operator=(const Offsets &) = delete;
+
+    size_t &operator[](size_t i) { return p[i]; }
+    size_t  operator[](size_t i) const { return p[i]; }
+};
+
+// count(b, e)        -> how many of [b, e) this pass will write
+// write(b, e, at)    -> writes them starting at output offset `at`, returns how many
+template <class EP, class Count, class Write>
+inline size_t Compact(size_t n, Count count, Write write)
+{
+    if (n == 0) return 0;
+    const size_t chunks = PlanFor<EP>(n);
+    if (chunks < 2) return write(size_t(0), n, size_t(0));
+
+    Offsets per(chunks);
+    RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) { per[idx] = count(b, e); });
+
+    Offsets at(chunks);
+    size_t total = 0;
+    for (size_t i = 0; i < chunks; ++i) {
+        at[i] = total;
+        total += per[i];
+    }
+    RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) { write(b, e, at[idx]); });
+    return total;
+}
+
+} // namespace __par
+
+// ── [alg.copy] copy_if / [alg.remove] the copying forms ─────────────────
+template <class EP, class In, class Out, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out copy_if(EP &&, In first, In last, Out out, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    const size_t written = __par::Compact<EP>(
+        n,
+        [&](size_t b, size_t e) {
+            size_t k  = 0;
+            In     it = __par::At(first, b);
+            for (size_t i = b; i < e; ++i, ++it)
+                if (p(*it)) ++k;
+            return k;
+        },
+        [&](size_t b, size_t e, size_t at) {
+            size_t k  = 0;
+            In     it = __par::At(first, b);
+            Out    o  = __par::At(out, at);
+            for (size_t i = b; i < e; ++i, ++it)
+                if (p(*it)) {
+                    *o = *it;
+                    ++o;
+                    ++k;
+                }
+            return k;
+        });
+    return __par::At(out, written);
+}
+
+template <class EP, class In, class Out, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out remove_copy_if(EP &&ep, In first, In last, Out out, Pred p)
+{
+    return copy_if(static_cast<EP &&>(ep), first, last, out,
+                   [&](const auto &x) { return !p(x); });
+}
+
+template <class EP, class In, class Out, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out remove_copy(EP &&ep, In first, In last, Out out, const T &value)
+{
+    return copy_if(static_cast<EP &&>(ep), first, last, out,
+                   [&](const auto &x) { return !(x == value); });
+}
+
+// unique_copy's decision is local but reaches one element back, and a chunk
+// that does not start the range can read it: element b-1 belongs to the chunk
+// before, which is not writing it.
+template <class EP, class In, class Out, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out unique_copy(EP &&, In first, In last, Out out, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    auto keeps = [&](size_t i) {
+        if (i == 0) return true;
+        return !static_cast<bool>(p(*__par::At(first, i - 1), *__par::At(first, i)));
+    };
+    const size_t written = __par::Compact<EP>(
+        n,
+        [&](size_t b, size_t e) {
+            size_t k = 0;
+            for (size_t i = b; i < e; ++i)
+                if (keeps(i)) ++k;
+            return k;
+        },
+        [&](size_t b, size_t e, size_t at) {
+            size_t k = 0;
+            Out    o = __par::At(out, at);
+            for (size_t i = b; i < e; ++i)
+                if (keeps(i)) {
+                    *o = *__par::At(first, i);
+                    ++o;
+                    ++k;
+                }
+            return k;
+        });
+    return __par::At(out, written);
+}
+
+template <class EP, class In, class Out>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+Out unique_copy(EP &&ep, In first, In last, Out out)
+{
+    return unique_copy(static_cast<EP &&>(ep), first, last, out,
+                       [](const auto &a, const auto &b) { return a == b; });
+}
+
+// partition_copy writes into TWO outputs, so it needs two offset series --
+// and the second is just "how many did not go to the first".
+template <class EP, class In, class OutT, class OutF, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+pair<OutT, OutF> partition_copy(EP &&, In first, In last, OutT outTrue, OutF outFalse, Pred p)
+{
+    const size_t n = static_cast<size_t>(distance(first, last));
+    if (n == 0) return {outTrue, outFalse};
+    const size_t chunks = __par::PlanFor<EP>(n);
+    __par::Offsets trues(chunks);
+    __par::RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) {
+        size_t k  = 0;
+        In     it = __par::At(first, b);
+        for (size_t i = b; i < e; ++i, ++it)
+            if (p(*it)) ++k;
+        trues[idx] = k;
+    });
+    __par::Offsets atT(chunks), atF(chunks);
+    size_t t = 0, f = 0;
+    for (size_t i = 0; i < chunks; ++i) {
+        atT[i] = t;
+        atF[i] = f;
+        t += trues[i];
+        f += (i + 1) * n / chunks - i * n / chunks - trues[i];
+    }
+    __par::RegionExact<EP>(n, chunks, [&](size_t idx, size_t b, size_t e) {
+        In   it = __par::At(first, b);
+        OutT ot = __par::At(outTrue, atT[idx]);
+        OutF of = __par::At(outFalse, atF[idx]);
+        for (size_t i = b; i < e; ++i, ++it) {
+            if (p(*it)) {
+                *ot = *it;
+                ++ot;
+            } else {
+                *of = *it;
+                ++of;
+            }
+        }
+    });
+    return {__par::At(outTrue, t), __par::At(outFalse, f)};
+}
+
+// ── [alg.sort]: the split is parallel, the merges are not ───────────────
+// Each chunk is sorted on its own strand and the sorted runs are then merged
+// pairwise on the caller. An honest half: the sort is where the time goes
+// (n log n against the merge's n per level), and a parallel merge is a
+// different algorithm rather than a chunked version of this one.
+//
+// sort and stable_sort differ in exactly one place -- WHICH sort each chunk
+// gets -- and that one place is the whole of stability here. inplace_merge is
+// stable and the runs are in order, so a stable chunk sort makes the result
+// stable and an unstable one does not. The first version of this had both
+// spellings share std::sort and the documentation claim both were stable,
+// which was a promise the code did not keep: std::sort may reorder equal
+// elements inside a chunk, and no amount of stable merging puts them back.
+namespace __par {
+
+template <class EP, class It, class Comp, class ChunkSort>
+inline void SortSplitMerge(It first, size_t n, Comp comp, ChunkSort chunkSort)
+{
+    if (n < 2) return;
+    const size_t chunks = PlanFor<EP>(n);
+    if (chunks < 2) {
+        chunkSort(first, At(first, n));
+        return;
+    }
+    RegionExact<EP>(n, chunks,
+                    [&](size_t, size_t b, size_t e) { chunkSort(At(first, b), At(first, e)); });
+    for (size_t width = 1; width < chunks; width *= 2) {
+        for (size_t i = 0; i + width < chunks; i += 2 * width) {
+            const size_t b = i * n / chunks;
+            const size_t m = (i + width) * n / chunks;
+            size_t       e = (i + 2 * width) * n / chunks;
+            if (i + 2 * width > chunks) e = n;
+            inplace_merge(At(first, b), At(first, m), At(first, e), comp);
+        }
+    }
+}
+
+} // namespace __par
+
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void sort(EP &&, It first, It last, Comp comp)
+{
+    __par::SortSplitMerge<EP>(first, static_cast<size_t>(distance(first, last)), comp,
+                              [&](It a, It b) { sort(a, b, comp); });
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void sort(EP &&ep, It first, It last)
+{
+    sort(static_cast<EP &&>(ep), first, last, [](const auto &a, const auto &b) { return a < b; });
+}
+
+template <class EP, class It, class Comp>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void stable_sort(EP &&, It first, It last, Comp comp)
+{
+    __par::SortSplitMerge<EP>(first, static_cast<size_t>(distance(first, last)), comp,
+                              [&](It a, It b) { stable_sort(a, b, comp); });
+}
+
+template <class EP, class It>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+void stable_sort(EP &&ep, It first, It last)
+{
+    stable_sort(static_cast<EP &&>(ep), first, last,
+                [](const auto &a, const auto &b) { return a < b; });
+}
+
+// ── The rearrangers that run on the calling strand ──────────────────────
+// Each of these is a different algorithm in parallel, not a chunked version of
+// the same one: rotate and the in-place removers move elements past each other,
+// the set operations and merge walk two ranges in lockstep, and nth_element and
+// partial_sort are defined by an order the chunks cannot see. They take a
+// policy because [algorithm.syn] says they do, and they honour it the way the
+// standard allows -- sequentially. CONFORMANCE §2 lists them by name rather
+// than leaving a caller to discover it with a stopwatch.
+#define BOXCXX_PAR_SEQUENTIAL(NAME)                                           \
+    template <class EP, class... Args>                                        \
+        requires is_execution_policy_v<remove_cvref_t<EP>>                    \
+    auto NAME(EP &&, Args &&...args)                                          \
+    {                                                                         \
+        return NAME(static_cast<Args &&>(args)...);                           \
+    }
+
+BOXCXX_PAR_SEQUENTIAL(rotate)
+BOXCXX_PAR_SEQUENTIAL(unique)
+BOXCXX_PAR_SEQUENTIAL(partition)
+BOXCXX_PAR_SEQUENTIAL(stable_partition)
+BOXCXX_PAR_SEQUENTIAL(inplace_merge)
+BOXCXX_PAR_SEQUENTIAL(merge)
+BOXCXX_PAR_SEQUENTIAL(includes)
+BOXCXX_PAR_SEQUENTIAL(set_union)
+BOXCXX_PAR_SEQUENTIAL(set_intersection)
+BOXCXX_PAR_SEQUENTIAL(set_difference)
+BOXCXX_PAR_SEQUENTIAL(set_symmetric_difference)
+BOXCXX_PAR_SEQUENTIAL(nth_element)
+BOXCXX_PAR_SEQUENTIAL(partial_sort)
+BOXCXX_PAR_SEQUENTIAL(partial_sort_copy)
+BOXCXX_PAR_SEQUENTIAL(shift_left)
+BOXCXX_PAR_SEQUENTIAL(shift_right)
+
+#undef BOXCXX_PAR_SEQUENTIAL
+
+// remove and remove_if return an iterator and take a policy; the macro above
+// cannot serve them, because their sequential forms are found by ADL against
+// the same names this file declares.
+template <class EP, class It, class Pred>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It remove_if(EP &&, It first, It last, Pred p)
+{
+    return remove_if(first, last, p);
+}
+
+template <class EP, class It, class T>
+    requires is_execution_policy_v<remove_cvref_t<EP>>
+It remove(EP &&, It first, It last, const T &value)
+{
+    return remove(first, last, value);
 }
 
 } // namespace std

@@ -85,3 +85,19 @@
 #  define __cpp_lib_ranges_fold 202207L
 #endif
 #undef BOXCXX_OWNS_ranges_fold
+
+// Ф40: the ExecutionPolicy overload set is complete -- [algorithms],
+// [numeric.ops] and [specialized.algorithms] all have theirs. 201603L is the
+// C++23 value; the draft's 202506L belongs to P3179's parallel RANGE
+// algorithms, which are a different feature and not built here.
+//
+// The macro says the overloads exist and behave, not that every one of them
+// splits: rotate, unique, partition, the set operations, merge, nth_element
+// and partial_sort run on the calling strand, because each is a different
+// algorithm in parallel rather than a chunked version of the same one.
+// CONFORMANCE §2 lists them by name.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_parallel_algorithm)) && \
+    !defined(__cpp_lib_parallel_algorithm)
+#  define __cpp_lib_parallel_algorithm 201603L
+#endif
+#undef BOXCXX_OWNS_parallel_algorithm

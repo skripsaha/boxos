@@ -29,10 +29,19 @@ size_t Width();
 // the brigade cannot end up waiting for itself.
 bool Nested() noexcept;
 
-// Splits [0, n) into chunks of at least `grain` elements, runs one on the
-// calling strand and the rest on the brigade, and returns when they all have.
-// Returns how many chunks were used, which is 1 whenever the range was too
-// short, the region was nested, or the cabin has no spare cores.
+// How many chunks [0, n) would be cut into at a given grain: the width of the
+// brigade, the length of the range and whether this strand is already inside a
+// region, folded into one number. A two-pass algorithm asks ONCE and hands the
+// answer to both passes, so both are cut the same way -- which is the whole
+// reason this is separate from Run.
+size_t Plan(size_t n, size_t grain);
+
+// Runs exactly the plan: one chunk on the calling strand, the rest on the
+// brigade, returning when all of them have. Returns the number actually used,
+// which can be smaller than asked only if the brigade is being torn down.
+size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks);
+
+// Plan and RunExact in one call, for the algorithms that need only one pass.
 size_t Run(Chunk fn, void *ctx, size_t n, size_t grain);
 
 } // namespace __par

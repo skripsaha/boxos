@@ -151,6 +151,7 @@ __cpp_lib_null_iterators|iterator
 __cpp_lib_optional_range_support|optional
 __cpp_lib_optional|optional
 __cpp_lib_out_ptr|memory
+__cpp_lib_parallel_algorithm|algorithm,numeric
 __cpp_lib_philox_engine|random
 __cpp_lib_polymorphic|memory
 __cpp_lib_polymorphic_allocator|memory_resource

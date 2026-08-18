@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **89** — 85 of C++23 (20 absent, §1) plus four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 130 |
-| Header source | ~91 400 lines |
-| Feature-test macros defined | 207 — 161 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Internal implementation leaves (`include/std/__bits/`) | 131 |
+| Header source | ~92 800 lines |
+| Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 216 phases (197 of them the numbered `PhaseN` series), 5 461 runtime checks, 1 865 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 217 phases (198 of them the numbered `PhaseN` series), 5 469 runtime checks, 1 867 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,7 +61,7 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted twice, in both directions, so it is now stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **216**. The
+there are exactly as many as there are phase definitions. That is **217**. The
 166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
 alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
 other suffixed ones -- so both numbers are given above and neither can drift
@@ -774,12 +774,42 @@ nothing has been found since.
   throwing calls `terminate()`. That is the specification, not a shortcut, and
   the worker body catches everything and calls it rather than letting an
   exception walk out of a strand entry point.
-- **`~` The overload set is partial, and `__cpp_lib_parallel_algorithm` stays
-  undefined until it is not.** Present so far: `for_each`, `for_each_n`, both
-  `transform`s, `count`, `count_if`, `all_of`, `any_of`, `none_of`, `fill`,
-  `fill_n` from [algorithms]; `reduce` ×3 and `transform_reduce` ×3 from
-  [numeric.ops]. The rest of [algorithms], and the [specialized.algorithms]
-  family in `<memory>`, are not built yet.
+- **The overload set is complete**, and `__cpp_lib_parallel_algorithm` is
+  201603L: every `ExecutionPolicy` overload in [algorithms], [numeric.ops] and
+  [specialized.algorithms] exists. What the macro does NOT say is that every
+  one of them splits, and this document does:
+
+  | | |
+  |---|---|
+  | **Element-wise** — the chunks are independent because the elements are | `for_each`, `for_each_n`, both `transform`s, `fill`, `fill_n`, `generate`, `generate_n`, `copy`, `copy_n`, `move`, `swap_ranges`, `replace`, `replace_if`, `replace_copy`, `replace_copy_if`, `reverse`, `reverse_copy`, `rotate_copy`, `adjacent_difference`, and the whole [specialized.algorithms] family |
+  | **Per chunk, then combine** | `count`, `count_if` (one atomic add per chunk, not per element), `min_element`, `max_element`, `minmax_element` (a compare-and-exchange between chunk winners), `reduce` ×3, `transform_reduce` ×3 (a partial per chunk, folded afterwards) |
+  | **First match** — and it short-circuits: a chunk past the current winner stops walking | `find`, `find_if`, `find_if_not`, `find_first_of`, `find_end`, `adjacent_find`, `search`, `search_n`, `mismatch`, `equal`, `lexicographical_compare`, `all_of`, `any_of`, `none_of`, `is_sorted`, `is_sorted_until`, `is_heap`, `is_heap_until`, `is_partitioned` |
+  | **Two pass** — count per chunk, turn the counts into offsets, write | `copy_if`, `remove_copy`, `remove_copy_if`, `unique_copy`, `partition_copy`, `inclusive_scan`, `exclusive_scan`, `transform_inclusive_scan`, `transform_exclusive_scan` |
+  | **Split then merge** — the sort is parallel, the merges are not | `sort`, `stable_sort` |
+  | **`~` On the calling strand** | `rotate`, `remove`, `remove_if`, `unique`, `partition`, `stable_partition`, `inplace_merge`, `merge`, `includes`, `set_union`, `set_intersection`, `set_difference`, `set_symmetric_difference`, `nth_element`, `partial_sort`, `partial_sort_copy`, `shift_left`, `shift_right` |
+
+  The last row is not laziness: each of those is a DIFFERENT algorithm in
+  parallel rather than a chunked version of the same one — the in-place
+  rearrangers move elements past each other, the set operations walk two ranges
+  in lockstep, and `nth_element` and `partial_sort` are defined by an order the
+  chunks cannot see. A chunked version that quietly serialised would be the
+  claim this library does not make, so they say it here instead.
+- `stable_sort` under a policy IS stable and `sort` is not, which is the same
+  promise each makes without one. The two differ in exactly one place — which
+  sort each chunk gets — because `inplace_merge` is stable and the runs are in
+  order, so the chunk sort decides the answer. Sharing one implementation
+  between them, which the first version of this did, quietly made
+  `stable_sort(par, ...)` unstable: `std::sort` may reorder equal elements
+  inside a chunk and no amount of stable merging puts them back. A test over
+  `int`s cannot see that, which is why phase202 sorts a key with a payload.
+- **The tie rules are where a parallel min/max goes wrong.**
+  [alg.min.max] wants the FIRST smallest and, for `minmax_element`, the LAST
+  largest — two different rules from one comparison. Getting the second by
+  loosening the comparison to "greater or equal" makes both directions true for
+  equal elements, and then whichever strand reaches the compare-and-exchange
+  last wins: a race that one round of testing passes by luck. The tie rule
+  belongs in the combine, not the comparison; phase202 runs those checks twenty
+  times over for exactly that reason.
 - The predicate algorithms short-circuit through a shared flag: a chunk that
   sees the answer already decided stops walking. The standard does not require
   it; without it every chunk would read a range whose answer is known.
