@@ -22,13 +22,23 @@
 // a literal, so they cannot describe a different target than the rest of the
 // header does.
 //
-// One measured number worth knowing before writing anything that converts
-// multibyte characters: MB_LEN_MAX here is **1**. The mb* family in <cstdlib>
-// and the conversions in <cuchar> answer to that.
+// **MB_LEN_MAX is raised to 4, and that is this header's one real deviation
+// from <limits.h>.** The compiler says 1, and it is not describing this system
+// when it does: a freestanding implementation with no locale support has
+// single-byte characters by default, and BoxOS is UTF-8 end to end — the
+// screen, the keyboard and TagFS names all are. C leaves the "C" locale's
+// multibyte encoding implementation-defined, so <cstdlib> makes it UTF-8 and
+// MB_CUR_MAX 4; a MB_LEN_MAX of 1 next to that would be a contradiction the
+// standard forbids (MB_CUR_MAX shall never exceed MB_LEN_MAX). The alternative
+// — a second, narrower encoding living inside the C functions — would have made
+// mbstowcs produce mojibake from ordinary BoxOS text.
 #ifndef BOXCXX_CLIMITS
 #define BOXCXX_CLIMITS
 
 #include <limits.h>
+
+#undef MB_LEN_MAX
+#define MB_LEN_MAX 4
 
 #ifndef LLONG_MAX
 #  define LLONG_MAX __LONG_LONG_MAX__

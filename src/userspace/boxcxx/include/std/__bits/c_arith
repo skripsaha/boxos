@@ -1,0 +1,51 @@
+// boxcxx — <__bits/c_arith>
+//
+// The integer arithmetic of [cstdlib.syn]: abs/labs/llabs and the div family.
+// It lives in a leaf because TWO headers must answer for it. [c.math.abs] puts
+// the integral abs overloads in <cstdlib>, and that is where they belong — but
+// a translation unit that includes only <cmath> and writes abs(-3) must not
+// get 3.0, which is what happens the moment the only visible overloads take
+// floating-point arguments. libstdc++ solves it the same way, with the same
+// kind of shared leaf; before Ф41 boxcxx solved it by defining them in <cmath>
+// and saying in a comment that they belonged to a header BoxOS did not have.
+//
+// constexpr is not an addition here: P0533R9 (C++23) made these constexpr, so
+// [constexpr.functions]/1 is satisfied rather than stretched.
+#ifndef BOXCXX_BITS_C_ARITH
+#define BOXCXX_BITS_C_ARITH
+
+namespace std {
+
+// [c.math.abs]/3 makes abs ill-formed for an unsigned type that does not
+// promote to int, and leaving the overload out is exactly how that is spelled.
+inline constexpr int abs(int j) { return j < 0 ? -j : j; }
+inline constexpr long abs(long j) { return j < 0 ? -j : j; }
+inline constexpr long long abs(long long j) { return j < 0 ? -j : j; }
+
+inline constexpr long labs(long j) { return j < 0 ? -j : j; }
+inline constexpr long long llabs(long long j) { return j < 0 ? -j : j; }
+
+struct div_t   { int quot;       int rem;       };
+struct ldiv_t  { long quot;      long rem;      };
+struct lldiv_t { long long quot; long long rem; };
+
+// C99 onward fixes truncation toward zero, which is also what C++ requires of
+// / and %, so the two operators ARE the definition — no rounding correction,
+// no second branch. The pair is returned together because computing them
+// together is one idiv on x86-64.
+inline constexpr div_t div(int x, int y) { return div_t{x / y, x % y}; }
+inline constexpr ldiv_t div(long x, long y) { return ldiv_t{x / y, x % y}; }
+inline constexpr lldiv_t div(long long x, long long y)
+{
+    return lldiv_t{x / y, x % y};
+}
+
+inline constexpr ldiv_t ldiv(long x, long y) { return ldiv_t{x / y, x % y}; }
+inline constexpr lldiv_t lldiv(long long x, long long y)
+{
+    return lldiv_t{x / y, x % y};
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_C_ARITH

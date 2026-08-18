@@ -63,6 +63,20 @@ const char *GenericText(int code)
     }
 }
 
+} // namespace
+
+// <cstring>'s strerror answers from THIS table, not a second one. The two must
+// agree — [syserr.errcat.objects] ties errno values to generic_category(), so
+// a program that compares strerror(EDOM) with
+// generic_category().message(EDOM) is entitled to the same words — and the way
+// to make two things agree is to have one of them.
+extern "C" const char *__boxcxx_generic_text(int code) noexcept
+{
+    return GenericText(code);
+}
+
+namespace {
+
 class GenericCategory final : public error_category {
 public:
     constexpr GenericCategory() noexcept = default;

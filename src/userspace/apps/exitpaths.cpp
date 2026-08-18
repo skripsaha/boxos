@@ -23,6 +23,7 @@
  */
 
 #include <cassert>
+#include <cstdlib>
 #include <csignal>
 #include <fstream>
 #include <string>
@@ -87,6 +88,21 @@ int main()
         print("[exitpaths] throwing uncaught\n");
         io_flush();
         throw 42;
+    }
+
+    if (mode == "quickexit") {
+        // quick_exit runs the at_quick_exit list and NOTHING else: not the
+        // atexit handlers, not the static destructors, not the .fini_array.
+        // The witness below would exit 77 if teardown ran, so 88 is the proof
+        // that it did not — and that the at_quick_exit handler DID.
+        std::at_quick_exit([] {
+            print("[exitpaths] at_quick_exit handler ran\n");
+            io_flush();
+            _Exit(88);
+        });
+        print("[exitpaths] quick_exit\n");
+        io_flush();
+        std::quick_exit(0);
     }
 
     if (mode == "assert") {

@@ -587,6 +587,8 @@
 #include <climits>
 #include <csignal>
 #include <cstdarg>
+#include <cstdlib>
+#include <cstring>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
@@ -46252,7 +46254,11 @@ bool ErrnoMeetsErrorCode()
 // macros and boxcxx's numeric_limits. A disagreement means one of them is
 // describing a machine this code is not running on.
 static_assert(CHAR_BIT == 8);
-static_assert(MB_LEN_MAX == 1, "phase203 the freestanding multibyte width");
+// Ф41-a measured 1 here, which is what the compiler's <limits.h> says about a
+// system with no locale support. Ф41-b made the "C" locale's encoding UTF-8
+// (BoxOS is UTF-8 everywhere else), so <climits> raises it to 4 — and
+// MB_CUR_MAX must never exceed it.
+static_assert(MB_LEN_MAX == 4, "phase203 the multibyte width boxcxx chose");
 static_assert(SCHAR_MIN == std::numeric_limits<signed char>::min());
 static_assert(SCHAR_MAX == std::numeric_limits<signed char>::max());
 static_assert(UCHAR_MAX == std::numeric_limits<unsigned char>::max());
@@ -46417,6 +46423,451 @@ void Phase203()
     }
 
     printf("[CXX] PASS phase203: the C-compatibility foundation, and what ends a process\n");
+}
+
+// ── phase204 — Ф41-b: <cstring> and <cstdlib> ───────────────────────────
+namespace p204 {
+
+// ── <cstring>: the const-preserving pairs, which are the whole reason a C++
+// program includes this header rather than the C declarations ─────────────
+const char *const kConstStr = "hello world";
+char              g_mutable[] = "hello world";
+
+static_assert(std::is_same_v<decltype(std::strchr(kConstStr, 'o')), const char *>);
+static_assert(std::is_same_v<decltype(std::strchr(g_mutable, 'o')), char *>);
+static_assert(std::is_same_v<decltype(std::strrchr(kConstStr, 'o')), const char *>);
+static_assert(std::is_same_v<decltype(std::strrchr(g_mutable, 'o')), char *>);
+static_assert(std::is_same_v<decltype(std::strstr(kConstStr, "wo")), const char *>);
+static_assert(std::is_same_v<decltype(std::strstr(g_mutable, "wo")), char *>);
+static_assert(std::is_same_v<decltype(std::strpbrk(kConstStr, "aeiou")), const char *>);
+static_assert(std::is_same_v<decltype(std::strpbrk(g_mutable, "aeiou")), char *>);
+static_assert(std::is_same_v<decltype(std::memchr(static_cast<const void *>(kConstStr), 'o', 5)),
+                             const void *>);
+static_assert(std::is_same_v<decltype(std::memchr(static_cast<void *>(g_mutable), 'o', 5)),
+                             void *>);
+
+bool StringSearches()
+{
+    const char *s = "hello world";
+    if (std::strchr(s, 'o') != s + 4) return false;
+    if (std::strrchr(s, 'o') != s + 7) return false;
+    // C requires the terminator itself to be findable — a subtlety that decides
+    // whether strchr(s, 0) means "end of string" or "not found".
+    if (std::strchr(s, '\0') != s + 11) return false;
+    if (std::strchr(s, 'z') != nullptr) return false;
+    if (std::strstr(s, "wor") != s + 6) return false;
+    if (std::strstr(s, "") != s) return false;          // empty needle: at 0
+    if (std::strstr(s, "worlds") != nullptr) return false;
+    if (std::strpbrk(s, "xyzw") != s + 6) return false;
+    if (std::strspn(s, "hel") != 4) return false;       // "hell"
+    if (std::strcspn(s, "ow") != 4) return false;       // stops at the 'o'
+    if (std::strspn(s, "") != 0) return false;
+
+    const char *m = "abcdef";
+    if (std::memchr(m, 'd', 6) != m + 3) return false;
+    if (std::memchr(m, 'd', 3) != nullptr) return false;
+    // memchr crosses a terminator; strchr does not. Same haystack, both true.
+    if (std::memchr("ab\0cd", 'c', 5) == nullptr) return false;
+    return std::strchr("ab", 'c') == nullptr;
+}
+
+bool StringBuilders()
+{
+    char buf[32];
+    std::strcpy(buf, "one");
+    std::strcat(buf, "-two");
+    if (std::strcmp(buf, "one-two") != 0) return false;
+
+    // strncat writes at most n characters AND always terminates — unlike
+    // strncpy, which is the trap this pair is famous for.
+    std::strncat(buf, "-threeXXX", 6);
+    if (std::strcmp(buf, "one-two-three") != 0) return false;
+
+    // The "C" locale collates by code, so strcoll IS strcmp, and strxfrm is a
+    // copy that reports the length it NEEDED (terminator excluded).
+    if (std::strcoll("a", "b") >= 0) return false;
+    char x[4];
+    if (std::strxfrm(x, "abcdef", sizeof x) != 6) return false;
+    if (std::strcmp(x, "abc") != 0) return false;
+    return true;
+}
+
+bool StringNullTolerance()
+{
+    // A documented strengthening: C leaves all of these undefined. Nothing
+    // conforming can observe the difference, and a bare-metal system has no
+    // signal to turn the fault into a diagnostic.
+    // The casts are not ceremony: with the const-preserving pair in place,
+    // strchr(nullptr, 'a') is genuinely ambiguous, which is itself evidence
+    // that both overloads exist.
+    const char *null_str = nullptr;
+    return std::strlen(nullptr) == 0 && std::strchr(null_str, 'a') == nullptr &&
+           std::strstr(null_str, "x") == nullptr && std::strspn(nullptr, "x") == 0 &&
+           std::memchr(static_cast<const void *>(nullptr), 0, 4) == nullptr;
+}
+
+bool Strtok()
+{
+    char        text[] = "  alpha, beta ,,gamma  ";
+    const char *want[] = {"alpha", "beta", "gamma"};
+    int         i      = 0;
+    for (char *t = std::strtok(text, " ,"); t; t = std::strtok(nullptr, " ,"), i++) {
+        if (i >= 3 || std::strcmp(t, want[i]) != 0) return false;
+    }
+    return i == 3 && std::strtok(nullptr, " ,") == nullptr;
+}
+
+// The cursor is PER-STRAND, which is the deviation that matters: with C's one
+// static object this test is a data race and the two strands steal each other's
+// place. Both tokenize the same shape of input concurrently.
+bool StrtokIsPerStrand()
+{
+    std::atomic<bool> other_ok{false};
+    std::atomic<int>  ready{0};
+
+    std::thread t([&] {
+        char        text[] = "x1 x2 x3";
+        const char *want[] = {"x1", "x2", "x3"};
+        ready.fetch_add(1);
+        while (ready.load() < 2) { }          // start both mid-flight
+        int i = 0;
+        for (char *s = std::strtok(text, " "); s; s = std::strtok(nullptr, " "), i++)
+            if (i >= 3 || std::strcmp(s, want[i]) != 0) return;
+        other_ok.store(i == 3);
+    });
+
+    char        text[] = "y1 y2 y3";
+    const char *want[] = {"y1", "y2", "y3"};
+    ready.fetch_add(1);
+    while (ready.load() < 2) { }
+    int i = 0;
+    bool mine = true;
+    for (char *s = std::strtok(text, " "); s; s = std::strtok(nullptr, " "), i++)
+        if (i >= 3 || std::strcmp(s, want[i]) != 0) { mine = false; break; }
+    t.join();
+    return mine && i == 3 && other_ok.load();
+}
+
+bool Strerror()
+{
+    // One table, two faces: [syserr.errcat.objects] ties errno values to the
+    // generic category, so the words must be the same words.
+    const std::string via_category = std::generic_category().message(EINVAL);
+    if (via_category != std::strerror(EINVAL)) return false;
+    if (std::strcmp(std::strerror(ERANGE), "numerical result out of range") != 0)
+        return false;
+    // A condition BoxOS cannot surface is not given a cargo-culted Unix string.
+    return std::strncmp(std::strerror(EPROTONOSUPPORT), "generic error ", 14) == 0;
+}
+
+// ── <cstdlib>: integer arithmetic ───────────────────────────────────────
+static_assert(std::abs(-3) == 3 && std::is_same_v<decltype(std::abs(-3)), int>);
+static_assert(std::abs(-3L) == 3L && std::is_same_v<decltype(std::abs(-3L)), long>);
+static_assert(std::labs(-4L) == 4L && std::llabs(-5LL) == 5LL);
+// P0533R9 made these constexpr in C++23, which is why the asserts above are
+// legal rather than an implementation taking liberties ([constexpr.functions]/1).
+static_assert(std::div(7, 2).quot == 3 && std::div(7, 2).rem == 1);
+static_assert(std::div(-7, 2).quot == -3 && std::div(-7, 2).rem == -1);
+static_assert(std::ldiv(-7L, 2L).rem == -1L && std::lldiv(7LL, -2LL).quot == -3LL);
+static_assert(std::is_same_v<decltype(std::div(1L, 1L)), std::ldiv_t>);
+
+// ── <cstdlib>: the strto* grammar ───────────────────────────────────────
+bool StrtolGrammar()
+{
+    char *end = nullptr;
+
+    if (std::strtol("  -42rest", &end, 10) != -42 || std::strcmp(end, "rest") != 0)
+        return false;
+    if (std::strtol("0x1f", &end, 16) != 31 || *end != '\0') return false;
+    if (std::strtol("0x1f", &end, 0) != 31) return false;      // base 0 sniffs
+    if (std::strtol("017", &end, 0) != 15) return false;       // ...octal too
+    if (std::strtol("17", &end, 0) != 17) return false;
+    if (std::strtol("zz", &end, 36) != 1295) return false;
+
+    // No conversion: value 0 AND endptr back at the start, which is the only
+    // way a caller can tell "0" from "not a number".
+    const char *junk = "  xyz";
+    if (std::strtol(junk, &end, 10) != 0 || end != junk) return false;
+
+    // Overflow clamps and says so through errno, in both directions.
+    errno = 0;
+    if (std::strtol("99999999999999999999", &end, 10) != LONG_MAX) return false;
+    if (errno != ERANGE) return false;
+    errno = 0;
+    if (std::strtol("-99999999999999999999", &end, 10) != LONG_MIN) return false;
+    if (errno != ERANGE) return false;
+
+    // The exact boundary must NOT set errno.
+    errno = 0;
+    if (std::strtoll("9223372036854775807", &end, 10) != LLONG_MAX) return false;
+    if (errno != 0) return false;
+
+    // strtoul on a negative is a wrap, not a refusal — surprising, and what C
+    // says.
+    if (std::strtoul("-1", &end, 10) != ULONG_MAX) return false;
+    return std::strtoull("18446744073709551615", &end, 10) == ULLONG_MAX;
+}
+
+bool StrtodGrammar()
+{
+    char *end = nullptr;
+
+    if (std::strtod("  3.5abc", &end) != 3.5 || std::strcmp(end, "abc") != 0)
+        return false;
+    if (std::strtod("-0.5", &end) != -0.5) return false;
+    if (std::strtod("1e3", &end) != 1000.0) return false;
+    if (std::strtod("0x1.8p1", &end) != 3.0) return false;   // hex float
+    if (!std::isinf(std::strtod("inf", &end))) return false;
+    if (!std::isnan(std::strtod("nan", &end))) return false;
+
+    const char *junk = "  q";
+    if (std::strtod(junk, &end) != 0.0 || end != junk) return false;
+
+    // Overflow gives HUGE_VAL with ERANGE; underflow gives zero with ERANGE.
+    // Which side it was is decided by re-parsing into the 80-bit type rather
+    // than by re-reading the text.
+    errno = 0;
+    if (!std::isinf(std::strtod("1e400", &end)) || errno != ERANGE) return false;
+    errno = 0;
+    if (std::strtod("-1e400", &end) >= 0.0 || errno != ERANGE) return false;
+    errno = 0;
+    if (std::strtod("1e-400", &end) != 0.0 || errno != ERANGE) return false;
+
+    if (std::strtof("2.5", &end) != 2.5f) return false;
+    if (std::strtold("2.5", &end) != 2.5L) return false;
+
+    return std::atoi("  -7x") == -7 && std::atol("12") == 12L &&
+           std::atoll("-3") == -3LL && std::atof("1.5") == 1.5;
+}
+
+// ── <cstdlib>: sorting and searching ────────────────────────────────────
+extern "C" int P204CompareInt(const void *a, const void *b)
+{
+    const int x = *static_cast<const int *>(a);
+    const int y = *static_cast<const int *>(b);
+    return (x > y) - (x < y);
+}
+
+bool SortAndSearch()
+{
+    // 512 elements in the worst shape for a naive quicksort — already sorted,
+    // then reverse — which is what the introsort fallback is for.
+    constexpr int kN = 512;
+    std::vector<int> v(kN);
+    for (int i = 0; i < kN; i++) v[i] = kN - i;
+    std::qsort(v.data(), v.size(), sizeof(int), P204CompareInt);
+    for (int i = 0; i < kN; i++)
+        if (v[i] != i + 1) return false;
+
+    std::qsort(v.data(), v.size(), sizeof(int), P204CompareInt);   // already sorted
+    for (int i = 0; i < kN; i++)
+        if (v[i] != i + 1) return false;
+
+    // Degenerate shapes C still requires to work.
+    std::qsort(v.data(), 0, sizeof(int), P204CompareInt);
+    std::qsort(v.data(), 1, sizeof(int), P204CompareInt);
+
+    const int key = 300;
+    const void *hit = std::bsearch(&key, static_cast<const void *>(v.data()),
+                                   v.size(), sizeof(int), P204CompareInt);
+    if (!hit || *static_cast<const int *>(hit) != 300) return false;
+    const int miss = 0;
+    if (std::bsearch(&miss, static_cast<const void *>(v.data()), v.size(),
+                     sizeof(int), P204CompareInt) != nullptr)
+        return false;
+
+    // [cstdlib.syn] gives bsearch the same const-preserving pair as strchr.
+    static_assert(std::is_same_v<decltype(std::bsearch(&key,
+                                                       static_cast<const void *>(v.data()),
+                                                       1, 4, P204CompareInt)),
+                                 const void *>);
+    static_assert(std::is_same_v<decltype(std::bsearch(&key,
+                                                       static_cast<void *>(v.data()),
+                                                       1, 4, P204CompareInt)),
+                                 void *>);
+    return true;
+}
+
+// ── <cstdlib>: rand, and the state C never says where to keep ───────────
+bool RandIsPerStrand()
+{
+    std::srand(7);
+    int mine[4];
+    for (int &r : mine) {
+        r = std::rand();
+        if (r < 0 || r > RAND_MAX) return false;
+    }
+
+    // The same seed on another strand yields the same sequence — which is only
+    // true because the state is thread_local. With C's single object the two
+    // strands would interleave and neither would see this.
+    bool same = false;
+    std::thread t([&] {
+        std::srand(7);
+        bool ok = true;
+        for (int i = 0; i < 4; i++)
+            if (std::rand() != mine[i]) ok = false;
+        same = ok;
+    });
+    t.join();
+    if (!same) return false;
+
+    // Reseeding reproduces, and a different seed diverges.
+    std::srand(7);
+    if (std::rand() != mine[0]) return false;
+    std::srand(8);
+    return std::rand() != mine[0];
+}
+
+// ── <cstdlib>: aligned_alloc, released by the ORDINARY free ─────────────
+bool AlignedAlloc()
+{
+    // malloc's own guarantee first: [c.malloc] says suitably aligned for any
+    // object type, which is alignof(max_align_t).
+    for (int i = 0; i < 8; i++) {
+        void *p = std::malloc(1 + static_cast<std::size_t>(i) * 7);
+        if (!p) return false;
+        if (reinterpret_cast<std::uintptr_t>(p) % alignof(std::max_align_t) != 0)
+            return false;
+        std::free(p);
+    }
+
+    for (std::size_t align : {std::size_t{32}, std::size_t{64}, std::size_t{256},
+                              std::size_t{4096}}) {
+        void *p = std::aligned_alloc(align, align * 3);
+        if (!p) return false;
+        if (reinterpret_cast<std::uintptr_t>(p) % align != 0) return false;
+        // Writable over the whole request — a split that got the size wrong
+        // would corrupt the neighbour rather than fault here.
+        std::memset(p, 0xA5, align * 3);
+        for (std::size_t i = 0; i < align * 3; i++)
+            if (static_cast<unsigned char *>(p)[i] != 0xA5) return false;
+        std::free(p);                       // the ordinary free, not a partner
+    }
+
+    // Interleave aligned and plain allocations so the leading remainders the
+    // splitter hands back are actually reused.
+    void *keep[8];
+    for (int i = 0; i < 8; i++) {
+        keep[i] = std::aligned_alloc(128, 128);
+        if (!keep[i] || reinterpret_cast<std::uintptr_t>(keep[i]) % 128 != 0)
+            return false;
+        void *filler = std::malloc(24);
+        if (!filler) return false;
+        std::free(filler);
+    }
+    for (void *p : keep) std::free(p);
+
+    // ‼ The conservation law, and the reason it is here: the first version of
+    // this phase checked only that the pointer was aligned, writable and
+    // freeable — and a mutation that gave the split block 32 bytes MORE than it
+    // owns passed all three. An over-claiming block is invisible until someone
+    // writes into the neighbour it now overlaps.
+    //
+    // Every block in the heap is a 32-byte header plus its payload, laid end to
+    // end from the base, so the payloads plus one header apiece can never
+    // exceed the bytes the heap has taken from sbrk. A split that forgets to
+    // pay for the header it just created breaks exactly this.
+    heap_stats_t st{};
+    heap_get_stats(&st);
+    const std::size_t accounted =
+        st.total_allocated + st.total_free +
+        static_cast<std::size_t>(st.alloc_count + st.free_count) * 32u;
+    if (accounted > st.heap_used) {
+        printf("[CXX] note phase204: heap accounts %zu bytes of %zu\n", accounted,
+               st.heap_used);
+        return false;
+    }
+
+    // Refusals: a non-power-of-two alignment and a zero size.
+    return std::aligned_alloc(24, 48) == nullptr &&
+           std::aligned_alloc(64, 0) == nullptr;
+}
+
+// ── <cstdlib>: the multibyte encoding is UTF-8 ──────────────────────────
+bool Multibyte()
+{
+    static_assert(MB_CUR_MAX == 4);
+    static_assert(MB_LEN_MAX == 4);
+
+    struct Case { const char *bytes; int len; char32_t cp; };
+    const Case cases[] = {
+        {"A", 1, U'A'},
+        {"\xC3\xA9", 2, U'é'},              // é
+        {"\xE2\x82\xAC", 3, U'€'},          // €
+        {"\xF0\x9F\x93\xA6", 4, U'\U0001F4E6'},  // 📦
+    };
+
+    for (const Case &c : cases) {
+        if (std::mblen(c.bytes, 4) != c.len) return false;
+        wchar_t wc = 0;
+        if (std::mbtowc(&wc, c.bytes, 4) != c.len) return false;
+        if (static_cast<char32_t>(wc) != c.cp) return false;
+        char out[4] = {};
+        if (std::wctomb(out, static_cast<wchar_t>(c.cp)) != c.len) return false;
+        if (std::memcmp(out, c.bytes, static_cast<std::size_t>(c.len)) != 0)
+            return false;
+    }
+
+    // Every way a sequence can be wrong is rejected, not silently accepted:
+    // a bare continuation, a truncated pair, an overlong encoding of 'A', and
+    // a surrogate.
+    if (std::mblen("\x80", 1) != -1) return false;
+    if (std::mblen("\xC3", 1) != -1) return false;
+    if (std::mblen("\xC0\x81", 2) != -1) return false;
+    if (std::mblen("\xED\xA0\x80", 3) != -1) return false;
+
+    wchar_t wide[8] = {};
+    const std::size_t n = std::mbstowcs(wide, "a\xC3\xA9\xF0\x9F\x93\xA6", 8);
+    if (n != 3 || wide[0] != L'a' || static_cast<char32_t>(wide[1]) != U'é' ||
+        static_cast<char32_t>(wide[2]) != U'\U0001F4E6')
+        return false;
+
+    char back[16] = {};
+    const std::size_t m = std::wcstombs(back, wide, sizeof back);
+    return m == 7 && std::strcmp(back, "a\xC3\xA9\xF0\x9F\x93\xA6") == 0;
+}
+
+bool EnvironmentAndProcessor()
+{
+    // Both are answers, not stubs: there is no environment and no command
+    // processor. C spells the second one "system(nullptr) returns zero".
+    return std::getenv("PATH") == nullptr && std::getenv("") == nullptr &&
+           std::system(nullptr) == 0;
+}
+
+} // namespace p204
+
+void Phase204()
+{
+    Check(p204::StringSearches(), "phase204 <cstring> searches, terminator included");
+    Check(p204::StringBuilders(), "phase204 <cstring> strcat/strncat/strcoll/strxfrm");
+    Check(p204::StringNullTolerance(), "phase204 <cstring> is null-tolerant where C is undefined");
+    Check(p204::Strtok(), "phase204 strtok splits and reports exhaustion");
+    Check(p204::StrtokIsPerStrand(), "phase204 strtok's cursor is per-strand, so two strands do not collide");
+    Check(p204::Strerror(), "phase204 strerror and generic_category() are one table");
+
+    Check(p204::StrtolGrammar(), "phase204 strtol grammar: bases, endptr, ERANGE clamping");
+    Check(p204::StrtodGrammar(), "phase204 strtod grammar: hex floats, inf/nan, over- and underflow");
+    Check(p204::SortAndSearch(), "phase204 qsort (introsort) and bsearch, const pair included");
+    Check(p204::RandIsPerStrand(), "phase204 rand is reproducible per seed and per-strand");
+    Check(p204::AlignedAlloc(), "phase204 aligned_alloc is released by the ordinary free");
+    Check(p204::Multibyte(), "phase204 the C locale's multibyte encoding is UTF-8");
+    Check(p204::EnvironmentAndProcessor(), "phase204 no environment, no command processor");
+
+    // quick_exit runs the at_quick_exit handlers and NOT the static
+    // destructors — a difference only a dying process can show.
+    {
+        const int status = p203::RunChild("quickexit");
+        if (status == -3) {
+            printf("[CXX] note phase204: proc_exec unavailable; quick_exit witness skipped\n");
+        } else {
+            Check(status == 88,
+                  "phase204 quick_exit runs at_quick_exit and NOT static destructors");
+        }
+    }
+
+    printf("[CXX] PASS phase204: <cstring> and <cstdlib>, and what they rest on\n");
 }
 
 } // namespace
@@ -46644,6 +47095,7 @@ int main()
     Phase201();
     Phase202();
     Phase203();
+    Phase204();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

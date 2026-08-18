@@ -32,6 +32,13 @@ extern "C" {
 void* malloc(size_t size);
 void* malloc_tagged(size_t size, const char *tag);
 void  free(void* ptr);
+
+/* Alignment beyond the 16 bytes malloc already guarantees. The result is
+ * released by the ORDINARY free() — the allocator splits a block so that a
+ * real header lands in front of the aligned payload, rather than hiding a
+ * back-pointer there. `alignment` must be a power of two; anything else, or a
+ * zero size, returns NULL. */
+void* aligned_alloc(size_t alignment, size_t size);
 void* calloc(size_t nmemb, size_t size);
 void* realloc(void* ptr, size_t size);
 

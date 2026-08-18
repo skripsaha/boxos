@@ -2946,23 +2946,19 @@ inline bool islessequal(long double x, long double y) { return __builtin_islesse
 inline bool islessgreater(long double x, long double y) { return __builtin_islessgreater(x, y); }
 inline bool isunordered(long double x, long double y) { return __builtin_isunordered(x, y); }
 
-// [c.math.abs]: abs of an integer returns THAT integer type, not a double.
-// The three integral forms belong to <cstdlib>, which BoxOS does not have —
-// so they are provided here rather than promoted, because promoting would
-// change std::abs(-3) from the int 3 that every program expects into 3.0.
-// Unsigned arguments are left out on purpose: [c.math.abs]/3 makes calling
-// abs on a type that is unsigned and does not promote to int ill-formed, and
-// omitting the overload is how that is spelled.
-inline constexpr int abs(int j) { return j < 0 ? -j : j; }
-inline constexpr long abs(long j) { return j < 0 ? -j : j; }
-inline constexpr long long abs(long long j) { return j < 0 ? -j : j; }
-
 #undef BOXCXX_MATH_PROMOTE1
 #undef BOXCXX_MATH_PROMOTE2
 #undef BOXCXX_MATH_PROMOTE3
 #undef BOXCXX_MATH_PROMOTE_XN
 
 } // namespace std
+
+// [c.math.abs]: abs of an integer returns THAT integer type, not a double, and
+// a TU that includes only <cmath> must still get the int one — otherwise
+// abs(-3) promotes and quietly becomes 3.0. The overloads belong to
+// <cstdlib> ([cstdlib.syn]), which since Ф41 exists; the leaf is how both
+// headers answer for the same three functions.
+#include <__bits/c_arith>
 #include <__bits/cmath_special>
 
 // [version.syn] names this header as an owner of the macros below;

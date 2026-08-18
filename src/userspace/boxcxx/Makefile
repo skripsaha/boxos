@@ -30,6 +30,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
 SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/csignal.cpp \
        src/runtime/cassert.cpp \
+       src/runtime/cstdlib.cpp \
        src/runtime/new_delete.cpp \
        src/runtime/cxxabi_typeinfo.cpp \
        src/runtime/dynamic_cast.cpp \
