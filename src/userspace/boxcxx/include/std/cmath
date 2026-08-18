@@ -2384,6 +2384,334 @@ inline float erfcf(float x){ return (float)erfc((long double)x); }       inline 
 inline float tgammaf(float x){ return (float)tgamma((long double)x); }   inline long double tgammal(long double x){ return tgamma(x); }
 inline float lgammaf(float x){ return (float)lgamma((long double)x); }   inline long double lgammal(long double x){ return lgamma(x); }
 
+} // namespace std
+
+// The binary128 kernels sit in their own leaf, and are included here rather
+// than at the top purely for reading order: nothing above this line needs
+// them, and everything below does.
+#include <__bits/cmath_quad>
+
+namespace std {
+
+// ════════════════════════════════════════════════════════════════════════
+//  [cmath.syn]/2 at the EXTENDED floating-point types (Ф40)
+// ════════════════════════════════════════════════════════════════════════
+// "For each function with at least one parameter of type floating-point-type,
+// the implementation provides an overload for each cv-unqualified
+// floating-point type" -- and on this toolchain there are eight such types,
+// not three: __STDCPP_FLOAT16_T__ and its four siblings are all predefined,
+// which makes _Float16, _Float32, _Float64, _Float128 and __bf16 standard
+// floating-point types by [basic.extended.fp]. Until Ф40 this clause was five
+// types short and nobody had noticed, because nothing in the tree had ever
+// written one of them down.
+//
+// Four of the five are answered by computing in the standard type whose format
+// contains theirs and converting back. That is not a shortcut, it is the whole
+// of the arithmetic: _Float32 IS binary32 and _Float64 IS binary64, so those
+// two are exact by construction; _Float16 (11 significand bits) and __bf16 (8)
+// go through double, whose 53 bits are more than the 2p+2 that makes the
+// double rounding provably harmless. The fifth, float128_t, has no wider type
+// to hide in and gets real kernels -- see <__bits/cmath_quad>, including which
+// functions it does NOT get and why.
+namespace __math {
+
+// The type an extended floating-point type computes through.
+template <class T> struct Via {
+    using type = void;
+};
+#if defined(__STDCPP_FLOAT16_T__)
+template <> struct Via<_Float16> {
+    using type = double;
+};
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+template <> struct Via<__bf16> {
+    using type = double;
+};
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+template <> struct Via<_Float32> {
+    using type = float;
+};
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+template <> struct Via<_Float64> {
+    using type = double;
+};
+#endif
+
+template <class T>
+concept NarrowExt = !is_void_v<typename Via<T>::type>;
+
+// Converts a result back to T when the underlying function returned a value,
+// and leaves an int, long or bool result exactly as it is. One helper is what
+// lets a single macro serve sqrt, ilogb, lround and isnan alike.
+template <class T, class R>
+constexpr auto Back(R r)
+{
+    if constexpr (is_same_v<R, typename Via<T>::type>) return static_cast<T>(r);
+    else return r;
+}
+
+} // namespace __math
+
+#define BOXCXX_MATH_EXT1(NAME)                                                \
+    template <class T>                                                        \
+        requires __math::NarrowExt<T>                                         \
+    inline auto NAME(T x)                                                     \
+    {                                                                         \
+        return __math::Back<T>(NAME(static_cast<typename __math::Via<T>::type>(x))); \
+    }
+#define BOXCXX_MATH_EXT2(NAME)                                                \
+    template <class T>                                                        \
+        requires __math::NarrowExt<T>                                         \
+    inline auto NAME(T x, T y)                                                \
+    {                                                                         \
+        using V = typename __math::Via<T>::type;                              \
+        return __math::Back<T>(NAME(static_cast<V>(x), static_cast<V>(y)));   \
+    }
+#define BOXCXX_MATH_EXT3(NAME)                                                \
+    template <class T>                                                        \
+        requires __math::NarrowExt<T>                                         \
+    inline auto NAME(T x, T y, T z)                                           \
+    {                                                                         \
+        using V = typename __math::Via<T>::type;                              \
+        return __math::Back<T>(                                               \
+            NAME(static_cast<V>(x), static_cast<V>(y), static_cast<V>(z)));   \
+    }
+#define BOXCXX_MATH_EXT_XN(NAME, NTYPE)                                       \
+    template <class T>                                                        \
+        requires __math::NarrowExt<T>                                         \
+    inline T NAME(T x, NTYPE n)                                               \
+    {                                                                         \
+        return static_cast<T>(NAME(static_cast<typename __math::Via<T>::type>(x), n)); \
+    }
+
+BOXCXX_MATH_EXT1(acos)      BOXCXX_MATH_EXT1(acosh)
+BOXCXX_MATH_EXT1(asin)      BOXCXX_MATH_EXT1(asinh)
+BOXCXX_MATH_EXT1(atan)      BOXCXX_MATH_EXT1(atanh)
+BOXCXX_MATH_EXT1(cbrt)      BOXCXX_MATH_EXT1(ceil)
+BOXCXX_MATH_EXT1(cos)       BOXCXX_MATH_EXT1(cosh)
+BOXCXX_MATH_EXT1(erf)       BOXCXX_MATH_EXT1(erfc)
+BOXCXX_MATH_EXT1(exp)       BOXCXX_MATH_EXT1(exp2)
+BOXCXX_MATH_EXT1(expm1)     BOXCXX_MATH_EXT1(fabs)
+BOXCXX_MATH_EXT1(abs)       BOXCXX_MATH_EXT1(floor)
+BOXCXX_MATH_EXT1(lgamma)    BOXCXX_MATH_EXT1(log)
+BOXCXX_MATH_EXT1(log10)     BOXCXX_MATH_EXT1(log1p)
+BOXCXX_MATH_EXT1(log2)      BOXCXX_MATH_EXT1(logb)
+BOXCXX_MATH_EXT1(nearbyint) BOXCXX_MATH_EXT1(rint)
+BOXCXX_MATH_EXT1(round)     BOXCXX_MATH_EXT1(sin)
+BOXCXX_MATH_EXT1(sinh)      BOXCXX_MATH_EXT1(sqrt)
+BOXCXX_MATH_EXT1(tan)       BOXCXX_MATH_EXT1(tanh)
+BOXCXX_MATH_EXT1(tgamma)    BOXCXX_MATH_EXT1(trunc)
+BOXCXX_MATH_EXT1(ilogb)     BOXCXX_MATH_EXT1(lrint)
+BOXCXX_MATH_EXT1(llrint)    BOXCXX_MATH_EXT1(lround)
+BOXCXX_MATH_EXT1(llround)   BOXCXX_MATH_EXT1(fpclassify)
+BOXCXX_MATH_EXT1(isfinite)  BOXCXX_MATH_EXT1(isinf)
+BOXCXX_MATH_EXT1(isnan)     BOXCXX_MATH_EXT1(isnormal)
+BOXCXX_MATH_EXT1(signbit)
+
+BOXCXX_MATH_EXT2(atan2)     BOXCXX_MATH_EXT2(copysign)
+BOXCXX_MATH_EXT2(fdim)      BOXCXX_MATH_EXT2(fmax)
+BOXCXX_MATH_EXT2(fmin)      BOXCXX_MATH_EXT2(fmod)
+BOXCXX_MATH_EXT2(hypot)     BOXCXX_MATH_EXT2(nextafter)
+BOXCXX_MATH_EXT2(pow)       BOXCXX_MATH_EXT2(remainder)
+BOXCXX_MATH_EXT2(isgreater) BOXCXX_MATH_EXT2(isgreaterequal)
+BOXCXX_MATH_EXT2(isless)    BOXCXX_MATH_EXT2(islessequal)
+BOXCXX_MATH_EXT2(islessgreater)
+BOXCXX_MATH_EXT2(isunordered)
+
+BOXCXX_MATH_EXT3(fma)       BOXCXX_MATH_EXT3(hypot)
+
+BOXCXX_MATH_EXT_XN(ldexp, int)
+BOXCXX_MATH_EXT_XN(scalbn, int)
+BOXCXX_MATH_EXT_XN(scalbln, long)
+
+template <class T>
+    requires __math::NarrowExt<T>
+inline T frexp(T x, int *e)
+{
+    return static_cast<T>(frexp(static_cast<typename __math::Via<T>::type>(x), e));
+}
+
+// modf writes the integral part through a pointer to the SAME type, which is
+// why it cannot be one of the macros above: the value has to come back through
+// a local of the computation type and be narrowed on the way out.
+template <class T>
+    requires __math::NarrowExt<T>
+inline T modf(T x, T *ip)
+{
+    using V = typename __math::Via<T>::type;
+    V whole{};
+    const V frac = modf(static_cast<V>(x), &whole);
+    *ip = static_cast<T>(whole);
+    return static_cast<T>(frac);
+}
+
+template <class T>
+    requires __math::NarrowExt<T>
+inline T remquo(T x, T y, int *q)
+{
+    using V = typename __math::Via<T>::type;
+    return static_cast<T>(remquo(static_cast<V>(x), static_cast<V>(y), q));
+}
+
+// lerp keeps its constexpr, like every other overload of it.
+template <class T>
+    requires __math::NarrowExt<T>
+constexpr T lerp(T a, T b, T t)
+{
+    using V = typename __math::Via<T>::type;
+    return static_cast<T>(lerp(static_cast<V>(a), static_cast<V>(b), static_cast<V>(t)));
+}
+
+// [cmath.syn]/4: "An invocation of nexttoward is ill-formed if the argument
+// corresponding to the floating-point-type parameter has extended
+// floating-point type." Not a deviation -- the standard's own rule, and
+// deleting the overloads is how a library says it out loud.
+#if defined(__STDCPP_FLOAT16_T__)
+_Float16 nexttoward(_Float16, long double) = delete;
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+__bf16 nexttoward(__bf16, long double) = delete;
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+_Float32 nexttoward(_Float32, long double) = delete;
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+_Float64 nexttoward(_Float64, long double) = delete;
+#endif
+#if defined(__STDCPP_FLOAT128_T__)
+_Float128 nexttoward(_Float128, long double) = delete;
+#endif
+
+#undef BOXCXX_MATH_EXT1
+#undef BOXCXX_MATH_EXT2
+#undef BOXCXX_MATH_EXT3
+#undef BOXCXX_MATH_EXT_XN
+
+#if defined(__STDCPP_FLOAT128_T__)
+// ── float128_t: the algebraic and classifying half, and only that ────────
+inline _Float128 fabs(_Float128 x) { return __quad::Fabs(x); }
+inline _Float128 abs(_Float128 x) { return __quad::Fabs(x); }
+inline _Float128 ceil(_Float128 x) { return __quad::Ceil(x); }
+inline _Float128 floor(_Float128 x) { return __quad::Floor(x); }
+inline _Float128 trunc(_Float128 x) { return __quad::Trunc(x); }
+inline _Float128 round(_Float128 x) { return __quad::Round(x); }
+inline _Float128 rint(_Float128 x) { return __quad::Rint(x); }
+inline _Float128 nearbyint(_Float128 x) { return __quad::Rint(x); }
+inline _Float128 sqrt(_Float128 x) { return __quad::Sqrt(x); }
+inline _Float128 cbrt(_Float128 x) { return __quad::Cbrt(x); }
+inline _Float128 logb(_Float128 x) { return __quad::Logb(x); }
+
+inline int ilogb(_Float128 x) { return __quad::Ilogb(x); }
+inline long lrint(_Float128 x) { return (long)__quad::Rint(x); }
+inline long long llrint(_Float128 x) { return (long long)__quad::Rint(x); }
+inline long lround(_Float128 x) { return (long)__quad::Round(x); }
+inline long long llround(_Float128 x) { return (long long)__quad::Round(x); }
+
+inline int fpclassify(_Float128 x)
+{
+    if (__quad::IsNan(x)) return FP_NAN_;
+    if (__quad::IsInf(x)) return FP_INFINITE_;
+    if (__quad::IsZero(x)) return FP_ZERO_;
+    return __quad::IsNormal(x) ? FP_NORMAL_ : FP_SUBNORMAL_;
+}
+inline bool isfinite(_Float128 x) { return __quad::IsFinite(x); }
+inline bool isinf(_Float128 x) { return __quad::IsInf(x); }
+inline bool isnan(_Float128 x) { return __quad::IsNan(x); }
+inline bool isnormal(_Float128 x) { return __quad::IsNormal(x); }
+inline bool signbit(_Float128 x) { return __quad::SignBit(x); }
+
+inline _Float128 copysign(_Float128 x, _Float128 y) { return __quad::CopySign(x, y); }
+inline _Float128 fdim(_Float128 x, _Float128 y) { return __quad::Fdim(x, y); }
+inline _Float128 fmax(_Float128 x, _Float128 y) { return __quad::Fmax(x, y); }
+inline _Float128 fmin(_Float128 x, _Float128 y) { return __quad::Fmin(x, y); }
+inline _Float128 fmod(_Float128 x, _Float128 y) { return __quad::Fmod(x, y); }
+inline _Float128 hypot(_Float128 x, _Float128 y) { return __quad::Hypot(x, y); }
+inline _Float128 nextafter(_Float128 x, _Float128 y) { return __quad::NextAfter(x, y); }
+inline _Float128 remainder(_Float128 x, _Float128 y) { return __quad::Remainder(x, y); }
+inline _Float128 fma(_Float128 x, _Float128 y, _Float128 z) { return __quad::Fma(x, y, z); }
+inline _Float128 hypot(_Float128 x, _Float128 y, _Float128 z)
+{
+    return __quad::Hypot(__quad::Hypot(x, y), z);
+}
+
+inline bool isgreater(_Float128 x, _Float128 y) { return __builtin_isgreater(x, y); }
+inline bool isgreaterequal(_Float128 x, _Float128 y) { return __builtin_isgreaterequal(x, y); }
+inline bool isless(_Float128 x, _Float128 y) { return __builtin_isless(x, y); }
+inline bool islessequal(_Float128 x, _Float128 y) { return __builtin_islessequal(x, y); }
+inline bool islessgreater(_Float128 x, _Float128 y) { return __builtin_islessgreater(x, y); }
+inline bool isunordered(_Float128 x, _Float128 y) { return __builtin_isunordered(x, y); }
+
+inline _Float128 ldexp(_Float128 x, int n) { return __quad::Ldexp(x, n); }
+inline _Float128 scalbn(_Float128 x, int n) { return __quad::Ldexp(x, n); }
+inline _Float128 scalbln(_Float128 x, long n)
+{
+    const int c = n > 60000 ? 60000 : (n < -60000 ? -60000 : (int)n);
+    return __quad::Ldexp(x, c);
+}
+inline _Float128 frexp(_Float128 x, int *e) { return __quad::Frexp(x, e); }
+inline _Float128 modf(_Float128 x, _Float128 *ip) { return __quad::Modf(x, ip); }
+inline _Float128 remquo(_Float128 x, _Float128 y, int *q)
+{
+    // [c.math]: q receives at least the low three bits of the integral
+    // quotient, with the sign of x/y.
+    const _Float128 r = __quad::Remainder(x, y);
+    const _Float128 n = __quad::Rint((x - r) / y);
+    const long long k = (long long)__quad::Fabs(n);
+    *q = (int)(k & 7);
+    if (__quad::SignBit(x) != __quad::SignBit(y)) *q = -*q;
+    return r;
+}
+
+// The transcendentals at float128_t are DELETED rather than absent. Both
+// spellings make the call fail; a deleted overload makes it fail at the call
+// site, with a diagnostic that names the function the program asked for,
+// instead of somewhere inside a promotion template three levels down. It also
+// states the deviation in the code rather than only in a document: these
+// functions need polynomial kernels carrying 113 bits, which is a phase of its
+// own, and computing them in 64 bits and returning a 113-bit type would be a
+// lie that compiles.
+_Float128 acos(_Float128) = delete;
+_Float128 acosh(_Float128) = delete;
+_Float128 asin(_Float128) = delete;
+_Float128 asinh(_Float128) = delete;
+_Float128 atan(_Float128) = delete;
+_Float128 atanh(_Float128) = delete;
+_Float128 cos(_Float128) = delete;
+_Float128 cosh(_Float128) = delete;
+_Float128 erf(_Float128) = delete;
+_Float128 erfc(_Float128) = delete;
+_Float128 exp(_Float128) = delete;
+_Float128 exp2(_Float128) = delete;
+_Float128 expm1(_Float128) = delete;
+_Float128 lgamma(_Float128) = delete;
+_Float128 log(_Float128) = delete;
+_Float128 log10(_Float128) = delete;
+_Float128 log1p(_Float128) = delete;
+_Float128 log2(_Float128) = delete;
+_Float128 sin(_Float128) = delete;
+_Float128 sinh(_Float128) = delete;
+_Float128 tan(_Float128) = delete;
+_Float128 tanh(_Float128) = delete;
+_Float128 tgamma(_Float128) = delete;
+_Float128 atan2(_Float128, _Float128) = delete;
+_Float128 pow(_Float128, _Float128) = delete;
+
+// lerp at float128_t is exact arithmetic, so it comes along; it is also the
+// one function here that must stay constexpr.
+constexpr _Float128 lerp(_Float128 a, _Float128 b, _Float128 t)
+{
+    if ((a <= (_Float128)0 && b >= (_Float128)0) || (a >= (_Float128)0 && b <= (_Float128)0))
+        return t * b + ((_Float128)1 - t) * a;
+    if (t == (_Float128)1) return b;
+    const _Float128 x = a + t * (b - a);
+    if ((t > (_Float128)1) == (b > a)) return b < x ? x : b;
+    return x < b ? x : b;
+}
+#endif // __STDCPP_FLOAT128_T__
+
 // ════════════════════════════════════════════════════════════════════════
 //  [cmath.syn]/2 — the "sufficient additional overloads"
 // ════════════════════════════════════════════════════════════════════════
@@ -2405,15 +2733,63 @@ inline float lgammaf(float x){ return (float)lgamma((long double)x); }   inline 
 // The `Needs` guards below make that structural rather than incidental.
 namespace __math {
 
+// [cmath.syn]/3 wants "the greatest floating-point conversion rank and
+// greatest subrank among the types of all such arguments", and with the
+// extended types present that is no longer a three-way widest-wins: the ranks
+// are a PARTIAL order. FpLevel is the rank -- equal numbers mean equal rank --
+// and the tie between an equal-ranked pair goes to the standard type, which is
+// what "greatest subrank" says. float16_t and bfloat16_t share a level and
+// neither is standard, and that is not an oversight: neither one's value set
+// contains the other's, so their ranks are genuinely unordered and a call
+// mixing them has no common type at all. [cmath.syn]/3 says so outright -- the
+// program is ill-formed -- and Wider returning void is how that is spelled
+// here, with Needs2/Needs3 turning it into "no matching function" rather than
+// an error from inside a template body.
 template <class T>
-using P1 = conditional_t<is_same_v<T, long double>, long double,
-                         conditional_t<is_same_v<T, float>, float, double>>;
+inline constexpr int FpLevel = is_same_v<T, long double> ? 4
+                               : is_same_v<T, double>      ? 3
+                               : is_same_v<T, float>       ? 2
+#if defined(__STDCPP_FLOAT16_T__)
+                               : is_same_v<T, _Float16>    ? 1
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+                               : is_same_v<T, __bf16>      ? 1
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+                               : is_same_v<T, _Float32>    ? 2
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+                               : is_same_v<T, _Float64>    ? 3
+#endif
+#if defined(__STDCPP_FLOAT128_T__)
+                               : is_same_v<T, _Float128>   ? 5
+#endif
+                                                           : -1;
+
+template <class T>
+inline constexpr bool FpStandard =
+    is_same_v<T, float> || is_same_v<T, double> || is_same_v<T, long double>;
+
 template <class T, class U>
-using P2 = conditional_t<
-    is_same_v<P1<T>, long double> || is_same_v<P1<U>, long double>, long double,
-    conditional_t<is_same_v<P1<T>, float> && is_same_v<P1<U>, float>, float,
-                  double>>;
-template <class T, class U, class V> using P3 = P2<P2<T, U>, V>;
+struct Wider {
+    using type = conditional_t<
+        (FpLevel<T> > FpLevel<U>), T,
+        conditional_t<(FpLevel<U> > FpLevel<T>), U,
+                      conditional_t<is_same_v<T, U>, T,
+                                    conditional_t<FpStandard<T>, T,
+                                                  conditional_t<FpStandard<U>, U, void>>>>>;
+};
+
+// An integer argument is "considered to have the same rank as double", which
+// this expresses by making it one.
+template <class T>
+using P1 = conditional_t<is_floating_point_v<T>, T, double>;
+template <class T, class U>
+using P2 = typename Wider<P1<T>, P1<U>>::type;
+// If a pair already has no common type, adding a third cannot give it one --
+// and P1<void> would quietly answer "double" if this let it through.
+template <class T, class U, class V>
+using P3 = conditional_t<is_void_v<P2<T, U>>, void, P2<P2<T, U>, V>>;
 
 // "Not already the target type." This guard is load-bearing twice over.
 // It stops the template competing with a concrete overload that is already an
@@ -2424,11 +2800,11 @@ template <class T, class U, class V> using P3 = P2<P2<T, U>, V>;
 template <class T>
 concept Needs1 = is_arithmetic_v<T> && !is_same_v<T, P1<T>>;
 template <class T, class U>
-concept Needs2 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
+concept Needs2 = is_arithmetic_v<T> && is_arithmetic_v<U> && !is_void_v<P2<T, U>> &&
                  !(is_same_v<T, P2<T, U>> && is_same_v<U, P2<T, U>>);
 template <class T, class U, class V>
 concept Needs3 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
-                 is_arithmetic_v<V> &&
+                 is_arithmetic_v<V> && !is_void_v<P3<T, U, V>> &&
                  !(is_same_v<T, P3<T, U, V>> && is_same_v<U, P3<T, U, V>> &&
                    is_same_v<V, P3<T, U, V>>);
 

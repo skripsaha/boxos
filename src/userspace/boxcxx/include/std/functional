@@ -665,6 +665,72 @@ struct hash<double> {
     }
 };
 
+namespace __hash_impl {
+
+// [unord.hash]/2 wants an enabled specialization for every arithmetic type,
+// and the two above were the only floating ones -- long double had none at
+// all, and neither did the five extended types, which have been arithmetic on
+// this toolchain all along (Ф40). N is given explicitly because it is NOT
+// always sizeof(T): x86_64's long double occupies sixteen bytes of which only
+// ten carry the value, and hashing the other six would hash whatever the
+// stack happened to hold -- two equal values could then hash differently,
+// which is the one thing a hash may not do.
+template <class T, size_t N>
+inline size_t HashFloat(T v) noexcept
+{
+    if (v == T{}) v = T{};                       // -0.0 and +0.0 must agree
+    unsigned char raw[N];
+    __builtin_memcpy(raw, &v, N);
+    size_t acc = 0;
+    for (size_t i = 0; i < N; i += sizeof(size_t)) {
+        size_t w = 0;
+        const size_t n = (N - i) < sizeof(size_t) ? (N - i) : sizeof(size_t);
+        __builtin_memcpy(&w, raw + i, n);
+        acc = Mix(acc ^ w);
+    }
+    return acc;
+}
+
+} // namespace __hash_impl
+
+template <>
+struct hash<long double> {
+    size_t operator()(long double v) const noexcept
+    {
+        return __hash_impl::HashFloat<long double, 10>(v);
+    }
+};
+#if defined(__STDCPP_FLOAT16_T__)
+template <>
+struct hash<_Float16> {
+    size_t operator()(_Float16 v) const noexcept { return __hash_impl::HashFloat<_Float16, 2>(v); }
+};
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+template <>
+struct hash<__bf16> {
+    size_t operator()(__bf16 v) const noexcept { return __hash_impl::HashFloat<__bf16, 2>(v); }
+};
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+template <>
+struct hash<_Float32> {
+    size_t operator()(_Float32 v) const noexcept { return __hash_impl::HashFloat<_Float32, 4>(v); }
+};
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+template <>
+struct hash<_Float64> {
+    size_t operator()(_Float64 v) const noexcept { return __hash_impl::HashFloat<_Float64, 8>(v); }
+};
+#endif
+#if defined(__STDCPP_FLOAT128_T__)
+template <>
+struct hash<_Float128> {
+    size_t operator()(_Float128 v) const noexcept { return __hash_impl::HashFloat<_Float128, 16>(v); }
+};
+#endif
+
 } // namespace std
 
 #endif // BOXCXX_FUNCTIONAL

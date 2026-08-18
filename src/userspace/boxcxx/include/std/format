@@ -1126,11 +1126,56 @@ template <> struct formatter<char, char> {
     }
 };
 
+namespace __format {
+
+// [format.formatter.spec]/2.4 asks for a formatter for "each cv-unqualified
+// floating-point type", and since Ф40 that phrase covers eight types on this
+// toolchain, not three. Two groups, for one reason: this engine renders
+// through to_chars, and to_chars has overloads for exactly float, double and
+// long double.
+template <class T>
+concept CoreFloat =
+    is_same_v<T, float> || is_same_v<T, double> || is_same_v<T, long double>;
+
+// The narrow extended types render through the standard type whose format
+// contains theirs, which is exact and not an approximation: _Float32 IS
+// binary32, _Float64 IS binary64, and _Float16/__bf16 widen into binary64
+// without losing a bit. float128_t is deliberately NOT here -- writing 113
+// significand bits in decimal needs a converter this library does not have
+// yet, and claiming the formatter while narrowing to long double would print
+// a number the caller never had. libstdc++ 16.1 refuses the same call for the
+// same reason (measured); recorded in CONFORMANCE §2.
+template <class T> struct FmtVia {
+    using type = void;
+};
+#if defined(__STDCPP_FLOAT16_T__)
+template <> struct FmtVia<_Float16> {
+    using type = double;
+};
+#endif
+#if defined(__STDCPP_BFLOAT16_T__)
+template <> struct FmtVia<__bf16> {
+    using type = double;
+};
+#endif
+#if defined(__STDCPP_FLOAT32_T__)
+template <> struct FmtVia<_Float32> {
+    using type = float;
+};
+#endif
+#if defined(__STDCPP_FLOAT64_T__)
+template <> struct FmtVia<_Float64> {
+    using type = double;
+};
+#endif
+
+} // namespace __format
+
 // floating-point (float / double / long double). is_floating_point_v ignores
 // cv by definition, but [format.formatter.spec]/2.4 provides formatters only
 // for cv-unqualified floating-point types — hence the second conjunct.
 template <class T>
-    requires is_floating_point_v<T> && is_same_v<T, remove_cv_t<T>>
+    requires __format::CoreFloat<T> && is_same_v<T, remove_cv_t<T>>
 struct formatter<T, char> {
     __format::StdSpec spec_;
 
@@ -1152,6 +1197,18 @@ struct formatter<T, char> {
         const int prec  = __format::EffectivePrecision(ctx, spec_);
         __format::FormatFloatCore<T>(ctx, spec_, width, prec, value,
                                      spec_.type);
+    }
+};
+
+// The narrow extended floating-point types: same spec grammar, same output,
+// one conversion in front of it.
+template <class T>
+    requires(!is_void_v<typename __format::FmtVia<T>::type>) && is_same_v<T, remove_cv_t<T>>
+struct formatter<T, char> : formatter<typename __format::FmtVia<T>::type, char> {
+    void format(T value, format_context &ctx) const
+    {
+        using V = typename __format::FmtVia<T>::type;
+        formatter<V, char>::format(static_cast<V>(value), ctx);
     }
 };
 
