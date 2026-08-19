@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 229 phases (210 of them the numbered `PhaseN` series), 5 876 runtime checks, 1 955 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 230 phases (211 of them the numbered `PhaseN` series), 5 905 runtime checks, 1 955 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -62,7 +62,7 @@ macro count and checks it against [version.syn] on every run.
 The phase count has drifted three times, in both directions, so it is now
 stated with the rule that produces it: `Phase*();` call sites in `main`, of
 which there are exactly as many as there are phase definitions. That is
-**229** — 210 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
+**230** — 211 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
 and the rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered
 series alone, which is why both numbers are given above: neither can drift
 without the other contradicting it.
@@ -326,13 +326,36 @@ and line — is recorded there.
   **Not yet:** there are still no wide streams and no `wformat_context`.
   `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
   `wcin`/`wcout`/`wcerr`/`wclog`; `<fstream>` and `<iosfwd>` carry
-  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts.
-  Every class template involved is generic in `CharT` already, so what is left
-  is not a structural block. Measured before the phase started: `basic_streambuf`
-  contains no bare `char` at all and `basic_ios` one, while `basic_ostream` has
-  52 and `basic_istream` 39 — the numeric engine that stands in for `num_put`
-  formats through `to_chars`, which produces `char` digits. That, and the
-  transcoding at the file boundary, is the remaining work.
+  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts;
+  and the free character and string inserters and extractors — `operator<<`
+  for `CharT` and `const CharT*`, and their `>>` counterparts — are still
+  declared for `char` alone.
+
+  **That last one is worth stating plainly, because it fails silently rather
+  than loudly.** With no `operator<<(basic_ostream<wchar_t>&, wchar_t)`, a wide
+  character offered to `<<` is promoted to `int` and its NUMBER is printed:
+  `wos << L'A'` writes `65`. `Phase215` pins that as the current answer rather
+  than the desired one, so the phase that adds the inserter is forced to
+  rewrite the check with it. `put()` and `get()` are members and were already
+  generic, so they behave correctly today.
+
+  **What Ф42-d did close** is the numeric engine. `<ostream>` and `<istream>`
+  formatted every number through helpers declared as `basic_ostream<char>&`
+  and `basic_istream<char>&` — 52 and 39 lines bound to one character type,
+  and the reason a wide stream could not simply be instantiated. The
+  formatting itself did not change: `to_chars` and `from_chars` work in ASCII,
+  which is what a number is written in. What became generic is the emission,
+  where a run of ASCII widens on the way to the buffer, and the ingestion,
+  where a stream character narrows to ASCII before the grammar looks at it and
+  anything outside ASCII narrows to a character that is a digit in no base.
+  Both conversions are casts rather than facet calls, for the reason §2
+  `<cwctype>` gives: one locale, UTF-8, and ASCII values that are their own
+  code points.
+
+  A wide `basic_ostringstream` is therefore a working wide stream today —
+  width, fill, `adjustfield`, `showbase`, `boolalpha` and the whole of the
+  correctly-rounded floating-point path included, with `setfill(L'ж')` filling
+  in a character no byte can hold.
 
 - **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
   machinery needs. The `L` format specifier is accepted and ignored.

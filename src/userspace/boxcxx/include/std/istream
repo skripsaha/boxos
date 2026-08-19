@@ -38,10 +38,14 @@ inline bool IsSpace(char c)
 enum class ExtractStatus { Ok, NoMatch, NoMatchEof, RangeError };
 
 // Forward declarations -- basic_istream is still incomplete here.
-template <class T> basic_istream<char> &ExtractInteger(basic_istream<char> &is, T &value);
-template <class F> basic_istream<char> &ExtractFloat(basic_istream<char> &is, F &value);
-basic_istream<char> &ExtractBool(basic_istream<char> &is, bool &value);
-basic_istream<char> &ExtractPointer(basic_istream<char> &is, void *&value);
+template <class CharT, class Traits, class T>
+basic_istream<CharT, Traits> &ExtractInteger(basic_istream<CharT, Traits> &is, T &value);
+template <class CharT, class Traits, class F>
+basic_istream<CharT, Traits> &ExtractFloat(basic_istream<CharT, Traits> &is, F &value);
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &ExtractBool(basic_istream<CharT, Traits> &is, bool &value);
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &ExtractPointer(basic_istream<CharT, Traits> &is, void *&value);
 
 } // namespace __ios
 
@@ -675,6 +679,21 @@ protected:
 // ════════════════════════════════════════════════════════════════════════
 namespace __ios {
 
+// A number is written in ASCII and in nothing else, so a stream character
+// outside it is simply not part of one. Mapping such a character to '\0' lets
+// every classifier below stay a plain `char` test with no wide special case:
+// '\0' is a digit in no base, a sign in no grammar and a point in no float.
+//
+// This is the mirror of <ostream>'s widening, and it is a cast for the same
+// reason: one locale, UTF-8, and ASCII values that are their own code points.
+template <class Traits>
+inline char NarrowAscii(typename Traits::int_type c)
+{
+    const auto ch = Traits::to_char_type(c);
+    const auto u  = static_cast<make_unsigned_t<decltype(ch)>>(ch);
+    return u <= 0x7Fu ? static_cast<char>(u) : '\0';
+}
+
 inline bool IsHexDigitChar(char c)
 {
     return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -693,23 +712,24 @@ inline bool IsDigitForBase(int base, char c)
 // commits-only-after-peeking "0x" that turns out NOT to be followed by a
 // hex digit ungets the 'x'/'X' and treats the '0' as an ordinary digit
 // (matches strtol("0x", ...) parsing "0" and leaving "x").
-inline int ResolveBaseAndPrefix(basic_streambuf<char> *buf, ios_base::fmtflags flags,
+template <class CharT, class Traits>
+inline int ResolveBaseAndPrefix(basic_streambuf<CharT, Traits> *buf, ios_base::fmtflags flags,
                                 char *digitBuf, streamsize &digitLen)
 {
-    using CT      = char_traits<char>;
+    using CT      = Traits;
     auto baseFlag = flags & ios_base::basefield;
     int  base = baseFlag == ios_base::oct ? 8 : baseFlag == ios_base::hex ? 16
               : baseFlag == ios_base::dec ? 10 : 0; // 0 == auto-detect
 
-    CT::int_type c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof()) && CT::to_char_type(c) == '0' && (base == 0 || base == 16)) {
+    typename CT::int_type c = buf->sgetc();
+    if (!CT::eq_int_type(c, CT::eof()) && NarrowAscii<CT>(c) == '0' && (base == 0 || base == 16)) {
         buf->sbumpc();
-        CT::int_type c1 = buf->sgetc();
+        typename CT::int_type c1 = buf->sgetc();
         if (!CT::eq_int_type(c1, CT::eof()) &&
-            (CT::to_char_type(c1) == 'x' || CT::to_char_type(c1) == 'X')) {
+            (NarrowAscii<CT>(c1) == 'x' || NarrowAscii<CT>(c1) == 'X')) {
             buf->sbumpc();
-            CT::int_type c2 = buf->sgetc();
-            if (!CT::eq_int_type(c2, CT::eof()) && IsHexDigitChar(CT::to_char_type(c2))) {
+            typename CT::int_type c2 = buf->sgetc();
+            if (!CT::eq_int_type(c2, CT::eof()) && IsHexDigitChar(NarrowAscii<CT>(c2))) {
                 base = 16; // genuine prefix -- '0' and 'x'/'X' both stay consumed
             } else {
                 buf->sungetc(); // false alarm -- un-consume the 'x'/'X'
@@ -725,17 +745,17 @@ inline int ResolveBaseAndPrefix(basic_streambuf<char> *buf, ios_base::fmtflags f
     return base;
 }
 
-template <class T>
-ExtractStatus ExtractIntegerCore(basic_istream<char> &is, T &value)
+template <class CharT, class Traits, class T>
+ExtractStatus ExtractIntegerCore(basic_istream<CharT, Traits> &is, T &value)
 {
     auto      *buf = is.rdbuf();
-    using CT       = char_traits<char>;
+    using CT       = Traits;
 
     streamsize signLen = 0; // 0 or 1: sungetc() only needs the COUNT to restore, not the character
     bool       neg     = false;
-    CT::int_type c = buf->sgetc();
+    typename CT::int_type c = buf->sgetc();
     if (!CT::eq_int_type(c, CT::eof())) {
-        char ch = CT::to_char_type(c);
+        char ch = NarrowAscii<CT>(c);
         if (ch == '+' || ch == '-') {
             neg = (ch == '-');
             ++signLen;
@@ -750,7 +770,7 @@ ExtractStatus ExtractIntegerCore(basic_istream<char> &is, T &value)
     for (;;) {
         c = buf->sgetc();
         if (CT::eq_int_type(c, CT::eof())) break;
-        char ch = CT::to_char_type(c);
+        char ch = NarrowAscii<CT>(c);
         if (!IsDigitForBase(base, ch)) break;
         if (digitLen >= static_cast<streamsize>(sizeof(digitBuf))) break; // full: stop BEFORE consuming
         digitBuf[digitLen++] = ch;
@@ -796,10 +816,10 @@ ExtractStatus ExtractIntegerCore(basic_istream<char> &is, T &value)
     return ExtractStatus::Ok;
 }
 
-template <class T>
-basic_istream<char> &ExtractInteger(basic_istream<char> &is, T &value)
+template <class CharT, class Traits, class T>
+basic_istream<CharT, Traits> &ExtractInteger(basic_istream<CharT, Traits> &is, T &value)
 {
-    typename basic_istream<char>::sentry ok(is, false);
+    typename basic_istream<CharT, Traits>::sentry ok(is, false);
     if (ok) {
         ExtractStatus status = ExtractStatus::NoMatch;
         try {
@@ -826,11 +846,12 @@ basic_istream<char> &ExtractInteger(basic_istream<char> &is, T &value)
 // two candidates can still extend. Unlike every other extraction path, a
 // failed/partial match does NOT put consumed characters back -- the one
 // place [istream.formatted.arithmetic] does not restore unconsumed input.
-inline ExtractStatus ExtractBoolCore(basic_istream<char> &is, bool &value)
+template <class CharT, class Traits>
+ExtractStatus ExtractBoolCore(basic_istream<CharT, Traits> &is, bool &value)
 {
     if ((is.flags() & ios_base::boolalpha) != ios_base::fmtflags{}) {
         auto       *buf         = is.rdbuf();
-        using CT                = char_traits<char>;
+        using CT                = Traits;
         const char *trueWord    = "true";
         const char *falseWord   = "false";
         streamsize  pos         = 0;
@@ -839,12 +860,12 @@ inline ExtractStatus ExtractBoolCore(basic_istream<char> &is, bool &value)
         for (;;) {
             if (trueAlive && trueWord[pos] == '\0') break;
             if (falseAlive && falseWord[pos] == '\0') break;
-            CT::int_type c = buf->sgetc();
+            typename CT::int_type c = buf->sgetc();
             if (CT::eq_int_type(c, CT::eof())) {
                 hitEof = true;
                 break;
             }
-            char ch          = CT::to_char_type(c);
+            char ch          = NarrowAscii<CT>(c);
             bool matchesTrue  = trueAlive && trueWord[pos] != '\0' && ch == trueWord[pos];
             bool matchesFalse = falseAlive && falseWord[pos] != '\0' && ch == falseWord[pos];
             if (!matchesTrue && !matchesFalse) break;
@@ -870,9 +891,10 @@ inline ExtractStatus ExtractBoolCore(basic_istream<char> &is, bool &value)
     return status;
 }
 
-inline basic_istream<char> &ExtractBool(basic_istream<char> &is, bool &value)
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &ExtractBool(basic_istream<CharT, Traits> &is, bool &value)
 {
-    typename basic_istream<char>::sentry ok(is, false);
+    typename basic_istream<CharT, Traits>::sentry ok(is, false);
     if (ok) {
         ExtractStatus status = ExtractStatus::NoMatch;
         try {
@@ -919,17 +941,17 @@ inline bool CouldBeHexFloatChar(char c)
     return IsHexDigitChar(c) || c == '.' || c == 'p' || c == 'P' || c == '+' || c == '-';
 }
 
-template <class F>
-ExtractStatus ExtractFloatCore(basic_istream<char> &is, F &value)
+template <class CharT, class Traits, class F>
+ExtractStatus ExtractFloatCore(basic_istream<CharT, Traits> &is, F &value)
 {
     auto *buf = is.rdbuf();
-    using CT  = char_traits<char>;
+    using CT  = Traits;
 
     streamsize signLen = 0;
     bool       neg     = false;
-    CT::int_type c = buf->sgetc();
+    typename CT::int_type c = buf->sgetc();
     if (!CT::eq_int_type(c, CT::eof())) {
-        char ch = CT::to_char_type(c);
+        char ch = NarrowAscii<CT>(c);
         if (ch == '+' || ch == '-') {
             neg = (ch == '-');
             ++signLen;
@@ -950,15 +972,15 @@ ExtractStatus ExtractFloatCore(basic_istream<char> &is, F &value)
     streamsize           n = 0;
 
     c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof()) && CT::to_char_type(c) == '0') {
+    if (!CT::eq_int_type(c, CT::eof()) && NarrowAscii<CT>(c) == '0') {
         buf->sbumpc();
-        CT::int_type c1 = buf->sgetc();
+        typename CT::int_type c1 = buf->sgetc();
         if (!CT::eq_int_type(c1, CT::eof()) &&
-            (CT::to_char_type(c1) == 'x' || CT::to_char_type(c1) == 'X')) {
+            (NarrowAscii<CT>(c1) == 'x' || NarrowAscii<CT>(c1) == 'X')) {
             buf->sbumpc();
-            CT::int_type c2 = buf->sgetc();
+            typename CT::int_type c2 = buf->sgetc();
             if (!CT::eq_int_type(c2, CT::eof()) &&
-                (IsHexDigitChar(CT::to_char_type(c2)) || CT::to_char_type(c2) == '.')) {
+                (IsHexDigitChar(NarrowAscii<CT>(c2)) || NarrowAscii<CT>(c2) == '.')) {
                 fmt            = chars_format::hex;
                 prefixConsumed = 2; // '0' and 'x'/'X', neither in token[]
             } else {
@@ -977,7 +999,7 @@ ExtractStatus ExtractFloatCore(basic_istream<char> &is, F &value)
             hitEof = true;
             break;
         }
-        char ch = CT::to_char_type(c);
+        char ch = NarrowAscii<CT>(c);
         bool extends = fmt == chars_format::hex ? CouldBeHexFloatChar(ch) : CouldBeFloatChar(ch);
         if (!extends) break;
         if (n >= kCap) break; // full: stop BEFORE consuming, so nothing unputbackable is lost
@@ -1010,10 +1032,10 @@ ExtractStatus ExtractFloatCore(basic_istream<char> &is, F &value)
     return ExtractStatus::Ok;
 }
 
-template <class F>
-basic_istream<char> &ExtractFloat(basic_istream<char> &is, F &value)
+template <class CharT, class Traits, class F>
+basic_istream<CharT, Traits> &ExtractFloat(basic_istream<CharT, Traits> &is, F &value)
 {
-    typename basic_istream<char>::sentry ok(is, false);
+    typename basic_istream<CharT, Traits>::sentry ok(is, false);
     if (ok) {
         ExtractStatus status = ExtractStatus::NoMatch;
         try {
@@ -1039,20 +1061,21 @@ basic_istream<char> &ExtractFloat(basic_istream<char> &is, F &value)
 // void*&: pointer round-tripping is inherently hex (insertion always emits
 // "0x..."), so extraction forces base 16 regardless of the current
 // basefield, reusing the same prefix-aware scanner integer extraction uses.
-inline ExtractStatus ExtractPointerCore(basic_istream<char> &is, void *&value)
+template <class CharT, class Traits>
+ExtractStatus ExtractPointerCore(basic_istream<CharT, Traits> &is, void *&value)
 {
     auto *buf = is.rdbuf();
-    using CT  = char_traits<char>;
+    using CT  = Traits;
 
     char       digitBuf[32];
     streamsize digitLen = 0;
     ResolveBaseAndPrefix(buf, ios_base::hex, digitBuf, digitLen);
 
-    CT::int_type c;
+    typename CT::int_type c;
     for (;;) {
         c = buf->sgetc();
         if (CT::eq_int_type(c, CT::eof())) break;
-        char ch = CT::to_char_type(c);
+        char ch = NarrowAscii<CT>(c);
         if (!IsHexDigitChar(ch)) break;
         if (digitLen < static_cast<streamsize>(sizeof(digitBuf))) digitBuf[digitLen++] = ch;
         buf->sbumpc();
@@ -1071,9 +1094,10 @@ inline ExtractStatus ExtractPointerCore(basic_istream<char> &is, void *&value)
     return ExtractStatus::Ok;
 }
 
-inline basic_istream<char> &ExtractPointer(basic_istream<char> &is, void *&value)
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &ExtractPointer(basic_istream<CharT, Traits> &is, void *&value)
 {
-    typename basic_istream<char>::sentry ok(is, false);
+    typename basic_istream<CharT, Traits>::sentry ok(is, false);
     if (ok) {
         ExtractStatus status = ExtractStatus::NoMatch;
         try {

@@ -48868,6 +48868,133 @@ void Phase214()
     printf("[CXX] PASS phase214: <cwchar> formatting — one engine, two widths\n");
 }
 
+// ── Phase215 — the stream numeric engine, now generic in CharT ──────────────
+//
+// <ostream> and <istream> formatted their numbers through helpers declared as
+// basic_ostream<char>& and basic_istream<char>& — 52 and 39 lines of the two
+// headers were bound to one character type. Measured before Ф42-d started, and
+// the reason the wide streams could not simply be instantiated.
+//
+// The formatting itself did not have to change and did not: to_chars and
+// from_chars work in ASCII, which is what a number is written in. What became
+// generic is the EMISSION — a run of ASCII widens on the way to the buffer —
+// and the INGESTION, where a stream character narrows to ASCII before the
+// grammar looks at it, and anything outside ASCII narrows to a character that
+// is a digit in no base.
+//
+// There is still no wcout (Ф42-f) — but a wide stringstream is a wide stream,
+// and it is enough to prove the engine end to end rather than by compilation.
+namespace p215 {
+
+std::wstring Put(auto &&fn)
+{
+    std::basic_ostringstream<wchar_t> o;
+    fn(o);
+    return o.str();
+}
+
+} // namespace p215
+
+void Phase215()
+{
+    using namespace p215;
+    using WOS = std::basic_ostringstream<wchar_t>;
+    using WIS = std::basic_istringstream<wchar_t>;
+
+    // ── the integers ─────────────────────────────────────────────────────
+    Check(Put([](WOS &o) { o << 42; }) == L"42", "phase215 a wide stream formats an int");
+    Check(Put([](WOS &o) { o << -42; }) == L"-42", "phase215 with its sign");
+    Check(Put([](WOS &o) { o << 18446744073709551615ull; }) == L"18446744073709551615",
+          "phase215 and the largest unsigned long long");
+    Check(Put([](WOS &o) { o << std::hex << 48879; }) == L"beef", "phase215 hex");
+    Check(Put([](WOS &o) { o << std::hex << std::showbase << std::uppercase << 48879; }) == L"0XBEEF",
+          "phase215 showbase and uppercase reach the wide buffer too");
+    Check(Put([](WOS &o) { o << std::oct << std::showbase << 8; }) == L"010", "phase215 octal");
+
+    // ── width, fill and adjustfield, which is where the two types meet ───
+    Check(Put([](WOS &o) { o << std::setw(6) << 42; }) == L"    42",
+          "phase215 the field width pads with the stream's own character");
+    Check(Put([](WOS &o) { o << std::left << std::setw(6) << 42; }) == L"42    ",
+          "phase215 left-justified");
+    Check(Put([](WOS &o) { o << std::setfill(L'ж') << std::setw(5) << 42; }) == L"жжж42",
+          "phase215 and the fill may be a character no byte can hold");
+    Check(Put([](WOS &o) { o << std::internal << std::setw(6) << -42; }) == L"-   42",
+          "phase215 internal puts the fill between the sign and the digits");
+
+    // ── the floating conversions, straight off the Ф27 correctly-rounded path
+    Check(Put([](WOS &o) { o << 3.5; }) == L"3.5", "phase215 a double");
+    Check(Put([](WOS &o) { o << std::fixed << 3.14159; }) == L"3.141590", "phase215 fixed");
+    Check(Put([](WOS &o) { o << std::scientific << 31400.0; }) == L"3.140000e+04",
+          "phase215 scientific");
+    Check(Put([](WOS &o) { o << 1.0 / 0.0; }) == L"inf", "phase215 and the words");
+    Check(Put([](WOS &o) { o << true; }) == L"1", "phase215 a bool");
+    Check(Put([](WOS &o) { o << std::boolalpha << true; o.put(L' '); o << false; }) == L"true false",
+          "phase215 boolalpha");
+
+    // ── extraction: a wide character narrows to ASCII before the grammar ─
+    {
+        WIS  in(L"  123 -4.5 beef");
+        int  n = 0;
+        double d = 0;
+        int  h = 0;
+        in >> n >> d >> std::hex >> h;
+        Check(n == 123, "phase215 a wide stream extracts an int");
+        Check(d > -4.51 && d < -4.49, "phase215 and a double");
+        Check(h == 48879, "phase215 and a hex int");
+        Check(!in.fail(), "phase215 without failing");
+    }
+    {
+        // A character outside ASCII is part of no number, and the extractor has
+        // to stop at it rather than mistake it for one. This is the whole of
+        // what narrowing buys.
+        WIS in(L"12ж34");
+        int n = 0;
+        in >> n;
+        Check(n == 12, "phase215 extraction stops at a character no number contains");
+        Check(!in.fail(), "phase215 and that is not a failure");
+        // get() is a member and therefore already generic. The FREE character
+        // inserters and extractors are still narrow-only — Ф42-f's work — which
+        // is why this reads with get() rather than with >>.
+        Check(in.get() == (std::wint_t)L'ж', "phase215 the character is still there to be read");
+    }
+    {
+        WIS  in(L"жж");
+        int  n = -7;
+        in >> n;
+        Check(in.fail(), "phase215 a field of nothing but such characters fails");
+        Check(n == 0, "phase215 and C++11 zeroes the target on a failed extraction");
+    }
+    {
+        WIS in(L"  true false");
+        bool a = false, b = true;
+        in >> std::boolalpha >> a >> b;
+        Check(a && !b, "phase215 boolalpha extraction");
+    }
+
+    {
+        // ‼ A gap this phase does NOT close, pinned so that Ф42-f must.
+        // There is no operator<<(basic_ostream<wchar_t>&, wchar_t) yet, so a
+        // wide character offered to << is promoted to int and its NUMBER is
+        // printed. It is silently wrong output rather than a compile error,
+        // which is the worst of the two, and the check below states the
+        // current answer rather than the desired one so that closing the gap
+        // FAILS here and forces this line to be rewritten with it.
+        Check(Put([](WOS &o) { o << L'A'; }) == L"65",
+              "phase215 [Ф42-f] a wide character still goes out as its number");
+        Check(Put([](WOS &o) { o.put(L'A'); }) == L"A",
+              "phase215 while put(), being a member, is already generic");
+    }
+
+    // ── the narrow streams must be untouched by all of this ──────────────
+    {
+        std::ostringstream o;
+        o << std::setw(6) << std::setfill('.') << 42 << ' ' << std::hex << 255;
+        Check(o.str() == "....42 ff", "phase215 the narrow stream still answers exactly as before");
+    }
+
+    printf("[CXX] PASS phase215: stream numerics generic in CharT — ASCII in, the stream's own character out\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -49106,6 +49233,7 @@ int main()
     Phase212();
     Phase213();
     Phase214();
+    Phase215();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

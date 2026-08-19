@@ -56,12 +56,18 @@ enum class Align { Left, Right, Internal };
 // themselves templated only on Traits, not on the enclosing class -- call
 // them too, and qualified lookup for a namespace-qualified name always
 // resolves at the point of definition, dependent arguments or not.
-template <class T> basic_ostream<char> &InsertInteger(basic_ostream<char> &os, T value);
-template <class F> basic_ostream<char> &InsertFloat(basic_ostream<char> &os, F value);
-basic_ostream<char> &InsertBool(basic_ostream<char> &os, bool value);
-basic_ostream<char> &InsertPointer(basic_ostream<char> &os, const void *value);
-void EmitField(basic_ostream<char> &os, const char *sign, streamsize signLen, const char *prefix,
-              streamsize prefixLen, const char *body, streamsize bodyLen, Align dflt);
+template <class CharT, class Traits, class T>
+basic_ostream<CharT, Traits> &InsertInteger(basic_ostream<CharT, Traits> &os, T value);
+template <class CharT, class Traits, class F>
+basic_ostream<CharT, Traits> &InsertFloat(basic_ostream<CharT, Traits> &os, F value);
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &InsertBool(basic_ostream<CharT, Traits> &os, bool value);
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &InsertPointer(basic_ostream<CharT, Traits> &os, const void *value);
+template <class CharT, class Traits, class BodyT>
+void EmitField(basic_ostream<CharT, Traits> &os, const char *sign, streamsize signLen,
+               const char *prefix, streamsize prefixLen, const BodyT *body,
+               streamsize bodyLen, Align dflt);
 template <class StreamT> void HandleException(StreamT &s);
 
 } // namespace __ios
@@ -443,15 +449,39 @@ inline char ToUpperAscii(char c)
 // thing that can say "no room", and a formatted inserter that did not ask
 // reported success while dropping the tail. The unformatted path
 // (basic_ostream::write) had always asked; only this one had not.
-[[nodiscard]] inline bool WriteRun(basic_streambuf<char> *buf, const char *s, streamsize n)
+//
+// Ф42-d made both generic in the stream's character type, and the run they
+// write generic in ITS character type, because the two are not always the
+// same. Every numeric conversion is produced by to_chars as ASCII `char` —
+// digits, a sign, `0x`, `inf` — and a wide stream has to widen it. A run that
+// is already the stream's own type (a string inserter's argument) goes out in
+// one sputn, as it always did.
+//
+// Widening is a cast and not a facet call. There is one locale here, its
+// encoding is UTF-8 (§2 <cwctype>), and the source bytes are ASCII, whose
+// values are their own code points — so `CharT(unsigned char(c))` is exactly
+// what a ctype facet's widen() would return, without a facet to consult.
+template <class CharT, class Traits, class SrcT>
+[[nodiscard]] inline bool WriteRun(basic_streambuf<CharT, Traits> *buf, const SrcT *s,
+                                   streamsize n)
 {
-    return n <= 0 || buf->sputn(s, n) == n;
+    if (n <= 0) return true;
+    if constexpr (is_same_v<CharT, SrcT>) {
+        return buf->sputn(s, n) == n;
+    } else {
+        for (streamsize i = 0; i < n; ++i) {
+            const CharT c = static_cast<CharT>(static_cast<unsigned char>(s[i]));
+            if (Traits::eq_int_type(buf->sputc(c), Traits::eof())) return false;
+        }
+        return true;
+    }
 }
-[[nodiscard]] inline bool WriteFill(basic_streambuf<char> *buf, char fillCh, streamsize n)
+template <class CharT, class Traits>
+[[nodiscard]] inline bool WriteFill(basic_streambuf<CharT, Traits> *buf, CharT fillCh,
+                                    streamsize n)
 {
-    using Tr = char_traits<char>;
     for (streamsize i = 0; i < n; ++i)
-        if (Tr::eq_int_type(buf->sputc(fillCh), Tr::eof())) return false;
+        if (Traits::eq_int_type(buf->sputc(fillCh), Traits::eof())) return false;
     return true;
 }
 
@@ -464,8 +494,9 @@ inline char ToUpperAscii(char c)
 // both empty (nothing to pad "between"), which is exactly the generic
 // [ostream.formatted.reqmts] left-vs-not-left rule non-numeric callers
 // need -- no separate code path required.
-inline void EmitField(basic_ostream<char> &os, const char *sign, streamsize signLen,
-                       const char *prefix, streamsize prefixLen, const char *body,
+template <class CharT, class Traits, class BodyT>
+inline void EmitField(basic_ostream<CharT, Traits> &os, const char *sign, streamsize signLen,
+                       const char *prefix, streamsize prefixLen, const BodyT *body,
                        streamsize bodyLen, Align dflt)
 {
     auto      *buf  = os.rdbuf();
@@ -482,7 +513,7 @@ inline void EmitField(basic_ostream<char> &os, const char *sign, streamsize sign
                           : adj == ios_base::internal   ? Align::Internal
                           : adj == ios_base::right      ? Align::Right
                                                          : dflt;
-        char fillCh = os.fill();
+        CharT fillCh = os.fill();
         if (align == Align::Left) {
             ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
                  WriteRun(buf, body, bodyLen) && WriteFill(buf, fillCh, pad);
@@ -525,8 +556,8 @@ void HandleException(StreamT &s)
 // wrap those). Shared by InsertInteger and InsertBool's non-boolalpha path
 // (bool formats "as if" static_cast to unsigned, so showbase/showpos/width/
 // fill/uppercase all apply consistently to the 0/1 form).
-template <class T>
-void WriteIntegerCore(basic_ostream<char> &os, T value)
+template <class CharT, class Traits, class T>
+void WriteIntegerCore(basic_ostream<CharT, Traits> &os, T value)
 {
     using U = make_unsigned_t<T>;
     ios_base::fmtflags baseFlag = os.flags() & ios_base::basefield;
@@ -611,10 +642,10 @@ void WriteIntegerCore(basic_ostream<char> &os, T value)
     EmitField(os, sign, signLen, prefix, prefixLen, digits, digitLen, Align::Right);
 }
 
-template <class T>
-basic_ostream<char> &InsertInteger(basic_ostream<char> &os, T value)
+template <class CharT, class Traits, class T>
+basic_ostream<CharT, Traits> &InsertInteger(basic_ostream<CharT, Traits> &os, T value)
 {
-    typename basic_ostream<char>::sentry ok(os);
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
     if (ok) {
         try {
             WriteIntegerCore(os, value);
@@ -626,9 +657,10 @@ basic_ostream<char> &InsertInteger(basic_ostream<char> &os, T value)
     return os;
 }
 
-inline basic_ostream<char> &InsertBool(basic_ostream<char> &os, bool value)
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &InsertBool(basic_ostream<CharT, Traits> &os, bool value)
 {
-    typename basic_ostream<char>::sentry ok(os);
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
     if (ok) {
         try {
             if ((os.flags() & ios_base::boolalpha) != ios_base::fmtflags{}) {
@@ -715,10 +747,10 @@ inline streamsize ShowPointGeneral(char *buf, streamsize len, streamsize cap, in
     return len + extra;
 }
 
-template <class F>
-basic_ostream<char> &InsertFloat(basic_ostream<char> &os, F value)
+template <class CharT, class Traits, class F>
+basic_ostream<CharT, Traits> &InsertFloat(basic_ostream<CharT, Traits> &os, F value)
 {
-    typename basic_ostream<char>::sentry ok(os);
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
     if (ok) {
         // Set OUTSIDE the try below (see comment there) rather than calling
         // setstate(failbit) directly from inside it.
@@ -859,9 +891,10 @@ inline void VPrintTo(basic_ostream<char> &os, string_view fmt, format_args args)
 // of the INTEGER inserters, not %p) but still honoring width/fill/
 // adjustfield like every other formatted inserter. nullptr_t inserts
 // identically (as if via static_cast<const void*>(nullptr)), giving "0x0".
-inline basic_ostream<char> &InsertPointer(basic_ostream<char> &os, const void *value)
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &InsertPointer(basic_ostream<CharT, Traits> &os, const void *value)
 {
-    typename basic_ostream<char>::sentry ok(os);
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
     if (ok) {
         try {
             char digits[20];
