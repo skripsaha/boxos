@@ -64,18 +64,34 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/unwind/unwind_level1.cpp
 OBJS = $(SRCS:.cpp=.o) src/unwind/unwind_context.o src/runtime/csetjmp.o
 
+# Header dependencies. Without these a header edit rebuilt NOTHING, and the
+# consequences were not theoretical: Ф41-e-2 added a field to a kernel struct
+# and got a kernel that hung on its first schedule() because objects had been
+# compiled against two different layouts, and Ф41-f/g mutated a boxcxx header
+# and watched make say "Nothing to be done" while the test ran on the old image
+# and reported green. `make clean` was the only remedy, and until Ф41-e-1 the
+# top-level clean did not even reach this directory.
+#
+# -MMD writes one .d per object listing the headers it read; -MP adds a phony
+# target for each of those headers so a DELETED header does not become a
+# missing prerequisite that stops the build. The include is dash-prefixed
+# because the .d files do not exist on the first build.
+DEPS = $(OBJS:.o=.d)
+
 all: libboxcxx.a
 
 libboxcxx.a: $(OBJS)
 	$(AR) rcs $@ $^
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 %.o: %.asm
 	$(ASM) -f elf64 $< -o $@
 
+-include $(DEPS)
+
 clean:
-	rm -f $(OBJS) libboxcxx.a
+	rm -f $(OBJS) $(DEPS) libboxcxx.a
 
 .PHONY: all clean

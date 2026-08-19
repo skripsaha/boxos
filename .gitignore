@@ -31,3 +31,7 @@ build/
 
 # Host build tool (compiled from tools/nameplate.c)
 tools/nameplate
+
+# Compiler-generated header-dependency files (-MMD). One per object; they are
+# build output, not source, and every clean target removes them.
+*.d

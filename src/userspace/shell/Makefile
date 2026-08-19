@@ -73,9 +73,13 @@ $(TARGET_ELF): $(BOXLIB_START) $(OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLA
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(BOXLIB))
 	@echo "Shell ELF created: $(TARGET_ELF)"
 
+# -MMD -MP: header dependencies, so a header edit rebuilds what read it.
+# See boxcxx/Makefile for what their absence cost.
 %.o: %.c
 	@echo "Compiling $<..."
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(OBJS:.o=.d)
 
 # Build entry point from assembly
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
@@ -84,7 +88,7 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET_ELF) $(TARGET)
+	rm -f $(OBJS) $(OBJS:.o=.d) $(TARGET_ELF) $(TARGET)
 	@echo "Cleaned shell build artifacts"
 
 .PHONY: all clean

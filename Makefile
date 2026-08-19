@@ -358,20 +358,29 @@ $(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h $(TAGFS_O
 $(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
 	@echo "$(UNAME_S):$(UNAME_M)" > $@
 
+# -MMD -MP: header dependencies. Without them a kernel header edit rebuilt only
+# the .c files that changed, and objects compiled against two different layouts
+# of the same struct linked cleanly and hung on the first schedule() — measured
+# in Ф41-e-2, three matrix runs spent bisecting it. `make clean` was the only
+# remedy and it is not one anybody remembers every time.
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
-	@$(CC) $(CFLAGS) -Os -c $< -o $@
+	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILDDIR)/%.o: $(SRCDIR)/%.asm | $(BUILDDIR)
 	@echo "Assembling $<..."
 	@mkdir -p $(@D)
 	@$(ASM) $(ASMFLAGS_ELF) $< -o $@
+
+# Dash-prefixed: the .d files do not exist on the first build, and BUILDDIR is
+# removed wholesale by clean, which takes them with it.
+-include $(C_OBJS:.o=.d)
 
 $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILDDIR)
 	@echo "Building Stage1..."

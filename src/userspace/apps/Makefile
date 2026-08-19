@@ -114,11 +114,16 @@ cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BO
 	fi
 
 # ---- object files ----
+# -MMD -MP: header dependencies. Their absence is what let a boxcxx header
+# change leave cxxtest.o stale, so a mutation could sit in a header while the
+# test ran on the previous image and reported green. See boxcxx/Makefile.
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 %.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+-include $(wildcard *.d) $(wildcard commands/*.d)
 
 # ---- boxlib_start entry (shared with shell) ----
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
@@ -126,4 +131,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.elf
+	rm -f *.o *.d *.elf
