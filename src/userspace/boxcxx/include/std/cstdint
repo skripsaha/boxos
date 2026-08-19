@@ -102,6 +102,32 @@ typedef __UINTMAX_TYPE__ uintmax_t;
 #define SIZE_MAX    __SIZE_MAX__
 #endif
 
+// [cstdint.syn]'s "limits of other integer types". These six were absent until
+// Ф42-b, and <cwchar> is what noticed: it needs WCHAR_MIN and WCHAR_MAX, and a
+// caller cannot derive the minimum from the maximum without already knowing
+// that wchar_t is signed here. libc++ defines all six; the omission was ours.
+//
+// SIG_ATOMIC_MIN and SIG_ATOMIC_MAX belong to the same clause and were missing
+// for the same reason, which Ф41-a's <csignal> should have caught and did not.
+#ifndef WCHAR_MIN
+#define WCHAR_MIN       __WCHAR_MIN__
+#endif
+#ifndef WCHAR_MAX
+#define WCHAR_MAX       __WCHAR_MAX__
+#endif
+#ifndef WINT_MIN
+#define WINT_MIN        __WINT_MIN__
+#endif
+#ifndef WINT_MAX
+#define WINT_MAX        __WINT_MAX__
+#endif
+#ifndef SIG_ATOMIC_MIN
+#define SIG_ATOMIC_MIN  __SIG_ATOMIC_MIN__
+#endif
+#ifndef SIG_ATOMIC_MAX
+#define SIG_ATOMIC_MAX  __SIG_ATOMIC_MAX__
+#endif
+
 #ifndef INT8_C
 #define INT8_C(c)   __INT8_C(c)
 #define INT16_C(c)  __INT16_C(c)

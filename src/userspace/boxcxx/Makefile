@@ -37,6 +37,11 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/cstdio.cpp \
        src/runtime/cstdio_printf.cpp \
        src/runtime/cstdio_scanf.cpp \
+       src/runtime/cwchar.cpp \
+       src/runtime/cwchar_num.cpp \
+       src/runtime/cwchar_io.cpp \
+       src/runtime/cwchar_printf.cpp \
+       src/runtime/cwchar_scanf.cpp \
        src/runtime/cfenv.cpp \
        src/runtime/new_delete.cpp \
        src/runtime/cxxabi_typeinfo.cpp \

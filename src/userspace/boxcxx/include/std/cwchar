@@ -1,0 +1,267 @@
+// boxcxx — <cwchar>
+//
+// [cwchar.syn], in two commits, the way <cstdio> arrived in Ф41: this one
+// carries the strings and the restartable conversions, and Ф42-c adds the
+// formatted and character I/O families (`fwprintf`, `fgetwc`, `wcstod` and the
+// rest). Nothing here is a placeholder — what is declared is defined — and the
+// list of what has not landed yet is at the bottom of this comment rather than
+// left for a reader to discover by link error.
+//
+// ── What a wchar_t is here ──────────────────────────────────────────────────
+// A Unicode scalar value. On this target `wchar_t` is a signed 32-bit `int`
+// and `wint_t` is unsigned 32-bit, so WEOF (0xFFFFFFFF) cannot collide with a
+// character: scalar values stop at U+10FFFF. Ф41-b fixed the encoding of the
+// one locale as UTF-8, so the multibyte side of every conversion below is UTF-8
+// and the wide side is UTF-32. That is the whole of the model.
+//
+// ── One conversion machine, not two ─────────────────────────────────────────
+// `mbrtowc` and `mbrtoc32` have exactly the same job here, because `wchar_t`
+// and `char32_t` hold the same values. So `mbrtowc` IS `mbrtoc32` — it calls
+// it — rather than a second state machine that would have to be kept level with
+// the first. The same holds for `wcrtomb` and `c32rtomb`.
+//
+// There is one thing delegation must not lose. C gives every one of these
+// functions its OWN internal state for calls that pass a null `ps`, and
+// <cuchar> keeps six separate ones for that reason: a program interleaving two
+// conversions over two strings must not have one cursor stepped by the other.
+// So `mbrtowc` passes its own thread_local state when `ps` is null, and shares
+// only the machine.
+//
+// ── Where these live, and why not in boxlib ─────────────────────────────────
+// Ф41-b put `strcoll`, `strxfrm` and `strtok` in boxlib, under the split that
+// gives boxlib the raw string primitives because C programs need them. That
+// rule deliberately does not carry over. Measured: the whole of boxlib mentions
+// `wchar_t` exactly zero times, and no C program in this system uses a wide
+// string. A symbol placed in boxlib that no C caller ever names is weight in
+// every C image for nothing, so the wide string functions live here.
+//
+// ── Two places this header is stronger than <cstring>, for the same reason ──
+// Nothing in the tree already owns these names — unlike `printf`, `fread`,
+// `fwrite` and `getchar`, which boxlib had claimed before <cstdio> wanted them.
+// That buys two things:
+//
+//   * The const-correct overload pairs of [c.strings] reach the GLOBAL
+//     namespace too. <cstring> cannot do that: `::strchr` already existed with
+//     C's signature, and a using-declaration for a function differing only in
+//     return type is a redeclaration conflict, so `::strchr` stays C-shaped and
+//     loses const there. Here `::wcschr` is the pair, so a `const wchar_t*` in
+//     yields a `const wchar_t*` out even unqualified. libstdc++ cannot manage
+//     this at all; libc++ manages it only inside `std`.
+//   * No renaming was needed anywhere. Ф41 spent three separate collisions on
+//     this (`exit(uint32_t)`, the `time_t` struct, `fread`/`fwrite`); the wide
+//     namespace was free.
+//
+// ── Deliberate answers, not stubs ───────────────────────────────────────────
+// `wcscoll` is `wcscmp` and `wcsxfrm` is a copy, because there is one locale
+// and no collation table to consult — the same answer boxlib already gives for
+// `strcoll`/`strxfrm`. C requires only that the order `wcscoll` imposes agree
+// with comparing `wcsxfrm` results, and identity satisfies that. This is a
+// measured divergence from the reference: macOS in `en_US.UTF-8` transforms
+// "abc" into seven wide characters and returns -8 rather than -1 from
+// `wcscoll(L"a", L"b")`. It has a real collation; BoxOS has one locale.
+//
+// `wcstok` needs no hidden cursor, and that is C's doing rather than ours: the
+// wide version takes an explicit `wchar_t **ptr`, so the design flaw that makes
+// `strtok` the textbook non-reentrant function was fixed when it was widened.
+// Ф41-b's per-strand `strtok` cursor has no counterpart here and should not
+// grow one.
+//
+// ── Not yet here (Ф42-c) ────────────────────────────────────────────────────
+// `fwprintf` `fwscanf` `swprintf` `swscanf` and their `v` forms, `wprintf`
+// `wscanf` `vwprintf` `vwscanf`; `fgetwc` `fgetws` `fputwc` `fputws` `fwide`
+// `getwc` `getwchar` `putwc` `putwchar` `ungetwc`; `wcstod` `wcstof`
+// `wcstold` `wcstol` `wcstoll` `wcstoul` `wcstoull`; `wcsftime`.
+#ifndef BOXCXX_CWCHAR
+#define BOXCXX_CWCHAR
+
+#include <cstddef>
+#include <__bits/c_mbstate>
+#include <__bits/c_wint>
+
+// [cwchar.syn] names both, and the compiler is the only thing that knows them:
+// wchar_t is signed here, so WCHAR_MIN is negative and a caller cannot derive
+// it from WCHAR_MAX without knowing that. <cstdint> defines them as well, as
+// [cstdint.syn] requires — it did not until Ф42-b, and this header is what
+// noticed.
+#ifndef WCHAR_MIN
+#define WCHAR_MIN __WCHAR_MIN__
+#endif
+#ifndef WCHAR_MAX
+#define WCHAR_MAX __WCHAR_MAX__
+#endif
+
+namespace std {
+
+// ── copying ─────────────────────────────────────────────────────────────────
+wchar_t *wcscpy(wchar_t *dst, const wchar_t *src) noexcept;
+wchar_t *wcsncpy(wchar_t *dst, const wchar_t *src, size_t n) noexcept;
+wchar_t *wmemcpy(wchar_t *dst, const wchar_t *src, size_t n) noexcept;
+wchar_t *wmemmove(wchar_t *dst, const wchar_t *src, size_t n) noexcept;
+
+// ── concatenation ───────────────────────────────────────────────────────────
+wchar_t *wcscat(wchar_t *dst, const wchar_t *src) noexcept;
+wchar_t *wcsncat(wchar_t *dst, const wchar_t *src, size_t n) noexcept;
+
+// ── comparison ──────────────────────────────────────────────────────────────
+int    wcscmp(const wchar_t *a, const wchar_t *b) noexcept;
+int    wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) noexcept;
+int    wcscoll(const wchar_t *a, const wchar_t *b) noexcept;
+size_t wcsxfrm(wchar_t *dst, const wchar_t *src, size_t n) noexcept;
+int    wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) noexcept;
+
+// ── searching ───────────────────────────────────────────────────────────────
+// The five functions [c.strings]/2 splits in two. The const overload is the one
+// a const argument selects, so constness survives the call instead of being
+// quietly cast away.
+const wchar_t *wcschr(const wchar_t *s, wchar_t c) noexcept;
+      wchar_t *wcschr(wchar_t *s, wchar_t c) noexcept;
+const wchar_t *wcsrchr(const wchar_t *s, wchar_t c) noexcept;
+      wchar_t *wcsrchr(wchar_t *s, wchar_t c) noexcept;
+const wchar_t *wcspbrk(const wchar_t *s, const wchar_t *set) noexcept;
+      wchar_t *wcspbrk(wchar_t *s, const wchar_t *set) noexcept;
+const wchar_t *wcsstr(const wchar_t *hay, const wchar_t *needle) noexcept;
+      wchar_t *wcsstr(wchar_t *hay, const wchar_t *needle) noexcept;
+const wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n) noexcept;
+      wchar_t *wmemchr(wchar_t *s, wchar_t c, size_t n) noexcept;
+
+size_t   wcscspn(const wchar_t *s, const wchar_t *set) noexcept;
+size_t   wcsspn(const wchar_t *s, const wchar_t *set) noexcept;
+wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **ptr) noexcept;
+
+// ── the rest ────────────────────────────────────────────────────────────────
+size_t   wcslen(const wchar_t *s) noexcept;
+wchar_t *wmemset(wchar_t *s, wchar_t c, size_t n) noexcept;
+
+// ── restartable multibyte / wide conversion ─────────────────────────────────
+// Only ASCII is a single byte in UTF-8, so btowc answers WEOF for every lead
+// and continuation byte, and wctob answers EOF for every character above
+// U+007F. Both are measurable claims rather than remarks: btowc(0xD0), the
+// first byte of L'ж', is WEOF.
+wint_t btowc(int c) noexcept;
+int    wctob(wint_t c) noexcept;
+int    mbsinit(const mbstate_t *ps) noexcept;
+
+size_t mbrlen(const char *s, size_t n, mbstate_t *ps) noexcept;
+size_t mbrtowc(wchar_t *pwc, const char *s, size_t n, mbstate_t *ps) noexcept;
+size_t wcrtomb(char *s, wchar_t wc, mbstate_t *ps) noexcept;
+size_t mbsrtowcs(wchar_t *dst, const char **src, size_t len, mbstate_t *ps) noexcept;
+size_t wcsrtombs(char *dst, const wchar_t **src, size_t len, mbstate_t *ps) noexcept;
+
+// ── numeric conversion ──────────────────────────────────────────────────────
+// The leading white space these skip is `iswspace`, which is Unicode-wide since
+// Ф42-a. So `wcstod(L"\u2003" L"42", ...)` consumes the EM SPACE and reads 42,
+// where the narrow `strtod` would not — the difference is not an oversight, it
+// is what C asks for once the classification is a wide one.
+double             wcstod(const wchar_t *s, wchar_t **end) noexcept;
+float              wcstof(const wchar_t *s, wchar_t **end) noexcept;
+long double        wcstold(const wchar_t *s, wchar_t **end) noexcept;
+long               wcstol(const wchar_t *s, wchar_t **end, int base) noexcept;
+long long          wcstoll(const wchar_t *s, wchar_t **end, int base) noexcept;
+unsigned long      wcstoul(const wchar_t *s, wchar_t **end, int base) noexcept;
+unsigned long long wcstoull(const wchar_t *s, wchar_t **end, int base) noexcept;
+
+// ── wide character input/output ─────────────────────────────────────────────
+struct FILE;                       // the incomplete type [cwchar.syn] names
+
+wint_t fgetwc(FILE *stream) noexcept;
+wint_t fputwc(wchar_t c, FILE *stream) noexcept;
+wint_t getwc(FILE *stream) noexcept;
+wint_t putwc(wchar_t c, FILE *stream) noexcept;
+wint_t getwchar() noexcept;
+wint_t putwchar(wchar_t c) noexcept;
+wint_t ungetwc(wint_t c, FILE *stream) noexcept;
+
+wchar_t *fgetws(wchar_t *s, int n, FILE *stream) noexcept;
+int      fputws(const wchar_t *s, FILE *stream) noexcept;
+
+// Fixes a stream's orientation, or reports it: negative byte, positive wide,
+// zero undecided. C forbids mixing the two on one stream, and that prohibition
+// is what lets the single push-back slot serve both.
+int fwide(FILE *stream, int mode) noexcept;
+
+// ── formatted wide input/output ─────────────────────────────────────────────
+int fwprintf(FILE *stream, const wchar_t *format, ...) noexcept;
+int wprintf(const wchar_t *format, ...) noexcept;
+int swprintf(wchar_t *s, size_t n, const wchar_t *format, ...) noexcept;
+int vfwprintf(FILE *stream, const wchar_t *format, __builtin_va_list arg) noexcept;
+int vwprintf(const wchar_t *format, __builtin_va_list arg) noexcept;
+int vswprintf(wchar_t *s, size_t n, const wchar_t *format, __builtin_va_list arg) noexcept;
+
+int fwscanf(FILE *stream, const wchar_t *format, ...) noexcept;
+int wscanf(const wchar_t *format, ...) noexcept;
+int swscanf(const wchar_t *s, const wchar_t *format, ...) noexcept;
+int vfwscanf(FILE *stream, const wchar_t *format, __builtin_va_list arg) noexcept;
+int vwscanf(const wchar_t *format, __builtin_va_list arg) noexcept;
+int vswscanf(const wchar_t *s, const wchar_t *format, __builtin_va_list arg) noexcept;
+
+} // namespace std
+
+// [headers]/5 leaves it unspecified whether a <cX> header's names also reach
+// the global namespace. They do here, as using-declarations, so there is
+// exactly one function either way — and, unlike <cstring>, the const-correct
+// pairs come with them, because nothing in the tree already owns these names.
+// [cwchar.syn] declares mbstate_t here as well as in <cuchar>, and <cuchar>
+// already makes it reachable unqualified. A program that includes only this
+// header must see the same name in the same place.
+using std::mbstate_t;
+
+using std::btowc;
+using std::mbrlen;
+using std::mbrtowc;
+using std::mbsinit;
+using std::mbsrtowcs;
+using std::wcrtomb;
+using std::wcscat;
+using std::wcschr;
+using std::wcscmp;
+using std::wcscoll;
+using std::wcscpy;
+using std::wcscspn;
+using std::wcslen;
+using std::wcsncat;
+using std::wcsncmp;
+using std::wcsncpy;
+using std::wcspbrk;
+using std::wcsrchr;
+using std::wcsrtombs;
+using std::wcsspn;
+using std::wcsstr;
+using std::wcstok;
+using std::wcsxfrm;
+using std::wctob;
+using std::fgetwc;
+using std::fgetws;
+using std::fputwc;
+using std::fputws;
+using std::fwide;
+using std::fwprintf;
+using std::fwscanf;
+using std::getwc;
+using std::getwchar;
+using std::putwc;
+using std::putwchar;
+using std::swprintf;
+using std::swscanf;
+using std::ungetwc;
+using std::vfwprintf;
+using std::vfwscanf;
+using std::vswprintf;
+using std::vswscanf;
+using std::vwprintf;
+using std::vwscanf;
+using std::wcstod;
+using std::wcstof;
+using std::wcstol;
+using std::wcstold;
+using std::wcstoll;
+using std::wcstoul;
+using std::wcstoull;
+using std::wprintf;
+using std::wscanf;
+using std::wmemchr;
+using std::wmemcmp;
+using std::wmemcpy;
+using std::wmemmove;
+using std::wmemset;
+
+#endif // BOXCXX_CWCHAR
