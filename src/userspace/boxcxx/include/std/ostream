@@ -279,9 +279,50 @@ protected:
 };
 
 // ── free character/string inserters [ostream.inserters.character] ────────
-// Because boxcxx's scope is CharT=char only, the CharT-generic and
-// char-specific overloads the real synopsis declares as separate templates
-// collapse pairwise into these Traits-only-templated overloads.
+// Ф42-f made these generic, and the synopsis's three tiers all became load-
+// bearing at once, because the ambiguity they exist to break is only real
+// when CharT can be something other than char:
+//
+//   * the CharT tier — a character or string of the stream's own type;
+//   * the char tier — a char or const char* offered to a stream of ANY
+//     character type, which a wide stream has to widen;
+//   * the char-stream tier — the same argument to a narrow stream, more
+//     specialized than either of the first two, so partial ordering picks it
+//     and they do not tie.
+//
+// No widen() is spelled here and no ctype facet is consulted, because
+// EmitField already does it: a run whose type is not the stream's goes out
+// through WriteRun's widening branch (Ф42-d), and that branch is a cast for
+// the reason WriteRun gives — one locale, UTF-8, ASCII values that are their
+// own code points.
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, CharT c)
+{
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (ok) {
+        try {
+            __ios::EmitField(os, nullptr, 0, nullptr, 0, &c, 1, __ios::Align::Right);
+        } catch (...) {
+            __ios::HandleException(os);
+        }
+        os.width(0);
+    }
+    return os;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, char c)
+{
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (ok) {
+        try {
+            __ios::EmitField(os, nullptr, 0, nullptr, 0, &c, 1, __ios::Align::Right);
+        } catch (...) {
+            __ios::HandleException(os);
+        }
+        os.width(0);
+    }
+    return os;
+}
 template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &os, char c)
 {
@@ -305,6 +346,36 @@ template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &os, unsigned char c)
 {
     return os << static_cast<char>(c);
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, const CharT *s)
+{
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (ok) {
+        try {
+            streamsize len = static_cast<streamsize>(Traits::length(s));
+            __ios::EmitField(os, nullptr, 0, nullptr, 0, s, len, __ios::Align::Right);
+        } catch (...) {
+            __ios::HandleException(os);
+        }
+        os.width(0);
+    }
+    return os;
+}
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits> &os, const char *s)
+{
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (ok) {
+        try {
+            streamsize len = static_cast<streamsize>(char_traits<char>::length(s));
+            __ios::EmitField(os, nullptr, 0, nullptr, 0, s, len, __ios::Align::Right);
+        } catch (...) {
+            __ios::HandleException(os);
+        }
+        os.width(0);
+    }
+    return os;
 }
 template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &os, const char *s)

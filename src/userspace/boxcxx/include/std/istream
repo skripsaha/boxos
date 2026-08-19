@@ -23,12 +23,27 @@ namespace std {
 
 namespace __ios {
 
-// [istream.sentry]'s whitespace criterion -- fixed ASCII "C"-locale check
-// (no ctype facet; documented epic-wide posture, not a shortcut here).
+// [istream.sentry]'s whitespace criterion. The standard asks
+// ctype<charT>::is(space, c) and there is no ctype facet here, so the answer
+// is spelled directly -- and it is NOT the same answer for both character
+// types, which is the point.
+//
+// For char it is the six characters of the "C" locale, because a byte is
+// where UTF-8 decoding has not happened yet: 0xA0 is half of U+00A0, not a
+// space, and a narrow stream that treated it as one would split a character.
+//
+// For wchar_t it is Unicode White_Space, because by then the decoding HAS
+// happened and the value IS a code point. Ф42-a settled that argument for
+// <cwctype> and Ф42-b for wcstod, which must skip an EM SPACE before a
+// number; a wide stream that then read U+3000 as part of a word would
+// contradict both. It is declared here and defined in ios.cpp so that
+// <istream> does not have to pull 1 312 lines of Unicode tables into every
+// translation unit that formats a number.
 inline bool IsSpace(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
 }
+bool IsSpace(wchar_t c);
 
 // Outcome of a Core extraction routine. The wrapper (which owns the sentry
 // and the try/catch) turns this into the right setstate call AFTER the try
@@ -523,16 +538,23 @@ private:
 };
 
 // ── free character/string extractors [istream.extractors] ────────────────
-template <class Traits>
-basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char &c)
+// Ф42-f made these generic — and NOT in the same shape as <ostream>'s, which
+// is the detail worth the line. Insertion has a char tier because a narrow
+// literal offered to a wide stream can be widened; extraction has none,
+// because the reverse would be narrowing, and [istream.extractors] declares
+// no `char&` overload for a stream of another character type. So the
+// signed/unsigned forms stay bound to basic_istream<char> and there is no
+// three-way partial ordering to arrange.
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, CharT &c)
 {
-    typename basic_istream<char, Traits>::sentry ok(is);
+    typename basic_istream<CharT, Traits>::sentry ok(is);
     if (ok) {
         bool hitEof = false;
         try {
-            typename char_traits<char>::int_type got = is.rdbuf()->sbumpc();
-            if (char_traits<char>::eq_int_type(got, char_traits<char>::eof())) hitEof = true;
-            else c = char_traits<char>::to_char_type(got);
+            typename Traits::int_type got = is.rdbuf()->sbumpc();
+            if (Traits::eq_int_type(got, Traits::eof())) hitEof = true;
+            else c = Traits::to_char_type(got);
         } catch (...) {
             __ios::HandleException(is);
         }
@@ -563,10 +585,10 @@ basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, unsigne
 // P0487R1 (C++20) removed the bare charT* overload entirely -- unbounded
 // with no setw(), it is a classic stack-overflow trap. Only the array-bound
 // form remains, capped at min(N-1, width()>0 ? width()-1 : N-1).
-template <class Traits, size_t N>
-basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char (&s)[N])
+template <class CharT, class Traits, size_t N>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, CharT (&s)[N])
 {
-    typename basic_istream<char, Traits>::sentry ok(is);
+    typename basic_istream<CharT, Traits>::sentry ok(is);
     if (ok) {
         streamsize w        = is.width();
         streamsize cap      = static_cast<streamsize>(N) - 1;
@@ -577,11 +599,11 @@ basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char (&
             auto *buf = is.rdbuf();
             for (; n < maxChars;) {
                 auto c = buf->sgetc();
-                if (char_traits<char>::eq_int_type(c, char_traits<char>::eof())) {
+                if (Traits::eq_int_type(c, Traits::eof())) {
                     hitEof = true;
                     break;
                 }
-                char ch = char_traits<char>::to_char_type(c);
+                CharT ch = Traits::to_char_type(c);
                 if (__ios::IsSpace(ch)) break;
                 s[n++] = ch;
                 buf->sbumpc();
@@ -589,7 +611,7 @@ basic_istream<char, Traits> &operator>>(basic_istream<char, Traits> &is, char (&
         } catch (...) {
             __ios::HandleException(is);
         }
-        s[n] = '\0';
+        s[n] = CharT();
         is.width(0);
         if (n == 0) is.setstate(hitEof ? (ios_base::failbit | ios_base::eofbit) : ios_base::failbit);
     } else {

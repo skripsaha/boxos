@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 231 phases (212 of them the numbered `PhaseN` series), 5 934 runtime checks, 1 966 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 232 phases (213 of them the numbered `PhaseN` series), 5 973 runtime checks, 1 984 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -316,9 +316,9 @@ and line — is recorded there.
 
 ## 1.2 Excluded by decision inside headers that do exist
 
-- **Wide characters — being lifted, one piece at a time (Ф42).** This was a
-  flat exclusion until Ф42; it is now a partial one, and the honest way to
-  state it is by what has landed rather than by what is planned.
+- **Wide characters — all but formatting, as of Ф42-f.** This was a flat
+  exclusion until Ф42 and is now down to one item. The honest way to state it
+  is by what has landed rather than by what is planned.
   **Landed:** `<cwctype>`, so the classification of a wide character is
   answered from the Unicode Character Database rather than from ASCII;
   `<cwchar>`, so wide strings, the restartable conversions, the seven `wcsto*`,
@@ -326,21 +326,27 @@ and line — is recorded there.
   the `codecvt` facets, so a wide character has a defined way to become bytes
   and back — see the `<locale>` entry below, which is where that stopped being
   a flat exclusion at all.
-  **Not yet:** there are still no wide streams and no `wformat_context`.
-  `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
-  `wcin`/`wcout`/`wcerr`/`wclog`; `<fstream>` and `<iosfwd>` carry
-  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts;
-  and the free character and string inserters and extractors — `operator<<`
-  for `CharT` and `const CharT*`, and their `>>` counterparts — are still
-  declared for `char` alone.
+  **Landed in Ф42-f: the streams themselves.** Every `w` typedef of
+  [iosfwd.syn] exists — `wios`, `wstreambuf`, `wistream`, `wostream`,
+  `wiostream`, `wstringbuf`, `wistringstream`, `wostringstream`,
+  `wstringstream`, `wsyncbuf`, `wosyncstream`, `wfilebuf`, `wifstream`,
+  `wofstream`, `wfstream` — along with `wcin`/`wcout`/`wcerr`/`wclog`, the
+  free character and string inserters and extractors in all three tiers the
+  synopsis declares, and the `wchar_t` half of `<string>`'s `operator<<` /
+  `operator>>` / `getline`. **A `wofstream` writes UTF-8**, through the
+  `codecvt` Ф42-e built; see `<fstream>` for what that cost and what it took
+  away.
 
-  **That last one is worth stating plainly, because it fails silently rather
-  than loudly.** With no `operator<<(basic_ostream<wchar_t>&, wchar_t)`, a wide
-  character offered to `<<` is promoted to `int` and its NUMBER is printed:
-  `wos << L'A'` writes `65`. `Phase215` pins that as the current answer rather
-  than the desired one, so the phase that adds the inserter is forced to
-  rewrite the check with it. `put()` and `get()` are members and were already
-  generic, so they behave correctly today.
+  **What that closed, and how it was made to close:** with no
+  `operator<<(basic_ostream<wchar_t>&, wchar_t)`, a wide character offered to
+  `<<` used to be promoted to `int` and its NUMBER printed — `wos << L'A'`
+  wrote `65`, silently wrong output rather than a compile error. Ф42-d pinned
+  that WRONG answer in `Phase215` on purpose, so that the commit adding the
+  inserter would fail there and be forced to rewrite it. It did, on the first
+  run after the inserter landed.
+
+  **Not yet:** `<format>` is still `char`-only — no `wformat_context`, no
+  `wformat`, no `formatter<T, wchar_t>`. That is the whole of what remains.
 
   **What Ф42-d did close** is the numeric engine. `<ostream>` and `<istream>`
   formatted every number through helpers declared as `basic_ostream<char>&`
@@ -1937,6 +1943,53 @@ All nine rows of [filebuf.members] Table 122 are implemented, along with the
 `noreplace` column P2467R1 added, and the suite pins each of them plus the
 combinations the table leaves out.
 
+- **The codecvt boundary (Ф42-f).** Until then a character moved to and from
+  the file as `sizeof(CharT)` raw bytes, which was right for `char` and would
+  have made a `wofstream` write **UTF-32** to a file every other program on
+  this system reads as UTF-8. The facet plugs in here, and the switch between
+  the two paths is the standard's own, `always_noconv()`. `Phase217` checks the
+  bytes on the volume with boxlib's `fread` rather than with an `ifstream`,
+  because a filebuf checked with a filebuf agrees with itself no matter how
+  wrong it is.
+- `~` **A relative seek fails on a wide file, and that is [filebuf.virtuals]
+  speaking.** With `encoding() <= 0` a nonzero `off` is an *error*: `off`
+  characters from here is not a number anyone can compute without reading
+  them, and landing between two bytes of one character is worse than failing.
+  `seekoff(0, …)` still works in all three directions, and `seekpos` with a
+  `pos_type` this filebuf handed out works for any position — which is what
+  `tellg()`/`seekg()` is for. **`seekpos` therefore does NOT route through
+  `seekoff`**, which is how it was written at first and what the wide phase
+  caught within one run: it inherited the very rule it exists to bypass, and
+  `tellg`/`seekg` was unusable on every wide file while every other check
+  passed.
+- `?` **`tellg()` is a byte offset, and it is `codecvt::length()` that makes it
+  one.** Characters × width is not a position when the width varies, so the
+  filebuf keeps the external bytes its get area came from and asks the facet
+  how many of them the characters up to `gptr()` consumed. That is the
+  question `do_length` exists to answer.
+- `?` **`sungetc()` past the start of the buffer returns a success marker, not
+  the character.** [streambuf] makes it `return pbackfail(eof())`, and
+  [filebuf.virtuals] promises of `pbackfail` only "some value other than
+  `eof()`" on success; this one answers `not_eof(eof())`. The position has
+  moved — the next `sgetc()` returns the character — but the value handed back
+  says nothing about which. This entry exists because the wide phase's own
+  first check asked for the character and failed against correct code.
+- `+` **`putback` of a DIFFERENT character is refused when the facet
+  converts.** For `char` the replacement is written through to the file,
+  because putting it only in the buffer would be a lie about the file. A wide
+  replacement need not encode to the same number of bytes as the character it
+  displaces, so writing it through would shift everything after it. Refusing is
+  the only honest answer left.
+- `+` **A state-dependent facet cannot be opened over.** `encoding() < 0` means
+  every position is a pair — an offset and the shift state to reach it — and
+  every seek a replay. boxcxx has no such facet; `open()` refuses one rather
+  than assume it will never appear, so the assumption `LogicalPos()` rests on
+  is checked where it is made.
+- `?` **A character split across a read is re-read, not carried.** The byte
+  window grows until it holds a whole character or the file has no more to
+  give, and whatever the conversion did not consume is simply left in the file
+  for the next refill to seek back to. A filebuf over a pipe would have to
+  carry those bytes forward; a Current is always seekable.
 - `–` **No `filesystem::path` overloads** of the constructors or of `open()`,
   because there is no `<filesystem>` (§1.1). The `const char*` and
   `const string&` forms are complete.
@@ -2049,6 +2102,44 @@ combinations the table leaves out.
   an element of the same vector stays valid because nothing moves under it.
   The cost is about three moves per element where a shift costs one.
 
+## `<ios>`
+
+- `✓` Closed in Ф42-f: **`widen` sign-extended and `narrow` truncated**, and
+  neither could be seen while `char` was the only instantiation. `widen` was
+  `static_cast<char_type>(c)` on a *signed* `char`, so `widen('\xD0')` produced
+  the `wchar_t` **-48** — while `<ostream>`'s `WriteRun`, widening the same
+  byte on its way into a wide stream, produced U+00D0. Two answers to one
+  question, from two places that had never both been reachable. `narrow` was
+  `static_cast<char>(c)`, so `narrow(L'ж', '?')` returned `0x36` — the digit
+  `'6'`, a plausible character, from the function whose second parameter exists
+  precisely to say *there is no such character*.
+- `?` **The pair is not a round trip above ASCII, on purpose.** Only ASCII has a
+  single-byte form in this system's encoding, and `<cwchar>`'s `wctob` already
+  says so (`wctob(L'ж')` is `EOF`, measured in Ф42-b), so `narrow` answers with
+  its default there. `widen` has no default parameter and must return
+  something, so a byte widens to the code point with its own value.
+  [locale.ctype] requires the round trip only for the basic character set.
+  **`widen` is a per-character map and not a UTF-8 decoder**: inserting the two
+  bytes of `"ж"` into a wide stream yields the two characters U+00D0 U+00B6,
+  which is also what inserting them one at a time yields. A decoder here would
+  make `os << "..."` and `os << '.' << '.' << ...` disagree, and would make
+  `setw` count something other than what it pads.
+
+## `<iosfwd>`
+
+- `✓` Closed in Ф42-f: **the five position aliases of [iosfwd.syn] were in
+  NEITHER column** — `streampos`, `wstreampos`, `u8streampos`, `u16streampos`
+  and `u32streampos` were not in the tree, and were not recorded as absent
+  either. The same shape of gap §1.1 found for `<ctime>`, found the same way:
+  by reading the synopsis against the file rather than against the list.
+- `?` **All five name the same type.** Each is defined as
+  `fpos<char_traits<X>::state_type>` and every `char_traits` here reports
+  `state_type = mbstate_t`, because a conversion state does not depend on which
+  character type it is producing. They are spelled as `fpos<mbstate_t>` rather
+  than through `char_traits` because `<iosfwd>` only forward-declares that
+  template, and naming a member would make this header pull in what it exists
+  not to pull in.
+
 ## `<iostream>`
 
 New in Ф36. `cin`, `cout`, `cerr` and `clog` exist and are bound to the Current
@@ -2076,7 +2167,24 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   without its newline. A character stream without line terminators is a
   different stream — `getline` would never find its delimiter and would splice
   every line the user ever typed into one — so `underflow()` appends the `\n`.
-- `–` No `wcin`/`wcout`/`wcerr`/`wclog` (§1.2).
+- `~` **`wcin`/`wcout`/`wcerr`/`wclog` exist since Ф42-f, and mixing them with
+  the narrow four is well defined here — which C forbids.**
+  [iostream.objects]/2 defers to the C standard, and C says a stream is byte-
+  oriented or wide-oriented for its life; the reason is real there, because a
+  wide write can leave a conversion suspended in a shift state that a byte
+  write would walk over. It is not real here: the encoding is UTF-8, its
+  codecvt reads and writes no state (§2 `<locale>`), both halves emit the same
+  alphabet through the same handle, and neither keeps a buffer of its own — so
+  `cout << "a"; wcout << L"б";` comes out in call order, exactly as
+  `std::print` already interleaves with `std::cout`. On the input side `wcin`
+  takes its bytes from `cin`'s own line buffer rather than opening the keyboard
+  a second time, so the two share one cursor and a typed line cannot end up
+  split between them.
+
+  ‼ This is deliberately **not** what `<cstdio>` does, where orientation is
+  enforced and `fwprintf(stdout, …)` refuses after `printf()` — a `FILE*` has
+  one unget slot that byte and wide reads would have to share (§2 `<cstdio>`).
+  These objects have no such slot to fight over.
 - `?` **`sync_with_stdio` remains inert** and returns the previous value. There
   is no C stdio buffer to pair with; boxlib's own `printf` is a different
   subsystem that no stream here touches.
@@ -2085,6 +2193,26 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   a user's own global constructor may write to `std::cout`. `ios_base::Init`,
   which was an honest no-op for the whole epic, now does the other half:
   its last destructor flushes the streams while they are still alive.
+
+## `<istream>` / `<ostream>` — the free inserters and extractors
+
+- `~` **Whitespace is not the same question for the two character types, and
+  Ф42-f made them answer differently.** `[istream.sentry]` asks
+  `ctype<charT>::is(space, c)` and there is no ctype facet here. For `char` the
+  answer is the six characters of the `"C"` locale, because a byte is where
+  UTF-8 decoding has not happened yet — `0xA0` is half of U+00A0, not a space,
+  and a narrow stream that treated it as one would split a character. For
+  `wchar_t` it is **Unicode `White_Space`**, because by then the value IS a
+  code point. Ф42-a settled that for `<cwctype>` and Ф42-b for `wcstod`, which
+  must skip an EM SPACE before a number; a wide stream that then read U+3000 as
+  part of a word would contradict both. Measured consequence, pinned by the
+  suite: `wistringstream(L"a　b") >> w1 >> w2` gives `a` and `b`, while the same
+  three bytes in a narrow stream are one word.
+- `?` **`<ostream>`'s inserters exist in all three tiers of the synopsis, and
+  `<istream>`'s in two.** Insertion has a `char` tier because a narrow literal
+  offered to a wide stream can be widened; extraction has none, because the
+  reverse would be narrowing and [istream.extractors] declares no `char&`
+  overload for a stream of another character type.
 
 ## `<iterator>`
 
@@ -3319,8 +3447,8 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
 ## `<syncstream>`
 
 - Complete: `basic_syncbuf`, `basic_osyncstream`, the free `swap`, and the
-  `syncbuf` / `osyncstream` typedefs (the wide pair is excluded with every
-  other wide stream, §1.2). New in Ф40; `__cpp_lib_syncbuf` is 201803L, and
+  `syncbuf` / `osyncstream` typedefs — and `wsyncbuf` / `wosyncstream` since
+  Ф42-f, which is where the wide half of every stream typedef arrived. New in Ф40; `__cpp_lib_syncbuf` is 201803L, and
   [version.syn] gives it two owners — `<syncstream>` and `<iosfwd>`, which
   declares the two class templates. It is the only macro in the tree whose
   owner is `<iosfwd>`.

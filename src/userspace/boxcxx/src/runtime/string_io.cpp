@@ -7,13 +7,14 @@
  * already transitively needs <string> via ios_base::failure : system_error
  * : runtime_error(const string&), so the reverse edge would cycle back
  * through <ios>). This is the one translation unit that includes both
- * sides together and provides the bodies, explicitly instantiated for
- * boxcxx's one real instantiation (CharT=char, Traits=char_traits<char>,
- * Allocator=allocator<char>) -- wide streams are a documented, permanent
- * exclusion (see <iosfwd>). Every OTHER translation unit only ever sees
- * the template declaration in <string>/<string_view>; the linker resolves
- * calls against the explicit instantiations emitted at the bottom of this
- * file.
+ * sides together and provides the bodies, explicitly instantiated for both of
+ * boxcxx's real instantiations: CharT=char, and CharT=wchar_t since Ф42-f.
+ * The bodies did not change to gain the second one -- they were generic all
+ * along, and this file was simply emitting half of what it declares, because
+ * wide streams were an exclusion until then. Every OTHER translation unit
+ * only ever sees the template declaration in <string>/<string_view>; the
+ * linker resolves calls against the explicit instantiations emitted at the
+ * bottom of this file.
  */
 
 #include <string>
@@ -171,7 +172,25 @@ basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
     return getline(is, s, is.widen('\n'));
 }
 
-// Explicit instantiation -- boxcxx's one real instantiation.
+// Explicit instantiation. Two now, not one: the bodies above were always
+// generic in CharT (that is why they compile unchanged), and until Ф42-f the
+// wide half had nothing to be instantiated FOR. Nothing here was rewritten —
+// the file simply stopped emitting half of what it declares.
+template basic_ostream<wchar_t> &operator<< <wchar_t, char_traits<wchar_t>>(
+    basic_ostream<wchar_t> &, basic_string_view<wchar_t, char_traits<wchar_t>>);
+template basic_ostream<wchar_t> &operator<< <wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_ostream<wchar_t> &, const basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &);
+template basic_istream<wchar_t> &operator>> <wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_istream<wchar_t> &, basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &);
+template basic_istream<wchar_t> &getline<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_istream<wchar_t> &, basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &, wchar_t);
+template basic_istream<wchar_t> &getline<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_istream<wchar_t> &&, basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &, wchar_t);
+template basic_istream<wchar_t> &getline<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_istream<wchar_t> &, basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &);
+template basic_istream<wchar_t> &getline<wchar_t, char_traits<wchar_t>, allocator<wchar_t>>(
+    basic_istream<wchar_t> &&, basic_string<wchar_t, char_traits<wchar_t>, allocator<wchar_t>> &);
+
 template basic_ostream<char> &operator<< <char, char_traits<char>>(
     basic_ostream<char> &, basic_string_view<char, char_traits<char>>);
 template basic_ostream<char> &operator<< <char, char_traits<char>, allocator<char>>(

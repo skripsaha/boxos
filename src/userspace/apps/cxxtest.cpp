@@ -48974,17 +48974,19 @@ void Phase215()
     }
 
     {
-        // ‼ A gap this phase does NOT close, pinned so that Ф42-f must.
-        // There is no operator<<(basic_ostream<wchar_t>&, wchar_t) yet, so a
-        // wide character offered to << is promoted to int and its NUMBER is
-        // printed. It is silently wrong output rather than a compile error,
-        // which is the worst of the two, and the check below states the
-        // current answer rather than the desired one so that closing the gap
-        // FAILS here and forces this line to be rewritten with it.
-        Check(Put([](WOS &o) { o << L'A'; }) == L"65",
-              "phase215 [Ф42-f] a wide character still goes out as its number");
+        // ‼ CLOSED BY Ф42-f, and this is the check that made it happen. Until
+        // then there was no operator<<(basic_ostream<wchar_t>&, wchar_t), so a
+        // wide character offered to << was promoted to int and its NUMBER
+        // printed — silently wrong output rather than a compile error, the
+        // worse of the two. Ф42-d pinned the WRONG answer here on purpose, so
+        // that adding the inserter would fail this line and force it to be
+        // rewritten. It did, on the first run after the inserter landed, and
+        // this is the rewrite. A pin that states the desired answer would have
+        // been a check that failed for two years and told nobody why.
+        Check(Put([](WOS &o) { o << L'A'; }) == L"A",
+              "phase215 a wide character now goes out as itself");
         Check(Put([](WOS &o) { o.put(L'A'); }) == L"A",
-              "phase215 while put(), being a member, is already generic");
+              "phase215 as put() always did, being a member");
     }
 
     // ── the narrow streams must be untouched by all of this ──────────────
@@ -49393,6 +49395,343 @@ void Phase216()
            "the image rather than in it\n");
 }
 
+// ── Phase217 — the wide layer, end to end ───────────────────────────────────
+//
+// Ф42-f. Ф42-d made the numeric engine generic and Ф42-e built the codecvt;
+// this is the phase where a wide stream becomes a thing you can hold. The
+// load-bearing check is not that a wofstream round-trips — a filebuf checked
+// with a filebuf agrees with itself no matter how wrong it is, which is why
+// Ф36 wrote P36Read in the first place. It is that the BYTES ON THE VOLUME
+// are UTF-8. Without the facet a wofstream would have written UTF-32, and
+// every other program on this system would have read the file as garbage
+// while this test passed.
+//
+// Every expected byte string below was measured, not derived in anyone's
+// head: a host probe converted the same literals through libc++'s codecvt and
+// printed them, along with the cumulative offsets tellg has to produce.
+namespace p217 {
+
+// The four-character corpus and its measured encoding: 'a', ж (2 bytes),
+// 中 (3), 😀 (4). One of each width, which is the point.
+const wchar_t *const kW    = L"aж中\U0001F600";
+const char *const    kBytes = "\x61\xD0\xB6\xE4\xB8\xAD\xF0\x9F\x98\x80";
+constexpr int        kNBytes = 10;
+// Cumulative byte offset after 0..4 characters — what tellg must answer.
+const long long kOff[5] = {0, 1, 3, 6, 10};
+
+} // namespace p217
+
+void Phase217()
+{
+    using namespace std;
+    using namespace p217;
+
+    // ── the names [iosfwd.syn] asks for ──────────────────────────────────
+    static_assert(is_same_v<wios, basic_ios<wchar_t>>, "phase217 wios");
+    static_assert(is_same_v<wstreambuf, basic_streambuf<wchar_t>>, "phase217 wstreambuf");
+    static_assert(is_same_v<wistream, basic_istream<wchar_t>>, "phase217 wistream");
+    static_assert(is_same_v<wostream, basic_ostream<wchar_t>>, "phase217 wostream");
+    static_assert(is_same_v<wiostream, basic_iostream<wchar_t>>, "phase217 wiostream");
+    static_assert(is_same_v<wstringbuf, basic_stringbuf<wchar_t>>, "phase217 wstringbuf");
+    static_assert(is_same_v<wstringstream, basic_stringstream<wchar_t>>, "phase217 wstringstream");
+    static_assert(is_same_v<wfilebuf, basic_filebuf<wchar_t>>, "phase217 wfilebuf");
+    static_assert(is_same_v<wifstream, basic_ifstream<wchar_t>>, "phase217 wifstream");
+    static_assert(is_same_v<wofstream, basic_ofstream<wchar_t>>, "phase217 wofstream");
+    static_assert(is_same_v<wfstream, basic_fstream<wchar_t>>, "phase217 wfstream");
+    static_assert(is_same_v<wsyncbuf, basic_syncbuf<wchar_t>>, "phase217 wsyncbuf");
+    static_assert(is_same_v<wspanstream, basic_spanstream<wchar_t>>, "phase217 wspanstream");
+    // The five position aliases were in NEITHER column until Ф42-f — absent
+    // from the tree AND from the list of what is absent. All five name the
+    // same type because every char_traits reports state_type = mbstate_t.
+    static_assert(is_same_v<streampos, fpos<mbstate_t>>, "phase217 streampos");
+    static_assert(is_same_v<wstreampos, streampos>, "phase217 wstreampos");
+    static_assert(is_same_v<u8streampos, streampos>, "phase217 u8streampos");
+    static_assert(is_same_v<u16streampos, streampos>, "phase217 u16streampos");
+    static_assert(is_same_v<u32streampos, streampos>, "phase217 u32streampos");
+
+    // ── ‼ the check this whole subphase exists for ───────────────────────
+    const char *A = "p217a";
+    P36Erase(A);
+    {
+        wofstream f(A);
+        Check(f.is_open(), "phase217 (1) a wofstream opens a file");
+        f << kW;
+        f.close();
+        Check(!f.fail(), "phase217 (2) and closes cleanly");
+    }
+    {
+        const string raw = P36Read(A);
+        Check((int)raw.size() == kNBytes,
+              "phase217 (3) ‼ the file holds 10 BYTES, not 4 wide characters — "
+              "without the codecvt it would have been 16 bytes of UTF-32");
+        Check(raw == string(kBytes, kNBytes),
+              "phase217 (4) and they are exactly the UTF-8 a host libc++ produces");
+    }
+
+    // ── read it back, and know WHERE each character starts ───────────────
+    {
+        wifstream f(A);
+        Check(f.is_open(), "phase217 (5) a wifstream opens the same file");
+        wchar_t got[8];
+        int     n = 0;
+        for (; n < 8; ++n) {
+            const wint_t c = (wint_t)f.get();
+            if (f.eof() || !f.good()) break;
+            got[n] = (wchar_t)c;
+        }
+        Check(n == 4 && got[0] == L'a' && got[1] == (wchar_t)0x0436 &&
+                  got[2] == (wchar_t)0x4E2D && got[3] == (wchar_t)0x1F600,
+              "phase217 (6) four characters come back, one to four bytes each");
+    }
+    {
+        wifstream f(A);
+        bool      okPos = true;
+        for (int i = 0; i < 4; ++i) {
+            // tellg is a BYTE offset, and it cannot be characters × width
+            // when the width varies — this is the number LogicalPos() now
+            // asks codecvt::length() for.
+            if ((long long)f.tellg() != kOff[i]) okPos = false;
+            f.get();
+        }
+        if ((long long)f.tellg() != kOff[4]) okPos = false;
+        Check(okPos, "phase217 (7) tellg reports the byte offset of each character");
+    }
+    {
+        // A position handed out by tellg goes back where it came from, which
+        // is what seekpos is for and the only seek a variable-width encoding
+        // allows with a nonzero offset.
+        wifstream f(A);
+        f.get();
+        const wifstream::pos_type p = f.tellg();
+        f.get();
+        f.seekg(p);
+        Check(f.get() == (wistream::int_type)0x0436,
+              "phase217 (8) seekg to a remembered position lands on the same character");
+    }
+    {
+        // [filebuf.virtuals]: with encoding() <= 0 a NONZERO offset is an
+        // error, not an approximation — `off` characters from here is not a
+        // number anyone can compute without reading them.
+        wifstream f(A);
+        f.seekg(2, ios_base::cur);
+        Check(f.fail(), "phase217 (9) a relative seek by characters fails on a wide file");
+        wifstream g(A);
+        g.seekg(0, ios_base::end);
+        Check(!g.fail() && (long long)g.tellg() == kNBytes,
+              "phase217 (10) while a zero offset still seeks, in bytes");
+        ifstream nf(A);
+        nf.seekg(2, ios_base::cur);
+        Check(!nf.fail() && (long long)nf.tellg() == 2,
+              "phase217 (11) and the narrow stream keeps the arithmetic it always had");
+    }
+
+    // ── a two-character buffer, so every boundary is crossed ─────────────
+    {
+        const char *B = "p217b";
+        P36Erase(B);
+        {
+            wofstream f(B);
+            for (int i = 0; i < 40; ++i) f << kW;
+            f.close();
+        }
+        Check(P36Size(B) == (long long)kNBytes * 40,
+              "phase217 (12) 160 characters of mixed width weigh 400 bytes");
+        {
+            wfilebuf  fb;
+            wchar_t   tiny[2];
+            fb.pubsetbuf(tiny, 2);
+            Check(fb.open(B, ios_base::in) != nullptr,
+                  "phase217 (13) a wfilebuf opens with a two-character buffer");
+            wistream  in(&fb);
+            int       n    = 0;
+            bool      okSeq = true;
+            for (;; ++n) {
+                const wistream::int_type c = in.get();
+                if (c == char_traits<wchar_t>::eof()) break;
+                if ((wchar_t)c != kW[n % 4]) { okSeq = false; break; }
+            }
+            Check(n == 160 && okSeq,
+                  "phase217 (14) all 160 come back in order across 80 refills");
+            fb.close();
+        }
+    }
+
+    // ── putback, where subtracting a width is no answer ──────────────────
+    {
+        wfilebuf fb;
+        wchar_t  tiny[2];
+        fb.pubsetbuf(tiny, 2);
+        fb.open(A, ios_base::in);
+        wistream in(&fb);
+        in.get();
+        in.get();
+        in.get();                       // consumed a, ж, 中 — buffer refilled
+        Check(in.rdbuf()->sungetc() == (wistream::int_type)0x4E2D,
+              "phase217 (15) sungetc inside the get area walks back one character");
+        // ‼ THE STEP THAT REACHES pbackfail, and the reason it is here: the
+        // check above does NOT. sungetc with anything left in the area just
+        // decrements a pointer, so a mutation that broke pbackfail's search
+        // entirely went UNCAUGHT until this second step was added. One more
+        // step back leaves the area empty, and then the question is real —
+        // where does the character before this buffer begin? Two bytes back
+        // for ж, not sizeof(wchar_t).
+        //
+        // ‼ And what sungetc RETURNS there is not the character. [streambuf]
+        // makes it `return pbackfail(eof())`, and pbackfail promises only
+        // "some value other than eof" on success — this one answers
+        // not_eof(eof). The first version of this check asked for 0x0436 and
+        // failed against correct code; the read below is what proves where it
+        // landed, and it is the check the mutation had to break.
+        Check(!char_traits<wchar_t>::eq_int_type(in.rdbuf()->sungetc(),
+                                                 char_traits<wchar_t>::eof()),
+              "phase217 (16) and once more succeeds across the refill boundary");
+        Check(in.get() == (wistream::int_type)0x0436,
+              "phase217 (17) landing on the character two bytes back, not four");
+        fb.close();
+    }
+    {
+        // Putting back a DIFFERENT character is refused when the facet
+        // converts: it need not weigh the same as the one it displaces, and
+        // writing it through would shift every byte after it.
+        wfilebuf fb;
+        fb.open(A, ios_base::in | ios_base::out);
+        Check(fb.sgetc() == (wistream::int_type)L'a', "phase217 (18) the file starts with 'a'");
+        fb.sbumpc();
+        Check(fb.sputbackc(L'Z') == char_traits<wchar_t>::eof(),
+              "phase217 (19) and a different character cannot be pushed back into it");
+        fb.close();
+    }
+
+    // ── the free inserters and extractors Ф42-d left undone ──────────────
+    {
+        wostringstream o;
+        o << L'A' << L"bc" << "de" << wstring(L"fg") << 42;
+        Check(o.str() == wstring(L"Abcdefg42"),
+              "phase217 (20) character, wide string, NARROW string widened, "
+              "std::wstring and a number all insert");
+    }
+    {
+        wostringstream o;
+        o << setw(6) << setfill(L'ж') << L'A';
+        Check(o.str() == wstring(L"жжжжжA"),
+              "phase217 (21) width and fill apply to a character no byte can hold");
+    }
+    {
+        wistringstream i(L"  hello  world");
+        wstring        a, b;
+        i >> a >> b;
+        Check(a == wstring(L"hello") && b == wstring(L"world"),
+              "phase217 (22) wstring extraction skips leading space and stops at the next");
+    }
+    {
+        wistringstream i(L"line one\nline two");
+        wstring        l;
+        getline(i, l);
+        Check(l == wstring(L"line one"), "phase217 (23) getline works on a wide stream");
+    }
+    {
+        wistringstream i(L"abcdefgh");
+        wchar_t        buf[4];
+        i >> setw(3) >> buf;
+        Check(wstring(buf) == wstring(L"ab"),
+              "phase217 (24) the bounded array extractor honours setw and terminates");
+    }
+    {
+        // ‼ Unicode whitespace, and the divergence Ф42-a chose deliberately.
+        // U+3000 IDEOGRAPHIC SPACE separates words for a WIDE stream, because
+        // by then the value is a code point. Its BYTES do not separate them
+        // for a narrow one, because a byte is not a character yet.
+        wistringstream wi(L"a　b");
+        wstring        w1, w2;
+        wi >> w1 >> w2;
+        Check(w1 == wstring(L"a") && w2 == wstring(L"b"),
+              "phase217 (25) an IDEOGRAPHIC SPACE separates words in a wide stream");
+        istringstream ni("a\xE3\x80\x80" "b");
+        string        n1;
+        ni >> n1;
+        Check(n1 == string("a\xE3\x80\x80" "b"),
+              "phase217 (26) and its bytes do not, in a narrow one");
+    }
+
+    // ── widen / narrow, which only a wide stream can catch ───────────────
+    {
+        wostringstream w;
+        ostringstream  n;
+        Check(w.widen('A') == L'A' && n.widen('A') == 'A',
+              "phase217 (27) widen is the obvious thing for ASCII in both");
+        // Sign extension: char is signed, so this used to be the wchar_t -48
+        // while <ostream>'s WriteRun made U+00D0 out of the same byte.
+        Check(w.widen('\xD0') == (wchar_t)0x00D0,
+              "phase217 (28) and a high byte widens to its own value, not to a negative");
+        wostringstream probe;
+        probe << "\xD0\xB6";
+        Check(probe.str() == wstring(L"\u00D0\u00B6"),
+              "phase217 (29) which is exactly what inserting those bytes produces — "
+              "widen is a per-character map, not a UTF-8 decoder");
+        // Truncation: the low byte of U+0436 is 0x36, the digit '6'.
+        Check(w.narrow(L'ж', '?') == '?' && w.narrow(L'A', '?') == 'A',
+              "phase217 (30) narrow answers '?' where there is no single-byte form");
+        Check(n.narrow('\xD0', '?') == '\xD0',
+              "phase217 (31) while a narrow stream narrows every byte to itself");
+    }
+
+    // ── the console objects ──────────────────────────────────────────────
+    {
+        Check(wcout.rdbuf() != nullptr && wcin.rdbuf() != nullptr,
+              "phase217 (32) the four wide console objects exist");
+        Check(wcin.tie() == &wcout &&
+                  (wcerr.flags() & ios_base::unitbuf) == ios_base::unitbuf,
+              "phase217 (33) tied and unit-buffered exactly as their narrow twins");
+        // Mixing is well defined here, and this line is the proof: the wide
+        // and the narrow halves share one road and neither buffers, so the
+        // pieces come out in call order.
+        cout << "[CXX] note phase217: ";
+        wcout << L"жЖ中\U0001F600";
+        cout << " <- wide and narrow interleaved on one line\n";
+        cout.flush();
+        Check(wcout.good() && cout.good(),
+              "phase217 (34) and both stay good after doing it");
+    }
+
+    // ── what a malformed file does ───────────────────────────────────────
+    {
+        const char *C = "p217c";
+        P36Put(C, string_view("a\xE4\xB8", 3));   // a, then a truncated 中
+        wifstream f(C);
+        Check(f.get() == (wistream::int_type)L'a',
+              "phase217 (35) a file that ends inside a character still yields what precedes it");
+        Check(f.get() == char_traits<wchar_t>::eof(),
+              "phase217 (36) and then stops, rather than inventing a character");
+
+        // A file that is NOTHING but a truncated character. This is the input
+        // that drives underflow's byte window round its loop a second time
+        // with nothing produced — the one case where it has to ask the file
+        // again and accept the answer instead of spinning.
+        const char *D = "p217d";
+        P36Put(D, string_view("\xE4\xB8", 2));
+        wifstream g(D);
+        Check(g.get() == char_traits<wchar_t>::eof(),
+              "phase217 (37) a file that is only half a character yields nothing, "
+              "and terminates asking");
+    }
+
+    // ── the narrow streams must be untouched by all of this ──────────────
+    {
+        ostringstream o;
+        o << 'x' << "yz" << string("!") << setw(4) << setfill('.') << 7;
+        Check(o.str() == string("xyz!...7"),
+              "phase217 (38) every narrow inserter still answers exactly as before");
+        istringstream i("  42 abc");
+        int           v = 0;
+        string        w;
+        i >> v >> w;
+        Check(v == 42 && w == string("abc"), "phase217 (39) and every narrow extractor");
+    }
+
+    printf("[CXX] PASS phase217: the wide layer — a wofstream writes UTF-8, and "
+           "tellg knows where every character starts\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -49633,6 +49972,7 @@ int main()
     Phase214();
     Phase215();
     Phase216();
+    Phase217();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
