@@ -1025,6 +1025,14 @@ clean:
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
+	# boxcxx was missing here, and its absence was not cosmetic: no Makefile in
+	# userspace tracks header dependencies, so `make clean && make` is the ONLY
+	# thing that rebuilds after a header changes — and for the whole C++ library
+	# it was doing nothing. A boxcxx header edit left every object that included
+	# it stale, which is how Ф41-e got a green run out of a mutation that never
+	# reached the image, and how <iosfwd> could hold two different mbstate_t at
+	# once. Found by a mutation that should have failed and did not.
+	@cd $(USERSPACE_DIR)/boxcxx && $(MAKE) clean
 
 install-deps:
 	@echo "Installing dependencies for $(UNAME_S)..."

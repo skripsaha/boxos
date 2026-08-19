@@ -15,6 +15,7 @@
 #include <charconv>
 #include <climits>
 #include <cstdlib>
+#include <__bits/c_utf8>
 #include <cstring>
 
 #include "box/sync.h"   // uspin_t — the at_quick_exit registry lock
@@ -48,71 +49,23 @@ constexpr unsigned int kDefaultSeed = 1u;
 thread_local unsigned long long g_rand_state = kDefaultSeed;
 
 // ── UTF-8, the "C" locale's multibyte encoding here ─────────────────────
-// Decodes one character. Returns the byte count, 0 for the terminator, or -1
-// for a sequence that is truncated, overlong, mis-continued or beyond U+10FFFF
-// — every one of which C calls an invalid sequence.
+// The codec itself moved to <__bits/c_utf8> in Ф41-e, because <cuchar> needs
+// the same one and could not reach it in this anonymous namespace. These two
+// keep their old shape so the five call sites below are unchanged, and the one
+// line that matters is the Incomplete case: for a NON-restartable conversion
+// bounded by n, "you did not give me enough bytes" IS an invalid character.
+// The restartable family in <cuchar> maps the same status to (size_t)(-2).
 int Utf8Decode(const char *s, size_t n, char32_t *out)
 {
-    if (n == 0) return -1;
-    const auto b0 = static_cast<unsigned char>(s[0]);
-    if (b0 == 0) { if (out) *out = 0; return 0; }
-
-    int      len = 0;
-    char32_t cp  = 0;
-    if (b0 < 0x80)                    { len = 1; cp = b0; }
-    else if ((b0 & 0xE0) == 0xC0)     { len = 2; cp = b0 & 0x1Fu; }
-    else if ((b0 & 0xF0) == 0xE0)     { len = 3; cp = b0 & 0x0Fu; }
-    else if ((b0 & 0xF8) == 0xF0)     { len = 4; cp = b0 & 0x07u; }
-    else                              return -1;   // continuation or 0xF8+
-
-    if (static_cast<size_t>(len) > n) return -1;    // truncated by n
-    for (int i = 1; i < len; i++) {
-        const auto bi = static_cast<unsigned char>(s[i]);
-        if ((bi & 0xC0) != 0x80) return -1;
-        cp = (cp << 6) | (bi & 0x3Fu);
+    const auto d = ::std::__utf8::Decode(s, n);
+    switch (d.status) {
+    case ::std::__utf8::Status::Nul: if (out) *out = 0; return 0;
+    case ::std::__utf8::Status::Ok:  if (out) *out = d.cp; return d.len;
+    default:                         return -1;
     }
-
-    // Overlong forms and surrogates are distinct encodings of something that
-    // already has one, which is exactly what makes them invalid.
-    static constexpr char32_t kMin[5] = {0, 0, 0x80, 0x800, 0x10000};
-    if (cp < kMin[len]) return -1;
-    if (cp > 0x10FFFF) return -1;
-    if (cp >= 0xD800 && cp <= 0xDFFF) return -1;
-
-    if (out) *out = cp;
-    return len;
 }
 
-int Utf8Encode(char *s, char32_t cp)
-{
-    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
-    if (cp < 0x80) {
-        if (s) s[0] = static_cast<char>(cp);
-        return 1;
-    }
-    if (cp < 0x800) {
-        if (s) {
-            s[0] = static_cast<char>(0xC0 | (cp >> 6));
-            s[1] = static_cast<char>(0x80 | (cp & 0x3F));
-        }
-        return 2;
-    }
-    if (cp < 0x10000) {
-        if (s) {
-            s[0] = static_cast<char>(0xE0 | (cp >> 12));
-            s[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            s[2] = static_cast<char>(0x80 | (cp & 0x3F));
-        }
-        return 3;
-    }
-    if (s) {
-        s[0] = static_cast<char>(0xF0 | (cp >> 18));
-        s[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-        s[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-        s[3] = static_cast<char>(0x80 | (cp & 0x3F));
-    }
-    return 4;
-}
+int Utf8Encode(char *s, char32_t cp) { return ::std::__utf8::Encode(s, cp); }
 
 // ── the strto* grammar ──────────────────────────────────────────────────
 bool IsSpace(char c)

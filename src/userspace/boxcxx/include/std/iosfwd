@@ -5,13 +5,16 @@
 // pull anything back in — every other iostream header, and <__bits/
 // char_traits>, sits safely underneath this one.
 //
-// mbstate_t belongs to <cwchar>/<cuchar> in the real standard; boxcxx has
-// neither yet, so it is defined here, minimally, until one of those headers
-// exists (at which point this definition moves there and <iosfwd> includes
-// it instead). boxcxx performs no real multibyte conversion (documented
-// "C"-locale-only, no-wide-streams posture) — the only requirement on
-// mbstate_t is that it be a distinct, trivially copyable, default-
-// constructible type.
+// mbstate_t belongs to <cwchar>/<cuchar> in the real standard, and as of Ф41-e
+// <cuchar> exists — so the eight-byte opaque placeholder that used to be
+// defined here moved out, exactly as the note that stood in its place said it
+// would. It could not move INTO <cuchar>: this header must keep pulling
+// nothing in. It lives in <__bits/c_mbstate>, which both include, and it
+// stopped being opaque on the way, because the restartable conversions need
+// real fields. Nothing here cares what is inside it — char_traits::state_type
+// and fpos<mbstate_t> need the name and the properties C requires of it
+// (distinct, trivially copyable, default-constructible, all-bits-zero being
+// the initial state).
 //
 // Every class template below is generic in CharT/Traits (and, for the
 // sstream family, Allocator) so a future wchar_t instantiation is not
@@ -21,6 +24,7 @@
 #define BOXCXX_IOSFWD
 
 #include <cstddef>
+#include <__bits/c_mbstate>
 
 // [version.syn] names THIS header an owner of __cpp_lib_syncbuf alongside
 // <syncstream> — basic_syncbuf/basic_osyncstream and their typedefs are
@@ -34,10 +38,6 @@ namespace std {
 
 template <class CharT> struct char_traits;
 template <class T> class allocator;
-
-struct mbstate_t {
-    unsigned char __opaque[8] = {};
-};
 
 using streamoff  = long long;
 using streamsize = ptrdiff_t;

@@ -1,0 +1,144 @@
+// boxcxx — <__bits/c_utf8>
+//
+// The UTF-8 codec of the "C" locale, in a leaf because TWO headers must answer
+// for it: <cstdlib> converts whole strings with mblen/mbtowc/mbstowcs, and
+// <cuchar> converts one character at a time with a resumable state. Before Ф41-e
+// the codec lived in an anonymous namespace inside cstdlib.cpp, which is exactly
+// where a second caller cannot reach it.
+//
+// The move is not a move: the decoder had to learn a distinction it never made.
+// It reported "truncated, overlong, mis-continued or beyond U+10FFFF" with one
+// value, -1, and that is right for mbtowc — a character that does not fit in
+// the n bytes it was given is invalid there, full stop. It is wrong for
+// mbrtoc8/16/32, which exist to be fed a byte at a time: those must answer
+// (size_t)(-2), "what you gave me could still become a character", or a caller
+// streaming a file would see an error on every character split across a read.
+// One decoder, two policies, one place where the difference is decided.
+//
+// Telling the two apart is not just "did I run out of bytes". A lead byte
+// constrains its first continuation, so E0 80, F0 80, F4 90 and ED A0 are each
+// dead on arrival — overlong, overlong, past U+10FFFF, and a surrogate — even
+// though only two bytes have been seen. Those four checks are what make
+// Incomplete mean "still possible" rather than "not yet disproved".
+#ifndef BOXCXX_BITS_C_UTF8
+#define BOXCXX_BITS_C_UTF8
+
+#include <cstddef>
+
+namespace std {
+namespace __utf8 {
+
+enum class Status : unsigned char {
+    Ok,         // a complete character; len and cp are set
+    Nul,        // the terminator; cp is 0, len is 0
+    Incomplete, // a valid prefix that n bytes could not finish
+    Invalid,    // no continuation of these bytes is a character
+};
+
+struct Decoded {
+    Status        status;
+    unsigned char len; // bytes consumed when Ok
+    char32_t      cp;
+};
+
+inline constexpr Decoded Decode(const char *s, size_t n) noexcept
+{
+    if (n == 0) return {Status::Incomplete, 0, 0};
+
+    const auto b0 = static_cast<unsigned char>(s[0]);
+    if (b0 == 0) return {Status::Nul, 0, 0};
+
+    unsigned len = 0;
+    char32_t cp  = 0;
+    if (b0 < 0x80)                { len = 1; cp = b0; }
+    else if ((b0 & 0xE0) == 0xC0) { len = 2; cp = b0 & 0x1Fu; }
+    else if ((b0 & 0xF0) == 0xE0) { len = 3; cp = b0 & 0x0Fu; }
+    else if ((b0 & 0xF8) == 0xF0) { len = 4; cp = b0 & 0x07u; }
+    else return {Status::Invalid, 0, 0}; // a continuation byte, or 0xF8+
+
+    // ‼ ASCII is finished HERE, before anything looks at s[1]. `n` is how many
+    // bytes the caller HAS, not how many this character uses: mbstowcs passes 4
+    // every time. Examining the next byte for a one-byte character would reject
+    // "AB" — an equivalence sweep against the shipped decoder caught exactly
+    // that, on 1.6 billion of 4.3 billion inputs, after four narrower tests
+    // that always passed n == len had missed it.
+    if (len == 1) return {Status::Ok, 1, cp};
+
+    // C0/C1 can only introduce an overlong two-byte form, and F5..F7 only a
+    // code point past U+10FFFF, so the lead byte alone settles both.
+    if (b0 == 0xC0 || b0 == 0xC1 || b0 > 0xF4) return {Status::Invalid, 0, 0};
+
+    // The first continuation, when we have it, is constrained by the lead.
+    // Deciding this here is what lets a two-byte prefix be called Invalid
+    // instead of waiting for bytes that could never rescue it.
+    if (n >= 2) {
+        const auto b1 = static_cast<unsigned char>(s[1]);
+        if ((b1 & 0xC0) != 0x80) return {Status::Invalid, 0, 0};
+        if (b0 == 0xE0 && b1 < 0xA0) return {Status::Invalid, 0, 0}; // overlong
+        if (b0 == 0xED && b1 >= 0xA0) return {Status::Invalid, 0, 0}; // surrogate
+        if (b0 == 0xF0 && b1 < 0x90) return {Status::Invalid, 0, 0}; // overlong
+        if (b0 == 0xF4 && b1 > 0x8F) return {Status::Invalid, 0, 0}; // > U+10FFFF
+    }
+
+    // Every continuation we actually hold must be one; a bad byte inside n is
+    // an error now, not an Incomplete that never completes.
+    const unsigned have = static_cast<unsigned>(n < len ? n : len);
+    for (unsigned i = 1; i < have; i++) {
+        const auto bi = static_cast<unsigned char>(s[i]);
+        if ((bi & 0xC0) != 0x80) return {Status::Invalid, 0, 0};
+        cp = (cp << 6) | (bi & 0x3Fu);
+    }
+    if (have < len) return {Status::Incomplete, 0, 0};
+
+    // No overlong / surrogate / out-of-range test follows, and its absence is a
+    // measured result rather than an oversight. The lead-byte constraints above
+    // subsume all three: an overlong form needs C0, C1, E0<A0 or F0<90; a
+    // surrogate needs ED>=A0; anything past U+10FFFF needs F4>8F or a lead byte
+    // above F4. Every one is already refused. Sweeping all 2^32 byte sequences
+    // of length <= 4, control reaches this point 143,161,216 times and the three
+    // tests would reject exactly zero of them; and this decoder answers what the
+    // one it replaced answered on all 4,311,810,305 of those inputs.
+    //
+    // ‼ That makes the lead-byte checks load-bearing ON THEIR OWN. Delete one
+    // and nothing downstream catches it — which is why the phase test mutates
+    // each of them individually and each mutation must fail a check.
+    return {Status::Ok, static_cast<unsigned char>(len), cp};
+}
+
+// Writes the encoding of cp and returns its length, or -1 if cp is not a
+// character. A null s measures without writing.
+inline constexpr int Encode(char *s, char32_t cp) noexcept
+{
+    if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    if (cp < 0x80) {
+        if (s) s[0] = static_cast<char>(cp);
+        return 1;
+    }
+    if (cp < 0x800) {
+        if (s) {
+            s[0] = static_cast<char>(0xC0 | (cp >> 6));
+            s[1] = static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        return 2;
+    }
+    if (cp < 0x10000) {
+        if (s) {
+            s[0] = static_cast<char>(0xE0 | (cp >> 12));
+            s[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s[2] = static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        return 3;
+    }
+    if (s) {
+        s[0] = static_cast<char>(0xF0 | (cp >> 18));
+        s[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+        s[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        s[3] = static_cast<char>(0x80 | (cp & 0x3F));
+    }
+    return 4;
+}
+
+} // namespace __utf8
+} // namespace std
+
+#endif // BOXCXX_BITS_C_UTF8

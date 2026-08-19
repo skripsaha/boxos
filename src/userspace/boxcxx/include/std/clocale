@@ -1,0 +1,89 @@
+// boxcxx — <clocale>
+//
+// [clocale.syn]. The header for a facility BoxOS has exactly one of, and the
+// interesting part is that "exactly one" is an answer rather than a shortfall.
+//
+// A C locale is a global, mutable, process-wide switch that silently changes
+// what "." means to every number the program prints. BoxOS is UTF-8 end to end
+// — the screen, the keyboard and TagFS names all are — and it has no
+// environment to read a locale name out of (<cstdlib>'s getenv is always
+// nullptr, and that too is an answer, not a stub). So there is one locale here,
+// it is "C", and its multibyte encoding is UTF-8 with MB_CUR_MAX 4.
+//
+// Two consequences worth stating rather than discovering:
+//
+//   • **setlocale never changes anything, so it can never race.** In a world of
+//     strands, hosted setlocale is a data race waiting for a second thread —
+//     glibc's own manual warns that changing the locale while another thread
+//     formats a number is undefined. Here the returned lconv is a constant in
+//     read-only storage, and localeconv() may be called from every strand at
+//     once. That is a property BoxOS gets by having refused the switch.
+//   • **An unknown locale name returns nullptr**, which is precisely how C
+//     spells "that selection cannot be honoured" — not a silent fallback to
+//     "C" that would let a program believe it had asked for something. Note
+//     that std::locale in <locale> accepts and ignores any name instead; the
+//     two are different APIs with different contracts, and <locale>'s
+//     simplification is recorded separately in CONFORMANCE.
+#ifndef BOXCXX_CLOCALE
+#define BOXCXX_CLOCALE
+
+#include <cstddef>
+
+// The six categories of [clocale.syn]. LC_ALL is 0 so that a program passing it
+// to a switch over the others cannot collide; the values themselves are
+// implementation-defined and only their distinctness is required.
+#define LC_ALL      0
+#define LC_COLLATE  1
+#define LC_CTYPE    2
+#define LC_MONETARY 3
+#define LC_NUMERIC  4
+#define LC_TIME     5
+
+namespace std {
+
+// [clocale.syn] — the member set is fixed by C; the order is not, and this is
+// the conventional one. The char members carry CHAR_MAX in the "C" locale,
+// which C defines to mean "this quantity is not available in this locale" —
+// not zero, which would be a claim that there are no fractional digits.
+struct lconv {
+    char *decimal_point;
+    char *thousands_sep;
+    char *grouping;
+    char *mon_decimal_point;
+    char *mon_thousands_sep;
+    char *mon_grouping;
+    char *positive_sign;
+    char *negative_sign;
+    char *currency_symbol;
+    char  frac_digits;
+    char  p_cs_precedes;
+    char  n_cs_precedes;
+    char  p_sep_by_space;
+    char  n_sep_by_space;
+    char  p_sign_posn;
+    char  n_sign_posn;
+    char *int_curr_symbol;
+    char  int_frac_digits;
+    char  int_p_cs_precedes;
+    char  int_n_cs_precedes;
+    char  int_p_sep_by_space;
+    char  int_n_sep_by_space;
+    char  int_p_sign_posn;
+    char  int_n_sign_posn;
+};
+
+// Returns "C" for a category selection this implementation can honour — that is
+// nullptr (query), "C", and "" (the implementation-defined native locale, which
+// here IS "C") — and nullptr for any other name. Never modifies global state.
+char *setlocale(int category, const char *locale) noexcept;
+
+// Never nullptr, never changes between calls, safe from any strand.
+lconv *localeconv() noexcept;
+
+} // namespace std
+
+using std::lconv;
+using std::localeconv;
+using std::setlocale;
+
+#endif // BOXCXX_CLOCALE

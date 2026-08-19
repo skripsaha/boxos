@@ -584,7 +584,10 @@
 #include <cctype>
 #include <cerrno>
 #include <cfloat>
+#include <cinttypes>
 #include <climits>
+#include <clocale>
+#include <cuchar>
 #include <csetjmp>
 #include <csignal>
 #include <cstdarg>
@@ -47253,6 +47256,405 @@ void Phase206()
     printf("[CXX] PASS phase206: <csetjmp> — and a shadow stack left exactly where it was\n");
 }
 
+// ── phase207: <cinttypes> ────────────────────────────────────────────────
+// The header is almost all macros, and a macro cannot be checked by reading it
+// back — PRId64 comparing equal to "ld" only proves this file and that file
+// agree. What has to be true is that the modifier matches the TYPE, and the one
+// thing in the build that knows that independently is the compiler's own
+// printf checker. The probe below carries the format attribute and raises
+// -Wformat to an error for its own extent, so a modifier that stops matching
+// its type stops the build instead of printing a plausible wrong number.
+namespace p207 {
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wformat"
+// Defined, not just declared: it has internal linkage here, and a static
+// function that is referenced but never defined is a link error the moment
+// the optimiser stops discarding the caller. The body is empty because the
+// whole point happens at compile time.
+__attribute__((format(printf, 1, 2))) void FmtProbe(const char *, ...) {}
+
+// Called from the phase so the calls below are certainly compiled.
+void CompilerChecksEveryModifier()
+{
+    FmtProbe("%" PRId8,  (std::int8_t)1);    FmtProbe("%" PRIu8,  (std::uint8_t)1);
+    FmtProbe("%" PRId16, (std::int16_t)1);   FmtProbe("%" PRIu16, (std::uint16_t)1);
+    FmtProbe("%" PRId32, (std::int32_t)1);   FmtProbe("%" PRIu32, (std::uint32_t)1);
+    FmtProbe("%" PRId64, (std::int64_t)1);   FmtProbe("%" PRIu64, (std::uint64_t)1);
+    FmtProbe("%" PRIi64, (std::int64_t)1);   FmtProbe("%" PRIo64, (std::uint64_t)1);
+    FmtProbe("%" PRIx64, (std::uint64_t)1);  FmtProbe("%" PRIX64, (std::uint64_t)1);
+    FmtProbe("%" PRIdMAX, (std::intmax_t)1); FmtProbe("%" PRIuMAX, (std::uintmax_t)1);
+    FmtProbe("%" PRIxMAX, (std::uintmax_t)1);
+    FmtProbe("%" PRIdPTR, (std::intptr_t)1); FmtProbe("%" PRIuPTR, (std::uintptr_t)1);
+    FmtProbe("%" PRIxPTR, (std::uintptr_t)1);
+    FmtProbe("%" PRIdLEAST8,  (std::int_least8_t)1);
+    FmtProbe("%" PRIdLEAST16, (std::int_least16_t)1);
+    FmtProbe("%" PRIdLEAST32, (std::int_least32_t)1);
+    FmtProbe("%" PRIdLEAST64, (std::int_least64_t)1);
+    FmtProbe("%" PRIuLEAST8,  (std::uint_least8_t)1);
+    FmtProbe("%" PRIuLEAST64, (std::uint_least64_t)1);
+    FmtProbe("%" PRIdFAST8,   (std::int_fast8_t)1);
+    FmtProbe("%" PRIdFAST16,  (std::int_fast16_t)1);
+    FmtProbe("%" PRIdFAST32,  (std::int_fast32_t)1);
+    FmtProbe("%" PRIdFAST64,  (std::int_fast64_t)1);
+    FmtProbe("%" PRIuFAST32,  (std::uint_fast32_t)1);
+    FmtProbe("%" PRIxFAST64,  (std::uint_fast64_t)1);
+}
+#pragma GCC diagnostic pop
+
+// [cinttypes.syn]/2 — <cinttypes> includes <cstdint>, so a TU that includes
+// only this header may name the exact-width types. If that stopped being true
+// this would not compile.
+static_assert(sizeof(std::int64_t) == 8 && sizeof(std::uintmax_t) == 8);
+
+// P0533R9 made these constexpr in C++23; if they were not, none of this would
+// be a constant expression.
+static_assert(std::imaxabs(-9) == 9);
+static_assert(std::imaxabs(0) == 0);
+static_assert(std::imaxdiv(7, 2).quot == 3 && std::imaxdiv(7, 2).rem == 1);
+static_assert(std::imaxdiv(-7, 2).quot == -3 && std::imaxdiv(-7, 2).rem == -1);
+static_assert(std::imaxdiv(7, -2).quot == -3 && std::imaxdiv(7, -2).rem == 1);
+
+// imaxdiv_t is a type of its own. ldiv_t has the same two members of the same
+// type on this target and is still a different type, which is what C says.
+static_assert(!std::is_same_v<std::imaxdiv_t, std::ldiv_t>);
+
+} // namespace p207
+
+// The SCN family has no X — %X is a printf conversion only. Whether a MACRO
+// exists is a preprocessor question and has to be asked in the preprocessor: a
+// requires-expression naming an undeclared identifier is a hard error, not a
+// false, which is exactly the trap Ф31 recorded.
+#ifdef SCNX64
+#  error "<cinttypes> defines SCNX64, which C does not have"
+#endif
+#ifdef SCNXMAX
+#  error "<cinttypes> defines SCNXMAX, which C does not have"
+#endif
+// ...and the ones C DOES have must be there, or the family is half-built.
+#if !defined(PRId8) || !defined(PRIuFAST64) || !defined(PRIxPTR) || \
+    !defined(SCNdMAX) || !defined(SCNoLEAST16)
+#  error "<cinttypes> is missing macros [cinttypes.syn] requires"
+#endif
+
+void Phase207()
+{
+    p207::CompilerChecksEveryModifier();
+
+    // The spellings themselves, so a silent respelling is caught even where the
+    // format attribute would still be satisfied (there is more than one way to
+    // print a long).
+    Check(std::string_view(PRId64) == "ld", "phase207 PRId64 is the long modifier");
+    Check(std::string_view(PRIu32) == "u", "phase207 PRIu32 has no modifier");
+    Check(std::string_view(PRIdMAX) == "jd", "phase207 PRIdMAX uses j");
+    Check(std::string_view(PRIxPTR) == "lx", "phase207 PRIxPTR is lx");
+    Check(std::string_view(SCNu16) == "hu", "phase207 SCNu16 is hu");
+
+    // The exact-, least- and fast-width families coincide on this target, which
+    // is a fact about the ABI worth pinning rather than assuming.
+    Check(std::string_view(PRId64) == std::string_view(PRIdLEAST64) &&
+              std::string_view(PRId64) == std::string_view(PRIdFAST64),
+          "phase207 exact/least/fast agree at 64 bits");
+
+    Check(std::imaxabs(std::numeric_limits<std::intmax_t>::max()) ==
+              std::numeric_limits<std::intmax_t>::max(),
+          "phase207 imaxabs of the largest positive is itself");
+
+    const std::imaxdiv_t d = std::imaxdiv(-9, -4);
+    Check(d.quot == 2 && d.rem == -1, "phase207 imaxdiv truncates toward zero");
+
+    // strtoimax/strtoumax are the widest parse in the library, so the edges of
+    // intmax_t are the interesting inputs — a narrower parser underneath would
+    // saturate here.
+    char *end = nullptr;
+    Check(std::strtoimax("9223372036854775807", &end, 10) ==
+              std::numeric_limits<std::intmax_t>::max() && *end == '\0',
+          "phase207 strtoimax reaches INTMAX_MAX");
+    Check(std::strtoumax("18446744073709551615", &end, 10) ==
+              std::numeric_limits<std::uintmax_t>::max() && *end == '\0',
+          "phase207 strtoumax reaches UINTMAX_MAX");
+    Check(std::strtoimax("-42abc", &end, 10) == -42 &&
+              std::string_view(end) == "abc",
+          "phase207 strtoimax stops at the first byte it cannot use");
+    Check(std::strtoimax("0x1f", &end, 16) == 31, "phase207 strtoimax base 16");
+    Check(std::strtoimax("0x1f", &end, 0) == 31, "phase207 strtoimax base 0 detects hex");
+
+    printf("[CXX] PASS phase207: <cinttypes> — the modifiers the compiler itself checks\n");
+}
+
+// ── phase208: <clocale> ──────────────────────────────────────────────────
+// One locale, and the point of the phase is that "one" is answered rather than
+// dodged: every member of lconv carries the value C fixes for "C", an unknown
+// name is refused instead of silently becoming "C", and the object handed back
+// never changes — which is what makes it safe to read from every strand.
+namespace p208 {
+
+bool AllStringsButTheDotAreEmpty(const std::lconv *c)
+{
+    return *c->thousands_sep == '\0' && *c->grouping == '\0' &&
+           *c->mon_decimal_point == '\0' && *c->mon_thousands_sep == '\0' &&
+           *c->mon_grouping == '\0' && *c->positive_sign == '\0' &&
+           *c->negative_sign == '\0' && *c->currency_symbol == '\0' &&
+           *c->int_curr_symbol == '\0';
+}
+
+bool EveryCharMemberIsUnavailable(const std::lconv *c)
+{
+    // CHAR_MAX is C's "this locale does not say", and it is NOT zero — zero
+    // would be the claim that there are no fractional digits.
+    return c->frac_digits == CHAR_MAX && c->p_cs_precedes == CHAR_MAX &&
+           c->n_cs_precedes == CHAR_MAX && c->p_sep_by_space == CHAR_MAX &&
+           c->n_sep_by_space == CHAR_MAX && c->p_sign_posn == CHAR_MAX &&
+           c->n_sign_posn == CHAR_MAX && c->int_frac_digits == CHAR_MAX &&
+           c->int_p_cs_precedes == CHAR_MAX && c->int_n_cs_precedes == CHAR_MAX &&
+           c->int_p_sep_by_space == CHAR_MAX && c->int_n_sep_by_space == CHAR_MAX &&
+           c->int_p_sign_posn == CHAR_MAX && c->int_n_sign_posn == CHAR_MAX;
+}
+
+} // namespace p208
+
+void Phase208()
+{
+    const std::lconv *c = std::localeconv();
+    Check(c != nullptr, "phase208 localeconv is never null");
+    Check(std::string_view(c->decimal_point) == ".", "phase208 the decimal point is a dot");
+    Check(p208::AllStringsButTheDotAreEmpty(c), "phase208 every other lconv string is empty");
+    Check(p208::EveryCharMemberIsUnavailable(c), "phase208 every lconv char member is CHAR_MAX");
+
+    // The same object every time: a program may cache the pointer, and C lets it.
+    Check(std::localeconv() == c, "phase208 localeconv returns one object");
+
+    Check(std::string_view(std::setlocale(LC_ALL, nullptr)) == "C",
+          "phase208 a null name queries, and the answer is C");
+    Check(std::string_view(std::setlocale(LC_ALL, "C")) == "C",
+          "phase208 C can be selected");
+    Check(std::string_view(std::setlocale(LC_ALL, "")) == "C",
+          "phase208 the native locale IS C here");
+    Check(std::setlocale(LC_ALL, "en_US.UTF-8") == nullptr,
+          "phase208 an unknown name is refused, not quietly granted");
+    Check(std::setlocale(LC_ALL, "POSIX") == nullptr,
+          "phase208 not even POSIX — this is not that system");
+    Check(std::setlocale(-1, "C") == nullptr, "phase208 an unknown category is refused");
+
+    // Every category names the one locale, so a program that sets them one at a
+    // time gets the same answer as one that sets LC_ALL.
+    Check(std::string_view(std::setlocale(LC_NUMERIC, "C")) == "C" &&
+              std::string_view(std::setlocale(LC_CTYPE, "C")) == "C" &&
+              std::string_view(std::setlocale(LC_TIME, "C")) == "C" &&
+              std::string_view(std::setlocale(LC_COLLATE, "C")) == "C" &&
+              std::string_view(std::setlocale(LC_MONETARY, "C")) == "C",
+          "phase208 all six categories answer C");
+
+    // A refused selection must not have moved anything.
+    Check(std::localeconv() == c && std::string_view(c->decimal_point) == ".",
+          "phase208 a refused setlocale changed nothing");
+
+    // The encoding of this locale is UTF-8, which is why these two are 4 and not
+    // the 1 a compiler's freestanding <limits.h> assumes.
+    Check(MB_CUR_MAX == 4, "phase208 MB_CUR_MAX is 4 because the encoding is UTF-8");
+    Check(MB_LEN_MAX == 4, "phase208 MB_LEN_MAX agrees with it");
+
+    printf("[CXX] PASS phase208: <clocale> — one locale, and every field says so\n");
+}
+
+// ── phase209: <cuchar> ───────────────────────────────────────────────────
+// The restartable conversions. Whole-character calls are the easy half; the
+// half that matters is a caller feeding one byte at a time, because that is the
+// only thing that exercises mbstate_t — and the (size_t)(-2) answer that makes
+// it possible is the one an implementation gets wrong by calling a valid prefix
+// an error.
+namespace p209 {
+
+constexpr auto kIncomplete = static_cast<std::size_t>(-2);
+constexpr auto kInvalid    = static_cast<std::size_t>(-1);
+constexpr auto kPending    = static_cast<std::size_t>(-3);
+
+// Feeds `s` to mbrtoc32 one byte at a time and reports what came back.
+bool ByteAtATime(const char *s, std::size_t n, char32_t want)
+{
+    std::mbstate_t st{};
+    char32_t       cp = 0;
+    for (std::size_t i = 0; i + 1 < n; i++) {
+        if (std::mbrtoc32(&cp, s + i, 1, &st) != kIncomplete) return false;
+    }
+    return std::mbrtoc32(&cp, s + n - 1, 1, &st) == 1 && cp == want;
+}
+
+// The per-strand property. Two strands convert different characters through the
+// INTERNAL state (ps == nullptr), strictly interleaved byte by byte. If that
+// state were one object per process — as it is in a hosted C library — the two
+// leading bytes would be assembled into one character and both would fail.
+// Equal lengths make the hand-off deadlock-free by construction: no timeout, no
+// bound, the protocol simply terminates.
+struct Feed {
+    const char *s;
+    char32_t    want;
+    bool        ok;
+};
+
+void InterleavedInternalState(Feed &a, Feed &b)
+{
+    std::atomic<int> tok{0};
+    auto run = [&tok](Feed &f, int me) {
+        char32_t       cp = 0;
+        std::size_t    rc = 0;
+        for (int i = 0; i < 3; i++) {
+            while (tok.load(std::memory_order_acquire) != me) {}
+            rc = std::mbrtoc32(&cp, f.s + i, 1, nullptr);
+            if (i < 2 && rc != kIncomplete) f.ok = false;
+            tok.store(1 - me, std::memory_order_release);
+        }
+        if (rc != 1 || cp != f.want) f.ok = false;
+    };
+    a.ok = b.ok = true;
+    std::thread ta(run, std::ref(a), 0);
+    std::thread tb(run, std::ref(b), 1);
+    ta.join();
+    tb.join();
+}
+
+} // namespace p209
+
+void Phase209()
+{
+    using namespace p209;
+    char32_t       c32 = 0;
+    char16_t       c16 = 0;
+    char8_t        c8  = 0;
+    std::mbstate_t st{};
+
+    // ── whole characters, all four lengths ───────────────────────────────
+    Check(std::mbrtoc32(&c32, "A", 1, &st) == 1 && c32 == U'A', "phase209 mbrtoc32 ascii");
+    Check(std::mbrtoc32(&c32, "\xD0\x91", 2, &st) == 2 && c32 == 0x0411,
+          "phase209 mbrtoc32 two bytes");
+    Check(std::mbrtoc32(&c32, "\xE2\x82\xAC", 3, &st) == 3 && c32 == 0x20AC,
+          "phase209 mbrtoc32 three bytes");
+    Check(std::mbrtoc32(&c32, "\xF0\x9F\x92\xA1", 4, &st) == 4 && c32 == 0x1F4A1,
+          "phase209 mbrtoc32 four bytes");
+    Check(std::mbrtoc32(&c32, "", 1, &st) == 0 && c32 == 0,
+          "phase209 the terminator returns 0, not 1");
+
+    // ‼ n is how many bytes the CALLER HAS, not how many the character uses.
+    // A decoder that inspects s[1] while decoding a one-byte character rejects
+    // "AB" — and <cstdlib>'s mbstowcs passes 4 on every call, so this is the
+    // shape that breaks whole-string conversion rather than an edge case.
+    Check(std::mbrtoc32(&c32, "AB", 2, &st) == 1 && c32 == U'A',
+          "phase209 an ascii character does not read the byte after it");
+    Check(std::mbrtoc32(&c32, "A\x80", 2, &st) == 1 && c32 == U'A',
+          "phase209 not even when the byte after it is not a character");
+    Check(std::mbrtoc32(&c32, "\xD0\x91XY", 4, &st) == 2 && c32 == 0x0411,
+          "phase209 a two-byte character consumes two of four bytes offered");
+    Check(std::mbrtoc32(&c32, "\xE2\x82\xACZ", 4, &st) == 3 && c32 == 0x20AC,
+          "phase209 a three-byte character consumes three of four");
+
+    // ── the answer that makes streaming possible ─────────────────────────
+    Check(ByteAtATime("\xD0\x91", 2, 0x0411), "phase209 two bytes, one call each");
+    Check(ByteAtATime("\xE2\x82\xAC", 3, 0x20AC), "phase209 three bytes, one call each");
+    Check(ByteAtATime("\xF0\x9F\x92\xA1", 4, 0x1F4A1), "phase209 four bytes, one call each");
+
+    // ── and the prefixes that are NOT incomplete ─────────────────────────
+    // A lead byte constrains its first continuation, so these are already dead
+    // at two bytes. Answering -2 here would ask the caller for bytes that could
+    // never help.
+    st    = std::mbstate_t{};
+    errno = 0; // sticky otherwise, and the check would pass on an older failure
+    Check(std::mbrtoc32(&c32, "\xE0\x80", 2, &st) == kInvalid && errno == EILSEQ,
+          "phase209 an overlong prefix is an error, not an unfinished character");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc32(&c32, "\xED\xA0", 2, &st) == kInvalid,
+          "phase209 a surrogate prefix is an error");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc32(&c32, "\xF4\x90", 2, &st) == kInvalid,
+          "phase209 a past-U+10FFFF prefix is an error");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc32(&c32, "\x80", 1, &st) == kInvalid,
+          "phase209 a lone continuation byte is an error");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc32(&c32, "\xF5\x80\x80\x80", 4, &st) == kInvalid,
+          "phase209 F5 cannot lead a character");
+
+    // ── mbrtoc16 and the second unit that has to wait ────────────────────
+    st = std::mbstate_t{};
+    Check(std::mbrtoc16(&c16, "\xE2\x82\xAC", 3, &st) == 3 && c16 == 0x20AC,
+          "phase209 mbrtoc16 inside the BMP is one unit");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc16(&c16, "\xF0\x9F\x92\xA1", 4, &st) == 4 && c16 == 0xD83D,
+          "phase209 mbrtoc16 hands back the high surrogate first");
+    Check(std::mbrtoc16(&c16, "\xF0\x9F\x92\xA1", 4, &st) == kPending && c16 == 0xDCA1,
+          "phase209 the low surrogate arrives as -3, consuming nothing");
+
+    // ── mbrtoc8: the units of the answer are the bytes of the question ───
+    st = std::mbstate_t{};
+    Check(std::mbrtoc8(&c8, "\xE2\x82\xAC", 3, &st) == 3 && c8 == 0xE2,
+          "phase209 mbrtoc8 returns the first byte and consumes the character");
+    Check(std::mbrtoc8(&c8, "\xE2\x82\xAC", 3, &st) == kPending && c8 == 0x82,
+          "phase209 mbrtoc8 second byte is -3");
+    Check(std::mbrtoc8(&c8, "\xE2\x82\xAC", 3, &st) == kPending && c8 == 0xAC,
+          "phase209 mbrtoc8 third byte is -3");
+    Check(std::mbrtoc8(&c8, "A", 1, &st) == 1 && c8 == u8'A',
+          "phase209 mbrtoc8 is back to reading input");
+
+    // ── the encoding direction ───────────────────────────────────────────
+    char buf[4] = {};
+    st = std::mbstate_t{};
+    Check(std::c32rtomb(buf, U'A', &st) == 1 && buf[0] == 'A', "phase209 c32rtomb ascii");
+    Check(std::c32rtomb(buf, 0x1F4A1, &st) == 4 &&
+              static_cast<unsigned char>(buf[0]) == 0xF0,
+          "phase209 c32rtomb four bytes");
+    Check(std::c32rtomb(buf, 0xD800, &st) == kInvalid,
+          "phase209 a surrogate is not a character to encode");
+    Check(std::c32rtomb(buf, 0x110000, &st) == kInvalid,
+          "phase209 nothing exists past U+10FFFF");
+
+    st = std::mbstate_t{};
+    Check(std::c16rtomb(buf, 0xD83D, &st) == 0,
+          "phase209 half a character writes no bytes");
+    Check(std::c16rtomb(buf, 0xDCA1, &st) == 4 &&
+              static_cast<unsigned char>(buf[3]) == 0xA1,
+          "phase209 the pair completes into four bytes");
+    st = std::mbstate_t{};
+    Check(std::c16rtomb(buf, 0xDCA1, &st) == kInvalid,
+          "phase209 an unpaired low surrogate is an error");
+    st = std::mbstate_t{};
+    Check(std::c16rtomb(buf, 0xD83D, &st) == 0 &&
+              std::c16rtomb(buf, u'A', &st) == kInvalid,
+          "phase209 a high surrogate followed by anything else is an error");
+
+    st = std::mbstate_t{};
+    Check(std::c8rtomb(buf, 0xE2, &st) == 0 && std::c8rtomb(buf, 0x82, &st) == 0 &&
+              std::c8rtomb(buf, 0xAC, &st) == 3 &&
+              static_cast<unsigned char>(buf[0]) == 0xE2,
+          "phase209 c8rtomb writes nothing until the character is whole");
+    st = std::mbstate_t{};
+    Check(std::c8rtomb(buf, 0x80, &st) == kInvalid,
+          "phase209 c8rtomb refuses a continuation byte as a lead");
+
+    // The null-s convention: equivalent to converting the terminator.
+    st = std::mbstate_t{};
+    Check(std::c32rtomb(nullptr, U'X', &st) == 1, "phase209 c32rtomb(null) is the terminator");
+    st = std::mbstate_t{};
+    Check(std::mbrtoc32(nullptr, nullptr, 0, &st) == 0,
+          "phase209 mbrtoc32(null) reads the terminator");
+
+    // The non-restartable family sits on the same codec, and mbstowcs is the
+    // caller that always offers more bytes than the character uses.
+    {
+        wchar_t wide[8] = {};
+        const std::size_t got = std::mbstowcs(wide, "A\xD0\x91\xE2\x82\xAC", 8);
+        Check(got == 3 && wide[0] == L'A' && wide[1] == 0x0411 && wide[2] == 0x20AC,
+              "phase209 mbstowcs converts a mixed-width string end to end");
+    }
+
+    // ── the state is per strand, and that is a decision ──────────────────
+    Feed a{"\xE2\x82\xAC", 0x20AC, true};   // €
+    Feed b{"\xE6\x97\xA5", 0x65E5, true};   // 日
+    InterleavedInternalState(a, b);
+    Check(a.ok && b.ok,
+          "phase209 two strands share no conversion cursor, byte for byte");
+
+    printf("[CXX] PASS phase209: <cuchar> — and the -2 that lets a caller feed one byte\n");
+}
+
 
 } // namespace
 
@@ -47482,6 +47884,9 @@ int main()
     Phase204();
     Phase205();
     Phase206();
+    Phase207();
+    Phase208();
+    Phase209();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
