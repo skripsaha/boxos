@@ -1,6 +1,6 @@
 // boxcxx — <iostream>
-// The four narrow standard stream objects [iostream.objects], bound to the
-// BoxOS Current spine.
+// The eight standard stream objects [iostream.objects], bound to the BoxOS
+// Current spine — four narrow, and four wide since Ф42-f.
 //
 // This header was absent on purpose for most of the epic's life, and the
 // reason it was absent is worth stating: BoxOS has no stdin/stdout/stderr.
@@ -10,13 +10,33 @@
 // not a Unix model in C++ clothing; they are the standard's names for three
 // BoxOS channels:
 //
-//   std::cout, std::cerr, std::clog  ->  the "screen" Current
-//   std::cin                         ->  the "keyboard" Current
+//   std::cout, std::cerr, std::clog    ->  the "screen" Current
+//   std::wcout, std::wcerr, std::wclog ->  the same screen Current, in UTF-8
+//   std::cin                           ->  the "keyboard" Current
+//   std::wcin                          ->  the same keyboard, decoded
 //
 // std::print has routed through that same screen channel since the spine
 // landed, and these objects share the very handle it uses (__print::Console),
 // so `std::cout << a; std::print("{}", b);` emits a then b — one road, one
 // order. Mixing them is not merely allowed, it is exact.
+//
+// ── mixing narrow and wide, which C forbids and this does not ───────────
+// [iostream.objects]/2 defers to the C standard, and C says a stream is byte-
+// oriented or wide-oriented for its life. The reason is real there: a wide
+// write can leave a conversion suspended in a shift state that a byte write
+// would then walk over. It is not real here. The encoding is UTF-8, Ф42-e
+// proved its codecvt reads and writes no state, both halves emit the same
+// alphabet through the same handle, and neither keeps a buffer of its own —
+// so `std::cout << "a"; std::wcout << L"б";` comes out in call order, exactly
+// as std::print already interleaves with std::cout. On the input side wcin
+// takes its bytes from cin's own line buffer rather than opening the keyboard
+// a second time, so the two share one cursor and a typed line cannot end up
+// split between them.
+//
+// ‼ This is deliberately NOT what <cstdio> does. There, fwide()/orientation
+// is enforced and fwprintf(stdout, ...) refuses after printf() — because a
+// FILE* has one unget slot that byte and wide reads would have to share
+// (Ф42-c). These objects have no such slot to fight over.
 //
 // ── two honest differences from a hosted implementation ─────────────────
 //
@@ -51,6 +71,11 @@ extern istream cin;
 extern ostream cout;
 extern ostream cerr;
 extern ostream clog;
+
+extern wistream wcin;
+extern wostream wcout;
+extern wostream wcerr;
+extern wostream wclog;
 
 // [iostream.objects]/1 requires that including this header guarantees the
 // objects are constructed before use. One of these per translation unit; the

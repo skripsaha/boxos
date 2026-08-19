@@ -30,16 +30,35 @@
 // megabyte through a 4 KiB window would be hundreds of Manifest round-trips
 // where one will do.
 //
-// Wide characters are a documented exclusion, so no transcoding happens
-// here: a character is moved to and from the file as sizeof(CharT) raw
-// bytes. The class stays generic in CharT so a future wide instantiation is
-// not structurally blocked, exactly as <iosfwd> promises, but only the
-// char-based typedefs are shipped.
+// ── the codecvt boundary (Ф42-f) ────────────────────────────────────────
+// This comment used to say that wide characters were a documented exclusion
+// and that a character moved to and from the file as sizeof(CharT) raw
+// bytes. That was true, and it was also the reason a wofstream would have
+// written UTF-32 to a file every other program on the system reads as UTF-8.
+// Ф42-e built the facet; this is where it plugs in.
+//
+// Two paths, and the switch between them is the standard's own:
+// always_noconv(). For char it is true, the identity facet says "move them
+// yourself", and every byte path below is exactly what it was. For wchar_t
+// it is false and the characters cross an EXTERNAL buffer of bytes on the
+// way to and from the file.
+//
+// ‼ The one thing a variable-width encoding takes away is arithmetic on
+// positions, and the standard takes it away explicitly: [filebuf.virtuals]
+// makes seekoff with a nonzero offset an ERROR when encoding() <= 0. So
+// LogicalPos() cannot be `characters × sizeof(CharT)` any more. It asks the
+// facet instead — length() answers "how many bytes make these N characters",
+// which is the question, and it is the reason that virtual exists.
+//
+// What this backing gives that a POSIX filebuf does not have: the file is
+// always seekable, so a character split across a read boundary needs no
+// leftover-byte carry. The unconsumed tail is simply read again.
 #ifndef BOXCXX_FSTREAM
 #define BOXCXX_FSTREAM
 
 #include <ios>
 #include <istream>
+#include <locale>
 #include <ostream>
 #include <streambuf>
 #include <string>
@@ -75,6 +94,16 @@ public:
 private:
     static constexpr streamsize S             = (streamsize)sizeof(char_type);
     static constexpr streamsize kDefaultBuf   = 4096 / (streamsize)sizeof(char_type);
+
+    using Codecvt = codecvt<char_type, char, mbstate_t>;
+
+    // The facet is NOT cached in a member, and that is a decision Ф42-e paid
+    // for: a facet lives in the image, so asking for it is a `lea` and not a
+    // lookup. A cached pointer would have to be carried by the move
+    // constructor, the move assignment, swap() and Disown() — four more
+    // places for two objects' state to drift apart, bought for nothing.
+    const Codecvt &Cvt() const { return use_facet<Codecvt>(this->getloc()); }
+    bool Conv() const { return !Cvt().always_noconv(); }
 
     static constexpr bool Has(ios_base::openmode m, ios_base::openmode f) noexcept
     {
@@ -155,7 +184,9 @@ public:
         : basic_streambuf<CharT, Traits>(rhs),
           __c(rhs.__c), __mode(rhs.__mode),
           __buf(rhs.__buf), __bufn(rhs.__bufn), __owns(rhs.__owns),
-          __base(rhs.__base), __reading(rhs.__reading), __writing(rhs.__writing),
+          __base(rhs.__base),
+          __ext(rhs.__ext), __extcap(rhs.__extcap), __extUsed(rhs.__extUsed),
+          __reading(rhs.__reading), __writing(rhs.__writing),
           __canRead(rhs.__canRead), __canWrite(rhs.__canWrite), __append(rhs.__append),
           __userBuf(rhs.__userBuf), __userN(rhs.__userN), __unbufReq(rhs.__unbufReq)
     {
@@ -177,6 +208,9 @@ public:
         __canRead  = rhs.__canRead;
         __canWrite = rhs.__canWrite;
         __append   = rhs.__append;
+        __ext      = rhs.__ext;
+        __extcap   = rhs.__extcap;
+        __extUsed  = rhs.__extUsed;
         __userBuf  = rhs.__userBuf;
         __userN    = rhs.__userN;
         __unbufReq = rhs.__unbufReq;
@@ -200,6 +234,9 @@ public:
         swap(__canRead, rhs.__canRead);
         swap(__canWrite, rhs.__canWrite);
         swap(__append, rhs.__append);
+        swap(__ext, rhs.__ext);
+        swap(__extcap, rhs.__extcap);
+        swap(__extUsed, rhs.__extUsed);
         swap(__userBuf, rhs.__userBuf);
         swap(__userN, rhs.__userN);
         swap(__unbufReq, rhs.__unbufReq);
@@ -248,6 +285,17 @@ public:
         ::Current *c = ::current_open(tag.c_str(), role, 0, flags);
         if (!c) return nullptr;
 
+        // A state-dependent encoding would make every position a PAIR —
+        // an offset and the shift state to reach it — and every seek a
+        // replay from the start. [locale.codecvt] spells that as
+        // encoding() < 0. boxcxx has no such facet, and this refuses one
+        // instead of assuming it will never appear: the assumption
+        // LogicalPos() rests on is checked where it is made.
+        if (Cvt().encoding() < 0) {
+            ::current_release(c);
+            return nullptr;
+        }
+
         char_type  *buf   = nullptr;
         streamsize  bufn  = 0;
         bool        owns  = false;
@@ -267,12 +315,31 @@ public:
             owns = true;
         }
 
+        // The external buffer exists only when there is something to convert,
+        // and it is sized so one full character buffer always fits: a
+        // conversion that could not make progress in one pass would be a loop
+        // with no floor.
+        char      *ext    = nullptr;
+        streamsize extcap = 0;
+        if (Conv()) {
+            extcap = bufn * (streamsize)Cvt().max_length();
+            ext    = new (nothrow) char[(size_t)extcap];
+            if (!ext) {
+                if (owns) delete[] buf;
+                ::current_release(c);
+                return nullptr;
+            }
+        }
+
         __c        = c;
         __mode     = which;
         __buf      = buf;
         __bufn     = bufn;
         __owns     = owns;
         __base     = 0;
+        __ext      = ext;
+        __extcap   = extcap;
+        __extUsed  = 0;
         __reading  = false;
         __writing  = false;
         __canRead  = p.read;
@@ -321,10 +388,14 @@ public:
         this->setg(nullptr, nullptr, nullptr);
         this->setp(nullptr, nullptr);
         if (__owns) delete[] __buf;
+        delete[] __ext;
         __buf      = nullptr;
         __bufn     = 0;
         __owns     = false;
         __base     = 0;
+        __ext      = nullptr;
+        __extcap   = 0;
+        __extUsed  = 0;
         __reading  = false;
         __writing  = false;
         __canRead  = false;
@@ -365,6 +436,14 @@ protected:
         // One file, one position: `which` cannot move the get side and leave
         // the put side behind, and naming neither is not a seek at all.
         if (!Has(which, ios_base::in) && !Has(which, ios_base::out)) return fail;
+        // [filebuf.virtuals]: with encoding() <= 0 a nonzero offset is an
+        // ERROR, not an approximation. Characters are one to four bytes wide,
+        // so `off` characters from here is not a number anyone can compute
+        // without reading them — and landing between two bytes of one
+        // character is worse than failing. off == 0 still works for all three
+        // directions, and seekpos with a pos_type this filebuf handed out
+        // works for any position, which is what tellg()/seekg() is for.
+        if (Conv() && off != 0) return fail;
         if (__writing && !FlushPut()) return fail;
 
         off_type target = 0;
@@ -384,17 +463,24 @@ protected:
         default:
             return fail;
         }
-        if (target < 0) return fail;
-
-        DropAreas();
-        __base = target;
-        return pos_type(target);
+        return SeekTo(target);
     }
 
+    // ‼ NOT `seekoff(off_type(sp), beg, which)`, which is what this was until
+    // Ф42-f and what a wide stream caught within a run of writing the test.
+    // seekoff refuses a nonzero offset when the encoding is variable-width —
+    // and seekpos is precisely the way around that refusal: the pos_type came
+    // from this filebuf's own tellg, so it is a byte offset it can honour
+    // exactly. Routing one through the other made tellg()/seekg() unusable on
+    // every wide file, while every other check in the phase passed.
     pos_type seekpos(pos_type sp,
                      ios_base::openmode which = ios_base::in | ios_base::out) override
     {
-        return seekoff(off_type(sp), ios_base::beg, which);
+        const pos_type fail(off_type(-1));
+        if (!__c) return fail;
+        if (!Has(which, ios_base::in) && !Has(which, ios_base::out)) return fail;
+        if (__writing && !FlushPut()) return fail;
+        return SeekTo(off_type(sp));
     }
 
     int sync() override
@@ -414,12 +500,21 @@ protected:
     streamsize showmanyc() override
     {
         if (!__c || !__canRead) return 0;
+        // While writing there is no get area, so there is nothing available
+        // to read without blocking — and saying so keeps LogicalPos() out of
+        // the one situation where it cannot price an unflushed put area.
+        if (__writing) return 0;
         const int64_t n = ::current_size(__c);
         if (n < 0) return 0;
         // in_avail() consults this only when the get area is empty, so what
         // is left in the file from the logical position is the whole answer.
         const off_type ahead = (off_type)n - LogicalPos();
-        return ahead > 0 ? (streamsize)(ahead / S) : 0;
+        if (ahead <= 0) return 0;
+        // [streambuf.virt.get] wants a count the caller can rely on, so with
+        // a variable-width encoding it has to be the FLOOR: those bytes are
+        // at least ahead/max_length characters and at most ahead.
+        const streamsize per = Conv() ? (streamsize)Cvt().max_length() : S;
+        return (streamsize)(ahead / per);
     }
 
     int_type underflow() override
@@ -438,12 +533,47 @@ protected:
         __base = at;
 
         if (::current_seek(__c, (uint64_t)__base) != 0) return Traits::eof();
-        const int got = ::current_read(__c, __buf, (size_t)(__bufn * S));
-        if (got <= 0) return Traits::eof();
-        const streamsize chars = (streamsize)got / S;
-        if (chars <= 0) return Traits::eof();
 
-        this->setg(__buf, __buf, __buf + chars);
+        if (!Conv()) {
+            const int got = ::current_read(__c, __buf, (size_t)(__bufn * S));
+            if (got <= 0) return Traits::eof();
+            const streamsize chars = (streamsize)got / S;
+            if (chars <= 0) return Traits::eof();
+
+            this->setg(__buf, __buf, __buf + chars);
+            __reading = true;
+            return Traits::to_int_type(*this->gptr());
+        }
+
+        // Converting. The byte window GROWS until it holds at least one whole
+        // character or the file has no more to give: a four-byte character
+        // can straddle any read, and a decoder handed only its first two
+        // bytes must be handed the rest rather than told the file ended.
+        // Whatever the conversion did not consume is simply left in the file;
+        // the next refill seeks back to it. A filebuf over a pipe would have
+        // to carry those bytes forward — a Current is seekable, so it does
+        // not.
+        streamsize extn = 0;
+        streamsize made = 0;
+        for (;;) {
+            const int got = ::current_read(__c, __ext + extn, (size_t)(__extcap - extn));
+            if (got <= 0) break;
+            extn += got;
+
+            const char *fn = nullptr;
+            char_type  *tn = nullptr;
+            mbstate_t   st{};
+            const codecvt_base::result r =
+                Cvt().in(st, __ext, __ext + extn, fn, __buf, __buf + __bufn, tn);
+            if (r == codecvt_base::error) return Traits::eof();
+            made      = (streamsize)(tn - __buf);
+            __extUsed = (streamsize)(fn - __ext);
+            if (made > 0) break;
+            if (extn >= __extcap) break;   // the window cannot widen further
+        }
+        if (made <= 0) return Traits::eof();
+
+        this->setg(__buf, __buf, __buf + made);
         __reading = true;
         return Traits::to_int_type(*this->gptr());
     }
@@ -451,6 +581,26 @@ protected:
     streamsize xsgetn(char_type *s, streamsize n) override
     {
         if (n <= 0 || !s || !__c || !__canRead) return 0;
+
+        if (Conv()) {
+            // Bytes cannot go straight into the caller's buffer while they are
+            // not characters yet, so the bulk path IS the buffered one, driven
+            // by underflow. A second decoder here would be a second thing to
+            // verify, and the sweep that verified the first cannot see it.
+            streamsize done = 0;
+            while (done < n) {
+                if (!this->gptr() || this->gptr() >= this->egptr())
+                    if (Traits::eq_int_type(underflow(), Traits::eof())) break;
+                const streamsize avail = this->egptr() - this->gptr();
+                if (avail <= 0) break;
+                const streamsize take = (n - done) < avail ? (n - done) : avail;
+                Traits::copy(s + done, this->gptr(), (size_t)take);
+                this->gbump((int)take);
+                done += take;
+            }
+            return done;
+        }
+
         streamsize done = 0;
 
         if (__reading) {
@@ -487,10 +637,38 @@ protected:
         if (!__c || !__canRead) return Traits::eof();
         if (__writing && !FlushPut()) return Traits::eof();
         const off_type at = LogicalPos();
-        if (at < S) return Traits::eof();          // nothing behind us
+
+        off_type start;
+        if (!Conv()) {
+            if (at < S) return Traits::eof();      // nothing behind us
+            start = at - S;
+        } else {
+            // Where does the character BEFORE `at` begin? Subtracting a width
+            // is no answer when characters are one to four bytes long, so the
+            // question goes to the facet: the start is the k for which
+            // exactly k bytes make exactly one character. UTF-8 admits only
+            // one such k — a lead byte is never a continuation byte — and any
+            // encoding this filebuf accepts is state-independent, so the walk
+            // needs no state to replay.
+            if (at <= 0) return Traits::eof();
+            const int maxl = Cvt().max_length();
+            start = -1;
+            for (int k = 1; k <= maxl && (off_type)k <= at; k++) {
+                char probe[8];
+                if (k > (int)sizeof(probe)) break;
+                if (::current_seek(__c, (uint64_t)(at - k)) != 0) return Traits::eof();
+                if (::current_read(__c, probe, (size_t)k) != k) continue;
+                mbstate_t st{};
+                if (Cvt().length(st, probe, probe + k, 1) == k) {
+                    start = at - k;
+                    break;
+                }
+            }
+            if (start < 0) return Traits::eof();
+        }
 
         DropAreas();
-        __base = at - S;
+        __base = start;
         if (Traits::eq_int_type(underflow(), Traits::eof())) return Traits::eof();
 
         if (Traits::eq_int_type(c, Traits::eof()))
@@ -501,6 +679,13 @@ protected:
         // A character the file does not have. Putting it only in our buffer
         // would be a lie about the file, so it is written through — and that
         // is impossible without a writable, non-appending mode.
+        //
+        // ‼ And impossible outright when the facet converts: the replacement
+        // character need not encode to the same number of bytes as the one it
+        // displaces, so writing it through would shift everything after it.
+        // Refusing is the only honest answer; putting it in the buffer alone
+        // would be the lie this path already refuses to tell for char.
+        if (Conv()) return Traits::eof();
         if (!__canWrite || __append) return Traits::eof();
         const char_type ch = Traits::to_char_type(c);
         *this->gptr() = ch;
@@ -532,6 +717,25 @@ protected:
         if (n <= 0 || !s || !__c || !__canWrite) return 0;
         if (!EnterWrite()) return 0;
 
+        if (Conv()) {
+            // The mirror of xsgetn: characters are not bytes yet, so the bulk
+            // path is the buffered one and FlushPut does the converting. The
+            // direct large-write shortcut below exists to skip a copy, and
+            // there is no copy to skip when the bytes have to be made anyway.
+            streamsize done = 0;
+            while (done < n) {
+                if (this->pptr() >= this->epptr() && !FlushPut()) break;
+                const streamsize room = this->epptr() - this->pptr();
+                if (room <= 0) break;
+                const streamsize take = (n - done) < room ? (n - done) : room;
+                Traits::copy(this->pptr(), s + done, (size_t)take);
+                this->pbump((int)take);
+                done += take;
+                if (__bufn == 1 && !FlushPut()) break;
+            }
+            return done;
+        }
+
         if (n <= this->epptr() - this->pptr()) {
             Traits::copy(this->pptr(), s, (size_t)n);
             this->pbump((int)n);
@@ -557,10 +761,42 @@ private:
     // The file byte offset the logical position sits at, wherever the live
     // area happens to be. Every seek, flush and refill is expressed through
     // this one expression so the two areas cannot drift apart.
+    // The tail both seeks share, once the target byte offset is settled.
+    pos_type SeekTo(off_type target)
+    {
+        if (target < 0) return pos_type(off_type(-1));
+        DropAreas();
+        __base = target;
+        return pos_type(target);
+    }
+
     off_type LogicalPos() const noexcept
     {
-        if (__reading) return __base + (off_type)((this->gptr() - this->eback()) * S);
-        if (__writing) return __base + (off_type)((this->pptr() - this->pbase()) * S);
+        if (__reading) {
+            if (!Conv())
+                return __base + (off_type)((this->gptr() - this->eback()) * S);
+            // Characters × width is not a byte count when the width varies,
+            // and length() is the virtual whose whole job is answering the
+            // question that replaces it: how many of the bytes in __ext did
+            // the characters up to gptr() consume. The state passed in is a
+            // fresh one because this filebuf refuses to open over a
+            // state-dependent facet — see open().
+            mbstate_t st{};
+            return __base + (off_type)Cvt().length(
+                                st, __ext, __ext + __extUsed,
+                                (size_t)(this->gptr() - this->eback()));
+        }
+        if (__writing) {
+            if (!Conv())
+                return __base + (off_type)((this->pptr() - this->pbase()) * S);
+            // What the buffered characters will WEIGH is not known without
+            // converting them, and converting has a side effect nobody asked
+            // for here. Every caller that needs an exact position while
+            // writing flushes first, after which the put area is empty and
+            // this is exactly __base; showmanyc, the one that does not,
+            // answers 0 while writing.
+            return __base;
+        }
         return __base;
     }
 
@@ -589,9 +825,39 @@ private:
         if (n > 0) {
             const uint64_t at = __append ? EndOffset() : (uint64_t)__base;
             if (::current_seek(__c, at) != 0) return false;
-            const int w = ::current_write(__c, this->pbase(), (size_t)(n * S));
-            if (w != (int)(n * S)) return false;
-            __base = (off_type)(at + (uint64_t)(n * S));
+
+            if (!Conv()) {
+                const int w = ::current_write(__c, this->pbase(), (size_t)(n * S));
+                if (w != (int)(n * S)) return false;
+                __base = (off_type)(at + (uint64_t)(n * S));
+            } else {
+                // Convert in as many passes as the external buffer needs. It
+                // holds a full character buffer's worth by construction, so
+                // one pass normally suffices; the loop is what makes "one
+                // pass" a fact rather than a hope.
+                const char_type       *from = this->pbase();
+                const char_type *const end  = this->pptr();
+                uint64_t               wrote = 0;
+                while (from < end) {
+                    const char_type *fn = nullptr;
+                    char            *tn = nullptr;
+                    mbstate_t        st{};
+                    const codecvt_base::result r =
+                        Cvt().out(st, from, end, fn, __ext, __ext + __extcap, tn);
+                    // error is a character no byte sequence can carry — an
+                    // unpaired surrogate, or a value past U+10FFFF. The file
+                    // keeps what was already written and the stream goes bad,
+                    // which is what a failed flush means everywhere else.
+                    if (r == codecvt_base::error) return false;
+                    const streamsize bytes = (streamsize)(tn - __ext);
+                    if (bytes <= 0 || fn == from) return false;  // no progress
+                    if (::current_write(__c, __ext, (size_t)bytes) != (int)bytes)
+                        return false;
+                    wrote += (uint64_t)bytes;
+                    from = fn;
+                }
+                __base = (off_type)(at + wrote);
+            }
         }
         this->setp(__buf, __buf + __bufn);
         return true;
@@ -625,6 +891,9 @@ private:
         __canRead  = false;
         __canWrite = false;
         __append   = false;
+        __ext      = nullptr;
+        __extcap   = 0;
+        __extUsed  = 0;
         __mode     = ios_base::openmode{};
     }
 
@@ -634,6 +903,12 @@ private:
     streamsize         __bufn = 0;
     bool               __owns = false;
     off_type           __base = 0;
+    // The external side, allocated only when the facet converts. __extUsed is
+    // how many of the bytes in __ext the characters now in the get area
+    // actually consumed — the anchor LogicalPos() measures against.
+    char              *__ext     = nullptr;
+    streamsize         __extcap  = 0;
+    streamsize         __extUsed = 0;
     bool               __reading  = false;
     bool               __writing  = false;
     bool               __canRead  = false;

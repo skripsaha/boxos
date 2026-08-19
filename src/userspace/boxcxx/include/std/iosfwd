@@ -141,10 +141,43 @@ using ifstream      = basic_ifstream<char>;
 using ofstream      = basic_ofstream<char>;
 using fstream       = basic_fstream<char>;
 
-// Deliberately NOT provided: wios/wstreambuf/wistream/wostream/wiostream/
-// wstringbuf/wistringstream/wostringstream/wstringstream, wfilebuf and the
-// wide fstream typedefs, and the char8_t/char16_t/char32_t stream typedefs —
-// wide/multibyte streams are a documented, out-of-scope exclusion.
+// The wide half, as of Ф42-f. This block used to be a sentence saying these
+// were "a documented, out-of-scope exclusion", which stopped being true one
+// piece at a time: Ф42-d made the numeric engine generic, Ф42-e built the
+// codecvt a wide filebuf stands on, and this is where the names arrive.
+using wios           = basic_ios<wchar_t>;
+using wstreambuf     = basic_streambuf<wchar_t>;
+using wistream       = basic_istream<wchar_t>;
+using wostream       = basic_ostream<wchar_t>;
+using wiostream      = basic_iostream<wchar_t>;
+using wstringbuf     = basic_stringbuf<wchar_t>;
+using wsyncbuf       = basic_syncbuf<wchar_t>;
+using wosyncstream   = basic_osyncstream<wchar_t>;
+using wistringstream = basic_istringstream<wchar_t>;
+using wostringstream = basic_ostringstream<wchar_t>;
+using wstringstream  = basic_stringstream<wchar_t>;
+using wfilebuf       = basic_filebuf<wchar_t>;
+using wifstream      = basic_ifstream<wchar_t>;
+using wofstream      = basic_ofstream<wchar_t>;
+using wfstream       = basic_fstream<wchar_t>;
+
+// ‼ The five position aliases of [iosfwd.syn], which were in NEITHER column
+// until Ф42-f: not in the tree, and not recorded as absent either — the same
+// shape of gap §1.1 found for <ctime>, and found the same way, by reading the
+// synopsis against the file rather than against the list.
+//
+// All five name the SAME type, and that is not a shortcut. Each is defined as
+// fpos<char_traits<X>::state_type>, and every char_traits here reports
+// state_type = mbstate_t, because a conversion state does not depend on which
+// character type it is producing. They are spelled as fpos<mbstate_t> rather
+// than through char_traits because <iosfwd> only forward-declares that
+// template — naming a member would make this header pull in what it exists
+// not to pull in.
+using streampos    = fpos<mbstate_t>;
+using wstreampos   = fpos<mbstate_t>;
+using u8streampos  = fpos<mbstate_t>;
+using u16streampos = fpos<mbstate_t>;
+using u32streampos = fpos<mbstate_t>;
 
 } // namespace std
 

@@ -264,8 +264,10 @@ private:
     syncbuf_type __sb;
 };
 
-using syncbuf     = basic_syncbuf<char>;
-using osyncstream = basic_osyncstream<char>;
+using syncbuf      = basic_syncbuf<char>;
+using osyncstream  = basic_osyncstream<char>;
+using wsyncbuf     = basic_syncbuf<wchar_t>;
+using wosyncstream = basic_osyncstream<wchar_t>;
 
 // Deliberately NOT provided: wsyncbuf / wosyncstream — wide streams are a
 // documented, out-of-scope exclusion (CONFORMANCE §1.2), the same one

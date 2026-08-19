@@ -472,13 +472,41 @@ public:
         return old;
     }
 
-    // widen/narrow are the identity function for CharT=char — this IS the
-    // fully correct "C"-locale behavior for a char stream, not a shortcut.
-    // Written generically so a future non-char instantiation is not
-    // structurally blocked, though it would need a real ctype facet to be
-    // more than an identity cast.
-    char narrow(char_type c, char) const { return static_cast<char>(c); }
-    char_type widen(char c) const { return static_cast<char_type>(c); }
+    // widen/narrow are the identity for CharT=char, which IS the fully
+    // correct "C"-locale behaviour for a char stream and not a shortcut.
+    // Ф42-f made the other instantiation reachable and found two things wrong
+    // with the generic spelling, neither visible while char was the only one:
+    //
+    // * widen SIGN-EXTENDED. char is signed here, so widen('\xD0') produced
+    //   the wchar_t -48 — and <ostream>'s WriteRun, widening the very same
+    //   byte on its way into a wide stream, produced U+00D0. Two answers to
+    //   one question. They agree now, on WriteRun's: a byte widens to the
+    //   code point with its own value.
+    //
+    // * narrow TRUNCATED. narrow(L'ж', '?') returned 0x36, the low byte of
+    //   U+0436, which is the digit '6' — a plausible character, silently
+    //   wrong, from a function whose second parameter exists precisely to say
+    //   "there is no such character". Only ASCII has a single-byte form in
+    //   this system's encoding, and <cwchar>'s wctob already says so
+    //   (measured in Ф42-b: wctob(L'ж') is EOF). narrow says it too now.
+    //
+    // The pair is deliberately NOT a round trip above ASCII: widen has no
+    // default parameter and must return something, narrow has one and uses
+    // it. [locale.ctype] only ever requires the round trip for the basic
+    // character set.
+    char narrow(char_type c, char dflt) const
+    {
+        if constexpr (is_same_v<char_type, char>) {
+            (void)dflt;
+            return c;
+        } else {
+            return static_cast<unsigned long long>(c) < 0x80u ? static_cast<char>(c) : dflt;
+        }
+    }
+    char_type widen(char c) const
+    {
+        return static_cast<char_type>(static_cast<unsigned char>(c));
+    }
 
     basic_ios(const basic_ios &) = delete;
     basic_ios &operator=(const basic_ios &) = delete;
