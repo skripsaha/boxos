@@ -1,0 +1,86 @@
+// boxcxx — <__bits/unicode_runs>
+//
+// How a generated Unicode table is read. Two encodings live here and nothing
+// else: no data, no UCD facts, no policy about what any predicate means.
+//
+// This leaf exists because the tables are generated and their readers are not.
+// <__bits/unicode_escape> (Ф30f-3, [format.string.escaped]) and
+// <__bits/unicode_wctype> (Ф42, [cwctype.syn]) are written end to end by their
+// generators, whose own preambles forbid a hand-written line from living in
+// them. The binary search that interprets what they emit is hand-written, so it
+// belongs outside both — otherwise two generators would each carry a copy of
+// the same eight lines, and a fix to one would not reach the other.
+//
+// ── Set membership: sorted edge arrays ──────────────────────────────────────
+// A set of code points is stored as the sorted boundaries of its runs. Runs
+// alternate outside/inside starting outside, so a code point is in the set
+// exactly when the number of edges <= it is odd. One binary search, no packing,
+// nothing to get subtly wrong at 3am.
+//
+// ── Case mapping: strided runs ──────────────────────────────────────────────
+// A mapping is stored as runs of (first, last, stride, delta): every code point
+// `first + k*stride` that is <= `last` maps to itself + `delta`, and everything
+// else is unmapped and returns unchanged.
+//
+// The stride is not a packing trick — it is the shape of the data. Unicode
+// allocates whole blocks in alternating case pairs (Latin Extended-A runs
+// 0100 Ā, 0101 ā, 0102 Ă, 0103 ă …), so the uppercase letters of such a block
+// are every OTHER code point with a constant delta of +1. Measured over the
+// 17.0.0 tables: without a stride field the two mappings need 694 and 678 runs,
+// with it 204 and 186 — 16 464 bytes of rodata down to 6 240. The generator
+// verifies the encoded form against the raw UCD mapping over all 1 114 112 code
+// points and refuses to write on any disagreement, so the compression carries
+// no residual risk.
+//
+// Runs cannot overlap by construction: the generator walks the mappings in
+// increasing code-point order and a new run always starts past the last code
+// point the previous run absorbed.
+#ifndef BOXCXX_BITS_UNICODE_RUNS
+#define BOXCXX_BITS_UNICODE_RUNS
+
+namespace std {
+namespace __unicode {
+
+// The number of edges <= cp is odd exactly when cp sits inside a run.
+constexpr bool InRuns(const char32_t *edges, unsigned count,
+                      char32_t cp) noexcept
+{
+    unsigned lo = 0, hi = count;
+    while (lo < hi) {
+        const unsigned mid = lo + (hi - lo) / 2;
+        if (edges[mid] <= cp) lo = mid + 1;
+        else hi = mid;
+    }
+    return (lo & 1u) != 0u;
+}
+
+struct CaseRun {
+    char32_t first;
+    char32_t last;
+    unsigned stride;   // never 0: a single-element run carries 1
+    int      delta;
+};
+
+// The mapped value, or cp itself when nothing maps it. C requires the
+// unchanged argument rather than a wrong-case letter or zero, which is what
+// makes towlower(WEOF) == WEOF.
+constexpr char32_t MapCase(const CaseRun *runs, unsigned count,
+                           char32_t cp) noexcept
+{
+    unsigned lo = 0, hi = count;
+    while (lo < hi) {                       // last run whose first <= cp
+        const unsigned mid = lo + (hi - lo) / 2;
+        if (runs[mid].first <= cp) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == 0) return cp;
+    const CaseRun &r = runs[lo - 1];
+    if (cp > r.last) return cp;
+    if ((cp - r.first) % r.stride != 0) return cp;
+    return static_cast<char32_t>(static_cast<int>(cp) + r.delta);
+}
+
+} // namespace __unicode
+} // namespace std
+
+#endif // BOXCXX_BITS_UNICODE_RUNS

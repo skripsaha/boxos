@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **100** — 95 of the 105 C++23 [headers] name (10 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 133 |
+| Standard headers provided | **101** — 96 of the 105 C++23 [headers] name (9 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 138 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 221 phases (202 of them the numbered `PhaseN` series), 5 505 runtime checks, 1 930 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 227 phases (208 of them the numbered `PhaseN` series), 5 754 runtime checks, 1 945 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -59,13 +59,19 @@ named in a comment — the two rows were never counted the same way, and saying
 so is cheaper than renumbering both). `tools/cxx_ftm_audit.sh` re-derives the
 macro count and checks it against [version.syn] on every run.
 
-The phase count has drifted twice, in both directions, so it is now stated
-with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **217**. The
-166 recorded at Ф33 was a different count -- the numbered `PhaseN` series
-alone, leaving out `Phase4a`, `Phase7b`, `Phase9a2`, `PhaseCurrent` and the
-other suffixed ones -- so both numbers are given above and neither can drift
+The phase count has drifted three times, in both directions, so it is now
+stated with the rule that produces it: `Phase*();` call sites in `main`, of
+which there are exactly as many as there are phase definitions. That is
+**227** — 208 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
+and the rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered
+series alone, which is why both numbers are given above: neither can drift
 without the other contradicting it.
+
+**The third drift was this paragraph against the table two rows up.** Ф41
+raised the table to 221 and left the sentence here saying 217, so the document
+disagreed with itself about a number it had already been corrected on twice.
+Ф42 re-derived both from the same two commands and they now differ by exactly
+the suffixed phases, which is the only difference they are allowed to have.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -96,14 +102,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (5)
+## 1.1 Headers that do not exist (4)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 100 of them are in the tree and 5 are not,
+[headers] name 105 headers in C++23; 101 of them are in the tree and 4 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 100 + 5 = the 105 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 101 + 5 = the 106 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -114,14 +120,15 @@ standard. Ф41-e-2 built it, so it is now in the tree rather than in neither
 column — and the count above is the output of a diff between [headers] and
 `ls include/std`, not a number anyone maintains.
 
-### C library wrappers — 2 absent, 19 provided
+### C library wrappers — 1 absent, 20 provided
 
-Absent: `<cwchar>` `<cwctype>`
+Absent: `<cwchar>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
 `<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
 (Ф41-c), `<csetjmp>` (Ф41-d) and `<cinttypes>` `<clocale>` `<cuchar>` (Ф41-e-1)
-`<ctime>` (Ф41-e-2) and `<cstdio>` (Ф41-f/g) — all §2.
+`<ctime>` (Ф41-e-2) and `<cstdio>` (Ф41-f/g) — all §2. `<cwctype>` joined them
+in Ф42-a (§2).
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -147,12 +154,21 @@ everything underneath these headers: `<cerrno>`'s `errno` is a C contract and
 not a BoxOS one, and nothing in boxlib or `box::` will ever set it (§2
 `<cerrno>`).
 
-`<cwchar>` and `<cwctype>` are absent for a different reason than the rest of
-that list: they belong to the wide-character exclusion of §1.2, not to the
-libc question. `<cwchar>` carries an entire second formatted-I/O engine and
-`<cwctype>` carries `wctype`/`wctrans`, which are locales. If the wide layer is
-ever built it will be built as one piece, with `wcout` and `wformat`, and those
-two headers come with it.
+**`<cwchar>` is absent for a different reason than the rest of that list:** it
+belongs to the wide-character exclusion of §1.2, not to the libc question. It
+carries an entire second formatted-I/O engine, and the wide layer is being
+built as one piece — Ф42 — so it arrives with `wcout` and `wformat` rather than
+on its own.
+
+`<cwctype>` used to be named here beside it, on the grounds that it "carries
+`wctype`/`wctrans`, which are locales". **That reason was wrong, and building
+the header is what showed it.** `wctype("alpha")` and `wctrans("tolower")` are
+not a locale database: C fixes the twelve property names and the two mapping
+names itself, and every answer behind them is a Unicode property. The header
+needs no locale to exist and does not consult one — which is fortunate, because
+BoxOS has exactly one and it can never change. It shipped first in Ф42-a, ahead
+of the streams, for exactly that reason: nothing in it depends on the rest of
+the wide layer.
 
 `<stdatomic.h>` used to be listed here as absent. It is **provided** as of Ф34:
 it is a pure using-declaration header over `<atomic>`, so `_Atomic(T)` means
@@ -292,19 +308,23 @@ and line — is recorded there.
 
 ## 1.2 Excluded by decision inside headers that do exist
 
-- **Wide characters.** There are no wide streams, no `wformat_context`, and no
-  wide-character facets. `wchar_t` itself works as a type; nothing in the
-  library is instantiated for it. Concretely, since Ф36 gave the narrow
-  streams a home: `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
-  `wcin`/`wcout`/`wcerr`/`wclog`, and `<fstream>` and `<iosfwd>` carry
-  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts.
-  Every class template involved is still generic in `CharT`, so the exclusion
-  is a decision about what is shipped and tested, not a structural block.
-  Ф41 drew one more line into this bullet rather than into the libc question:
-  `<cwchar>` and `<cwctype>` are absent **because of this exclusion**. The first
-  carries an entire second formatted-I/O engine (`fwprintf`, `fgetwc`, …) and
-  the second carries `wctype`/`wctrans`, which are locales. If the wide layer is
-  ever built, those two headers arrive with `wcout` and `wformat`, as one piece.
+- **Wide characters — being lifted, one piece at a time (Ф42).** This was a
+  flat exclusion until Ф42; it is now a partial one, and the honest way to
+  state it is by what has landed rather than by what is planned.
+  **Landed:** `<cwctype>` (§2), so the classification of a wide character is
+  answered, and answered from the Unicode Character Database rather than from
+  ASCII.
+  **Not yet:** there are still no wide streams and no `wformat_context`.
+  `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
+  `wcin`/`wcout`/`wcerr`/`wclog`; `<fstream>` and `<iosfwd>` carry
+  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts;
+  `<cwchar>` is absent with them (§1.1).
+  Every class template involved is generic in `CharT` already, so what is left
+  is not a structural block. Measured before the phase started: `basic_streambuf`
+  contains no bare `char` at all and `basic_ios` one, while `basic_ostream` has
+  52 and `basic_istream` 39 — the numeric engine that stands in for `num_put`
+  formats through `to_chars`, which produces `char` digits. That, and the
+  transcoding at the file boundary, is the remaining work.
 - **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
   machinery needs. The `L` format specifier is accepted and ignored.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
@@ -1477,6 +1497,79 @@ the ABI it is compiled against. `std::va_list` is `::va_list` — the same type
 the macros walk, which matters more here than usual: `<cstdio>`'s `vprintf`
 family will take it by value, and on x86-64 SysV a `va_list` is an array of one
 struct and therefore decays on the way in. No deviations.
+
+## `<cwctype>`
+
+The eighteen functions of [cwctype.syn], answering for one wide character what
+`<cctype>` answers for one byte — and answering it out of the Unicode Character
+Database, which is the single decision worth recording about this header.
+
+**Why it is not the ASCII answer.** `<cctype>` writes its classification out as
+range tests, because the `"C"` locale's execution character set is ASCII. That
+argument does not survive into the wide header, because Ф41-b already fixed the
+encoding of this system's one locale as UTF-8 with `MB_CUR_MAX` 4, and Ф41-e-1
+built the codec that turns those bytes into code points. A `wchar_t` here is a
+Unicode scalar value. A system that decodes UTF-8 into real code points and
+then reports that none of them is a letter would be contradicting itself, so
+`iswalpha(L'ж')` is 1.
+
+The two headers do not disagree, and the reason is worth stating: `0xD0`, the
+first byte of `'ж'` in UTF-8, is not a character but a fragment of one, and
+`isalpha(0xD0)` is right to answer 0. Each header is correct about the thing it
+classifies.
+
+**Two measured divergences from macOS libc in `en_US.UTF-8`,** both deliberate:
+
+| | macOS | boxcxx | Why |
+|---|---|---|---|
+| `iswalpha(U+4E2D)` | 0 | **1** | `Lo` is `Alphabetic` in `DerivedCoreProperties`. A CJK ideograph is a letter; macOS classifies only what its own locale tables carry. |
+| `iswprint(U+00AD)` | 1 | **0** | A SOFT HYPHEN is `Cf` — a format character with no glyph. Excluding it also forces `iswpunct(U+00AD)` to 0, since punct must imply print for the classification to hold together. |
+
+**Three predicates stay ASCII on purpose, and both references agree.** C fixes
+`iswdigit` and `iswxdigit` to the decimal- and hexadecimal-digit characters of
+its own 5.2.1 rather than to a Unicode property, so `iswdigit(U+0660 ARABIC-INDIC
+DIGIT ZERO)` is 0 — measured, in a UTF-8 locale, on the reference. `iswalnum` is
+alpha-or-digit on top of that, which leaves U+0660 in no class but `print`:
+not a digit, not alphanumeric, not punctuation. That is what a UTF-8 locale
+answers.
+
+**Which property backs which predicate** is recorded in
+`tools/gen_unicode_wctype.py`, beside the code that acts on it, and the tables
+it emits into `<__bits/unicode_wctype>` hold nothing but UCD facts. `iswgraph`,
+`iswalnum`, `iswpunct`-implies-`iswprint` and the `iswctype` dispatch are
+derived in the header from the tabled predicates rather than tabled themselves,
+so they cannot drift from what they are defined in terms of.
+
+**`towupper`/`towlower` are the SIMPLE case mappings** (UnicodeData.txt fields
+12 and 13). They are single-code-point functions and cannot express the full
+mappings of SpecialCasing.txt, where one character becomes several:
+`towupper(U+00DF LATIN SMALL LETTER SHARP S)` stays U+00DF rather than becoming
+`"SS"`. Every implementation draws the line in the same place.
+
+**`wctype_t` and `wctrans_t` are `unsigned long` handles**, and an unknown
+property name yields 0, which `iswctype` then answers 0 for — C's own wording
+is that the returned value is usable only if it is nonzero. `wctype(nullptr)`
+and `wctrans(nullptr)` yield 0 rather than dereferencing.
+
+**How the tables are known to be right.** The generator verifies both encodings
+against the raw UCD over all 1 114 112 code points and refuses to write on any
+disagreement. That checks the tables but not the wiring, so the compiled header
+was then dumped on the host and compared against an independent per-code-point
+computation straight from the UCD text: 1 114 112 code points × 14 answers,
+zero disagreements. Three mutations — a table wired to the wrong predicate,
+`iswgraph` dropping its space exclusion, `MapCase` ignoring its stride — were
+each caught, with a diagnostic naming the code point. `Phase212` then re-derives
+the population count of every class on the target itself, because the host
+proves nothing about a different compiler and a `wint_t` that is unsigned here
+and signed there.
+
+**One guard is defensive rather than load-bearing, and saying so is cheaper
+than implying otherwise.** `<cwctype>` rejects anything above U+10FFFF before
+consulting a table, which is what makes `towlower(WEOF) == WEOF` read as
+intentional. Removing it would not change a single answer: the edge arrays are
+balanced, so a code point past the last edge has even parity and is in no set,
+and `MapCase` returns its argument when it falls past the last run. The guard
+states the contract; the encoding already honoured it.
 
 ## `<debugging>`
 
