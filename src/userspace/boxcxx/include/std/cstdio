@@ -1,0 +1,250 @@
+// boxcxx — <cstdio>
+//
+// [cstdio.syn]. The last of the C wrappers CONFORMANCE §1.1 justified with one
+// sentence — "BoxOS has no libc" — and the only one that sentence was ever
+// really about. The others needed answers BoxOS already had; this one needs a
+// `FILE*`, and nothing underneath implements one.
+//
+// It is built on Current, the BoxOS I/O spine, exactly as Ф36 built
+// `basic_filebuf`. A FILE is a buffer, a position and a mode wrapped around a
+// Current, and the three standard streams are three conventional tags:
+//
+//     stdout -> "screen"       stdin -> "keyboard"       stderr -> "screen"
+//     fopen("report", "r") -> "file:report"
+//
+// Three things about that mapping are decisions rather than transliterations:
+//
+//   • **stderr goes to the screen, not to the serial log.** The log is where a
+//     developer with a cable looks; a diagnostic that only reaches it is one
+//     nobody sees on a machine that has none. Ф36 made the same call for
+//     std::cerr and <cassert> for assert, and all three agree on purpose.
+//   • **fopen takes a NAME, not a path.** TagFS has no directories to walk, so
+//     "file:report" is the whole of it, and a program that writes "/tmp/x" gets
+//     a file whose name contains slashes rather than a silent traversal. There
+//     is no CWD to be relative to and no notion of one to add later.
+//   • **EOF is the writer's, not the file's.** Current answers CURRENT_CLOSED
+//     when no more data will arrive, which for a file is exhaustion and for a
+//     stream is the writer letting go. feof() reports that, and a live keyboard
+//     never sets it — it blocks, because a keyboard has no end. That is the
+//     honest shape of the Unix EOF this header has to spell.
+//
+// ‼ FOUR NAMES ARE ALREADY TAKEN in the global namespace, and each needed a
+// different answer.
+//
+//   • **printf and getchar are ONE function each, shared with boxlib.** They
+//     are declared here with exactly boxlib's signature and pulled into std by
+//     a using-declaration, so `printf` inside a `using namespace std;` block
+//     names one entity and cannot be ambiguous. WHICH implementation runs is a
+//     link-time question: boxlib's are weak, boxcxx defines strong ones, and
+//     apps/Makefile already puts libboxcxx.a first "so our runtime symbols
+//     always win". A C++ program therefore gets the full C conversion set; a
+//     C-only program, which cannot link boxcxx at all, keeps the smaller set
+//     it has always had.
+//
+//     Declaring a SECOND printf in namespace std was tried first and does not
+//     work: [headers]/p permits it, but cxxtest alone has 53
+//     `using namespace std;` blocks, and inside one of those an unqualified
+//     printf sees two functions with identical signatures. The build said so in
+//     twenty places.
+//
+//   • **fread and fwrite are genuinely different functions** — boxlib's take a
+//     TagFS file id and a byte offset (box/file.h). They stay in std only.
+//     Nothing is ambiguous, because the parameter lists do not match: a call
+//     shaped like C's fread cannot select boxlib's.
+#ifndef BOXCXX_CSTDIO
+#define BOXCXX_CSTDIO
+
+#include <cstddef>
+#include <cstdarg>
+
+// C11 7.21.2/7 makes every stream operation atomic with respect to every other
+// one, so a FILE carries a lock. umutex_t is boxlib's general mutex — the
+// event-driven one, not the allocator's spin lock — and it is named here rather
+// than hidden behind a void* because its size and alignment are part of FILE's
+// layout. <chrono> and <cstdlib> already include boxlib headers for the same
+// kind of reason.
+#include "box/sync.h"
+
+// ── the macros [cstdio.syn] ─────────────────────────────────────────────
+#define _IOFBF 0   // fully buffered
+#define _IOLBF 1   // line buffered
+#define _IONBF 2   // unbuffered
+
+// One page. Current's byte backings copy through the kernel, so the buffer's
+// job is to make that copy happen once per page rather than once per putchar.
+#define BUFSIZ 4096
+
+#define EOF (-1)
+
+// C requires at least 8. BoxOS keeps no fixed table — open files live in a
+// dynamically grown list — so this is the guarantee, not the ceiling; it is the
+// number a conforming program may rely on, and exceeding it is not an error
+// here. (Owner rule: no hardcoded fixed-size arrays.)
+#define FOPEN_MAX 16
+
+// TagFS names are 32 bytes including the terminator (file_info_t::filename),
+// so this is measured rather than chosen.
+#define FILENAME_MAX 32
+
+#define L_tmpnam 32
+#define TMP_MAX 25
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
+
+// The two names boxlib also declares. Spelled exactly as box/print.h spells
+// them — same linkage, same signature, no noexcept — so a translation unit that
+// includes both headers sees one declaration of one function.
+extern "C" int printf(const char *format, ...);
+extern "C" int getchar(void);
+
+namespace std {
+
+using ::getchar;
+using ::printf;
+
+// C requires fpos_t to record everything needed to specify a position — and
+// NOT to be an arithmetic type a program can do arithmetic on. A struct is the
+// spelling that enforces it.
+struct fpos_t {
+    long long __off;
+};
+
+// A complete type, because C makes FILE an object type — and because the three
+// conventional streams then need no allocation to exist. Every member is
+// reserved: a program that touches one is not a program this header describes.
+//
+// The Current is held as void* on purpose. <cstdio> must stay includable by a
+// translation unit that knows nothing about boxlib, and naming ::Current here
+// would drag box/current.h into every one of them.
+struct FILE {
+    void      *__cur;    // ::Current*, or nullptr for an in-memory sink
+    char      *__buf;
+    size_t     __cap;    // buffer capacity
+    size_t     __pos;    // read: next byte to serve; write: bytes pending
+    size_t     __end;    // read: bytes valid in __buf
+    long long  __off;    // logical file position, for ftell
+    int        __mode;   // _IOFBF / _IOLBF / _IONBF
+    int        __unget;  // pushed-back byte, or EOF
+    unsigned   __flags;
+    ::umutex_t __lock;
+};
+
+// ── operations on files ─────────────────────────────────────────────────
+int   remove(const char *filename) noexcept;
+int   rename(const char *old_p, const char *new_p) noexcept;
+FILE *tmpfile() noexcept;
+char *tmpnam(char *s) noexcept;
+
+// ── file access ─────────────────────────────────────────────────────────
+int   fclose(FILE *stream) noexcept;
+int   fflush(FILE *stream) noexcept;
+FILE *fopen(const char *filename, const char *mode) noexcept;
+FILE *freopen(const char *filename, const char *mode, FILE *stream) noexcept;
+void  setbuf(FILE *stream, char *buf) noexcept;
+int   setvbuf(FILE *stream, char *buf, int mode, size_t size) noexcept;
+
+// ── formatted input/output (Ф41-g) ──────────────────────────────────────
+int fprintf(FILE *stream, const char *format, ...) noexcept;
+int fscanf(FILE *stream, const char *format, ...) noexcept;
+int scanf(const char *format, ...) noexcept;
+int snprintf(char *s, size_t n, const char *format, ...) noexcept;
+int sprintf(char *s, const char *format, ...) noexcept;
+int sscanf(const char *s, const char *format, ...) noexcept;
+int vfprintf(FILE *stream, const char *format, va_list arg) noexcept;
+int vfscanf(FILE *stream, const char *format, va_list arg) noexcept;
+int vprintf(const char *format, va_list arg) noexcept;
+int vscanf(const char *format, va_list arg) noexcept;
+int vsnprintf(char *s, size_t n, const char *format, va_list arg) noexcept;
+int vsprintf(char *s, const char *format, va_list arg) noexcept;
+int vsscanf(const char *s, const char *format, va_list arg) noexcept;
+
+// ── character input/output ──────────────────────────────────────────────
+int   fgetc(FILE *stream) noexcept;
+char *fgets(char *s, int n, FILE *stream) noexcept;
+int   fputc(int c, FILE *stream) noexcept;
+int   fputs(const char *s, FILE *stream) noexcept;
+int   getc(FILE *stream) noexcept;
+int   putc(int c, FILE *stream) noexcept;
+int   putchar(int c) noexcept;
+int   puts(const char *s) noexcept;
+int   ungetc(int c, FILE *stream) noexcept;
+
+// ── direct input/output ─────────────────────────────────────────────────
+size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept;
+size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept;
+
+// ── file positioning ────────────────────────────────────────────────────
+int  fgetpos(FILE *stream, fpos_t *pos) noexcept;
+int  fseek(FILE *stream, long offset, int whence) noexcept;
+int  fsetpos(FILE *stream, const fpos_t *pos) noexcept;
+long ftell(FILE *stream) noexcept;
+void rewind(FILE *stream) noexcept;
+
+// ── error handling ──────────────────────────────────────────────────────
+void clearerr(FILE *stream) noexcept;
+int  feof(FILE *stream) noexcept;
+int  ferror(FILE *stream) noexcept;
+void perror(const char *s) noexcept;
+
+// The three conventional streams. Functions rather than objects so their
+// Currents open on first use: a program that never prints never opens the
+// screen, and one that never reads never claims the keyboard.
+FILE *__stdin() noexcept;
+FILE *__stdout() noexcept;
+FILE *__stderr() noexcept;
+
+} // namespace std
+
+#define stdin  (::std::__stdin())
+#define stdout (::std::__stdout())
+#define stderr (::std::__stderr())
+
+using std::FILE;
+using std::clearerr;
+using std::fclose;
+using std::feof;
+using std::ferror;
+using std::fflush;
+using std::fgetc;
+using std::fgetpos;
+using std::fgets;
+using std::fopen;
+using std::fpos_t;
+using std::fprintf;
+using std::fputc;
+using std::fputs;
+using std::freopen;
+using std::fscanf;
+using std::fseek;
+using std::fsetpos;
+using std::ftell;
+using std::getc;
+using std::perror;
+// printf and getchar are already global — they ARE boxlib's names. fread and
+// fwrite are not injected: boxlib's mean something else. See the top.
+using std::putc;
+using std::putchar;
+using std::puts;
+using std::remove;
+using std::rename;
+using std::rewind;
+using std::scanf;
+using std::setbuf;
+using std::setvbuf;
+using std::snprintf;
+using std::sprintf;
+using std::sscanf;
+using std::tmpfile;
+using std::tmpnam;
+using std::ungetc;
+using std::vfprintf;
+using std::vfscanf;
+using std::vprintf;
+using std::vscanf;
+using std::vsnprintf;
+using std::vsprintf;
+using std::vsscanf;
+
+#endif // BOXCXX_CSTDIO

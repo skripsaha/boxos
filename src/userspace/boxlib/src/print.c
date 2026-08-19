@@ -419,7 +419,20 @@ static int append_str(char *buf, int pos, int max, const char *s)
     return pos;
 }
 
-int printf(const char *fmt, ...)
+/* WEAK on purpose. boxlib's printf is BoxOS's coloured-run console printer and
+ * converts %s %d %i %u %x %X %c %p %% — the set a C program on this system has
+ * always had. boxcxx's <cstdio> defines the full C set, including the floating
+ * conversions, and a program that links boxcxx must get THAT one: [cstdio.syn]
+ * asks for conversions this function does not have, and two functions cannot
+ * share an ELF symbol.
+ *
+ * Weak rather than moved to its own translation unit because printf lives on
+ * this file's statics — g_io_mode, the per-strand colour state, the shared
+ * io_buf — and splitting it would mean exposing all three across a boundary to
+ * solve a linking question. The link order that makes this work is already
+ * stated in apps/Makefile: libboxcxx.a before libbox.a, "so our runtime symbols
+ * always win". */
+__attribute__((weak)) int printf(const char *fmt, ...)
 {
     if (!fmt) return -1;
     StrandPrintState *ps = print_state_self();
@@ -696,7 +709,11 @@ int readline(char* buffer, size_t max_len)
     return len < 0 ? -1 : len;
 }
 
-int getchar(void)
+/* WEAK for the same reason as printf above: boxcxx's getchar reads through the
+ * same FILE as fgetc(stdin), so a byte pushed back with ungetc comes back to
+ * it. This one cannot see that pushback, which is correct for a C program that
+ * has no FILE and wrong for a C++ one that does. */
+__attribute__((weak)) int getchar(void)
 {
     StrandPrintState *ps = print_state_self();
     io_flush_state(ps);
