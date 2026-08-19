@@ -32,11 +32,25 @@ typedef _Bool bool;
 #define NULL ((void*)0)
 #endif
 
+/* #ifndef-guarded for the same reason the limits below are: a C++ TU may see
+ * <cstdarg> first — which is the compiler's own <stdarg.h> — and it spells
+ * these with the same builtins. The definitions are identical, so the only
+ * thing an unguarded redefinition produced was four warnings, but "identical
+ * today" is not a property worth relying on. Found by <cstdio>, which is the
+ * first header to include both this file and <cstdarg>. */
 typedef __builtin_va_list va_list;
+#ifndef va_start
 #define va_start(ap, last) __builtin_va_start(ap, last)
+#endif
+#ifndef va_end
 #define va_end(ap)         __builtin_va_end(ap)
+#endif
+#ifndef va_arg
 #define va_arg(ap, type)   __builtin_va_arg(ap, type)
+#endif
+#ifndef va_copy
 #define va_copy(d, s)      __builtin_va_copy(d, s)
+#endif
 
 /* #ifndef-guarded: C++ TUs may see boxcxx's <cstdint> first, which
  * defines the same limits via compiler builtins (equal values, different
