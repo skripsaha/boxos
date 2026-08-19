@@ -1,0 +1,32 @@
+// boxcxx — <__bits/c_mbstate>
+//
+// mbstate_t, in a leaf because two very different headers must name the same
+// type. <cuchar> owns it in the standard and uses it for what it is — the
+// memory of a conversion in progress. <iosfwd> only needs the NAME, because
+// char_traits::state_type and fpos<mbstate_t> are spelled in terms of it, and
+// <iosfwd> must remain a header that pulls nothing in.
+//
+// Until Ф41-e this type was an eight-byte opaque placeholder defined inside
+// <iosfwd>, whose own comment said it would move here the day <cuchar> existed.
+// That day is this commit, and the type stopped being opaque with it: the
+// restartable conversions need real fields, because a caller feeding one byte
+// at a time is exactly a caller asking mbstate_t to remember something.
+//
+// The requirements are C's: trivially copyable, and all-bits-zero IS the
+// initial conversion state — which is why `mbstate_t st{};` is how a caller
+// starts one and why nothing here needs an init function.
+#ifndef BOXCXX_BITS_C_MBSTATE
+#define BOXCXX_BITS_C_MBSTATE
+
+namespace std {
+
+struct mbstate_t {
+    unsigned char  nin   = 0;      // bytes of an unfinished character held
+    unsigned char  in[4] = {};
+    unsigned char  npend = 0;      // output units produced, not yet handed back
+    unsigned short pend[3] = {};   // trailing UTF-8 bytes (c8) or a low surrogate (c16)
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_C_MBSTATE

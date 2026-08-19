@@ -1,0 +1,69 @@
+// boxcxx — <cuchar>
+//
+// [cuchar.syn]. The six functions that convert between the "C" locale's
+// multibyte encoding and char8_t/char16_t/char32_t. On BoxOS that encoding is
+// UTF-8, which makes mbrtoc32 a decoder, c32rtomb an encoder, and mbrtoc8 the
+// odd one out: its input and its output are the same bytes, handed back one
+// code unit per call.
+//
+// The whole design of this header is the letter r in its function names.
+// <cstdlib>'s mbtowc is handed a complete character or it fails; these are
+// *restartable*, which means a caller may feed them one byte at a time and they
+// must remember what they have seen. Two kinds of memory are needed and both
+// live in mbstate_t:
+//
+//   • **input** bytes of a character not yet complete, so a character split
+//     across two reads is not an error, and
+//   • **output** units of a character that produced more than one — the low
+//     surrogate of a non-BMP character for mbrtoc16, the trailing UTF-8 bytes
+//     for mbrtoc8 — which come back on later calls as (size_t)(-3).
+//
+// (size_t)(-2) is the answer that makes streaming possible and it is the one an
+// implementation is most tempted to get wrong, because it requires knowing that
+// a prefix is still *possible*. E0 80 is not: no third byte rescues an overlong
+// form. That distinction is decided once, in <__bits/c_utf8>, and both this
+// header and <cstdlib> read their answer from it.
+//
+// A null ps selects an internal state, and here that state is **per strand**.
+// Hosted C keeps one per process and its own manuals warn you about it; a
+// BoxOS program runs strands over the same address space by default, so a
+// shared conversion cursor would be a data race the standard would have let us
+// ship. The same decision was taken for rand and strtok in Ф41-b.
+#ifndef BOXCXX_CUCHAR
+#define BOXCXX_CUCHAR
+
+#include <cstddef>
+// mbstate_t is shared with <iosfwd>, which needs the name for
+// char_traits::state_type and fpos<mbstate_t> while remaining a header that
+// pulls nothing in. One type, one definition, two very different users.
+#include <__bits/c_mbstate>
+
+namespace std {
+
+
+// Each returns the bytes consumed from s, 0 for the terminator, (size_t)(-3)
+// when a unit held over from a previous call was stored and no input was read,
+// (size_t)(-2) when the bytes so far are a possible but unfinished character,
+// and (size_t)(-1) with errno == EILSEQ when they can never become one.
+size_t mbrtoc8(char8_t *pc8, const char *s, size_t n, mbstate_t *ps) noexcept;
+size_t mbrtoc16(char16_t *pc16, const char *s, size_t n, mbstate_t *ps) noexcept;
+size_t mbrtoc32(char32_t *pc32, const char *s, size_t n, mbstate_t *ps) noexcept;
+
+// Each returns the bytes written to s, 0 when the unit was consumed without
+// completing a character (a high surrogate, or a non-final UTF-8 byte), and
+// (size_t)(-1) with errno == EILSEQ for a unit that cannot occur there.
+size_t c8rtomb(char *s, char8_t c8, mbstate_t *ps) noexcept;
+size_t c16rtomb(char *s, char16_t c16, mbstate_t *ps) noexcept;
+size_t c32rtomb(char *s, char32_t c32, mbstate_t *ps) noexcept;
+
+} // namespace std
+
+using std::c16rtomb;
+using std::c32rtomb;
+using std::c8rtomb;
+using std::mbrtoc16;
+using std::mbrtoc32;
+using std::mbrtoc8;
+using std::mbstate_t;
+
+#endif // BOXCXX_CUCHAR

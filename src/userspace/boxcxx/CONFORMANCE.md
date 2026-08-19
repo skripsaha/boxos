@@ -96,14 +96,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (10)
+## 1.1 Headers that do not exist (7)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 95 of them are in the tree and 10 are not,
+[headers] name 105 headers in C++23; 98 of them are in the tree and 7 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 95 + 5 = the 100 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 98 + 5 = the 103 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -113,14 +113,14 @@ still added up because they were adjusted to each other rather than to the
 standard. It is absent, it is listed below, and the count above is now the
 output of a diff between [headers] and `ls include/std`.
 
-### C library wrappers — 7 absent, 14 provided
+### C library wrappers — 4 absent, 17 provided
 
-Absent: `<cinttypes>` `<clocale>` `<cstdio>` `<ctime>` `<cuchar>` `<cwchar>`
-`<cwctype>`
+Absent: `<cstdio>` `<ctime>` `<cwchar>` `<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
 `<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
-(Ф41-c) and `<csetjmp>` (Ф41-d) — all §2.
+(Ф41-c), `<csetjmp>` (Ф41-d) and `<cinttypes>` `<clocale>` `<cuchar>` (Ф41-e)
+— all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -848,6 +848,75 @@ default. Ф41-b made the `"C"` locale's multibyte encoding UTF-8 (§2
 `MB_LEN_MAX`. The alternative was a second, narrower encoding living inside the
 C functions of a system that is UTF-8 everywhere else.
 
+## `<cinttypes>`
+
+Almost entirely macros, and the macros are why it could not be a wrapper: GCC's
+freestanding set stops at `<stdint.h>` and never ships `<inttypes.h>`. Before
+Ф41-e there was not one `PRI*` or `SCN*` spelling anywhere in the BoxOS tree —
+every format string that printed a `uint64_t` was written by hand, per call
+site, in whichever modifier the author knew was right.
+
+A `PRI` macro is a promise about the ABI: `PRId64` is `"ld"` only because
+`int64_t` **is** `long` here. Everywhere else that promise is made by a vendor
+header generated for the target; here it is made by this file, so it is made
+checkably. Five `static_assert`s pin the type identities, and phase207 goes
+further: a probe carrying `__attribute__((format(printf, 1, 2)))` under a local
+`#pragma GCC diagnostic error "-Wformat"` makes **the compiler itself** verify
+every macro against the type it is used with. A modifier that stops matching
+stops the build, naming the macro and the line, instead of letting `printf` read
+the wrong number of bytes off the varargs list and print a plausible lie.
+
+- `~` **`abs(intmax_t)` and `div(intmax_t, intmax_t)` are absent, and their
+  absence is required.** [cinttypes.syn] limits those overloads to the case
+  where `intmax_t` designates an *extended* integer type. Here `intmax_t` is
+  `long`, `<cstdlib>` already declares `abs(long)` and `div(long, long)`, and a
+  second declaration would be a redefinition rather than an overload. Both
+  reference implementations omit them for the same reason.
+- `~` **`wcstoimax` / `wcstoumax` are absent** with the rest of the wide
+  library: `<cwchar>` is deferred (§1.1). Naming one is a compile error that
+  says which header is missing, not a link failure at the end of the build.
+- `?` `strtoimax` and `strtoumax` forward to `<cstdlib>`'s parser rather than
+  repeating it, which is exact rather than merely plausible: the `static_assert`
+  above pins `intmax_t` to `long`, the type `strtol` already returns. If the
+  assumption ever stops holding the build stops with it.
+- `?` The exact-, least- and fast-width families coincide at every width, which
+  is a fact about this ABI rather than a simplification.
+- There is **no `SCNX` family** — `%X` is a printf conversion only. Its absence
+  is C's, and phase207 asserts it in the preprocessor, where a macro's existence
+  is the kind of question that can actually be asked.
+
+## `<clocale>`
+
+One locale, `"C"`, whose multibyte encoding is UTF-8. That is an answer, not a
+shortfall: BoxOS is UTF-8 end to end — the screen, the keyboard and TagFS names
+all are — and there is no environment to read a locale name out of (`getenv` is
+always `nullptr`, see `<cstdlib>`).
+
+Two consequences are worth stating rather than discovering.
+
+- `+` **`setlocale` never changes anything, so it can never race.** In a hosted
+  library this is a global mutable switch that silently changes what `"."` means
+  to every number the program prints; glibc's own manual warns that changing the
+  locale while another thread formats a number is undefined. Here the `lconv` is
+  a constant in read-only storage and `localeconv()` may be called from every
+  strand at once. BoxOS gets that property by having refused the switch.
+- `~` **An unknown locale name returns `nullptr`.** That is precisely how C
+  spells "that selection cannot be honoured", and it is not the same as a quiet
+  fallback to `"C"`, which would let a program believe it had got what it asked
+  for. `setlocale(LC_ALL, "en_US.UTF-8")` fails; `""` succeeds, because the
+  implementation-defined native locale here **is** `"C"`. Note the deliberate
+  asymmetry with `std::locale` in `<locale>`, which accepts and ignores any
+  name — different APIs, different contracts, and `<locale>`'s simplification is
+  recorded in its own entry.
+- `?` Every `char` member of `lconv` is `CHAR_MAX`, which C defines as "this
+  locale does not say" — **not** zero, which would be the claim that there are
+  no fractional digits. `decimal_point` is `"."`; every other string is empty.
+- `?` The member *order* of `lconv` is not fixed by the standard, and the two
+  reference implementations genuinely differ (glibc and the BSDs disagree about
+  where `int_curr_symbol` goes). boxcxx initialises it with designated
+  initializers so a reordering cannot silently put `CHAR_MAX` where a pointer
+  belongs.
+
 ## `<cfenv>`
 
 The header that made an old claim checkable, and the claim did not survive.
@@ -1087,6 +1156,56 @@ returns a mutable one.
   a shared buffer would have. A condition BoxOS cannot surface gets
   `"generic error N"` rather than a cargo-culted Unix string — the policy
   `<system_error>` already had.
+
+## `<cuchar>`
+
+The six restartable conversions between the `"C"` locale's multibyte encoding
+and `char8_t` / `char16_t` / `char32_t`. Since that encoding is UTF-8,
+`mbrtoc32` is a decoder, `c32rtomb` an encoder, and `mbrtoc8` the odd one out —
+its input and its output are the same bytes, handed back one code unit per call.
+
+The whole design is the letter `r` in the names. `<cstdlib>`'s `mbtowc` is
+handed a complete character or it fails; these are *restartable*, so a caller
+may feed one byte at a time and they must remember what they have seen. Both
+kinds of memory live in `mbstate_t`: input bytes of a character not yet
+complete, and output units of a character that produced more than one — the low
+surrogate for `mbrtoc16`, the trailing UTF-8 bytes for `mbrtoc8`, returned as
+`(size_t)(-3)`.
+
+`(size_t)(-2)` is the answer that makes streaming possible and the one an
+implementation is most tempted to get wrong, because it requires knowing that a
+prefix is still *possible*. `E0 80` is not: no third byte rescues an overlong
+form. That distinction is decided once, in `<__bits/c_utf8>`, and both this
+header and `<cstdlib>` read their answer from it — `<cstdlib>` mapping
+`Incomplete` back onto `-1`, which is correct for a non-restartable conversion
+bounded by `n`.
+
+- `+` **A null `ps` selects state that is per strand, not per process.** C keeps
+  one internal `mbstate_t` per function per program, and a BoxOS program runs
+  strands over one address space by default, so the hosted answer is a data race
+  the standard would have let us ship. Same decision as `rand` and `strtok`
+  (Ф41-b) and the `<ctime>` buffers (Ф41-e).
+- `?` **`mbstate_t` moved here from `<iosfwd>`, where it had been an eight-byte
+  opaque placeholder** since the iostream work — `char_traits::state_type` and
+  `fpos<mbstate_t>` are spelled in terms of it. `<iosfwd>`'s own comment said
+  the definition would move "the day one of those headers exists". It now lives
+  in `<__bits/c_mbstate>` and both include it, because `<iosfwd>` must remain a
+  header that pulls nothing in.
+- `?` The decoder carries **no overlong / surrogate / out-of-range test after
+  the loop**, and that is a measured result rather than an oversight: the
+  lead-byte constraints subsume all three. Sweeping every byte sequence of
+  length ≤ 4, control reaches that point 143,161,216 times and the three tests
+  would reject exactly zero of them. The migration was checked the same way:
+  the new decoder answers what the shipped one answered on all 4,311,810,305
+  inputs of length ≤ 4. The consequence is that the lead-byte checks are
+  load-bearing alone, so the phase mutates each of them individually.
+- `!` That sweep is also what caught the one real defect in this work. `n` is
+  how many bytes the *caller has*, not how many the character *uses* — and
+  `mbstowcs` passes 4 on every call. A first draft examined `s[1]` before
+  deciding a one-byte character was finished, so `"AB"` failed to convert.
+  Four narrower tests missed it because every one of them passed `n` exactly
+  equal to the character's length; the equivalence sweep disagreed with the
+  shipped decoder on 1.6 billion inputs and named the first one.
 
 ## `<csetjmp>`
 

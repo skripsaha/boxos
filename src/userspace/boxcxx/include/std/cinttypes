@@ -1,0 +1,279 @@
+// boxcxx — <cinttypes>
+//
+// [cinttypes.syn]. The header that is almost entirely macros, and whose macros
+// are the reason it cannot be a wrapper: GCC's freestanding set stops at
+// <stdint.h> and never ships <inttypes.h>, so before Ф41 there was not a single
+// PRI* or SCN* spelling anywhere in the BoxOS tree — the format strings that
+// print a uint64_t were written by hand, per call site, in the one modifier the
+// author happened to know was right.
+//
+// A PRI macro is a promise about the ABI: PRId64 expands to "ld" only because
+// int64_t IS long on x86-64 SysV. Everywhere else that promise is made by a
+// vendor header generated for the target. Here it is made by this file, so it
+// is made **checkably**: the static_asserts below fail the build if any of the
+// five assumptions stops holding, rather than letting printf read the wrong
+// number of bytes off the varargs list and print a plausible lie. That is the
+// whole reason the modifiers are not simply typed in.
+//
+// The abs/div overloads taking intmax_t that [cinttypes.syn] shows are
+// deliberately absent, and their absence is required rather than a shortcut:
+// the synopsis note limits them to the case where intmax_t designates an
+// *extended* integer type. On this target intmax_t is long, <cstdlib> already
+// declares abs(long) and div(long, long), and declaring them again here would
+// be a redefinition, not an overload.
+#ifndef BOXCXX_CINTTYPES
+#define BOXCXX_CINTTYPES
+
+// [cinttypes.syn]/2 — the header includes <cstdint>, and that is normative:
+// a program may include <cinttypes> alone and use int64_t.
+#include <cstdint>
+// ...and <cstdlib>, for the parser strtoimax/strtoumax forward to. Naming it
+// here rather than mid-file keeps every dependency of this header in one place.
+#include <cstdlib>
+
+namespace __boxcxx_inttypes {
+// A two-line same-type trait, local on purpose: <type_traits> would be a heavy
+// dependency for a header whose job is text substitution, and the assertions
+// below are the only user.
+template <class, class> struct Same { static constexpr bool value = false; };
+template <class T> struct Same<T, T> { static constexpr bool value = true; };
+} // namespace __boxcxx_inttypes
+
+// The five promises every macro in this file rests on. int8_t is signed char
+// rather than char because printf's "hh" reads an int-promoted signed char, and
+// char's signedness is a separate question that must not leak in here.
+static_assert(__boxcxx_inttypes::Same<::std::int8_t, signed char>::value,
+              "<cinttypes>: PRI*8 assumes int8_t is signed char");
+static_assert(__boxcxx_inttypes::Same<::std::int16_t, short>::value,
+              "<cinttypes>: PRI*16 assumes int16_t is short");
+static_assert(__boxcxx_inttypes::Same<::std::int32_t, int>::value,
+              "<cinttypes>: PRI*32 assumes int32_t is int");
+static_assert(__boxcxx_inttypes::Same<::std::int64_t, long>::value,
+              "<cinttypes>: PRI*64 assumes int64_t is long");
+static_assert(__boxcxx_inttypes::Same<::std::intmax_t, long>::value &&
+                  __boxcxx_inttypes::Same<::std::intptr_t, long>::value,
+              "<cinttypes>: PRI*MAX/PRI*PTR assume intmax_t and intptr_t are long");
+
+// ── printf, signed decimal [PRIdN] ──────────────────────────────────────
+#define PRId8         "hhd"
+#define PRId16        "hd"
+#define PRId32        "d"
+#define PRId64        "ld"
+#define PRIdLEAST8    "hhd"
+#define PRIdLEAST16   "hd"
+#define PRIdLEAST32   "d"
+#define PRIdLEAST64   "ld"
+#define PRIdFAST8     "hhd"
+#define PRIdFAST16    "hd"
+#define PRIdFAST32    "d"
+#define PRIdFAST64    "ld"
+#define PRIdMAX       "jd"
+#define PRIdPTR       "ld"
+
+#define PRIi8         "hhi"
+#define PRIi16        "hi"
+#define PRIi32        "i"
+#define PRIi64        "li"
+#define PRIiLEAST8    "hhi"
+#define PRIiLEAST16   "hi"
+#define PRIiLEAST32   "i"
+#define PRIiLEAST64   "li"
+#define PRIiFAST8     "hhi"
+#define PRIiFAST16    "hi"
+#define PRIiFAST32    "i"
+#define PRIiFAST64    "li"
+#define PRIiMAX       "ji"
+#define PRIiPTR       "li"
+
+#define PRIo8         "hho"
+#define PRIo16        "ho"
+#define PRIo32        "o"
+#define PRIo64        "lo"
+#define PRIoLEAST8    "hho"
+#define PRIoLEAST16   "ho"
+#define PRIoLEAST32   "o"
+#define PRIoLEAST64   "lo"
+#define PRIoFAST8     "hho"
+#define PRIoFAST16    "ho"
+#define PRIoFAST32    "o"
+#define PRIoFAST64    "lo"
+#define PRIoMAX       "jo"
+#define PRIoPTR       "lo"
+
+#define PRIu8         "hhu"
+#define PRIu16        "hu"
+#define PRIu32        "u"
+#define PRIu64        "lu"
+#define PRIuLEAST8    "hhu"
+#define PRIuLEAST16   "hu"
+#define PRIuLEAST32   "u"
+#define PRIuLEAST64   "lu"
+#define PRIuFAST8     "hhu"
+#define PRIuFAST16    "hu"
+#define PRIuFAST32    "u"
+#define PRIuFAST64    "lu"
+#define PRIuMAX       "ju"
+#define PRIuPTR       "lu"
+
+#define PRIx8         "hhx"
+#define PRIx16        "hx"
+#define PRIx32        "x"
+#define PRIx64        "lx"
+#define PRIxLEAST8    "hhx"
+#define PRIxLEAST16   "hx"
+#define PRIxLEAST32   "x"
+#define PRIxLEAST64   "lx"
+#define PRIxFAST8     "hhx"
+#define PRIxFAST16    "hx"
+#define PRIxFAST32    "x"
+#define PRIxFAST64    "lx"
+#define PRIxMAX       "jx"
+#define PRIxPTR       "lx"
+
+#define PRIX8         "hhX"
+#define PRIX16        "hX"
+#define PRIX32        "X"
+#define PRIX64        "lX"
+#define PRIXLEAST8    "hhX"
+#define PRIXLEAST16   "hX"
+#define PRIXLEAST32   "X"
+#define PRIXLEAST64   "lX"
+#define PRIXFAST8     "hhX"
+#define PRIXFAST16    "hX"
+#define PRIXFAST32    "X"
+#define PRIXFAST64    "lX"
+#define PRIXMAX       "jX"
+#define PRIXPTR       "lX"
+
+// ── scanf ───────────────────────────────────────────────────────────────
+// There is no SCNX family, and its absence is C's, not an omission here:
+// %X is a printf conversion; scanf reads hexadecimal with %x in either case.
+#define SCNd8         "hhd"
+#define SCNd16        "hd"
+#define SCNd32        "d"
+#define SCNd64        "ld"
+#define SCNdLEAST8    "hhd"
+#define SCNdLEAST16   "hd"
+#define SCNdLEAST32   "d"
+#define SCNdLEAST64   "ld"
+#define SCNdFAST8     "hhd"
+#define SCNdFAST16    "hd"
+#define SCNdFAST32    "d"
+#define SCNdFAST64    "ld"
+#define SCNdMAX       "jd"
+#define SCNdPTR       "ld"
+
+#define SCNi8         "hhi"
+#define SCNi16        "hi"
+#define SCNi32        "i"
+#define SCNi64        "li"
+#define SCNiLEAST8    "hhi"
+#define SCNiLEAST16   "hi"
+#define SCNiLEAST32   "i"
+#define SCNiLEAST64   "li"
+#define SCNiFAST8     "hhi"
+#define SCNiFAST16    "hi"
+#define SCNiFAST32    "i"
+#define SCNiFAST64    "li"
+#define SCNiMAX       "ji"
+#define SCNiPTR       "li"
+
+#define SCNo8         "hho"
+#define SCNo16        "ho"
+#define SCNo32        "o"
+#define SCNo64        "lo"
+#define SCNoLEAST8    "hho"
+#define SCNoLEAST16   "ho"
+#define SCNoLEAST32   "o"
+#define SCNoLEAST64   "lo"
+#define SCNoFAST8     "hho"
+#define SCNoFAST16    "ho"
+#define SCNoFAST32    "o"
+#define SCNoFAST64    "lo"
+#define SCNoMAX       "jo"
+#define SCNoPTR       "lo"
+
+#define SCNu8         "hhu"
+#define SCNu16        "hu"
+#define SCNu32        "u"
+#define SCNu64        "lu"
+#define SCNuLEAST8    "hhu"
+#define SCNuLEAST16   "hu"
+#define SCNuLEAST32   "u"
+#define SCNuLEAST64   "lu"
+#define SCNuFAST8     "hhu"
+#define SCNuFAST16    "hu"
+#define SCNuFAST32    "u"
+#define SCNuFAST64    "lu"
+#define SCNuMAX       "ju"
+#define SCNuPTR       "lu"
+
+#define SCNx8         "hhx"
+#define SCNx16        "hx"
+#define SCNx32        "x"
+#define SCNx64        "lx"
+#define SCNxLEAST8    "hhx"
+#define SCNxLEAST16   "hx"
+#define SCNxLEAST32   "x"
+#define SCNxLEAST64   "lx"
+#define SCNxFAST8     "hhx"
+#define SCNxFAST16    "hx"
+#define SCNxFAST32    "x"
+#define SCNxFAST64    "lx"
+#define SCNxMAX       "jx"
+#define SCNxPTR       "lx"
+
+namespace std {
+
+// [cinttypes.syn] — a distinct structure type, not a typedef for ldiv_t. They
+// have the same shape on this target and are still different types, which is
+// what C says and what a program overloading on the result would observe.
+struct imaxdiv_t {
+    intmax_t quot;
+    intmax_t rem;
+};
+
+// P0533R9 made the C-library arithmetic constexpr in C++23; imaxabs and imaxdiv
+// are in that set, so constexpr here satisfies [constexpr.functions] rather
+// than stretching it.
+inline constexpr intmax_t imaxabs(intmax_t j) { return j < 0 ? -j : j; }
+
+inline constexpr imaxdiv_t imaxdiv(intmax_t numer, intmax_t denom)
+{
+    return imaxdiv_t{numer / denom, numer % denom};
+}
+
+} // namespace std
+
+// ── conversions [cinttypes.syn] ─────────────────────────────────────────
+// These forward to <cstdlib>'s parser rather than repeating it, and the
+// forward is *provably* exact rather than merely plausible: the static_assert
+// above pins intmax_t to long, which is the type strtol already returns. If
+// that assumption ever stops holding the build stops with it, instead of this
+// header silently narrowing a wider intmax_t through a long.
+//
+// wcstoimax/wcstoumax are the wide half of this synopsis and are absent with
+// the rest of it: <cwchar> is deferred to the wide phase, so asking for them
+// today is a compile error naming what is missing rather than a link failure
+// at the end of the build. CONFORMANCE §2 records it.
+namespace std {
+
+inline intmax_t strtoimax(const char *nptr, char **endptr, int base) noexcept
+{
+    return ::std::strtol(nptr, endptr, base);
+}
+
+inline uintmax_t strtoumax(const char *nptr, char **endptr, int base) noexcept
+{
+    return ::std::strtoul(nptr, endptr, base);
+}
+
+} // namespace std
+
+using std::imaxabs;
+using std::imaxdiv;
+using std::imaxdiv_t;
+using std::strtoimax;
+using std::strtoumax;
+
+#endif // BOXCXX_CINTTYPES

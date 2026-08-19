@@ -31,6 +31,8 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/csignal.cpp \
        src/runtime/cassert.cpp \
        src/runtime/cstdlib.cpp \
+       src/runtime/clocale.cpp \
+       src/runtime/cuchar.cpp \
        src/runtime/cfenv.cpp \
        src/runtime/new_delete.cpp \
        src/runtime/cxxabi_typeinfo.cpp \
