@@ -46,12 +46,16 @@ include ../nameplate.mk
 display.elf: $(BOXLIB_START) display.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) display.o $(BOXLIB))
 
+# -MMD -MP: header dependencies, so a header edit rebuilds what read it.
+# See boxcxx/Makefile for what their absence cost.
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(wildcard *.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.elf
+	rm -f *.o *.d *.elf

@@ -68,6 +68,10 @@ SRCS = src/core/notify.c \
        src/sync.c \
        src/strand.c
 OBJS = $(SRCS:.c=.o)
+# Header dependencies — see the note in boxcxx/Makefile for what their absence
+# cost. -MMD records what each object read; -MP keeps a deleted header from
+# becoming a missing prerequisite.
+DEPS = $(OBJS:.o=.d)
 
 all: libbox.a ../build/boxlib_start.o
 
@@ -83,9 +87,11 @@ libbox.a: $(OBJS)
 	nasm -f elf64 $< -o $@
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(DEPS)
 
 clean:
-	rm -f $(OBJS) libbox.a
+	rm -f $(OBJS) $(DEPS) libbox.a
 
 .PHONY: all clean
