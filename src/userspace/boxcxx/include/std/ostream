@@ -345,10 +345,15 @@ basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &os, const u
 // implied or offered: char8_t/char16_t/char32_t/wchar_t text is simply not
 // something a narrow stream can write.
 //
-// The synopsis's six basic_ostream<wchar_t, traits> deletions are deliberately
-// not mirrored: wide streams are a permanent exclusion here (see the banner),
-// there is no char_traits<wchar_t>, so basic_ostream<wchar_t, …> can never be
-// formed and those overloads could never be candidates for anything.
+// ‼ The synopsis's six basic_ostream<wchar_t, traits> deletions ARE mirrored,
+// as of Ф42-e, and the reason they were not is worth keeping because it was
+// false in two independent ways. It read: "wide streams are a permanent
+// exclusion here, there is no char_traits<wchar_t>, so basic_ostream<wchar_t,
+// …> can never be formed". char_traits<wchar_t> has existed all along
+// (<__bits/char_traits>), and Ф42-d made a wide basic_ostringstream a working
+// stream — so the overloads were candidates, and the silent wrong output the
+// narrow deletions exist to stop was happening on the wide side unwatched:
+// wos << u8'x' promoted to int and printed 120.
 template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &, wchar_t) = delete;
 template <class Traits>
@@ -365,6 +370,18 @@ template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &, const char16_t *) = delete;
 template <class Traits>
 basic_ostream<char, Traits> &operator<<(basic_ostream<char, Traits> &, const char32_t *) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, char8_t) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, char16_t) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, char32_t) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, const char8_t *) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, const char16_t *) = delete;
+template <class Traits>
+basic_ostream<wchar_t, Traits> &operator<<(basic_ostream<wchar_t, Traits> &, const char32_t *) = delete;
 
 // ── no-arg manipulators [ostream.manip] ───────────────────────────────────
 // dec/hex/oct/boolalpha/... (pure ios_base manipulators) live in <ios>; only

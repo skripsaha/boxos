@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **102** — 97 of the 105 C++23 [headers] name (8 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 139 |
+| Internal implementation leaves (`include/std/__bits/`) | 140 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 230 phases (211 of them the numbered `PhaseN` series), 5 905 runtime checks, 1 955 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 231 phases (212 of them the numbered `PhaseN` series), 5 934 runtime checks, 1 966 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -320,9 +320,12 @@ and line — is recorded there.
   flat exclusion until Ф42; it is now a partial one, and the honest way to
   state it is by what has landed rather than by what is planned.
   **Landed:** `<cwctype>`, so the classification of a wide character is
-  answered from the Unicode Character Database rather than from ASCII; and
+  answered from the Unicode Character Database rather than from ASCII;
   `<cwchar>`, so wide strings, the restartable conversions, the seven `wcsto*`,
-  the wide character I/O and the whole of `fwprintf`/`fwscanf` work (§2).
+  the wide character I/O and the whole of `fwprintf`/`fwscanf` work (§2); and
+  the `codecvt` facets, so a wide character has a defined way to become bytes
+  and back — see the `<locale>` entry below, which is where that stopped being
+  a flat exclusion at all.
   **Not yet:** there are still no wide streams and no `wformat_context`.
   `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
   `wcin`/`wcout`/`wcerr`/`wclog`; `<fstream>` and `<iosfwd>` carry
@@ -357,8 +360,14 @@ and line — is recorded there.
   correctly-rounded floating-point path included, with `setfill(L'ж')` filling
   in a character no byte can hold.
 
-- **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
-  machinery needs. The `L` format specifier is accepted and ignored.
+- **Locales beyond `"C"`.** There is one locale and no way to construct
+  another; the `L` format specifier is accepted and ignored. What changed in
+  Ф42-e is what a locale CONTAINS: `<locale>` used to have no facets at all,
+  and now has the four `codecvt` specializations Table 104 of
+  [locale.category] requires. It still has no ctype, no num_get/num_put, no
+  numpunct, collate, moneypunct, time_get/time_put or messages, no way to
+  install a facet, and no `_byname` family. Details and the reasoning are in
+  §2 `<locale>`.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
   `zoned_time`, and no leap-second table.
 
@@ -2110,10 +2119,105 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<locale>`
 
-- `–` Only the `"C"` locale exists, and it has no facets: there is no facet base,
-  no `use_facet` / `has_facet`, and no `ctype` / `num_get` / `num_put` / … The
-  named constructor accepts any name and ignores it; `name()` always returns
-  `"C"`. The header exists to satisfy the stream machinery's references to it.
+- `~` **A locale here is a NAME, not a container.** In the standard a locale owns
+  a vector of facets indexed by `locale::id`, refcounts each, and `use_facet<F>`
+  is a lookup in that vector — a shape that exists so a program can hold several
+  locales and install its own facets into them. BoxOS has one locale and no way
+  to construct another, so that vector would be a table with one row and the row
+  would be the program. The facets are therefore part of the **image**, the same
+  answer Ф37 gave for the symbol table, and `use_facet<F>(loc)` ignores `loc`.
+  Three consequences, each measured rather than argued:
+  `std::locale` stays an **empty, trivially copyable** class, so `ios_base` and
+  every `basic_streambuf` — which hold one by value — did not grow a refcount;
+  a facet is **eight bytes of `.rodata`** — its vtable pointer and nothing
+  else — constant-initialized, with no guard variable, no `__cxa_guard_acquire`,
+  no `__cxa_atexit` and no `_GLOBAL__sub_I` in the generated object (it is
+  `.rodata` and not `.data.rel.ro` because this target links `-fno-pic` and
+  static, so no load-time relocation is left to keep the page writable for);
+  and they answer at **any** instant, including during static destruction,
+  because nothing ever destroys them.
+- `~` **`locale::facet`'s destructor is not virtual.** This is the one thing that
+  design cost. The standard makes it virtual because a locale owns its facets and
+  deletes them through a `facet*`; nothing here owns a facet, so the virtual
+  destructor would buy exactly one thing — mortality. Measured with
+  `x86_64-elf-g++ 15.2.0`: mark it `virtual` and every facet object gains an
+  `__cxa_atexit` registration, is torn down during static destruction, and has
+  its vptr rewritten to a base with no `do_in`. GCC does not implement the
+  `no_destroy` attribute that would suppress that — it warns `-Wattributes` and
+  ignores it. A facet that stops answering before the program stops running is
+  the worse of the two failures in a library where nothing deletes one at all.
+- `?` `locale::id` exists, because every facet's synopsis declares
+  `static locale::id id;` and a program may name it, but it carries **no index**:
+  lookup is by type, so there is no vector for an index to point into.
+- `?` `facet(size_t refs)` accepts its argument and does not store it. Its meaning
+  is "0: the locale destroys this facet; nonzero: it does not", and no locale here
+  destroys any facet ever.
+- `+` `use_facet<F>` for a facet this image does not carry is a **compile error**,
+  not a `bad_cast` thrown at run time. `has_facet<F>` still answers `false` for
+  one, as the standard says. The same answer, moved to where it costs nothing to
+  act on.
+- `–` No facet **installation**: `locale(const locale&, Facet*)` and the
+  category-combining constructors are absent, and so is the whole `_byname`
+  family including `codecvt_byname`. A `codecvt_byname("ru_RU.KOI8-R")` that
+  quietly produced UTF-8 would be the silent lie this header refuses to tell.
+- `–` No category facets: no `ctype`, `num_get`, `num_put`, `numpunct`, `collate`,
+  `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` or `messages`.
+  A program that needs real facet-based i18n fails to compile rather than
+  silently behaving as `"C"`.
+- `–` The two Annex D `codecvt` specializations deprecated in C++20 —
+  `codecvt<char16_t, char, mbstate_t>` and `codecvt<char32_t, char, mbstate_t>` —
+  are not provided. C++26 is already removing the neighbouring deprecated Unicode
+  conversion machinery (P2871R3); building onto a surface the standard is walking
+  away from is taking on a debt at the moment of writing. The **four that Table
+  104 of [locale.category] requires are all here**: `codecvt<char, char>`,
+  `codecvt<wchar_t, char>`, `codecvt<char16_t, char8_t>` and
+  `codecvt<char32_t, char8_t>`, all over `mbstate_t`.
+- `?` **`mbstate_t` is named in every `codecvt` signature and read in none.**
+  That is a property of UTF-8, not a shortcut: the encoding has no shift state,
+  and the protocol lets a converter say so by stopping AT an unfinished character
+  instead of swallowing its bytes, so the caller offers the same bytes again with
+  more behind them. libc++'s own `char8_t` facets answer identically (`partial`,
+  `from_next` unmoved).
+- `?` **`do_in` judges the source before it measures the destination.** When the
+  destination is already full AND the next bytes are not a character, both
+  `partial` and `error` are true and [locale.codecvt.virtuals] orders neither.
+  boxcxx answers `error`: it is true whatever the destination holds, it leaves
+  `from_next` in exactly the same place, and it does not ask the caller for room
+  that cannot help. This is the **only** place the engine and libc++ disagree —
+  36 lines out of 1 114 956 in the differential sweep, every one of them this
+  shape.
+- **Where the reference implementation is wrong.** libc++'s
+  `codecvt<wchar_t, char, mbstate_t>` delegates to the platform's
+  `mbsnrtowcs`/`wcsnrtombs`, and three of its answers are measurably wrong — each
+  one contradicted by libc++'s **own** `char8_t` facets, which do not delegate:
+  it returns `partial` for a byte that can never begin a character (`0xFF`, an
+  overlong form, a surrogate — the platform's `mbrtowc` underneath correctly
+  returns `-1`/`EILSEQ`, so the loss is libc++'s own); it returns `ok` from
+  `unshift` where [locale.codecvt.virtuals] gives `noconv` the meaning "no
+  termination sequence is needed for this state_type"; and it **loses an embedded
+  NUL entirely** — `out(L"\0A")` into an eight-byte buffer produces zero bytes and
+  reports `partial`, because `wcsnrtombs` reads the NUL as a terminator. The
+  correct answer is `00 41` and `ok`, which is what its own
+  `codecvt<char32_t, char8_t>` gives for the same input and what boxcxx gives.
+- **How it is verified.** `<__bits/codecvt_engine>` is a leaf precisely so a host
+  build can include the shipped file rather than a copy: one source, two builds —
+  against the tree and against libc++'s `char8_t` facets — produced 1 114 956
+  canonical lines each and agreed on all but the 36 above. That covers every code
+  point in both directions at every destination size from 0 to 8, plus a
+  23-string corpus of truncated, overlong, surrogate and out-of-range input.
+  Twelve mutations of the engine were tried; ten changed the stream. Of the two
+  that did not, one was proven equivalent by pairing (removing the lone-low-
+  surrogate check changes nothing while `__utf8::Encode` still refuses
+  surrogates — take that refusal away too and the pair diverges by 17 lines), and
+  the other was found to have mutated a line that **did nothing**: an
+  intermediate cast to `unsigned` that a modular conversion to `char32_t` already
+  performed. That line is gone. What a host sweep cannot reach — this target's
+  compiler, and the `wchar_t` instantiation that has no trustworthy oracle — is
+  `Phase216`, which sweeps all 1 114 112 code points through the wide, the
+  `char32_t` and the `char16_t` facets in 2.2 s of CPU and requires them to
+  agree: 2 048 surrogates refused, 1 112 064 round-tripped.
+- The named constructor still accepts any name and ignores it; `name()` always
+  returns `"C"`.
 
 ## `<map>` / `<set>` / `<unordered_map>`
 
@@ -2493,11 +2597,18 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   the **pointer address**, `os << char8_t('x')` promoted to `operator<<(int)` and
   printed the **number**. Verified in generated assembly at the time
   (`_ZNSolsEPKv`, `_ZNSolsEi`); the deletions are pinned by cxxtest phase144.
-- `~` The synopsis's six `basic_ostream<wchar_t, traits>` deletions are **not**
-  mirrored. Wide streams are a permanent exclusion (§1.2) and there is no
-  `char_traits<wchar_t>`, so `basic_ostream<wchar_t, …>` can never be formed and
-  those overloads could never be candidates. Declared for completeness they would
-  be unreachable text.
+- `✓` Closed in Ф42-e: **the synopsis's six `basic_ostream<wchar_t, traits>`
+  deletions were missing, and the reason recorded for it was false twice over.**
+  It read: "wide streams are a permanent exclusion and there is no
+  `char_traits<wchar_t>`, so `basic_ostream<wchar_t, …>` can never be formed".
+  `char_traits<wchar_t>` has existed all along in `<__bits/char_traits>`, and
+  Ф42-d made a wide `basic_ostringstream` a working stream — so those overloads
+  *were* candidates, and the silent wrong output the narrow deletions exist to
+  stop was happening unwatched on the wide side: `wos << u8'x'` promoted to
+  `int` and wrote **120**. All six are declared and deleted now, pinned by
+  `Phase216` (29)–(38), controls included. This entry is the case for deriving a
+  claim rather than carrying it: nothing about the code changed on the day the
+  sentence became untrue, so nothing prompted anyone to reread it.
 - `?` The extraction side is safe, but only by accident: no `istream` extractor
   binds a reference across distinct fundamental types, so `is >> char8_t_lvalue`
   fails to compile even though nothing deletes it either. The standard does not
@@ -2508,9 +2619,12 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   in this header, and Ф31e-g-2 corrected the claim that it was `pmr::u8string`:
   [version.syn] names `<locale>` among the macro's owning headers because
   P0482R6 adds `codecvt<char16_t, char8_t, mbstate_t>`,
-  `codecvt<char32_t, char8_t, mbstate_t>` and their `_byname` forms, and
-  boxcxx's `<locale>` has no facets at all (§1.2). That exclusion is permanent,
-  so this macro is too.
+  `codecvt<char32_t, char8_t, mbstate_t>` and their `_byname` forms. **Both
+  codecvt specializations exist as of Ф42-e**, so the reason this entry gave
+  until then — "`<locale>` has no facets at all, and that exclusion is
+  permanent" — is dead. What still blocks the macro is the `_byname` forms,
+  which need a locale that can be named, and `<filesystem>`, which is an absent
+  header (§1.1).
 
 ## `<print>`
 
@@ -3766,7 +3880,9 @@ constructor, and **`std::align`, which did not exist and was in no tracker** —
 a C++11 function, and on a bare-metal target not a corner case. Eight more
 macros. Two entries in this document were rewritten rather than closed:
 `__cpp_lib_char8_t` is blocked by `<locale>`'s facet exclusion (P0482R6 adds
-`codecvt<charN_t, char8_t, mbstate_t>`), not by `pmr::u8string` as recorded, and
+`codecvt<charN_t, char8_t, mbstate_t>`), not by `pmr::u8string` as recorded —
+a reason that expired in its turn when Ф42-e built those two facets; what
+blocks the macro now is in §2 `<locale>` — and
 `__cpp_lib_is_implicit_lifetime` cannot be claimed at all — the trait needs
 `__builtin_is_implicit_lifetime`, which this toolchain does not have, and no
 library-only approximation can separate a user-provided destructor from a
