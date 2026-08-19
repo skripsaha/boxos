@@ -42,6 +42,10 @@
 #include "perf_trace.h"
 #include "kernel_config.h"
 #include "amp.h"
+#include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
+
+/* TSC frequency, for turning a cycle delta into microseconds. */
+extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "rtc.h"
 #include "pit.h"
 #include "cpu_calibrate.h"
@@ -602,6 +606,54 @@ static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
  *   out_crate (>= 32 bytes): [u32 pid][u32 state][i32 score][u32 _pad]
  *                            [u64 code_start][u64 code_size]
  *                            [char tags[capacity-32]] */
+/* SYSTEM_OP_PROC_CPUTIME
+ *   params:    none
+ *   out_crate (>= 8): [u64 processor microseconds used by the calling cabin]
+ *
+ * Self only, and that is the design rather than a limitation: there is no pid
+ * parameter because another cabin's processor time is not this op's business,
+ * and because a question about yourself needs no authority to check — which is
+ * what makes OP_AUTH_NONE honest here rather than convenient. */
+static int SysProcCpuTime(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                          const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < sizeof(uint64_t)) return ERR_BUFFER_TOO_SMALL;
+
+    /* Completed slices, plus the one running right now.
+     *
+     * The in-flight term is measured from cpu_tsc_stamp, and the base matters
+     * more than the arithmetic. An earlier version used last_run_time and was
+     * wrong twice over: schedule() re-stamps it on every pass, and it SURVIVES
+     * A PARK, so the difference spanned a whole sleep and a 300 ms nap read as
+     * 300 ms of processor time. cpu_tsc_stamp exists only while the strand
+     * holds the core — set when it takes it, cleared when it leaves — so a
+     * strand that is not running contributes nothing here, and one that is
+     * gets credited to the cycle.
+     *
+     * Without this term the answer would only move at a context switch, and on
+     * a machine with a spare core a strand can run a long time without one: a
+     * 50 ms CPU-bound loop on 16 cores measured as zero. That is what this
+     * paragraph is for.
+     *
+     * The read happens on the core the caller is running on, so the two TSC
+     * values come from the same clock. */
+    uint64_t us = __atomic_load_n(&ctx->proc->total_cpu_time, __ATOMIC_RELAXED);
+    const uint64_t stamp = ctx->proc->cpu_tsc_stamp;
+    if (stamp != 0) {
+        const uint64_t khz = cpu_get_tsc_freq_khz();
+        const uint64_t now = rdtsc();
+        if (khz != 0 && now > stamp) us += ((now - stamp) * 1000ULL) / khz;
+    }
+
+    if (crate_write(out, ctx, &us, sizeof(us)) != OK) return ERR_INVALID_ADDRESS;
+    return OK;
+}
+
 static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -1692,6 +1744,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },
         { SYSTEM_OP_PROC_KILL,    SysProcKill,    OP_AUTH_NONE,   "system.proc.kill"  },
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
+        { SYSTEM_OP_PROC_CPUTIME, SysProcCpuTime, OP_AUTH_NONE,   "system.proc.cputime"},
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },
         { SYSTEM_OP_STRAND_SPAWN, SysStrandSpawn, OP_AUTH_APP,    "system.strand.spawn"},

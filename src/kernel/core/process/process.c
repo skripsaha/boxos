@@ -240,6 +240,7 @@ static void process_init_strand_fields(process_t *proc)
     proc->last_run_time    = 0;
     proc->consecutive_runs = 0;
     proc->total_cpu_time   = 0;
+    proc->cpu_tsc_stamp    = 0;
     proc->state            = PROC_CREATED;
     spinlock_init(&proc->state_lock);
     atomic_store_u32(&proc->ref_count, 1);

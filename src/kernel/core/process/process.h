@@ -127,7 +127,20 @@ typedef struct process_t
     int32_t score;
     uint64_t last_run_time;
     uint32_t consecutive_runs;
+    /* Processor time this process has been given, in MICROSECONDS, summed at
+     * every context switch away from it (scheduler.c) and read by
+     * system.proc.cputime, which backs std::clock(). Whole slices only: the
+     * slice in progress is not in it. */
     uint64_t total_cpu_time;
+    /* TSC at the moment this process was given the core. The pair above is
+     * measured with the TSC and not with the scheduler tick, and that is not a
+     * refinement: at tick granularity whoever is current when the tick fires is
+     * credited the WHOLE tick, so two processes alternating every tick are each
+     * credited 100% of the wall clock. That was measured on a one-core boot —
+     * cxxtest and pid 1 ping-ponged every tick, both fully credited — and it is
+     * what made std::clock() indistinguishable from wall time. Zero means "not
+     * currently holding the core". */
+    uint64_t cpu_tsc_stamp;
     int8_t current_prio;            // Current scheduler priority level (set on enqueue)
     int8_t rq_prio;                 // Priority level in runqueue (-1 = not enqueued)
     int16_t rq_index;               // Index in queue (-1 = not enqueued)

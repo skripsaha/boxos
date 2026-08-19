@@ -591,6 +591,7 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstdarg>
+#include <ctime>
 #include <cfenv>
 #include <cstdlib>
 #include <cstring>
@@ -734,6 +735,11 @@ template class box::__flat_hash::Table<std::string, std::string, std::hash<std::
 namespace {
 
 int g_failures = 0;
+
+// std::clock() sampled before any phase runs. phase210 uses it as a
+// discriminator that involves no timing at all: if clock() were a system-wide
+// or wall-based quantity it would already read like the uptime here.
+std::clock_t g_clock_at_entry = 0;
 
 void Check(bool ok, const char *what)
 {
@@ -47655,6 +47661,248 @@ void Phase209()
     printf("[CXX] PASS phase209: <cuchar> — and the -2 that lets a caller feed one byte\n");
 }
 
+// ── phase210: <ctime> ────────────────────────────────────────────────────
+// The header that could not exist while a twenty-byte structure held the name
+// time_t. Three things are worth proving beyond the arithmetic: that the name
+// really is arithmetic now, that <chrono> stopped dodging it, and that clock()
+// measures PROCESSOR time — which is a claim only a sleeping strand can settle.
+namespace p210 {
+
+static_assert(std::is_arithmetic_v<std::time_t>,
+              "[ctime.syn] requires time_t to be an arithmetic type");
+static_assert(std::is_arithmetic_v<std::clock_t>);
+static_assert(std::is_signed_v<std::time_t>,
+              "an unsigned time_t cannot represent a date before 1970");
+
+// The deviation this header retires. Before Ф41-e these returned `long long`
+// because there was no std::time_t to return — a documented departure from
+// [time.clock.system]/3. If someone reverts the rename, this line stops
+// compiling before anything else notices.
+static_assert(std::is_same_v<
+                  decltype(std::chrono::system_clock::to_time_t(
+                      std::chrono::system_clock::time_point{})),
+                  std::time_t>,
+              "[time.clock.system]/3 — to_time_t must return std::time_t");
+
+std::tm MakeTm(int y, int mon, int d, int h, int mi, int s)
+{
+    std::tm t{};
+    t.tm_year = y - 1900;
+    t.tm_mon  = mon - 1;
+    t.tm_mday = d;
+    t.tm_hour = h;
+    t.tm_min  = mi;
+    t.tm_sec  = s;
+    return t;
+}
+
+bool Renders(const std::tm &t, const char *fmt, std::string_view want)
+{
+    char buf[128];
+    const std::size_t n = std::strftime(buf, sizeof(buf), fmt, &t);
+    return n == want.size() && std::string_view(buf, n) == want;
+}
+
+} // namespace p210
+
+void Phase210()
+{
+    using namespace p210;
+
+    // ── gmtime, against dates that are their own oracle ──────────────────
+    std::time_t t = 0;
+    std::tm    *g = std::gmtime(&t);
+    Check(g && g->tm_year == 70 && g->tm_mon == 0 && g->tm_mday == 1 &&
+              g->tm_hour == 0 && g->tm_wday == 4 && g->tm_yday == 0,
+          "phase210 the epoch is Thursday 1970-01-01");
+
+    t = -1;
+    g = std::gmtime(&t);
+    Check(g && g->tm_year == 69 && g->tm_mon == 11 && g->tm_mday == 31 &&
+              g->tm_hour == 23 && g->tm_min == 59 && g->tm_sec == 59,
+          "phase210 one second before the epoch is the last of 1969");
+
+    t = 951782400; // 2000-02-29T00:00:00Z — the century leap year that IS one
+    g = std::gmtime(&t);
+    Check(g && g->tm_year == 100 && g->tm_mon == 1 && g->tm_mday == 29,
+          "phase210 2000-02-29 exists");
+
+    // ── mktime normalises, which is what it is for ───────────────────────
+    std::tm n = MakeTm(2024, 1, 32, 0, 0, 0);  // January 32nd
+    std::mktime(&n);
+    Check(n.tm_year == 124 && n.tm_mon == 1 && n.tm_mday == 1,
+          "phase210 January 32nd is February 1st");
+
+    n = MakeTm(2024, 1, 1, 25, 0, 0);          // hour 25
+    std::mktime(&n);
+    Check(n.tm_mday == 2 && n.tm_hour == 1, "phase210 hour 25 is 01:00 the next day");
+
+    n = MakeTm(2024, 13, 1, 0, 0, 0);          // month 13
+    std::mktime(&n);
+    Check(n.tm_year == 125 && n.tm_mon == 0, "phase210 month 13 rolls into next year");
+
+    n = MakeTm(2024, 0, 1, 0, 0, 0);           // month 0 == December before
+    std::mktime(&n);
+    Check(n.tm_year == 123 && n.tm_mon == 11, "phase210 month 0 rolls back a year");
+
+    // ‼ Neither of the two above catches a mktime that FORGETS to fold the
+    // month into the year, and a mutation proved it: days_from_civil counts
+    // from March, so an out-of-range month extends upward on its own and
+    // tm_mon 12, 13, 25 and 37 all come out right without any folding at all.
+    // Only a month BELOW -1 exposes it — unfolded, tm_mon -13 lands in the year
+    // 359834187. Anything less than -1 is the whole test here.
+    n = MakeTm(2024, 1, 1, 0, 0, 0);
+    n.tm_mon = -13;                            // 13 months before January 2024
+    std::mktime(&n);
+    Check(n.tm_year == 122 && n.tm_mon == 11,
+          "phase210 a month far BELOW range folds into the year");
+    n = MakeTm(2024, 1, 1, 0, 0, 0);
+    n.tm_mon = 25;                             // and far above it
+    std::mktime(&n);
+    Check(n.tm_year == 126 && n.tm_mon == 1,
+          "phase210 a month far above range folds too");
+
+    n = MakeTm(1900, 2, 29, 0, 0, 0);          // 1900 is NOT a leap year
+    std::mktime(&n);
+    Check(n.tm_mon == 2 && n.tm_mday == 1, "phase210 1900-02-29 is March 1st");
+
+    // mktime and gmtime are inverses across the epoch in both directions.
+    for (std::time_t probe : {std::time_t(0), std::time_t(-86399), std::time_t(1234567890),
+                              std::time_t(-2208988800), std::time_t(2147483647)}) {
+        std::tm b = *std::gmtime(&probe);
+        Check(std::mktime(&b) == probe, "phase210 gmtime and mktime are inverses");
+    }
+
+    Check(std::difftime(100, 40) == 60.0, "phase210 difftime");
+    Check(std::difftime(40, 100) == -60.0, "phase210 difftime is signed");
+
+    // ── the fixed 26-byte form C spells out ──────────────────────────────
+    std::tm a = MakeTm(1970, 1, 1, 0, 0, 0);
+    std::mktime(&a); // fills tm_wday, which asctime prints
+    Check(std::string_view(std::asctime(&a)) == "Thu Jan  1 00:00:00 1970\n",
+          "phase210 asctime — %3d puts TWO spaces before a single-digit day");
+    a = MakeTm(2024, 12, 25, 13, 4, 5);
+    std::mktime(&a);
+    Check(std::string_view(std::asctime(&a)) == "Wed Dec 25 13:04:05 2024\n",
+          "phase210 asctime pads the time with zeros and the day with a space");
+
+    std::time_t xmas = 1735131845; // 2024-12-25T13:04:05Z
+    Check(std::string_view(std::ctime(&xmas)) == "Wed Dec 25 13:04:05 2024\n",
+          "phase210 ctime is asctime of localtime");
+    // ctime must not hand back asctime's buffer: a program may hold one across
+    // a call to the other.
+    const char *held = std::ctime(&xmas);
+    std::tm     other = MakeTm(1999, 1, 1, 0, 0, 0);
+    std::mktime(&other);
+    std::asctime(&other);
+    Check(std::string_view(held) == "Wed Dec 25 13:04:05 2024\n",
+          "phase210 ctime's result survives a call to asctime");
+
+    // ── strftime through <chrono>'s engine, not a second one ─────────────
+    std::tm s = MakeTm(2024, 12, 25, 13, 4, 5);
+    std::mktime(&s);
+    Check(Renders(s, "%Y-%m-%d", "2024-12-25"), "phase210 strftime %Y-%m-%d");
+    Check(Renders(s, "%H:%M:%S", "13:04:05"), "phase210 strftime %H:%M:%S — no fraction");
+    Check(Renders(s, "%a %b %e", "Wed Dec 25"), "phase210 strftime names and %e");
+    Check(Renders(s, "%j", "360"), "phase210 strftime day of year");
+    Check(Renders(s, "%F %T", "2024-12-25 13:04:05"), "phase210 strftime %F %T");
+    Check(Renders(s, "%I %p", "01 PM"), "phase210 strftime 12-hour clock");
+    Check(Renders(s, "%%", "%"), "phase210 strftime %% is a literal percent");
+    Check(Renders(s, "a%nb%tc", "a\nb\tc"), "phase210 strftime %n and %t");
+    // localtime IS gmtime here, and the zone specifiers say so rather than
+    // rendering nothing or throwing.
+    // The week and weekday specifiers are the ones whose input this header
+    // fills in by hand (Parts::wd and Parts::yday), so they are where a
+    // one-off in the tm-to-Parts mapping would show. 2024-12-25 is a
+    // Wednesday, day 360 of a leap year, ISO week 52 of ISO year 2024.
+    Check(Renders(s, "%u", "3"), "phase210 strftime %u — ISO weekday, Monday is 1");
+    Check(Renders(s, "%w", "3"), "phase210 strftime %w — weekday, Sunday is 0");
+    Check(Renders(s, "%U", "51"), "phase210 strftime %U — weeks counted from Sunday");
+    Check(Renders(s, "%W", "52"), "phase210 strftime %W — weeks counted from Monday");
+    Check(Renders(s, "%V", "52"), "phase210 strftime %V — ISO week");
+    Check(Renders(s, "%G", "2024"), "phase210 strftime %G — ISO year");
+    Check(Renders(s, "%C", "20"), "phase210 strftime %C — century");
+    Check(Renders(s, "%y", "24"), "phase210 strftime %y — two-digit year");
+    Check(Renders(s, "%D", "12/25/24"), "phase210 strftime %D");
+    Check(Renders(s, "%x", "12/25/24"), "phase210 strftime %x — the C locale date");
+    Check(Renders(s, "%Z", "UTC"), "phase210 strftime %Z is UTC, said plainly");
+    Check(Renders(s, "%z", "+0000"), "phase210 strftime %z is +0000");
+
+    char small[4];
+    Check(std::strftime(small, sizeof(small), "%Y-%m-%d", &s) == 0,
+          "phase210 strftime returns 0 when the result does not fit");
+    char exact[11];
+    Check(std::strftime(exact, sizeof(exact), "%Y-%m-%d", &s) == 10,
+          "phase210 strftime counts the terminator against maxsize");
+    // An unknown conversion is undefined in C; it must not throw into a C caller.
+    Check(std::strftime(exact, sizeof(exact), "%\xEE", &s) == 0,
+          "phase210 an unknown conversion returns 0, it does not escape as an exception");
+
+    // ── time and timespec_get agree with each other ──────────────────────
+    std::time_t direct = 0;
+    const std::time_t returned = std::time(&direct);
+    Check(returned == direct && returned > 1700000000,
+          "phase210 time writes through the pointer and returns the same value");
+
+    std::timespec ts{};
+    Check(std::timespec_get(&ts, TIME_UTC) == TIME_UTC, "phase210 timespec_get accepts TIME_UTC");
+    Check(ts.tv_nsec >= 0 && ts.tv_nsec < 1000000000, "phase210 timespec_get normalises tv_nsec");
+    Check(std::timespec_get(&ts, 0) == 0, "phase210 timespec_get refuses an unknown base");
+
+    // ── clock() is PROCESSOR time, and here is the proof ─────────────────
+    Check(CLOCKS_PER_SEC == 1000000, "phase210 CLOCKS_PER_SEC is microseconds");
+    const std::clock_t c0 = std::clock();
+    Check(c0 != static_cast<std::clock_t>(-1), "phase210 the kernel can answer clock()");
+
+    // Burning CPU moves it.
+    {
+        const auto      w0 = std::chrono::steady_clock::now();
+        volatile double sink = 0;
+        while (std::chrono::steady_clock::now() - w0 < std::chrono::milliseconds(50))
+            for (int i = 0; i < 1000; i++) sink = sink + 1.0;
+        const std::clock_t c1 = std::clock();
+        Check(c1 > c0, "phase210 clock() advances while the strand burns CPU");
+        Check(c1 >= c0, "phase210 clock() never runs backwards");
+    }
+
+    // The discriminator that needs no timing: a quantity sampled before the
+    // suite began must be near zero. Anything system-wide — uptime, the wall
+    // clock, a tick counter — would already have read like the uptime there.
+    Check(g_clock_at_entry >= 0 && g_clock_at_entry < 2 * CLOCKS_PER_SEC,
+          "phase210 clock() started near zero, so it is not a system-wide clock");
+    Check(c0 > g_clock_at_entry,
+          "phase210 and it has advanced since, by the work this suite did");
+
+    // Sleeping is NOT used as a discriminator here, and the reason is a BoxOS
+    // defect rather than a property of clock(). A strand blocked in a timed
+    // park still gets the core: measured across a 300 ms sleep on a one-core
+    // boot, this strand was credited ~256 ms of processor time, because the
+    // wait it is doing is a poll and not an event. clock() is reporting that
+    // faithfully — it is the sleep that is wrong, and it belongs to the
+    // scheduler, not here. The numbers are printed so the day it is fixed is
+    // visible in the log.
+    {
+        const std::clock_t c1 = std::clock();
+        const auto         w1 = std::chrono::steady_clock::now();
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        const std::clock_t c2 = std::clock();
+        const auto         w2 = std::chrono::steady_clock::now();
+
+        const long long wall_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(w2 - w1).count();
+        const long long cpu_us = static_cast<long long>(c2 - c1);
+        printf("[CXX] note phase210: across a 300 ms sleep, wall=%lld us cpu=%lld us "
+               "(a parked strand should spend far less than it does — see CONFORMANCE)\n",
+               wall_us, cpu_us);
+        Check(wall_us >= 250000, "phase210 the sleep really slept");
+        Check(cpu_us <= wall_us + 20000,
+              "phase210 a strand cannot be credited more processor time than wall time");
+    }
+
+    printf("[CXX] PASS phase210: <ctime> — the name is free, and clock() means what C says\n");
+}
+
+
 
 } // namespace
 
@@ -47663,6 +47911,8 @@ int CxxTraitsTortureCompiled();
 
 int main()
 {
+    g_clock_at_entry = std::clock();
+
     Phase0();
     Phase1();
     Phase3();
@@ -47887,6 +48137,7 @@ int main()
     Phase207();
     Phase208();
     Phase209();
+    Phase210();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

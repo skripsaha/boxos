@@ -17,11 +17,11 @@
 
 #define TIME_TIMEOUT_MS    BOX_TIMEOUT_FAST_MS
 
-int time_get(time_t *out)
+int time_get(BoxTime *out)
 {
     if (!out) return ERR_NULL_POINTER;
 
-    /* Out-crate layout matches kernel's time_t struct (20 bytes). */
+    /* Out-crate layout matches kernel's BoxTime struct (20 bytes). */
     uint8_t buf[20] = {0};
     int rc = MfCall1(DECK_HARDWARE, HW_RTC_GET_TIME,
                      NULL, 0, NULL, 0,
@@ -109,7 +109,7 @@ static void write4(char *buf, uint16_t v)
     buf[3] = (char)('0' + v % 10);
 }
 
-int64_t time_diff(const time_t *a, const time_t *b)
+int64_t time_diff(const BoxTime *a, const BoxTime *b)
 {
     if (!a || !b) return 0;
     int64_t sec_diff = (int64_t)a->seconds - (int64_t)b->seconds;
@@ -117,7 +117,7 @@ int64_t time_diff(const time_t *a, const time_t *b)
     return sec_diff * 1000 + ns_diff / 1000000;
 }
 
-void time_add_ms(const time_t *t, int64_t ms, time_t *out)
+void time_add_ms(const BoxTime *t, int64_t ms, BoxTime *out)
 {
     if (!t || !out) return;
 
@@ -161,7 +161,7 @@ void time_add_ms(const time_t *t, int64_t ms, time_t *out)
     out->day   = (uint8_t)(days + 1);
 }
 
-int time_format(const time_t *t, char *buf, size_t buf_size)
+int time_format(const BoxTime *t, char *buf, size_t buf_size)
 {
     if (!t || !buf) return ERR_NULL_POINTER;
     if (buf_size < 20) return ERR_BUFFER_TOO_SMALL;

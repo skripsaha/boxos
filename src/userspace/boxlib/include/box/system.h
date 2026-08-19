@@ -42,6 +42,13 @@ typedef struct {
 
 int proc_info(uint16_t pid, proc_info_t* info);
 
+/* Processor microseconds this cabin has been given — NOT wall time: a cabin
+ * that is parked spends none of it, and two strands running at once spend it
+ * twice as fast as the clock on the wall. Self only; there is no pid form,
+ * because another cabin's processor time is not ours to read. Backs
+ * std::clock(). */
+int proc_cpu_time(uint64_t* out_us);
+
 /* Normal termination: runs __cxa_finalize callbacks (std::atexit + static
  * destructors) and the .fini_array, flushes the console, then ends the
  * process. The parameter is `int` because [support.start.term] says so and

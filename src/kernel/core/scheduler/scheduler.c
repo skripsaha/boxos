@@ -19,6 +19,9 @@
 #include "lapic.h"     /* lapic_send_ipi — directed reschedule IPI on cross-core enqueue */
 #include "irqchip.h"   /* IPI_WAKE_VECTOR */
 
+/* TSC frequency for per-process processor-time accounting (see schedule()). */
+extern uint64_t cpu_get_tsc_freq_khz(void);
+
 // ---------------------------------------------------------------------------
 // Dynamic Scheduler Parameters
 // ---------------------------------------------------------------------------
@@ -961,6 +964,36 @@ void schedule(void *frame_ptr)
     if (current && current != next && !process_is_idle(current)) {
         current->quiesce_core = amp_get_core_index();
         __atomic_store_n(&current->quiesce_seq, my_qseq, __ATOMIC_RELEASE);
+
+        /* Processor time. total_cpu_time was a field that had been zeroed at
+         * creation and never written again since it was added — a promise in a
+         * struct, and the reason std::clock() had nothing true to return until
+         * Ф41-e.
+         *
+         * Measured with the TSC, not with the scheduler tick, and the first
+         * attempt used the tick: at that granularity whoever is current when
+         * the tick fires is credited the WHOLE tick, so two processes that
+         * alternate every tick are EACH credited 100% of the wall clock. That
+         * is not a rounding error, it is a factor of two per participant, and
+         * on a one-core boot it made std::clock() read exactly equal to wall
+         * time — including across a 300 ms sleep. The TSC is the only clock
+         * here fine enough to say who actually had the core.
+         *
+         * Both ends of the delta are taken on THIS core (a process is switched
+         * away by the core running it), so cross-core TSC skew cannot enter.
+         * Two RDTSCs per switch, ~25 cycles each, against a switch rate of a
+         * few hundred per second per core. */
+        if (current->cpu_tsc_stamp != 0) {
+            const uint64_t khz = cpu_get_tsc_freq_khz();
+            const uint64_t now_tsc = rdtsc();
+            if (khz != 0 && now_tsc > current->cpu_tsc_stamp) {
+                const uint64_t used = ((now_tsc - current->cpu_tsc_stamp) * 1000ULL) / khz;
+                __atomic_store_n(&current->total_cpu_time,
+                                 __atomic_load_n(&current->total_cpu_time, __ATOMIC_RELAXED) + used,
+                                 __ATOMIC_RELAXED);
+            }
+            current->cpu_tsc_stamp = 0;   /* no longer holding the core */
+        }
     }
     s->current_process = next;
     /* Release the outgoing strand's dispatch claim AFTER current_process moves to
@@ -988,6 +1021,11 @@ void schedule(void *frame_ptr)
         spin_unlock(&next->state_lock);
     }
     next->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    /* Start of this strand's processor-time slice. Only when it is actually
+     * taking the core from someone else: on a consecutive run the slice never
+     * ended, and restamping would discard the part already served. The idle
+     * task is excluded — time spent idle is not time given to anyone. */
+    if (next != current && !process_is_idle(next)) next->cpu_tsc_stamp = rdtsc();
 
     // Track consecutive runs
     if (current && current != next)
