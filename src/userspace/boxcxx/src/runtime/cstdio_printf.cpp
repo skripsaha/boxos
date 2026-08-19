@@ -254,10 +254,18 @@ void Floating(Sink &s, const Spec &sp, long double value, char conv)
 
 // ── the walk ────────────────────────────────────────────────────────────
 
+// Saturating. A field width is written by the caller and nothing bounds its
+// digits, so `v * 10` on a plain int is signed overflow — undefined behaviour,
+// not merely a large number. Ф42 found this while giving the wide engine the
+// same parser and had to explain why the two differed; they no longer do.
 int ReadInt(const char *&p)
 {
     int v = 0;
-    while (*p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+    while (*p >= '0' && *p <= '9') {
+        v = v * 10 + (*p - '0');
+        if (v > 1000000) v = 1000000;
+        ++p;
+    }
     return v;
 }
 

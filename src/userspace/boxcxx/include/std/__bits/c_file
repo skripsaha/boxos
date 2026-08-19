@@ -1,0 +1,98 @@
+// boxcxx — <__bits/c_file>
+//
+// The inside of a FILE: what the bits of `__flags` mean, and the three
+// primitives that may be called while its lock is held.
+//
+// This leaf exists because <cwchar>'s wide character I/O is a SECOND consumer
+// of a stream's internals, and a multi-byte character has to be assembled
+// under ONE lock — taking and releasing it per byte would let another strand
+// interleave halfway through a character, which is not a thing a reader can
+// recover from. Until Ф42 all of this lived in the anonymous namespace of
+// `cstdio.cpp`, which is precisely where a second consumer cannot reach it.
+//
+// That is the fourth time this phase family has hit the same shape:
+// `Utf8Decode` in `cstdlib.cpp` (Ф41-e-1), the conversion state machine in
+// `cuchar.cpp`, the Unicode run reader in the generated escape table (Ф42-a),
+// and now this. The rule the four of them add up to: **if a definition would
+// have to be duplicated for a second caller to use it, it does not belong in
+// an anonymous namespace** — it belongs in a leaf, even a private one.
+//
+// Nothing here is part of the standard library's interface. It is included by
+// `cstdio.cpp` and by `cwchar_io.cpp`, and by nothing else.
+#ifndef BOXCXX_BITS_C_FILE
+#define BOXCXX_BITS_C_FILE
+
+#include <cstdio>
+
+#include "box/sync.h"
+
+namespace std {
+namespace __stdio {
+
+// The bits of FILE::__flags. They belong beside the struct rather than inside
+// one runtime file: <cstdio> already publishes `__flags`, and a reader cannot
+// do anything with a field whose meaning is kept somewhere else.
+inline constexpr unsigned kRead     = 1u << 0;
+inline constexpr unsigned kWrite    = 1u << 1;
+inline constexpr unsigned kEof      = 1u << 2;
+inline constexpr unsigned kErr      = 1u << 3;
+inline constexpr unsigned kOwnBuf   = 1u << 4;
+inline constexpr unsigned kConsole  = 1u << 5;  // writes take the shared screen road
+inline constexpr unsigned kKeyboard = 1u << 6;  // line source with no end
+inline constexpr unsigned kSeekable = 1u << 7;
+inline constexpr unsigned kAppend   = 1u << 8;
+inline constexpr unsigned kWriting  = 1u << 9;  // buffer holds pending output
+inline constexpr unsigned kReading  = 1u << 10; // buffer holds data read ahead
+inline constexpr unsigned kStatic   = 1u << 11; // one of the three conventional streams
+
+// Stream orientation ([cwchar.syn] `fwide`). A stream starts with neither bit
+// set — undecided — and the first byte or wide operation on it fixes one.
+//
+// This is also what lets `__unget` serve both worlds. C forbids mixing byte
+// and wide I/O on one stream, which is exactly what orientation MEANS, so the
+// byte push-back and the wide push-back can never both be live. One `int`
+// holds either a byte or a wchar_t, and no field had to be added to FILE — so
+// the struct's layout is unchanged and nothing that was compiled against it
+// needs rebuilding for the wrong reason.
+inline constexpr unsigned kByteOriented = 1u << 12;
+inline constexpr unsigned kWideOriented = 1u << 13;
+
+// Holds a stream's lock for a scope. Non-recursive: everything called from
+// inside is a `*Locked` function, and calling a public <cstdio> entry point
+// from within one would deadlock rather than misbehave quietly.
+struct Guard {
+    ::umutex_t *m;
+    explicit Guard(::std::FILE *f) : m(&f->__lock) { ::umutex_lock(m); }
+    ~Guard() { ::umutex_unlock(m); }
+    Guard(const Guard &)            = delete;
+    Guard &operator=(const Guard &) = delete;
+};
+
+// One byte in, one byte out, and the pending-output drain — the whole of what
+// the wide layer needs from the byte layer.
+int GetLocked(::std::FILE *f);
+int PutLocked(::std::FILE *f, int c);
+int FlushLocked(::std::FILE *f);
+
+// Fixes the orientation if it is still undecided, and answers whether the
+// stream may be used the way the caller intends. A byte call on a
+// wide-oriented stream, or the reverse, is undefined by C; here it is refused,
+// because "undefined" and "unnoticed" are not the same thing.
+inline bool ClaimWide(::std::FILE *f) noexcept
+{
+    if (f->__flags & kByteOriented) return false;
+    f->__flags |= kWideOriented;
+    return true;
+}
+
+inline bool ClaimByte(::std::FILE *f) noexcept
+{
+    if (f->__flags & kWideOriented) return false;
+    f->__flags |= kByteOriented;
+    return true;
+}
+
+} // namespace __stdio
+} // namespace std
+
+#endif // BOXCXX_BITS_C_FILE

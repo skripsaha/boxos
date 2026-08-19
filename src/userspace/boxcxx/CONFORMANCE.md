@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **101** — 96 of the 105 C++23 [headers] name (9 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 138 |
+| Standard headers provided | **102** — 97 of the 105 C++23 [headers] name (8 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 139 |
 | Header source | ~93 300 lines |
 | Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 227 phases (208 of them the numbered `PhaseN` series), 5 754 runtime checks, 1 945 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 229 phases (210 of them the numbered `PhaseN` series), 5 876 runtime checks, 1 955 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -62,7 +62,7 @@ macro count and checks it against [version.syn] on every run.
 The phase count has drifted three times, in both directions, so it is now
 stated with the rule that produces it: `Phase*();` call sites in `main`, of
 which there are exactly as many as there are phase definitions. That is
-**227** — 208 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
+**229** — 210 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
 and the rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered
 series alone, which is why both numbers are given above: neither can drift
 without the other contradicting it.
@@ -102,14 +102,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (4)
+## 1.1 Headers that do not exist (3)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 101 of them are in the tree and 4 are not,
+[headers] name 105 headers in C++23; 102 of them are in the tree and 3 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 101 + 5 = the 106 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 102 + 5 = the 107 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -120,9 +120,12 @@ standard. Ф41-e-2 built it, so it is now in the tree rather than in neither
 column — and the count above is the output of a diff between [headers] and
 `ls include/std`, not a number anyone maintains.
 
-### C library wrappers — 1 absent, 20 provided
+### C library wrappers — 21 of 21 provided
 
-Absent: `<cwchar>`
+**None is absent.** Ф42 finished the set that Ф41 began, and the sentence that
+used to open this section — "BoxOS has no libc" — has been retired rather than
+qualified: it was true, and it was the reason given for headers it said nothing
+about.
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
 `<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
@@ -154,11 +157,16 @@ everything underneath these headers: `<cerrno>`'s `errno` is a C contract and
 not a BoxOS one, and nothing in boxlib or `box::` will ever set it (§2
 `<cerrno>`).
 
-**`<cwchar>` is absent for a different reason than the rest of that list:** it
-belongs to the wide-character exclusion of §1.2, not to the libc question. It
-carries an entire second formatted-I/O engine, and the wide layer is being
-built as one piece — Ф42 — so it arrives with `wcout` and `wformat` rather than
-on its own.
+**`<cwchar>` used to be absent for a different reason than the rest of that
+list:** it was said to belong to the wide-character exclusion of §1.2 because
+it "carries an entire second formatted-I/O engine". Half of that was right and
+the half that mattered was not. It does carry the wide formatted-I/O surface —
+and that surface turned out to need no second engine at all. Every conversion
+except the character and string ones produces ASCII, so a directive is
+formatted by the narrow engine and widened, which is how the correctly-rounded
+floating-point path of Ф27 arrived without being ported. What the wide layer
+owns is the four conversions whose width is counted in characters rather than
+bytes, and that is a page of code, not an engine. It shipped in Ф42-b (§2).
 
 `<cwctype>` used to be named here beside it, on the grounds that it "carries
 `wctype`/`wctrans`, which are locales". **That reason was wrong, and building
@@ -311,20 +319,21 @@ and line — is recorded there.
 - **Wide characters — being lifted, one piece at a time (Ф42).** This was a
   flat exclusion until Ф42; it is now a partial one, and the honest way to
   state it is by what has landed rather than by what is planned.
-  **Landed:** `<cwctype>` (§2), so the classification of a wide character is
-  answered, and answered from the Unicode Character Database rather than from
-  ASCII.
+  **Landed:** `<cwctype>`, so the classification of a wide character is
+  answered from the Unicode Character Database rather than from ASCII; and
+  `<cwchar>`, so wide strings, the restartable conversions, the seven `wcsto*`,
+  the wide character I/O and the whole of `fwprintf`/`fwscanf` work (§2).
   **Not yet:** there are still no wide streams and no `wformat_context`.
   `<iostream>` declares `cin`/`cout`/`cerr`/`clog` and not
   `wcin`/`wcout`/`wcerr`/`wclog`; `<fstream>` and `<iosfwd>` carry
-  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts;
-  `<cwchar>` is absent with them (§1.1).
+  `filebuf`/`ifstream`/`ofstream`/`fstream` and not their `w` counterparts.
   Every class template involved is generic in `CharT` already, so what is left
   is not a structural block. Measured before the phase started: `basic_streambuf`
   contains no bare `char` at all and `basic_ios` one, while `basic_ostream` has
   52 and `basic_istream` 39 — the numeric engine that stands in for `num_put`
   formats through `to_chars`, which produces `char` digits. That, and the
   transcoding at the file boundary, is the remaining work.
+
 - **Locales beyond `"C"`.** `<locale>` exists as the minimum the stream
   machinery needs. The `L` format specifier is accepted and ignored.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
@@ -1320,6 +1329,18 @@ the rename stops the build rather than quietly restoring the old dodge.
   list it. `timespec_get` accepts `TIME_UTC` and returns 0 for any other base,
   which is the only base there is.
 
+## `<cstdint>`
+
+**Six macros [cstdint.syn] requires were absent until Ф42-b**, and the header
+that noticed was `<cwchar>`: it needs `WCHAR_MIN` and `WCHAR_MAX`, and a caller
+cannot derive the minimum from the maximum without already knowing that
+`wchar_t` is signed here. `WINT_MIN`, `WINT_MAX`, `SIG_ATOMIC_MIN` and
+`SIG_ATOMIC_MAX` belong to the same clause of C's 7.20.3 and were missing for
+the same reason — the last two should have been caught when Ф41-a built
+`<csignal>` and were not. libc++ defines all six; the omission was ours. They
+are the compiler's own predefined values, as the rest of the header already is.
+No other deviation.
+
 ## `<cstdio>`
 
 The last C wrapper, and the only one the sentence §1.1 used to open with — "BoxOS
@@ -1397,6 +1418,31 @@ in the global namespace**, and each needed a different answer.
   of them. C promises a *stream* only one character of `ungetc`, and that is
   what is handed back when the call returns; the deeper lookahead lives inside
   one call.
+
+**Stream orientation arrived in Ф42-b**, with `<cwchar>`. C says the first byte
+or wide operation on a stream fixes which of the two worlds it belongs to, and
+`fwide` reports it. Two consequences are worth stating because they surprise
+people, and both are the rule rather than a limitation:
+
+* `stdout` has carried `printf` since the program started, so it is
+  byte-oriented and `fwprintf(stdout, …)` is refused. A stream is one world or
+  the other for its whole life.
+* The orientation is what makes `FILE::__unget` serve both the byte push-back
+  and the wide one. They can never both be live, so `ungetwc` needed no new
+  field and the struct's layout is unchanged.
+
+The claim is made at the public byte entry points — `fgetc`, `fputc`, `ungetc`,
+`fgets`, `fputs`, `puts`, `fread`, `fwrite` — and not inside the locked
+primitives, because `<cwchar>`'s wide I/O calls those same primitives to move
+its bytes. Putting it one layer lower was the first attempt and it made every
+wide write to a wide-oriented stream refuse itself.
+
+**The field-width parser saturates**, at a value high enough that no width a
+program really writes is affected. That is an overflow guard and not a policy:
+a width is written by the caller, nothing bounds its digits, and `v * 10` on a
+plain `int` is signed overflow — undefined, not merely large. It is distinct
+from `<format>`'s deliberate 65535 cap (§3). Ф42 found the hole while giving
+the wide engine the same parser and having to explain why the two differed.
 
 ## `<csetjmp>`
 
@@ -1497,6 +1543,121 @@ the ABI it is compiled against. `std::va_list` is `::va_list` — the same type
 the macros walk, which matters more here than usual: `<cstdio>`'s `vprintf`
 family will take it by value, and on x86-64 SysV a `va_list` is an array of one
 struct and therefore decays on the way in. No deviations.
+
+## `<cwchar>`
+
+All of [cwchar.syn]: the wide strings, the restartable conversions, the seven
+`wcsto*`, the wide character I/O, and the formatted families. `wchar_t` here is
+a signed 32-bit `int` and `wint_t` an unsigned 32-bit one, so WEOF cannot
+collide with a character — scalar values stop at U+10FFFF.
+
+**One conversion machine, not two.** `mbrtowc` IS `mbrtoc32`: on this target
+`wchar_t` and `char32_t` hold the same values, so a second state machine would
+be a second thing to keep level with the first. What delegation must not lose
+is that C gives every one of these functions its OWN internal state for a null
+`ps` — `<cuchar>` keeps six separate ones for exactly that reason — so
+`mbrtowc` passes its own when the caller supplies none, and shares only the
+machine. `wcrtomb` and `c32rtomb` stand in the same relation.
+
+**One formatting engine, not two.** Every conversion except the character and
+string ones produces ASCII, so `fwprintf` rebuilds the directive narrow, hands
+it to the engine `<cstdio>` already has, and widens the result. The
+correctly-rounded floating-point path of Ф27 therefore arrived without being
+ported. What the wide layer does itself is `%c`, `%lc`, `%s` and `%ls`, because
+**their width and precision count CHARACTERS and the narrow engine counts
+bytes** — `%8ls` on `L"жжж"` must pad to eight characters, not to eight bytes
+of UTF-8. `%n` counts characters for the same reason.
+
+**One tokenizer that could not be shared.** `fwscanf` gathers its own fields,
+because two things the narrow scanner does are wrong at this width: white space
+is `iswspace`, which is Unicode-wide (§2 `<cwctype>`), and a field width counts
+characters. The VALUE conversion is still shared — a gathered token goes to
+`wcstoll`/`wcstoull`/`wcstold`, whose `endptr` is authoritative about how much
+of it was really a number.
+
+**Where these functions live, and why not in boxlib.** Ф41-b put `strcoll`,
+`strxfrm` and `strtok` in boxlib, under the split that gives it the raw string
+primitives because C programs need them. That rule deliberately does not carry
+over: measured, the whole of boxlib mentions `wchar_t` exactly zero times, and
+no C program in this system uses a wide string. A symbol in boxlib that no C
+caller ever names is weight in every C image for nothing.
+
+**Two places this header is stronger than `<cstring>`, for a reason that is not
+to its credit.** Nothing in the tree already owned these names — unlike
+`printf`, `fread`, `fwrite` and `getchar`, which boxlib had claimed before
+`<cstdio>` wanted them. So the const-correct overload pairs of [c.strings] reach
+the **global** namespace too, where `::strchr` has to stay C-shaped and lose
+const; and no renaming was needed anywhere, where Ф41 spent three separate
+collisions on it.
+
+**Deliberate answers, not stubs.**
+
+| | |
+|---|---|
+| `wcscoll` | is `wcscmp`, and `wcsxfrm` is a copy: one locale, no collation table. C asks only that the order `wcscoll` imposes agree with comparing `wcsxfrm` results, and identity satisfies that. Measured divergence: macOS in `en_US.UTF-8` transforms `"abc"` into seven wide characters and returns −8 from `wcscoll(L"a", L"b")`. It has a real collation; BoxOS has one locale. |
+| `wcstok` | needs no hidden cursor, and that is C's doing: the wide form takes an explicit `wchar_t **ptr`. Ф41-b's per-strand `strtok` cursor has no counterpart here and should not grow one. |
+| `btowc` / `wctob` | only ASCII is one byte in UTF-8, so `btowc(0xD0)` — the first byte of `L'ж'` — is WEOF, and `wctob` answers EOF for everything above U+007F. |
+| `swprintf` | reports a **negative** value when the buffer fills, rather than what it would have written. That is C's design and not `snprintf`'s; a caller sizing a buffer by asking first has to do it another way. |
+| leading white space in `wcsto*` | is `iswspace`, so `wcstod(L"\u2003" L"42")` consumes the EM SPACE where the narrow `strtod` would stop at its first byte. Not an oversight in either direction — C defines the skip in terms of the classification of the character type it was given. |
+
+**A defect measured in the reference, which boxcxx cannot have by
+construction.** macOS's own `strtol` and `wcstol` disagree with each other on
+`"0x"`, `"0x."`, `"0X"` and `"0xg"`, at base 0 and base 16 alike: the narrow one
+consumes the `0` (which is right — the longest initial subsequence of the
+expected form is `"0"`), the wide one consumes nothing. Here the wide function
+IS the narrow one, so the two cannot drift.
+
+**What the push-back can and cannot promise.** `ungetwc` accepts one character,
+which is all C guarantees, and it goes in `FILE::__unget` — the same slot the
+byte world uses. That sharing is safe for a reason rather than by luck: C
+forbids mixing byte and wide operations on one stream, which is what
+orientation MEANS, so the two push-backs can never both be live. No field was
+added to `FILE` and its layout is unchanged. `fwscanf`'s deeper look-ahead
+(eight characters, because `infinity` is eight long) lives in the call and only
+the last character goes back to the stream — the one [fwscanf] requires to be
+left unread. The narrow `vfscanf` hands its own back on exactly these terms.
+
+**How it is known to be right.** Four differentials against the host's libc,
+before any of it was booted: the strings and restartable conversions over
+40 000 randomised iterations from an alphabet mixing ASCII with Cyrillic, CJK
+and astral characters (**280 562 lines, 0 disagreements**); the seven `wcsto*`
+over 65 inputs × 5 bases including a 2 996-digit run (**1 520 lines, 0**);
+`swprintf` (**48 cases, 0**); `swscanf` (**63 cases, 0**). Thirteen mutations
+were run. Ten were caught. Of the three that were not:
+
+* one was a genuine test gap — `wcschr` that could no longer find the
+  terminator passed clean, because no generated needle was ever `L'\0'`;
+* one was a second genuine gap — the scanner's "push back what the converter
+  declined" step had no input in the corpus that produced a tail at all;
+* one is **equivalent, and proved so by pairing**: removing the `0x` back-off
+  alone changes no answer, because `wcstoull`'s `endptr` returns the `x`
+  regardless; removing both breaks eight cases. Exactly one of the two
+  mechanisms is load-bearing, and the back-off is kept because its story is
+  local.
+
+Closing the first two gaps then found a real defect that no reading had: `%i`
+on `"0888888888888"` resolves to octal, so eighteen characters became tail, the
+eight-deep push-back dropped ten of them **silently**, and the next field read
+the wrong number. The root cause was gathering generously and letting the
+converter sort it out; the fix resolves the base before any digit is taken.
+
+**Three more were found by asking what every fixed-size buffer would do when
+the argument outgrew it**, and all three were silent:
+
+* `%*d` with a NEGATIVE width lost its left-justification on every delegated
+  conversion. A negative `*` width IS the `-` flag, and the flag was set in the
+  parsed struct while the narrow directive was rebuilt from the flag ARRAY. If
+  a directive is rebuilt, everything derived from an argument has to reach the
+  form it is rebuilt from.
+* `%s` of a 2 000-character multibyte string produced 511 characters and a
+  return value that agreed with itself. It buffered; it no longer does, and
+  decodes twice instead — a buffer has a size and a string does not.
+* `%.500f` of 1e300 needs 812 characters and produced 511. `snprintf` reports
+  the length it WOULD have written, so that is now the signal to reformat
+  through a heap buffer. A precision is a number the caller picks.
+
+None of the three could be caught by reading, and the first was caught by the
+host differential rather than by review.
 
 ## `<cwctype>`
 

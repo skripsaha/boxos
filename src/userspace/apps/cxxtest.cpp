@@ -592,6 +592,7 @@
 #include <csignal>
 #include <cstdarg>
 #include <cwctype>
+#include <cwchar>
 #include <cstdio>
 #include <ctime>
 #include <cfenv>
@@ -48155,45 +48156,47 @@ namespace p212 {
 
 struct Counts {
     unsigned alpha, upper, lower, print, space, blank, cntrl, punct;
+    unsigned firstBad;          // where an invariant broke, 0 if none
+    bool     ok;
 };
 
+// One pass, not two. The population count and the derived relations are asked
+// of the same code point while it is in hand — the first version swept
+// 1 114 112 code points twice, once to count and once to check, and the second
+// sweep learned nothing the first could not have told it.
 Counts SweepAll()
 {
     Counts n = {};
+    n.ok = true;
     for (unsigned cp = 0; cp <= 0x10FFFFu; ++cp) {
         const std::wint_t c = (std::wint_t)cp;
-        if (std::iswalpha(c)) ++n.alpha;
-        if (std::iswupper(c)) ++n.upper;
-        if (std::iswlower(c)) ++n.lower;
-        if (std::iswprint(c)) ++n.print;
-        if (std::iswspace(c)) ++n.space;
-        if (std::iswblank(c)) ++n.blank;
-        if (std::iswcntrl(c)) ++n.cntrl;
-        if (std::iswpunct(c)) ++n.punct;
-    }
-    return n;
-}
 
-// Every relation the header derives rather than tables. A break here means two
-// answers that must agree stopped agreeing, which no population count can see.
-bool InvariantsHold(unsigned *firstBad)
-{
-    for (unsigned cp = 0; cp <= 0x10FFFFu; ++cp) {
-        const std::wint_t c = (std::wint_t)cp;
+        const bool alpha = std::iswalpha(c) != 0;
+        const bool upper = std::iswupper(c) != 0;
+        const bool lower = std::iswlower(c) != 0;
         const bool print = std::iswprint(c) != 0;
         const bool space = std::iswspace(c) != 0;
-        const bool graph = std::iswgraph(c) != 0;
-        const bool alpha = std::iswalpha(c) != 0;
-        const bool digit = std::iswdigit(c) != 0;
-        const bool alnum = std::iswalnum(c) != 0;
+        const bool blank = std::iswblank(c) != 0;
+        const bool cntrl = std::iswcntrl(c) != 0;
         const bool punct = std::iswpunct(c) != 0;
-        if (graph != (print && !space)) { *firstBad = cp; return false; }
-        if (alnum != (alpha || digit)) { *firstBad = cp; return false; }
-        if (punct && !print)           { *firstBad = cp; return false; }
-        if (std::iswupper(c) && !alpha){ *firstBad = cp; return false; }
-        if (std::iswlower(c) && !alpha){ *firstBad = cp; return false; }
+        const bool digit = std::iswdigit(c) != 0;
+        const bool graph = std::iswgraph(c) != 0;
+        const bool alnum = std::iswalnum(c) != 0;
+
+        n.alpha += alpha; n.upper += upper; n.lower += lower; n.print += print;
+        n.space += space; n.blank += blank; n.cntrl += cntrl; n.punct += punct;
+
+        // Everything the header derives rather than tables. A break here means
+        // two answers that must agree stopped agreeing, which no population
+        // count can see.
+        if (n.ok &&
+            (graph != (print && !space) || alnum != (alpha || digit) ||
+             (punct && !print) || (upper && !alpha) || (lower && !alpha))) {
+            n.ok = false;
+            n.firstBad = cp;
+        }
     }
-    return true;
+    return n;
 }
 
 } // namespace p212
@@ -48295,9 +48298,14 @@ void Phase212()
 
     // ── the whole table, re-derived on this machine ──────────────────────
     // These eight numbers are the generator's own output from the UCD. One
-    // misplaced edge anywhere in 31960 bytes of rodata moves at least one.
+    // misplaced edge anywhere in 31 960 bytes of rodata moves at least one.
+    // The cost is reported rather than guessed at: std::clock() here is real
+    // process CPU time off the TSC, which Ф41-e-2 built.
     {
-        const Counts n = SweepAll();
+        const std::clock_t t0 = std::clock();
+        const Counts       n  = SweepAll();
+        const std::clock_t t1 = std::clock();
+
         Check(n.alpha == 147421u, "phase212 Alphabetic covers exactly 147421 code points");
         Check(n.upper == 2006u,   "phase212 Uppercase 2006");
         Check(n.lower == 2595u,   "phase212 Lowercase 2595");
@@ -48306,18 +48314,558 @@ void Phase212()
         Check(n.blank == 18u,     "phase212 blank 18");
         Check(n.cntrl == 65u,     "phase212 Cc 65");
         Check(n.punct == 9473u,   "phase212 punctuation and symbols 9473");
-        printf("[CXX] note phase212: swept 1114112 code points — alpha %u, print %u, punct %u\n",
+        Check(n.ok,
+              "phase212 graph/alnum/punct/upper/lower agree with what they derive from");
+        if (!n.ok)
+            printf("[CXX] note phase212: first invariant break at U+%05X\n", n.firstBad);
+
+        printf("[CXX] note phase212: swept 1114112 code points in %u ms of CPU "
+               "— alpha %u, print %u, punct %u\n",
+               (unsigned)((t1 - t0) / (CLOCKS_PER_SEC / 1000)),
                n.alpha, n.print, n.punct);
+    }
+
+    printf("[CXX] PASS phase212: <cwctype> — the one locale classifies Unicode, not ASCII\n");
+}
+
+// ── Phase213 — <cwchar>, the string half ────────────────────────────────────
+//
+// The whole of this header was compared against the host's libc before it was
+// ever booted: one source built twice, 40 000 randomised iterations over an
+// alphabet that mixes ASCII with Cyrillic, CJK and astral characters, plus
+// btowc/wctob across every byte and the restartable conversions fed one byte at
+// a time. 280 561 lines of output, zero disagreements — with wcscoll and
+// wcsxfrm deliberately excluded, because macOS has a real collation and BoxOS
+// has one locale (§2 <cwchar>).
+//
+// Six mutations were caught by that comparison and one was NOT: a wcschr that
+// could no longer find the terminator passed clean, because no generated string
+// ever offered L'\0' as a needle. What survives here is the part the host
+// cannot speak to — that this target agrees — plus the boundary rules that the
+// gap taught, written out by name so they cannot go missing again.
+namespace p213 {
+
+// <cwchar> writes -1 rather than including <cstdio> for EOF, which would drag
+// the FILE machinery and the Current spine into a translation unit whose job is
+// converting characters. This is the translation unit that can see both, so
+// this is where the two are held level.
+static_assert(EOF == -1, "<cwchar>'s btowc/wctob assume EOF is -1");
+
+static_assert(WCHAR_MIN < 0, "wchar_t is signed on this target");
+static_assert(WCHAR_MAX == 0x7FFFFFFF, "and 32-bit");
+static_assert(sizeof(wchar_t) == 4, "so a wchar_t holds any scalar value");
+static_assert(WEOF == (std::wint_t)-1, "WEOF is the all-ones wint_t");
+static_assert((std::wint_t)-1 > (std::wint_t)0, "wint_t is unsigned, so WEOF is not a value");
+
+// Every scalar value survives wchar_t -> UTF-8 -> wchar_t. Surrogates are not
+// scalar values and are excluded, exactly as the encoder refuses them.
+bool RoundTripAll(unsigned *firstBad)
+{
+    // One state object per direction. A conversion state belongs to a single
+    // conversion sequence, and feeding the same one to the encoder and the
+    // decoder in turn is not something C permits, however well it would happen
+    // to work for a stateless encoding.
+    std::mbstate_t out{}, in{};
+    for (unsigned cp = 0; cp <= 0x10FFFFu; ++cp) {
+        if (cp >= 0xD800u && cp <= 0xDFFFu) continue;
+        char              buf[8];
+        const std::size_t w = std::wcrtomb(buf, (wchar_t)cp, &out);
+        if (w == (std::size_t)-1 || w > 4) { *firstBad = cp; return false; }
+        wchar_t           back = 0;
+        const std::size_t r = std::mbrtowc(&back, buf, w, &in);
+        // C makes the null character the one value mbrtowc reports as 0 rather
+        // than as the byte count: "if the resulting wide character is the null
+        // wide character, the value 0 is returned". The encoder still wrote one
+        // byte, so a test that expected r == w failed at U+0000 and nowhere
+        // else — which is exactly where it did fail.
+        const std::size_t want = (cp == 0) ? 0u : w;
+        if (r != want || (unsigned)back != cp) { *firstBad = cp; return false; }
+    }
+    return true;
+}
+
+// The encoder's refusal branch: a surrogate is not a scalar value and has no
+// UTF-8 form, so it must be reported rather than encoded into something.
+bool SurrogatesRefused()
+{
+    for (unsigned cp = 0xD800u; cp <= 0xDFFFu; ++cp) {
+        char           buf[8];
+        std::mbstate_t st{};
+        if (std::wcrtomb(buf, (wchar_t)cp, &st) != (std::size_t)-1) return false;
+    }
+    return true;
+}
+
+} // namespace p213
+
+void Phase213()
+{
+    using namespace p213;
+
+    wchar_t buf[64];
+
+    // ── lengths, copies and the two rules people get wrong ───────────────
+    Check(std::wcslen(L"") == 0 && std::wcslen(L"abc") == 3, "phase213 wcslen");
+    Check(std::wcslen(L"жЖ中") == 3, "phase213 and it counts characters, not bytes");
+
+    // wcsncpy pads with nulls and does NOT terminate when src fills n.
+    for (int i = 0; i < 8; ++i) buf[i] = L'#';
+    std::wcsncpy(buf, L"ab", 5);
+    Check(buf[0] == L'a' && buf[1] == L'b' && buf[2] == 0 && buf[3] == 0 &&
+          buf[4] == 0 && buf[5] == L'#', "phase213 wcsncpy pads the tail with nulls");
+    for (int i = 0; i < 8; ++i) buf[i] = L'#';
+    std::wcsncpy(buf, L"abcde", 3);
+    Check(buf[0] == L'a' && buf[2] == L'c' && buf[3] == L'#',
+          "phase213 and does not terminate when src fills n");
+
+    // wcsncat always terminates, which is why it may write n+1.
+    std::wcscpy(buf, L"xy");
+    std::wcsncat(buf, L"abcde", 3);
+    Check(std::wcscmp(buf, L"xyabc") == 0, "phase213 wcsncat appends at most n");
+    Check(buf[5] == L'\0', "phase213 and always terminates");
+
+    // ── comparison is of wchar_t values, and wchar_t is signed ───────────
+    Check(std::wcscmp(L"a", L"b") < 0 && std::wcscmp(L"b", L"a") > 0 &&
+          std::wcscmp(L"a", L"a") == 0, "phase213 wcscmp");
+    Check(std::wcscmp(L"ж", L"a") > 0, "phase213 U+0436 sorts above ASCII");
+    Check(std::wcsncmp(L"abc", L"abd", 2) == 0 && std::wcsncmp(L"abc", L"abd", 3) < 0,
+          "phase213 wcsncmp respects n");
+    Check(std::wcscoll(L"a", L"b") == std::wcscmp(L"a", L"b"),
+          "phase213 one locale, so wcscoll is wcscmp");
+    {
+        // wcsxfrm reports the length it would need even when nothing fits, so a
+        // caller can size the buffer with a zero-length probe.
+        const std::size_t need = std::wcsxfrm(nullptr, L"abcd", 0);
+        Check(need == 4, "phase213 wcsxfrm measures without writing");
+        wchar_t x[8];
+        Check(std::wcsxfrm(x, L"abcd", 8) == 4 && std::wcscmp(x, L"abcd") == 0,
+              "phase213 and the transform is identity here");
+        Check((std::wcscoll(L"ab", L"ac") < 0) == (std::wcscmp(L"ab", L"ac") < 0),
+              "phase213 so the two orders agree, which is all C requires");
+    }
+
+    // ── searching, including the terminator rule the host diff missed ────
+    {
+        const wchar_t *s = L"abcabc";
+        Check(std::wcschr(s, L'b') == s + 1, "phase213 wcschr finds the first");
+        Check(std::wcsrchr(s, L'b') == s + 4, "phase213 wcsrchr finds the last");
+        // C makes the terminator part of the searched string. A mutation that
+        // dropped this passed a 280 561-line differential against the host,
+        // because no generated needle was ever L'\0'.
+        Check(std::wcschr(s, L'\0') == s + 6, "phase213 wcschr finds the terminator");
+        Check(std::wcsrchr(s, L'\0') == s + 6, "phase213 and so does wcsrchr");
+        Check(std::wmemchr(s, L'c', 6) == s + 2, "phase213 wmemchr");
+        Check(std::wcsstr(s, L"cab") == s + 2, "phase213 wcsstr");
+        Check(std::wcsstr(s, L"") == s, "phase213 an empty needle matches at the front");
+        Check(std::wcspbrk(s, L"xc") == s + 2, "phase213 wcspbrk");
+        Check(std::wcsspn(L"aabxx", L"ab") == 3, "phase213 wcsspn");
+        Check(std::wcscspn(L"aabxx", L"x") == 3, "phase213 wcscspn");
+
+        // The branch where nothing matched, written beside the branch where
+        // something did — the lesson Ф41 learned three times.
+        Check(std::wcschr(s, L'z') == nullptr, "phase213 wcschr finds nothing when there is nothing");
+        Check(std::wcsrchr(s, L'z') == nullptr, "phase213 nor does wcsrchr");
+        Check(std::wmemchr(s, L'z', 6) == nullptr, "phase213 nor wmemchr");
+        Check(std::wcsstr(s, L"zzz") == nullptr, "phase213 nor wcsstr");
+        Check(std::wcspbrk(s, L"z") == nullptr, "phase213 nor wcspbrk");
+        Check(std::wcspbrk(s, L"") == nullptr, "phase213 an empty set matches nothing");
+        Check(std::wcsspn(s, L"") == 0, "phase213 and spans nothing");
+        Check(std::wcscspn(s, L"") == 6, "phase213 while the complement spans everything");
+    }
+
+    // ── the const-correct pairs, which reach the global namespace here ───
+    {
+        const wchar_t *cs = L"abc";
+        wchar_t        ms[] = L"abc";
+        static_assert(std::is_same_v<decltype(std::wcschr(cs, L'b')), const wchar_t *>,
+                      "a const argument yields a const result");
+        static_assert(std::is_same_v<decltype(std::wcschr(ms, L'b')), wchar_t *>,
+                      "and a mutable one yields a mutable result");
+        // Unqualified too — <cstring> cannot manage this, because boxlib already
+        // owned ::strchr with C's signature before <cstring> existed.
+        static_assert(std::is_same_v<decltype(::wcschr(cs, L'b')), const wchar_t *>,
+                      "the pair reaches the global namespace as well");
+        static_assert(std::is_same_v<decltype(::wmemchr(ms, L'b', 3)), wchar_t *>,
+                      "for all five of the [c.strings] pairs");
+        Check(std::wcschr(ms, L'b') == ms + 1, "phase213 the mutable overload still finds it");
+    }
+
+    // ── wcstok, which needs no hidden cursor because C gave it a parameter ─
+    {
+        wchar_t  text[] = L"a,,bb,ccc";
+        wchar_t *ctx = nullptr;
+        wchar_t *t1 = std::wcstok(text, L",", &ctx);
+        wchar_t *t2 = std::wcstok(nullptr, L",", &ctx);
+        wchar_t *t3 = std::wcstok(nullptr, L",", &ctx);
+        wchar_t *t4 = std::wcstok(nullptr, L",", &ctx);
+        Check(t1 && std::wcscmp(t1, L"a") == 0, "phase213 wcstok first token");
+        Check(t2 && std::wcscmp(t2, L"bb") == 0, "phase213 skips empty fields");
+        Check(t3 && std::wcscmp(t3, L"ccc") == 0, "phase213 third token");
+        Check(t4 == nullptr, "phase213 and reports the end");
+
+        // Two tokenisations at once — the thing strtok cannot do, and the
+        // reason Ф41-b needed a per-strand cursor for the narrow version.
+        wchar_t  a[] = L"1-2-3", b[] = L"x/y";
+        wchar_t *ca = nullptr, *cb = nullptr;
+        wchar_t *pa = std::wcstok(a, L"-", &ca);
+        wchar_t *pb = std::wcstok(b, L"/", &cb);
+        pa = std::wcstok(nullptr, L"-", &ca);
+        pb = std::wcstok(nullptr, L"/", &cb);
+        Check(pa && std::wcscmp(pa, L"2") == 0 && pb && std::wcscmp(pb, L"y") == 0,
+              "phase213 two tokenisations interleave without interfering");
+
+        wchar_t  allDelim[] = L",,,";
+        wchar_t *cd = nullptr;
+        Check(std::wcstok(allDelim, L",", &cd) == nullptr,
+              "phase213 a string of nothing but delimiters yields no token");
+    }
+
+    // ── wmemmove, both overlap directions ────────────────────────────────
+    {
+        for (int i = 0; i < 10; ++i) buf[i] = (wchar_t)(L'0' + i);
+        std::wmemmove(buf + 2, buf, 5);
+        Check(buf[2] == L'0' && buf[6] == L'4' && buf[0] == L'0',
+              "phase213 wmemmove copies backwards when it must");
+        for (int i = 0; i < 10; ++i) buf[i] = (wchar_t)(L'0' + i);
+        std::wmemmove(buf, buf + 3, 5);
+        Check(buf[0] == L'3' && buf[4] == L'7', "phase213 and forwards when it may");
+        std::wmemset(buf, L'ж', 4);
+        Check(buf[0] == L'ж' && buf[3] == L'ж' && buf[4] == L'7', "phase213 wmemset");
+    }
+
+    // ── the conversions ──────────────────────────────────────────────────
+    Check(std::btowc('A') == (std::wint_t)L'A', "phase213 btowc on ASCII");
+    Check(std::btowc(0xD0) == WEOF, "phase213 a UTF-8 lead byte is not a character");
+    Check(std::btowc(0x80) == WEOF, "phase213 nor is a continuation byte");
+    Check(std::btowc(EOF) == WEOF, "phase213 and EOF maps to WEOF");
+    Check(std::wctob(L'A') == 'A', "phase213 wctob on ASCII");
+    Check(std::wctob(L'ж') == EOF, "phase213 and EOF for anything wider");
+    {
+        std::mbstate_t st{};
+        Check(std::mbsinit(&st) != 0, "phase213 an all-zero mbstate_t is the initial state");
+        Check(std::mbsinit(nullptr) != 0, "phase213 and so is no state at all");
+        const char *zhe = "\xD0\xB6";
+        Check(std::mbrlen(zhe, 1, &st) == (std::size_t)-2,
+              "phase213 one byte of two is incomplete");
+        Check(std::mbsinit(&st) == 0, "phase213 and the state now remembers it");
+        Check(std::mbrlen(zhe + 1, 1, &st) == 1, "phase213 the second byte completes it");
+        Check(std::mbsinit(&st) != 0, "phase213 leaving the state initial again");
+    }
+    {
+        // A four-byte character delivered one byte at a time, which is the only
+        // thing mbstate_t exists for.
+        std::mbstate_t st{};
+        const char    *grin = "\xF0\x9F\x98\x80";
+        wchar_t        wc = 0;
+        Check(std::mbrtowc(&wc, grin + 0, 1, &st) == (std::size_t)-2 &&
+              std::mbrtowc(&wc, grin + 1, 1, &st) == (std::size_t)-2 &&
+              std::mbrtowc(&wc, grin + 2, 1, &st) == (std::size_t)-2 &&
+              std::mbrtowc(&wc, grin + 3, 1, &st) == 1 && wc == (wchar_t)0x1F600,
+              "phase213 a four-byte character arrives one byte at a time");
+        Check(std::mbrtowc(nullptr, nullptr, 0, &st) == 0,
+              "phase213 a null source resets and reports the null character");
+    }
+    {
+        // The property that delegation had to preserve: mbrtowc and mbrlen keep
+        // separate internal states when ps is null. Sharing one machine is
+        // correct; sharing one cursor is not.
+        std::mbrtowc(nullptr, nullptr, 0, nullptr);
+        std::mbrlen(nullptr, 0, nullptr);
+        const char *zhong = "\xE4\xB8\xAD";
+        const char *grin  = "\xF0\x9F\x98\x80";
+        wchar_t     wc = 0;
+        bool ok = std::mbrtowc(&wc, zhong + 0, 1, nullptr) == (std::size_t)-2;
+        ok = ok && std::mbrlen(grin + 0, 1, nullptr) == (std::size_t)-2;
+        ok = ok && std::mbrtowc(&wc, zhong + 1, 1, nullptr) == (std::size_t)-2;
+        ok = ok && std::mbrlen(grin + 1, 1, nullptr) == (std::size_t)-2;
+        ok = ok && std::mbrtowc(&wc, zhong + 2, 1, nullptr) == 1 && wc == (wchar_t)0x4E2D;
+        ok = ok && std::mbrlen(grin + 2, 1, nullptr) == (std::size_t)-2;
+        ok = ok && std::mbrlen(grin + 3, 1, nullptr) == 1;
+        Check(ok, "phase213 mbrtowc and mbrlen keep separate internal states");
+    }
+    {
+        const char *src = "a\xD0\xB6\xE4\xB8\xAD";
+        std::mbstate_t st{};
+        const char *q = src;
+        Check(std::mbsrtowcs(nullptr, &q, 0, &st) == 3, "phase213 mbsrtowcs measures");
+        Check(q == src, "phase213 and a measurement does not move the cursor");
+        wchar_t w[8];
+        q = src; st = std::mbstate_t{};
+        Check(std::mbsrtowcs(w, &q, 8, &st) == 3 && w[0] == L'a' &&
+              w[1] == (wchar_t)0x436 && w[2] == (wchar_t)0x4E2D && w[3] == 0,
+              "phase213 and converts the whole string");
+        Check(q == nullptr, "phase213 nulling the source when it finishes");
+
+        const wchar_t  wsrc[] = {L'a', (wchar_t)0x436, (wchar_t)0x4E2D, 0};
+        const wchar_t *wq = wsrc;
+        char           ob[32];
+        st = std::mbstate_t{};
+        const std::size_t n = std::wcsrtombs(ob, &wq, 32, &st);
+        Check(n == 6 && wq == nullptr, "phase213 wcsrtombs counts bytes, not characters");
+        Check((unsigned char)ob[0] == 0x61 && (unsigned char)ob[1] == 0xD0 &&
+              (unsigned char)ob[3] == 0xE4, "phase213 and the bytes are UTF-8");
+    }
+    {
+        // The failing branch: ill-formed input is reported, not absorbed.
+        const char    *bad = "\xFF\xFE";
+        const char    *p = bad;
+        std::mbstate_t st{};
+        wchar_t        w[4];
+        errno = 0;
+        Check(std::mbsrtowcs(w, &p, 4, &st) == (std::size_t)-1,
+              "phase213 mbsrtowcs refuses an ill-formed sequence");
+        Check(errno == EILSEQ, "phase213 and says why");
     }
 
     {
         unsigned bad = 0;
-        Check(InvariantsHold(&bad),
-              "phase212 graph/alnum/punct/upper/lower agree with what they derive from");
-        if (bad) printf("[CXX] note phase212: first invariant break at U+%05X\n", bad);
+        Check(RoundTripAll(&bad),
+              "phase213 every scalar value survives wchar_t -> UTF-8 -> wchar_t");
+        if (bad) printf("[CXX] note phase213: round trip broke at U+%05X\n", bad);
+        Check(SurrogatesRefused(),
+              "phase213 and all 2048 surrogates are refused, not encoded");
     }
 
-    printf("[CXX] PASS phase212: <cwctype> — the one locale classifies Unicode, not ASCII\n");
+    printf("[CXX] PASS phase213: <cwchar> strings — one conversion machine, two cursors\n");
+}
+
+// ── Phase214 — <cwchar>, formatting and wide streams ────────────────────────
+//
+// swprintf and swscanf were compared against the host's before this ever
+// booted — 48 and ~60 cases, zero disagreements, nine mutations caught. Two of
+// those mutations were NOT caught at first and each taught something that is
+// written out by name below: a `%*d` with a negative width lost its
+// left-justification on every delegated conversion, and the scanner's
+// "push back what the converter did not want" step had no input in the corpus
+// that produced a tail at all.
+//
+// What the host cannot speak to, and what is therefore here: the file side.
+// A FILE on BoxOS is a Current, so `fputwc` reaches the screen through the
+// same spine `std::cout` uses, and `fwide` decides which of the two worlds a
+// stream belongs to.
+void Phase214()
+{
+    wchar_t b[256];
+
+    // ── formatted output ─────────────────────────────────────────────────
+    Check(std::swprintf(b, 256, L"%d", 42) == 2 && std::wcscmp(b, L"42") == 0,
+          "phase214 swprintf %d");
+    Check(std::swprintf(b, 256, L"%#x/%#o", 42, 42) == 8 &&
+          std::wcscmp(b, L"0x2a/052") == 0, "phase214 the alternate forms");
+    Check(std::swprintf(b, 256, L"%.2f", 3.14159) == 4 && std::wcscmp(b, L"3.14") == 0,
+          "phase214 and the floating conversions the narrow engine owns");
+    Check(std::swprintf(b, 256, L"%Lf", (long double)1.5L) == 8 &&
+          std::wcscmp(b, L"1.500000") == 0, "phase214 including long double");
+
+    // A negative * width IS the '-' flag. The narrow directive is rebuilt from
+    // the parsed flags, so a left-justification that lived only in the parsed
+    // struct was lost — found by the host differential, pinned here.
+    Check(std::swprintf(b, 256, L"%*d|", -8, 42) == 9 &&
+          std::wcscmp(b, L"42      |") == 0,
+          "phase214 a negative * width left-justifies");
+    Check(std::swprintf(b, 256, L"%*d|", 8, 42) == 9 &&
+          std::wcscmp(b, L"      42|") == 0, "phase214 and a positive one does not");
+
+    // Width and precision count CHARACTERS here, not bytes. This is the whole
+    // reason the wide layer owns %c/%lc/%s/%ls instead of delegating them.
+    Check(std::swprintf(b, 256, L"%8ls|", L"жжж") == 9 &&
+          std::wcscmp(b, L"     жжж|") == 0,
+          "phase214 a field width pads to characters, not to UTF-8 bytes");
+    Check(std::swprintf(b, 256, L"%.2ls|", L"жжж") == 3 &&
+          std::wcscmp(b, L"жж|") == 0, "phase214 and a precision cuts characters");
+    Check(std::swprintf(b, 256, L"%5lc|", (std::wint_t)0x436) == 6 &&
+          std::wcscmp(b, L"    ж|") == 0, "phase214 %lc pads the same way");
+    Check(std::swprintf(b, 256, L"%6s|", "\xD0\xB6\xD0\xB6") == 7 &&
+          std::wcscmp(b, L"    жж|") == 0,
+          "phase214 a multibyte %s is measured in characters too");
+
+    {
+        int n = -1;
+        Check(std::swprintf(b, 256, L"жжж%n", &n) == 3 && n == 3,
+              "phase214 %n counts wide characters");
+    }
+    {
+        // Unlike snprintf, swprintf makes a full buffer an ERROR rather than
+        // reporting what it would have written. That is C's design.
+        wchar_t small[4];
+        Check(std::swprintf(small, 4, L"abcdefgh") < 0,
+              "phase214 swprintf fails rather than truncating quietly");
+    }
+    Check(std::swprintf(b, 256, L"ж=%d", 7) == 3 && std::wcscmp(b, L"ж=7") == 0,
+          "phase214 a non-ASCII character in the format itself survives");
+
+    {
+        // Output longer than any internal scratch. Both of these produced 511
+        // characters and said so in the return value, silently, until the
+        // buffers behind them were removed: %s held a 512-element array, and
+        // the numeric path a 512-byte one that %.500f of 1e300 needs 812 of.
+        // A precision is a number the caller picks; no fixed size is enough.
+        static wchar_t wide[8192];
+        static char    mb[2400];
+        for (int i = 0; i < 2000; ++i) mb[i] = 'a';
+        mb[2000] = '\0';
+        Check(std::swprintf(wide, 8192, L"%s", mb) == 2000 &&
+              std::wcslen(wide) == 2000,
+              "phase214 a 2000-character %s is not cut at a buffer size");
+        Check(std::swprintf(wide, 8192, L"%.500f", 1e300) == 802 &&
+              std::wcslen(wide) == 802,
+              "phase214 nor is a conversion whose precision outgrows the scratch");
+    }
+
+    // ── formatted input ──────────────────────────────────────────────────
+    {
+        long long v = -1;
+        Check(std::swscanf(L"42", L"%lld", &v) == 1 && v == 42, "phase214 swscanf %lld");
+        v = -1;
+        Check(std::swscanf(L"   42", L"%lld", &v) == 1 && v == 42,
+              "phase214 leading white space is skipped");
+        v = -1;
+        // iswspace is Unicode-wide since Ф42-a, so an EM SPACE is white space.
+        Check(std::swscanf(L" " L"42", L"%lld", &v) == 1 && v == 42,
+              "phase214 and an EM SPACE counts as white space");
+        v = -1;
+        Check(std::swscanf(L"0x1f", L"%llx", &v) == 1 && v == 31, "phase214 %llx");
+        v = -1;
+        Check(std::swscanf(L"017", L"%lli", &v) == 1 && v == 15, "phase214 %lli reads octal");
+        v = -1;
+        Check(std::swscanf(L"123456", L"%3lld", &v) == 1 && v == 123,
+              "phase214 a field width stops the token");
+    }
+    {
+        double d = -1.0;
+        Check(std::swscanf(L"3.14", L"%lf", &d) == 1 && d > 3.13 && d < 3.15,
+              "phase214 swscanf %lf");
+        d = -1.0;
+        Check(std::swscanf(L"1e3", L"%lf", &d) == 1 && d > 999.0 && d < 1001.0,
+              "phase214 with an exponent");
+        d = 0.0;
+        Check(std::swscanf(L"infinity", L"%lf", &d) == 1 && d > 1e300,
+              "phase214 and the words, which need eight characters of look-ahead");
+    }
+    {
+        // The step a mutation proved untested: what the converter declined has
+        // to go back, or the next directive reads the wrong thing.
+        long long a = -1;
+        wchar_t   next = 0;
+        Check(std::swscanf(L"09", L"%lli%lc", &a, &next) == 2 && a == 0 && next == L'9',
+              "phase214 what the converter declined is pushed back");
+        a = -1; next = 0;
+        Check(std::swscanf(L"0x", L"%lli%lc", &a, &next) == 2 && a == 0 && next == L'x',
+              "phase214 including the x of a bare 0x");
+    }
+    {
+        wchar_t w[32] = {0};
+        Check(std::swscanf(L"жжж abc", L"%ls", w) == 1 && std::wcscmp(w, L"жжж") == 0,
+              "phase214 %ls stores wide characters");
+        char m[32] = {0};
+        Check(std::swscanf(L"жж abc", L"%s", m) == 1 &&
+              (unsigned char)m[0] == 0xD0 && (unsigned char)m[1] == 0xB6,
+              "phase214 while %s without l stores UTF-8 bytes");
+        wchar_t w2[32] = {0};
+        Check(std::swscanf(L"жжжжж", L"%2ls", w2) == 1 && std::wcslen(w2) == 2,
+              "phase214 and a width on %ls counts characters");
+    }
+    {
+        // The branch where nothing matched, written beside the branch where
+        // something did.
+        long long v = -7;
+        Check(std::swscanf(L"abc", L"%lld", &v) == 0 && v == -7,
+              "phase214 a field that does not match assigns nothing");
+        Check(std::swscanf(L"", L"%lld", &v) == -1,
+              "phase214 and an empty input reports the end");
+        wchar_t w[8] = {L'z', 0};
+        Check(std::swscanf(L"123", L"%l[abc]", w) == 0,
+              "phase214 a scanset that matches nothing assigns nothing");
+        long long a = -1, c = -1;
+        Check(std::swscanf(L"1 x", L"%lld %lld", &a, &c) == 1 && a == 1,
+              "phase214 a partial match reports how many fields landed");
+    }
+
+    // ── the file side, which no host comparison can reach ────────────────
+    // A FILE here is a Current. `stdout` is the screen Current, the same one
+    // std::cout writes to — there is no descriptor anywhere in this path.
+    {
+        // stdout has been carrying printf since phase0, so C's rule that the
+        // first byte operation fixes the orientation makes it byte-oriented —
+        // and a wide write to it must therefore be refused. That is not a
+        // limitation of the wrapper; it is what stream orientation IS, and it
+        // is the same rule that lets one push-back slot serve both worlds.
+        Check(std::fwide(stdout, 0) < 0, "phase214 stdout is byte-oriented, having carried printf");
+        Check(std::fwide(stdout, 1) < 0, "phase214 and asking for wide does not change it");
+        Check(std::fputwc(L'x', stdout) == WEOF,
+              "phase214 so a wide write to stdout is refused rather than interleaved");
+
+        // A fresh file stream, taken wide, round-trips a non-ASCII line.
+        std::FILE *f = std::fopen("cxx_p214_wide", "w+");
+        Check(f != nullptr, "phase214 a file stream opens");
+        if (f) {
+            Check(std::fwide(f, 1) > 0, "phase214 and can be fixed wide");
+            Check(std::fputwc(L'ж', f) == (std::wint_t)L'ж', "phase214 fputwc");
+            Check(std::fputws(L"Ж中\n", f) == 0, "phase214 fputws");
+            Check(std::fwprintf(f, L"%d/%ls\n", 7, L"жx") == 5, "phase214 fwprintf to a file");
+            std::fflush(f);
+            std::rewind(f);
+
+            Check(std::fwide(f, 0) > 0, "phase214 the orientation sticks");
+            Check(std::fgetwc(f) == (std::wint_t)L'ж', "phase214 fgetwc reads it back");
+            Check(std::ungetwc((std::wint_t)L'Q', f) == (std::wint_t)L'Q',
+                  "phase214 one character of push-back, in the slot the byte world uses");
+            Check(std::fgetwc(f) == (std::wint_t)L'Q', "phase214 and it comes back first");
+
+            wchar_t line[32] = {0};
+            Check(std::fgetws(line, 32, f) != nullptr, "phase214 fgetws");
+            Check(std::wcscmp(line, L"Ж中\n") == 0, "phase214 keeps the newline, as C says");
+
+            long long got = -1;
+            wchar_t   tail[16] = {0};
+            Check(std::fwscanf(f, L"%lld/%ls", &got, tail) == 2 && got == 7 &&
+                  std::wcscmp(tail, L"жx") == 0, "phase214 fwscanf from a file");
+            std::fclose(f);
+            std::remove("cxx_p214_wide");
+        }
+    }
+    {
+        // C leaves the offending character unread when a conversion terminates
+        // on a conflicting input. On a string source that is unobservable —
+        // scanf returns the moment a conversion fails, so nothing in the same
+        // call ever reads it — which is why the host differential could not
+        // test this step at all, and why it lives here. A stream can be asked
+        // afterwards.
+        std::FILE *f = std::fopen("cxx_p214_pb", "w+");
+        Check(f != nullptr, "phase214 a third stream opens");
+        if (f) {
+            // Written with the WIDE calls on purpose. The first version used
+            // fputs, and fwide then refused to make the stream wide — which is
+            // the orientation rule doing its job, not a defect. A stream is one
+            // world or the other for its whole life.
+            Check(std::fputws(L"-x", f) == 0, "phase214 written wide");
+            std::fflush(f);
+            std::rewind(f);
+            Check(std::fwide(f, 0) > 0, "phase214 and still wide for the read");
+            long long v = -7;
+            Check(std::fwscanf(f, L"%lld", &v) == 0,
+                  "phase214 a sign that begins no number converts nothing");
+            Check(std::fgetwc(f) == (std::wint_t)L'-',
+                  "phase214 and the offending character was left unread");
+            std::fclose(f);
+            std::remove("cxx_p214_pb");
+        }
+    }
+    {
+        // Orientation is a promise, and a byte operation on a wide stream is
+        // refused rather than left to do something surprising.
+        std::FILE *f = std::fopen("cxx_p214_mix", "w+");
+        Check(f != nullptr, "phase214 a second stream opens");
+        if (f) {
+            Check(std::fwide(f, -1) < 0, "phase214 fixed byte-oriented");
+            Check(std::fputwc(L'x', f) == WEOF,
+                  "phase214 and a wide write on it is refused, not undefined");
+            std::fclose(f);
+            std::remove("cxx_p214_mix");
+        }
+    }
+
+    printf("[CXX] PASS phase214: <cwchar> formatting — one engine, two widths\n");
 }
 
 } // namespace
@@ -48556,6 +49104,8 @@ int main()
     Phase210();
     Phase211();
     Phase212();
+    Phase213();
+    Phase214();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

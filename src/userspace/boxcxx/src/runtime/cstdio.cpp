@@ -18,32 +18,20 @@
 #include <new>
 #include <print>   // __print::ToConsole / Console — the ONE screen road
 
+#include <__bits/c_file>   // the flags, the Guard and the three locked
+                           // primitives live beside the struct they describe:
+                           // <cwchar>'s wide I/O is a second consumer of all
+                           // three, and a multi-byte character has to be
+                           // assembled under ONE lock.
+
 #include "box/current.h"
 #include "box/file.h"
 
 namespace {
 
-// ── flags ───────────────────────────────────────────────────────────────
-constexpr unsigned kRead     = 1u << 0;
-constexpr unsigned kWrite    = 1u << 1;
-constexpr unsigned kEof      = 1u << 2;
-constexpr unsigned kErr      = 1u << 3;
-constexpr unsigned kOwnBuf   = 1u << 4;
-constexpr unsigned kConsole  = 1u << 5;  // writes take the shared screen road
-constexpr unsigned kKeyboard = 1u << 6;  // line source with no end
-constexpr unsigned kSeekable = 1u << 7;
-constexpr unsigned kAppend   = 1u << 8;
-constexpr unsigned kWriting  = 1u << 9;  // buffer holds pending output
-constexpr unsigned kReading  = 1u << 10; // buffer holds data read ahead
-constexpr unsigned kStatic   = 1u << 11; // one of the three conventional streams
-
-struct Guard {
-    ::umutex_t *m;
-    explicit Guard(::std::FILE *f) : m(&f->__lock) { ::umutex_lock(m); }
-    ~Guard() { ::umutex_unlock(m); }
-    Guard(const Guard &) = delete;
-    Guard &operator=(const Guard &) = delete;
-};
+// Everything below spells the flags, the Guard and the locked primitives
+// unqualified, as it always did; they are simply defined elsewhere now.
+using namespace ::std::__stdio;
 
 ::Current *Cur(::std::FILE *f) { return static_cast<::Current *>(f->__cur); }
 
@@ -143,19 +131,6 @@ bool EnsureBuf(::std::FILE *f)
     return true;
 }
 
-// Push pending output. Returns 0 on success, EOF on failure.
-int FlushLocked(::std::FILE *f)
-{
-    if (!(f->__flags & kWriting) || f->__pos == 0) return 0;
-    const int w = RawWrite(f, f->__buf, f->__pos);
-    if (w < 0 || static_cast<::std::size_t>(w) != f->__pos) {
-        f->__flags |= kErr;
-        return EOF;
-    }
-    f->__off += static_cast<long long>(f->__pos);
-    f->__pos  = 0;
-    return 0;
-}
 
 // Abandon read-ahead. A stream that seeks or switches direction must forget
 // what it had buffered, and its logical position must come back to where the
@@ -197,38 +172,7 @@ int Fill(::std::FILE *f)
     return static_cast<int>(n);
 }
 
-int GetLocked(::std::FILE *f)
-{
-    if (!(f->__flags & kRead)) { f->__flags |= kErr; return EOF; }
-    if (f->__unget != EOF) {
-        const int c = f->__unget;
-        f->__unget = EOF;
-        f->__off++;
-        return c;
-    }
-    if (f->__pos >= f->__end) {
-        const int got = Fill(f);
-        if (got <= 0) return EOF;
-    }
-    f->__off++;
-    return static_cast<unsigned char>(f->__buf[f->__pos++]);
-}
 
-int PutLocked(::std::FILE *f, int c)
-{
-    if (!(f->__flags & kWrite)) { f->__flags |= kErr; return EOF; }
-    if (f->__flags & kReading) DropReadAhead(f);
-    if (!EnsureBuf(f)) return EOF;
-    f->__flags |= kWriting;
-
-    f->__buf[f->__pos++] = static_cast<char>(static_cast<unsigned char>(c));
-    const bool full = f->__pos >= f->__cap;
-    const bool line = (f->__mode == _IOLBF) && c == '\n';
-    if (full || line || f->__mode == _IONBF) {
-        if (FlushLocked(f) != 0) return EOF;
-    }
-    return static_cast<unsigned char>(c);
-}
 
 // ── the three conventional streams ──────────────────────────────────────
 // Static storage, so they exist before any constructor runs and cost nothing
@@ -250,6 +194,65 @@ int PutLocked(::std::FILE *f, int c)
 }
 
 } // namespace
+
+// ── the primitives the wide layer shares ────────────────────────────────
+//
+// These three are the whole of what <cwchar>'s wide I/O needs from the byte
+// layer: one byte in, one byte out, and the pending-output drain. They sit
+// in std::__stdio rather than in the unnamed namespace above so that a second
+// translation unit can reach them — which is exactly what an unnamed
+// namespace is for preventing, and exactly why they had to leave it.
+//
+// They still call the helpers above: names with internal linkage are visible
+// through the rest of the translation unit, so nothing had to move with them.
+namespace std { namespace __stdio {
+
+// Push pending output. Returns 0 on success, EOF on failure.
+int FlushLocked(::std::FILE *f)
+{
+    if (!(f->__flags & kWriting) || f->__pos == 0) return 0;
+    const int w = RawWrite(f, f->__buf, f->__pos);
+    if (w < 0 || static_cast<::std::size_t>(w) != f->__pos) {
+        f->__flags |= kErr;
+        return EOF;
+    }
+    f->__off += static_cast<long long>(f->__pos);
+    f->__pos  = 0;
+    return 0;
+}
+int GetLocked(::std::FILE *f)
+{
+    if (!(f->__flags & kRead)) { f->__flags |= kErr; return EOF; }
+    if (f->__unget != EOF) {
+        const int c = f->__unget;
+        f->__unget = EOF;
+        f->__off++;
+        return c;
+    }
+    if (f->__pos >= f->__end) {
+        const int got = Fill(f);
+        if (got <= 0) return EOF;
+    }
+    f->__off++;
+    return static_cast<unsigned char>(f->__buf[f->__pos++]);
+}
+int PutLocked(::std::FILE *f, int c)
+{
+    if (!(f->__flags & kWrite)) { f->__flags |= kErr; return EOF; }
+    if (f->__flags & kReading) DropReadAhead(f);
+    if (!EnsureBuf(f)) return EOF;
+    f->__flags |= kWriting;
+
+    f->__buf[f->__pos++] = static_cast<char>(static_cast<unsigned char>(c));
+    const bool full = f->__pos >= f->__cap;
+    const bool line = (f->__mode == _IOLBF) && c == '\n';
+    if (full || line || f->__mode == _IONBF) {
+        if (FlushLocked(f) != 0) return EOF;
+    }
+    return static_cast<unsigned char>(c);
+}
+
+}} // namespace std::__stdio
 
 namespace std {
 
@@ -429,6 +432,13 @@ int fgetc(FILE *stream) noexcept
 {
     if (!stream) return EOF;
     Guard g(stream);
+    // C: the first byte operation on a stream fixes its orientation, and
+    // that is not bookkeeping. It is what makes sharing __unget with
+    // <cwchar>'s wide push-back safe by construction — the two can never
+    // both be live. The claim belongs HERE and not in GetLocked/PutLocked,
+    // because the wide layer calls those to move its own bytes; putting it
+    // one layer down made every wide write refuse itself.
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
     return GetLocked(stream);
 }
 
@@ -436,6 +446,7 @@ int fputc(int c, FILE *stream) noexcept
 {
     if (!stream) return EOF;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
     return PutLocked(stream, c);
 }
 
@@ -447,6 +458,7 @@ int ungetc(int c, FILE *stream) noexcept
 {
     if (!stream || c == EOF) return EOF;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
     if (stream->__unget != EOF) return EOF;   // one byte of pushback, as C guarantees
     stream->__unget = static_cast<unsigned char>(c);
     if (stream->__off > 0) stream->__off--;
@@ -458,6 +470,7 @@ char *fgets(char *s, int n, FILE *stream) noexcept
 {
     if (!s || n <= 0 || !stream) return nullptr;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return nullptr; }
     int i = 0;
     while (i < n - 1) {
         const int c = GetLocked(stream);
@@ -474,6 +487,7 @@ int fputs(const char *s, FILE *stream) noexcept
 {
     if (!s || !stream) return EOF;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return EOF; }
     for (const char *p = s; *p; p++)
         if (PutLocked(stream, static_cast<unsigned char>(*p)) == EOF) return EOF;
     return 0;
@@ -484,6 +498,7 @@ int puts(const char *s) noexcept
     if (!s) return EOF;
     FILE *f = __stdout();
     Guard g(f);
+    if (!ClaimByte(f)) { f->__flags |= kErr; return EOF; }
     for (const char *p = s; *p; p++)
         if (PutLocked(f, static_cast<unsigned char>(*p)) == EOF) return EOF;
     // puts appends the newline fputs does not — the one difference between them
@@ -497,6 +512,7 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept
 {
     if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return 0; }
     char  *out  = static_cast<char *>(ptr);
     size_t done = 0;
     for (; done < nmemb; done++) {
@@ -513,6 +529,7 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) noexcept
 {
     if (!ptr || !stream || size == 0 || nmemb == 0) return 0;
     Guard g(stream);
+    if (!ClaimByte(stream)) { stream->__flags |= kErr; return 0; }
     const char *in   = static_cast<const char *>(ptr);
     size_t      done = 0;
     for (; done < nmemb; done++) {
