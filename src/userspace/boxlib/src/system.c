@@ -20,6 +20,7 @@
 #define SYS_PROC_SPAWN  SYSTEM_OP_PROC_SPAWN
 #define SYS_PROC_KILL   SYSTEM_OP_PROC_KILL
 #define SYS_PROC_INFO   SYSTEM_OP_PROC_INFO
+#define SYS_PROC_CPUTIME SYSTEM_OP_PROC_CPUTIME
 #define SYS_CTX_USE     SYSTEM_OP_CTX_USE
 #define SYS_PROC_EXEC   SYSTEM_OP_PROC_EXEC
 #define SYS_DEFRAG      SYSTEM_OP_DEFRAG_FILE
@@ -45,6 +46,24 @@
 /* =========================================================================
  *  Process lifecycle
  * ========================================================================= */
+
+int proc_cpu_time(uint64_t *out_us)
+{
+    if (!out_us) return -ERR_INVALID_ARGUMENT;
+
+    uint8_t  out[8]  = {0};
+    uint32_t actual  = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_CPUTIME,
+                     NULL, 0,
+                     NULL, 0,
+                     out, sizeof(out), &actual,
+                     SYS_TIMEOUT_MS, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (actual < 8) return -ERR_INTERNAL;
+
+    memcpy(out_us, out, 8);
+    return OK;
+}
 
 int proc_info(uint16_t pid, proc_info_t *info)
 {

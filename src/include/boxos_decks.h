@@ -29,6 +29,11 @@
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
 #define SYSTEM_OP_CTX_USE           0x04
+/* () -> u64 microseconds of processor time used by the CALLING cabin. Self
+ * only, deliberately: another cabin's processor time is information this op
+ * has no business handing out, and a question about yourself needs no
+ * authority to check. Backs std::clock(). */
+#define SYSTEM_OP_PROC_CPUTIME      0x05
 #define SYSTEM_OP_PROC_EXEC         0x06
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */

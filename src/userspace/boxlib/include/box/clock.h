@@ -7,6 +7,7 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
+#include "box/time.h"   /* BoxTime, for clock_boxtime below */
 
 /*
  * box/clock.h — userspace API over the kernel-mapped ClockBoard page.
@@ -53,11 +54,15 @@ uint64_t clock_unix_now(void);
  * backing for std::chrono::system_clock::now(). */
 uint64_t clock_unix_now_ns(void);
 
-/* Calendar form (BoxOS-native time_t). Computed in userspace from
- * boot_unix_secs + uptime_us — the kernel does NOT do calendar
- * arithmetic in the IRQ. */
-struct time_t_;
-int clock_boxtime(struct time_t_ *out);
+/* Calendar form. Computed in userspace from boot_unix_secs + uptime_us — the
+ * kernel does NOT do calendar arithmetic in the IRQ.
+ *
+ * This used to be declared against `struct time_t_`, a type that was forward-
+ * declared here and DEFINED NOWHERE; clock.c cast through it into the real
+ * structure. The workaround existed because the real structure was called
+ * time_t, a name <ctime> needs for an arithmetic type. Ф41-e gave it the name
+ * the rest of the tree had always used for it, and the phantom went with it. */
+int clock_boxtime(BoxTime *out);
 
 /* Convert a TSC delta to nanoseconds using the calibrated frequency
  * cached on the ClockBoard. ns = (tsc * 1_000_000) / freq_khz. */

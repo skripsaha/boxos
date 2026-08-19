@@ -187,7 +187,7 @@ void rtc_init(void) {
                  rtc_state.base_seconds);
 }
 
-void rtc_get_boxtime(time_t* out) {
+void rtc_get_boxtime(BoxTime* out) {
     out->year    = rtc_state.year;
     out->month   = rtc_state.month;
     out->day     = rtc_state.day;

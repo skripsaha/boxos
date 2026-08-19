@@ -96,31 +96,32 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (7)
+## 1.1 Headers that do not exist (6)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 98 of them are in the tree and 7 are not,
+[headers] name 105 headers in C++23; 99 of them are in the tree and 6 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 98 + 5 = the 103 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 99 + 5 = the 104 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
 document was written: **`<ctime>` was in neither column.** It was not listed as
 absent and it was not in the tree; it simply never appeared, and the totals
 still added up because they were adjusted to each other rather than to the
-standard. It is absent, it is listed below, and the count above is now the
-output of a diff between [headers] and `ls include/std`.
+standard. Ф41-e-2 built it, so it is now in the tree rather than in neither
+column — and the count above is the output of a diff between [headers] and
+`ls include/std`, not a number anyone maintains.
 
-### C library wrappers — 4 absent, 17 provided
+### C library wrappers — 3 absent, 18 provided
 
-Absent: `<cstdio>` `<ctime>` `<cwchar>` `<cwctype>`
+Absent: `<cstdio>` `<cwchar>` `<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
 `<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
-(Ф41-c), `<csetjmp>` (Ф41-d) and `<cinttypes>` `<clocale>` `<cuchar>` (Ф41-e)
-— all §2.
+(Ф41-c), `<csetjmp>` (Ф41-d) and `<cinttypes>` `<clocale>` `<cuchar>` (Ф41-e-1)
+and `<ctime>` (Ф41-e-2) — all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -804,9 +805,15 @@ looks identical and is not; see there.
 - `~` `clock_cast` is identity-only. A cross-clock cast (`system_clock` →
   `utc_clock`) does not compile — correct in the absence of
   `clock_time_conversion`, and better than silently converting wrongly.
-- `~` `to_time_t` / `from_time_t` work in `long long` epoch seconds. There is no
-  `std::time_t` and no `<ctime>`; the name `time_t` already belongs to a 20-byte
-  BoxOS structure in `box/time.h`.
+- `to_time_t` / `from_time_t` work in `std::time_t`, as [time.clock.system]/3
+  requires. **This entry used to be a deviation** — they returned `long long`,
+  because the name `time_t` belonged to a 20-byte BoxOS structure in
+  `box/time.h` and `<chrono>` could not introduce the arithmetic type the
+  standard asks for without colliding with it. Ф41-e-2 renamed that structure to
+  `BoxTime` (the name `clock_boxtime()` and `rtc_get_boxtime()` had always used
+  for it) and built `<ctime>`; the deviation went with the rename rather than
+  being worked around again. phase210 asserts the return type, so undoing the
+  rename stops the build.
 - `?` `file_clock`'s epoch is the Unix epoch (the standard leaves it
   implementation-defined; libstdc++ uses 1601), so a `file_time` renders like a
   `sys_time`.
@@ -1206,6 +1213,92 @@ bounded by `n`.
   Four narrower tests missed it because every one of them passed `n` exactly
   equal to the character's length; the equivalence sweep disagreed with the
   shipped decoder on 1.6 billion inputs and named the first one.
+
+## `<ctime>`
+
+The header that could not exist while a twenty-byte structure held the name.
+
+`time_t` in a BoxOS tree meant a packed calendar record — seconds, nanoseconds
+and the broken-down fields — declared in `box/time.h` and used by the kernel's
+RTC driver, the hardware deck and boxlib alike. [ctime.syn] requires `time_t` to
+be an **arithmetic** type, so the two could not share a program, and the
+collision was not theoretical: `<chrono>` had been dodging it since Ф30. Its own
+comment said so, and `system_clock::to_time_t` returned `long long` — a recorded
+departure from [time.clock.system]/3 whose stated cause was that the name was
+taken. Ф41-e gave that structure the name the rest of the tree had been calling
+it by for years — `clock_boxtime()`, `rtc_get_boxtime()`, *"Boxtime is the
+preferred form"* — and the deviation retired with the rename. `to_time_t` and
+`from_time_t` now work in `std::time_t`, and phase210 asserts it, so reverting
+the rename stops the build rather than quietly restoring the old dodge.
+
+- `+` **`clock()` is processor time, and until this commit there was no such
+  thing in BoxOS to return.** The kernel carried a `total_cpu_time` field on
+  every process that was zeroed at creation and never written again — a promise
+  in a struct. It is accumulated now, per slice, **measured with the TSC**.
+
+  The TSC is not an implementation detail here, it is the whole difference. The
+  first version counted scheduler ticks, and at tick granularity whoever is
+  current when the tick fires is credited the *whole* tick — so two processes
+  alternating every tick are each credited 100% of the wall clock. Measured on a
+  one-core boot (cxxtest and pid 1 ping-ponging every tick, both fully
+  credited), that made `clock()` read *exactly* equal to wall time. A factor of
+  two per participant is not a rounding error and no arithmetic over ticks
+  removes it.
+- `?` The value counts **completed slices plus the one in progress**, so two
+  calls inside one slice differ by the work between them. Getting there took two
+  wrong answers, both found by measurement. Deriving the in-flight part from the
+  scheduler's dispatch stamp was wrong because that stamp is rewritten on every
+  scheduler pass and survives a park — a 300 ms sleep reported 300 ms of
+  processor time. Dropping the term was wrong in the other direction: with a
+  spare core a strand runs 50 ms without one context switch, and on sixteen
+  cores the answer never moved. The stamp that works is the one that exists
+  only while the strand holds the core.
+- `!` **A strand blocked in a timed park is still given the core, and `clock()`
+  reports that faithfully.** Across a 300 ms `sleep_for` on a one-core boot the
+  strand is credited ~260 ms of processor time. This is a BoxOS defect, not a
+  property of `clock()`: the wait underneath a timed park is a poll rather than
+  an event, so a sleeping strand keeps its share of the core. It is recorded
+  here because a reader will otherwise conclude `clock()` is wall time — it is
+  not; the same strand reads far below wall time when it competes with others,
+  and reads near zero at process start while the machine's uptime is large.
+  phase210 prints both numbers on every run so the day the park becomes an event
+  is visible in the log. Fixing it belongs to the scheduler.
+- `?` `clock()` is **per strand**, not per program. C defines it as the
+  processor time used by "the program"; a BoxOS strand is its own schedulable
+  entity with its own accounting, so a multi-strand program's strands each
+  report their own. For a single-threaded program the two coincide.
+- `~` **`localtime` IS `gmtime`.** There is no timezone database, and inventing
+  an offset would be worse than saying so. `tm_isdst` is always 0, `%Z` renders
+  `UTC` and `%z` renders `+0000`. The same shape as `<chrono>`'s documented
+  absence of a leap-second table, and the two are consistent with each other.
+- `+` **`gmtime`, `localtime`, `asctime` and `ctime` return storage that is per
+  strand.** C makes those buffers process-wide, which in a program running
+  strands over one address space is a data race the standard permits. Each of
+  the four has its own, so a program may hold what `ctime` returned across a
+  call to `asctime` — which C also allows a hosted library to break.
+- `?` **`strftime` is not a second formatting engine.** `<chrono>`'s formatter
+  already walks a `%`-string over the full specifier vocabulary, tested by every
+  calendar phase from Ф30 on; `strftime` fills that engine's field struct from a
+  `tm` and calls it. A date therefore prints identically through `std::format`
+  and through `strftime`, and the conversions `<chrono>` documents as deviating
+  (`%I`/`%r`/`%p` beyond twelve hours) deviate identically here. An unknown
+  conversion is undefined in C: the engine throws, `strftime` catches, and 0 is
+  returned — no exception crosses into a C caller.
+- `?` `asctime` reproduces C's format exactly, including the two details an
+  implementation gets wrong by eye: the day is `%3d`, so it carries its own
+  leading space and there is none between the month and it; and the year is
+  `%d`, **not** `%4d`, so year 500 prints as `500` and the line is one character
+  shorter. Field values that cannot fit their fixed column — where C leaves the
+  behaviour undefined — return `nullptr` rather than emitting a non-digit.
+- `?` The calendar arithmetic is `<chrono>`'s (`days_from_civil` /
+  `civil_from_days` / `weekday_from_days`), not a fourth copy: the tree already
+  had three civil-date conversions when this header was written. It was checked
+  differentially against a hosted libc over 1,740,289 instants spanning
+  1901–2100, with `mktime` and `gmtime` required to invert each other at every
+  one of them.
+- `~` `timespec_getres` is absent: [ctime.syn] in the C++23 baseline does not
+  list it. `timespec_get` accepts `TIME_UTC` and returns 0 for any other base,
+  which is the only base there is.
 
 ## `<csetjmp>`
 

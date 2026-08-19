@@ -1,14 +1,20 @@
 // __bits/chrono_clock — std::chrono clocks ([time.clock]). Included by <chrono>.
 //
-// Time sources are BoxOS-native (ClockBoard + RDTSC) via boxlib. We never
-// include <box/time.h> (whose global struct `time_t` would collide) and we
-// deliberately do NOT introduce a global/std `time_t`: system_clock::to_time_t
-// returns `long long` epoch-seconds. Documented deviation (no <ctime>).
+// Time sources are BoxOS-native (ClockBoard + RDTSC) via boxlib.
+//
+// to_time_t and from_time_t work in std::time_t, as [time.clock.system]/3
+// requires. They returned `long long` until Ф41-e, and the reason was not a
+// simplification: the name time_t belonged to a twenty-byte BoxOS calendar
+// structure in box/time.h, so <chrono> could not introduce the arithmetic type
+// the standard asks for without colliding with it. That structure is called
+// BoxTime now — the name the tree's own functions had always used for it — and
+// the deviation went with the rename rather than being worked around again.
 #ifndef BOXCXX_BITS_CHRONO_CLOCK
 #define BOXCXX_BITS_CHRONO_CLOCK
 
 #include <__bits/chrono_duration>
 #include <cstdint>
+#include <ctime>   // std::time_t for to_time_t/from_time_t; declarations only
 #include <type_traits>
 
 #include "box/clock.h" // ClockBoard wall-clock: clock_unix_now_ns, clock_uptime_us, clock_tsc_to_ns
@@ -31,11 +37,12 @@ struct system_clock {
             duration(static_cast<long long>(::clock_unix_now_ns())));
     }
 
-    static long long to_time_t(const time_point &t) noexcept
+    static ::std::time_t to_time_t(const time_point &t) noexcept
     {
-        return duration_cast<seconds>(t.time_since_epoch()).count();
+        return static_cast<::std::time_t>(
+            duration_cast<seconds>(t.time_since_epoch()).count());
     }
-    static time_point from_time_t(long long t) noexcept
+    static time_point from_time_t(::std::time_t t) noexcept
     {
         return time_point(duration_cast<duration>(seconds(t)));
     }

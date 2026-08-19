@@ -404,18 +404,18 @@ static int HwRtcGetUnix64(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_RTC_GET_TIME  out_crate: time_t (20 bytes packed) */
+/* HW_RTC_GET_TIME  out_crate: BoxTime (20 bytes packed) */
 static int HwRtcGetTime(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
     (void)crate_count;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < sizeof(time_t)) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < sizeof(BoxTime)) return ERR_BUFFER_TOO_SMALL;
 
-    time_t t;
+    BoxTime t;
     rtc_get_boxtime(&t);
-    if (crate_write(out, ctx, &t, sizeof(time_t)) != OK) return ERR_INVALID_ADDRESS;
+    if (crate_write(out, ctx, &t, sizeof(BoxTime)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 

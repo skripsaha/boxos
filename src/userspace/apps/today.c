@@ -27,7 +27,7 @@ static const char *weekday_name(uint8_t wd)
 
 int main(void)
 {
-    time_t now;
+    BoxTime now;
     int rc = time_get(&now);
     if (rc != 0)
     {

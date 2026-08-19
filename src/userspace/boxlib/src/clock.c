@@ -110,7 +110,7 @@ bool clock_throttle(uint64_t *last_us, uint64_t interval_us)
  * leap-year-correct for 1970..9999. seconds-of-day is straightforward.
  * ------------------------------------------------------------------------- */
 
-static void unix_to_civil(uint64_t unix_secs, time_t *out)
+static void unix_to_civil(uint64_t unix_secs, BoxTime *out)
 {
     uint64_t days     = unix_secs / 86400ULL;
     uint32_t sec_day  = (uint32_t)(unix_secs % 86400ULL);
@@ -138,9 +138,8 @@ static void unix_to_civil(uint64_t unix_secs, time_t *out)
     out->second = (uint8_t)(sec_day % 60u);
 }
 
-int clock_boxtime(struct time_t_ *out_)
+int clock_boxtime(BoxTime *out)
 {
-    time_t *out = (time_t *)out_;
     if (!out) return -ERR_NULL_POINTER;
 
     const ClockBoardView *v = cb();

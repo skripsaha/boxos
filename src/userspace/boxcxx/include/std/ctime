@@ -1,0 +1,154 @@
+// boxcxx — <ctime>
+//
+// [ctime.syn]. The header that could not exist until the name was free.
+//
+// `time_t` in a BoxOS tree meant a twenty-byte calendar structure — seconds,
+// nanoseconds, and the broken-down fields — declared in box/time.h and used by
+// the kernel's RTC driver, the hardware deck and boxlib alike. [ctime.syn]
+// requires time_t to be an ARITHMETIC type, so the two could not share a
+// program, and the collision was not theoretical: <chrono> has been dodging it
+// since Ф30. Its own comment said so, and system_clock::to_time_t returned
+// `long long` instead of std::time_t — a documented deviation from
+// [time.clock.system]/3 whose stated cause was "the name time_t already belongs
+// to a 20-byte BoxOS structure". Ф41-e gave that structure the name the rest of
+// the tree had been calling it by for years — clock_boxtime(), rtc_get_boxtime(),
+// "Boxtime is the preferred form" — and the deviation retired with the rename.
+//
+// Three answers this header had to give that a hosted one inherits:
+//
+//   • **clock() is processor time, and now there is such a thing.** C asks for
+//     the CPU time used by the program. The kernel had a `total_cpu_time` field
+//     on every process that was zeroed at creation and never written again —
+//     a promise in a struct. It is accumulated now, per slice, measured with
+//     the TSC.
+//
+//     The TSC is not a detail. The first version counted scheduler ticks, and
+//     at that granularity whoever is current when the tick fires is credited
+//     the WHOLE tick — so two processes alternating every tick are EACH
+//     credited 100% of the wall clock. Measured on a one-core boot, that made
+//     clock() read exactly equal to wall time. A factor of two per participant
+//     is not a rounding error, and no arithmetic on top of ticks removes it.
+//   • **localtime IS gmtime.** There is no timezone database, and inventing an
+//     offset would be worse than saying so. tm_isdst is always 0, %Z renders
+//     "UTC", %z renders "+0000". The same shape as <chrono>'s documented
+//     absence of a leap-second table.
+//   • **The static buffers are per strand.** gmtime, localtime, asctime and
+//     ctime all return a pointer to storage that C makes process-wide, which in
+//     a program running strands over one address space is a data race the
+//     standard permits. Here each strand has its own, as it does for rand,
+//     strtok and the conversion states in <cuchar>.
+//
+// strftime is NOT a second formatting engine. <chrono>'s formatter already
+// walks a %-string over a full specifier vocabulary, tested by every calendar
+// phase from Ф30 on; strftime fills that engine's field struct from a `tm` and
+// calls it. The tree had three civil-date conversions when this header was
+// written (boxlib's clock.c, boxlib's time.c, and <chrono>) and gained no
+// fourth: mktime and gmtime use <chrono>'s.
+#ifndef BOXCXX_CTIME
+#define BOXCXX_CTIME
+
+#include <cstddef>
+
+// Microseconds. The scheduler accumulates in this unit at every context switch
+// (converting from its own tick as it goes, because the tick rate is not
+// constant), so the value carries no second conversion and no rounding drift.
+//
+// Completed slices plus the one running, so two calls inside one slice differ
+// by the work between them. The in-flight part is measured from the stamp that
+// exists ONLY while the strand holds the core; an earlier version used the
+// scheduler's dispatch stamp instead, which is re-written on every scheduler
+// pass and survives a park, and made a 300 ms sleep read as 300 ms of
+// processor time. Dropping the term entirely was worse in the other direction:
+// on a machine with a spare core a strand can run for 50 ms without a single
+// context switch, and the answer then never moved at all.
+//
+// ‼ One thing this number reports faithfully is a BoxOS defect, not a property
+// of clock(): a strand blocked in a timed park is still given the core, so a
+// 300 ms sleep is credited roughly 260 ms of processor time. The wait underneath
+// is a poll rather than an event. CONFORMANCE records it; phase210 prints the
+// two numbers on every run so the day it is fixed is visible in the log.
+#define CLOCKS_PER_SEC 1000000
+
+// The one time base [time.h] requires. TIME_UTC's epoch here is the Unix epoch.
+#define TIME_UTC 1
+
+namespace std {
+
+// Signed: (clock_t)-1 is C's "processor time is unavailable", and it should be
+// -1 rather than the largest representable value.
+using clock_t = long long;
+
+// Seconds since 1970-01-01T00:00:00Z. Signed, so dates before the epoch are
+// representable rather than enormous.
+using time_t = long long;
+
+struct timespec {
+    time_t tv_sec;
+    long   tv_nsec;
+};
+
+struct tm {
+    int tm_sec;   // 0..60, the 60 for a leap second this system never inserts
+    int tm_min;   // 0..59
+    int tm_hour;  // 0..23
+    int tm_mday;  // 1..31
+    int tm_mon;   // 0..11 — January is 0, which C chose and everyone regrets
+    int tm_year;  // years since 1900
+    int tm_wday;  // 0..6, Sunday is 0
+    int tm_yday;  // 0..365
+    int tm_isdst; // always 0: there is no timezone database to consult
+};
+
+// Processor time used by this cabin, in CLOCKS_PER_SEC units, or (clock_t)-1
+// if the kernel cannot answer.
+clock_t clock() noexcept;
+
+// Wall-clock seconds. Writes through `timer` as well when it is not null.
+time_t time(time_t *timer) noexcept;
+
+inline double difftime(time_t time1, time_t time0) noexcept
+{
+    return static_cast<double>(time1) - static_cast<double>(time0);
+}
+
+// Normalises every field of *timeptr (any of them may be out of range on the
+// way in), fills tm_wday and tm_yday, and returns the corresponding time_t.
+// Because localtime is gmtime here, this is exactly a UTC conversion.
+time_t mktime(tm *timeptr) noexcept;
+
+// Both return a pointer to storage private to the calling strand.
+tm *gmtime(const time_t *timer) noexcept;
+tm *localtime(const time_t *timer) noexcept;
+
+// The fixed 25-character form C fixes, "Www Mmm dd hh:mm:ss yyyy\n", in
+// per-strand storage. Returns nullptr for a year that does not fit it, where C
+// leaves the behaviour undefined.
+char *asctime(const tm *timeptr) noexcept;
+char *ctime(const time_t *timer) noexcept;
+
+// Renders through <chrono>'s specifier engine. Returns the character count, or
+// 0 if the result would not fit in `maxsize` — in which case the contents of
+// `s` are unspecified, exactly as C says.
+size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) noexcept;
+
+// TIME_UTC is the only base, so any other value returns 0 and writes nothing.
+int timespec_get(timespec *ts, int base) noexcept;
+
+} // namespace std
+
+using std::asctime;
+using std::clock;
+using std::clock_t;
+using std::ctime;
+using std::difftime;
+using std::gmtime;
+using std::localtime;
+using std::mktime;
+using std::strftime;
+using std::time;
+using std::time_t;
+using std::timespec;
+using std::timespec_get;
+using std::tm;
+
+#endif // BOXCXX_CTIME
