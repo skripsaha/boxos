@@ -1,0 +1,33 @@
+// boxcxx — <__bits/c_wint>
+//
+// wint_t and WEOF, in a leaf because two headers must name the same type.
+// [cwchar.syn] and [cwctype.syn] both declare wint_t and both define WEOF, and
+// a program may include either one alone — the same shape that put mbstate_t in
+// <__bits/c_mbstate> in Ф41-e-1.
+//
+// The type is the compiler's own __WINT_TYPE__ rather than a spelling of our
+// own. That matters more than it looks: wint_t must hold every value of
+// wchar_t plus WEOF, and on this target wchar_t is a SIGNED 32-bit int while
+// wint_t is UNSIGNED 32-bit. Taking the compiler's word for both keeps the
+// promotion rules that <cwchar>'s vararg functions depend on identical to the
+// ones the compiler applies when it checks a call.
+//
+// WEOF is (wint_t)-1 = 0xFFFFFFFF. It is not a code point and cannot collide
+// with one: Unicode scalar values stop at U+10FFFF. char_traits<wchar_t>
+// already used this value as its eof() before this header existed, so the two
+// agree by construction rather than by anyone remembering to keep them level.
+#ifndef BOXCXX_BITS_C_WINT
+#define BOXCXX_BITS_C_WINT
+
+namespace std {
+
+using wint_t = __WINT_TYPE__;
+
+} // namespace std
+
+using std::wint_t;
+
+// A macro, as C specifies, so it works in #if and in a preprocessor-only TU.
+#define WEOF ((__WINT_TYPE__)-1)
+
+#endif // BOXCXX_BITS_C_WINT

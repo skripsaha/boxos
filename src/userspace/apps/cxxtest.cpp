@@ -591,6 +591,7 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstdarg>
+#include <cwctype>
 #include <cstdio>
 #include <ctime>
 #include <cfenv>
@@ -48136,8 +48137,188 @@ void Phase211()
     printf("[CXX] PASS phase211: <cstdio> — a FILE is a Current, and printf grew the rest of C\n");
 }
 
+// ── Phase212 — <cwctype> ────────────────────────────────────────────────────
+//
+// The tables were verified on the host against an independent per-code-point
+// computation straight from the UCD: 1114112 code points x 14 answers, zero
+// disagreements, and three mutations (a table wired to the wrong predicate,
+// iswgraph forgetting to exclude spaces, MapCase ignoring its stride) each
+// caught with a diagnostic naming the code point. What that CANNOT establish is
+// anything about this target: a different compiler, and a wint_t that is
+// unsigned here where the host's is signed. So this phase re-derives the
+// tables' fingerprint on the machine itself.
+//
+// The fingerprint is the population count of each class. Those numbers are not
+// invented here — tools/gen_unicode_wctype.py prints them from the UCD, and if
+// a single edge landed wrong in the image the total cannot match.
+namespace p212 {
 
+struct Counts {
+    unsigned alpha, upper, lower, print, space, blank, cntrl, punct;
+};
 
+Counts SweepAll()
+{
+    Counts n = {};
+    for (unsigned cp = 0; cp <= 0x10FFFFu; ++cp) {
+        const std::wint_t c = (std::wint_t)cp;
+        if (std::iswalpha(c)) ++n.alpha;
+        if (std::iswupper(c)) ++n.upper;
+        if (std::iswlower(c)) ++n.lower;
+        if (std::iswprint(c)) ++n.print;
+        if (std::iswspace(c)) ++n.space;
+        if (std::iswblank(c)) ++n.blank;
+        if (std::iswcntrl(c)) ++n.cntrl;
+        if (std::iswpunct(c)) ++n.punct;
+    }
+    return n;
+}
+
+// Every relation the header derives rather than tables. A break here means two
+// answers that must agree stopped agreeing, which no population count can see.
+bool InvariantsHold(unsigned *firstBad)
+{
+    for (unsigned cp = 0; cp <= 0x10FFFFu; ++cp) {
+        const std::wint_t c = (std::wint_t)cp;
+        const bool print = std::iswprint(c) != 0;
+        const bool space = std::iswspace(c) != 0;
+        const bool graph = std::iswgraph(c) != 0;
+        const bool alpha = std::iswalpha(c) != 0;
+        const bool digit = std::iswdigit(c) != 0;
+        const bool alnum = std::iswalnum(c) != 0;
+        const bool punct = std::iswpunct(c) != 0;
+        if (graph != (print && !space)) { *firstBad = cp; return false; }
+        if (alnum != (alpha || digit)) { *firstBad = cp; return false; }
+        if (punct && !print)           { *firstBad = cp; return false; }
+        if (std::iswupper(c) && !alpha){ *firstBad = cp; return false; }
+        if (std::iswlower(c) && !alpha){ *firstBad = cp; return false; }
+    }
+    return true;
+}
+
+} // namespace p212
+
+void Phase212()
+{
+    using namespace p212;
+
+    // ── the decision this header exists to carry ─────────────────────────
+    // BoxOS classifies Unicode, not ASCII. Measured on macOS libc in a UTF-8
+    // locale, iswalpha(U+4E2D) is 0 and towupper(U+0436) is the identity;
+    // both are wrong about Unicode and both are recorded in CONFORMANCE.
+    Check(std::iswalpha(L'ж') != 0, "phase212 a Cyrillic letter is a letter");
+    Check(std::iswlower(L'ж') != 0, "phase212 and it is lowercase");
+    Check(std::iswupper(L'Ж') != 0, "phase212 its capital is uppercase");
+    Check(std::towupper(L'ж') == (std::wint_t)L'Ж', "phase212 towupper crosses the alphabet");
+    Check(std::towlower(L'Ж') == (std::wint_t)L'ж', "phase212 and towlower comes back");
+    Check(std::iswalpha(0x4E2D) != 0, "phase212 a CJK ideograph is a letter (macOS says it is not)");
+    Check(std::iswprint(0x00AD) == 0, "phase212 a SOFT HYPHEN does not print (macOS says it does)");
+    Check(std::iswpunct(0x00AD) == 0, "phase212 and so it cannot be punctuation either");
+
+    // ── what C fixes to ASCII no matter how wide the character ───────────
+    Check(std::iswdigit(0x0660) == 0, "phase212 an ARABIC-INDIC ZERO is not a digit");
+    Check(std::iswalnum(0x0660) == 0, "phase212 nor alphanumeric");
+    Check(std::iswpunct(0x0660) == 0, "phase212 nor punctuation — it is simply none of them");
+    Check(std::iswprint(0x0660) != 0, "phase212 but it does print");
+    Check(std::iswdigit(L'7') != 0 && std::iswxdigit(L'f') != 0, "phase212 ASCII digits still are");
+
+    // ── the classes that are neither letters nor ASCII ───────────────────
+    Check(std::iswpunct(0x2014) != 0, "phase212 an em dash is punctuation");
+    Check(std::iswpunct(0x20AC) != 0, "phase212 and so is a currency sign");
+    Check(std::iswspace(0x2003) != 0 && std::iswgraph(0x2003) == 0,
+          "phase212 an em space is space and therefore not graph");
+    Check(std::iswprint(0x2003) != 0, "phase212 though it does print");
+    Check(std::iswblank(0x00A0) != 0, "phase212 a no-break space is blank");
+    Check(std::iswblank(L'\n') == 0 && std::iswspace(L'\n') != 0,
+          "phase212 a newline is space but not blank");
+    Check(std::iswcntrl(0x0001) != 0 && std::iswprint(0x0001) == 0,
+          "phase212 a control character does not print");
+    Check(std::iswalpha(0xD800) == 0 && std::iswprint(0xD800) == 0,
+          "phase212 a surrogate is not a character at all");
+
+    // ── WEOF, and everything past the last scalar value ──────────────────
+    Check(std::iswalpha(WEOF) == 0 && std::iswprint(WEOF) == 0 &&
+          std::iswspace(WEOF) == 0 && std::iswpunct(WEOF) == 0,
+          "phase212 WEOF is in no class");
+    Check(std::towlower(WEOF) == WEOF && std::towupper(WEOF) == WEOF,
+          "phase212 and both conversions hand it back unchanged");
+    Check(std::iswalpha(0x110000) == 0, "phase212 nothing past U+10FFFF is classified");
+
+    // ── wctype/iswctype cannot disagree with the named functions ─────────
+    {
+        static const char *const kNames[] = {
+            "alnum", "alpha", "blank", "cntrl", "digit", "graph",
+            "lower", "print", "punct", "space", "upper", "xdigit"
+        };
+        bool allNamed = true, allAgree = true;
+        for (unsigned i = 0; i < 12; ++i)
+            if (std::wctype(kNames[i]) == 0) allNamed = false;
+        Check(allNamed, "phase212 all twelve property names are known");
+
+        const std::wint_t probes[] = {L'a', L'Z', L'7', L' ', L'\t', L'\n',
+                                      0x0436, 0x4E2D, 0x2014, 0x00A0, WEOF};
+        for (std::wint_t c : probes) {
+            const int direct[12] = {
+                std::iswalnum(c), std::iswalpha(c), std::iswblank(c),
+                std::iswcntrl(c), std::iswdigit(c), std::iswgraph(c),
+                std::iswlower(c), std::iswprint(c), std::iswpunct(c),
+                std::iswspace(c), std::iswupper(c), std::iswxdigit(c)
+            };
+            for (unsigned i = 0; i < 12; ++i)
+                if (!!std::iswctype(c, std::wctype(kNames[i])) != !!direct[i])
+                    allAgree = false;
+        }
+        Check(allAgree, "phase212 iswctype answers exactly what the named function does");
+    }
+
+    // ── the branch where nothing matched ─────────────────────────────────
+    // Written at the same time as the branch where something did. Three times
+    // in Ф41 a green test turned out to cover only the successful path, and
+    // each time a mutation found it; this block is that lesson applied first.
+    Check(std::wctype("nosuchclass") == 0, "phase212 an unknown property is no property");
+    Check(std::wctype("") == 0, "phase212 and so is the empty name");
+    Check(std::wctype("alpha ") == 0, "phase212 a name with a trailing byte is not that name");
+    Check(std::wctype("alph") == 0, "phase212 nor is a prefix of one");
+    Check(std::wctype(nullptr) == 0, "phase212 a null name does not dereference");
+    Check(std::iswctype(L'a', 0) == 0, "phase212 classifying against no property matches nothing");
+    Check(std::wctrans("nosuchmap") == 0, "phase212 an unknown mapping is no mapping");
+    Check(std::wctrans(nullptr) == 0, "phase212 and a null one does not dereference");
+    Check(std::towctrans(L'a', 0) == (std::wint_t)L'a',
+          "phase212 mapping through no mapping returns the argument");
+
+    Check(std::wctrans("tolower") != 0 && std::wctrans("toupper") != 0,
+          "phase212 the two mappings C names are known");
+    Check(std::towctrans(L'Ж', std::wctrans("tolower")) == (std::wint_t)L'ж',
+          "phase212 towctrans(tolower) is towlower");
+    Check(std::towctrans(L'ж', std::wctrans("toupper")) == (std::wint_t)L'Ж',
+          "phase212 towctrans(toupper) is towupper");
+
+    // ── the whole table, re-derived on this machine ──────────────────────
+    // These eight numbers are the generator's own output from the UCD. One
+    // misplaced edge anywhere in 31960 bytes of rodata moves at least one.
+    {
+        const Counts n = SweepAll();
+        Check(n.alpha == 147421u, "phase212 Alphabetic covers exactly 147421 code points");
+        Check(n.upper == 2006u,   "phase212 Uppercase 2006");
+        Check(n.lower == 2595u,   "phase212 Lowercase 2595");
+        Check(n.print == 297097u, "phase212 Print 297097");
+        Check(n.space == 25u,     "phase212 White_Space 25");
+        Check(n.blank == 18u,     "phase212 blank 18");
+        Check(n.cntrl == 65u,     "phase212 Cc 65");
+        Check(n.punct == 9473u,   "phase212 punctuation and symbols 9473");
+        printf("[CXX] note phase212: swept 1114112 code points — alpha %u, print %u, punct %u\n",
+               n.alpha, n.print, n.punct);
+    }
+
+    {
+        unsigned bad = 0;
+        Check(InvariantsHold(&bad),
+              "phase212 graph/alnum/punct/upper/lower agree with what they derive from");
+        if (bad) printf("[CXX] note phase212: first invariant break at U+%05X\n", bad);
+    }
+
+    printf("[CXX] PASS phase212: <cwctype> — the one locale classifies Unicode, not ASCII\n");
+}
 
 } // namespace
 
@@ -48374,6 +48555,7 @@ int main()
     Phase209();
     Phase210();
     Phase211();
+    Phase212();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

@@ -151,10 +151,13 @@ PREAMBLE = '''// boxcxx — <__bits/unicode_escape>
 // 1114112 code points against both libraries found no other disagreement that
 // the Unicode 16 -> 17 data bump does not account for.
 //
-// Storage: sorted edge arrays. Runs alternate outside/inside starting outside,
-// so membership is "the number of edges <= cp is odd" — one binary search.
+// Storage: sorted edge arrays, read by InRuns in <__bits/unicode_runs> — the
+// same reader <__bits/unicode_wctype> uses, which is why it lives outside both
+// generated files rather than being emitted twice.
 #ifndef BOXCXX_BITS_UNICODE_ESCAPE
 #define BOXCXX_BITS_UNICODE_ESCAPE
+
+#include <__bits/unicode_runs>
 
 namespace std {
 namespace __unicode {
@@ -162,19 +165,6 @@ namespace __unicode {
 '''
 
 EPILOGUE = '''
-// The number of edges <= cp is odd exactly when cp sits inside a run.
-constexpr bool InRuns(const char32_t *edges, unsigned count,
-                      char32_t cp) noexcept
-{
-    unsigned lo = 0, hi = count;
-    while (lo < hi) {
-        const unsigned mid = lo + (hi - lo) / 2;
-        if (edges[mid] <= cp) lo = mid + 1;
-        else hi = mid;
-    }
-    return (lo & 1u) != 0u;
-}
-
 // General_Category in group Separator (Z) or Other (C). U+0020 is included.
 constexpr bool NeedsEscapeCategory(char32_t cp) noexcept
 {
