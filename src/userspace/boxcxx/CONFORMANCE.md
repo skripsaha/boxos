@@ -96,14 +96,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (6)
+## 1.1 Headers that do not exist (5)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 99 of them are in the tree and 6 are not,
+[headers] name 105 headers in C++23; 100 of them are in the tree and 5 are not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 99 + 5 = the 104 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 100 + 5 = the 105 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -114,14 +114,14 @@ standard. Ф41-e-2 built it, so it is now in the tree rather than in neither
 column — and the count above is the output of a diff between [headers] and
 `ls include/std`, not a number anyone maintains.
 
-### C library wrappers — 3 absent, 18 provided
+### C library wrappers — 2 absent, 19 provided
 
-Absent: `<cstdio>` `<cwchar>` `<cwctype>`
+Absent: `<cwchar>` `<cwctype>`
 
 Provided since Ф41: `<cassert>` `<cctype>` `<cerrno>` `<cfloat>` `<climits>`
 `<cstdarg>` `<csignal>` (Ф41-a), `<cstring>` `<cstdlib>` (Ф41-b), `<cfenv>`
 (Ф41-c), `<csetjmp>` (Ф41-d) and `<cinttypes>` `<clocale>` `<cuchar>` (Ф41-e-1)
-and `<ctime>` (Ф41-e-2) — all §2.
+`<ctime>` (Ф41-e-2) and `<cstdio>` (Ф41-f/g) — all §2.
 
 **The entry here used to name all seventeen and give one reason for all of
 them — "BoxOS has no libc" — and that reason was doing two different jobs.**
@@ -1299,6 +1299,84 @@ the rename stops the build rather than quietly restoring the old dodge.
 - `~` `timespec_getres` is absent: [ctime.syn] in the C++23 baseline does not
   list it. `timespec_get` accepts `TIME_UTC` and returns 0 for any other base,
   which is the only base there is.
+
+## `<cstdio>`
+
+The last C wrapper, and the only one the sentence §1.1 used to open with — "BoxOS
+has no libc" — was ever really about. The others needed answers BoxOS already
+had; this one needs a `FILE*`, and nothing underneath implemented one.
+
+A FILE is a buffer, a position and a mode wrapped around a **Current**, exactly
+as Ф36 built `basic_filebuf`. The three conventional streams are three
+conventional tags: `stdout` and `stderr` are `"screen"`, `stdin` is
+`"keyboard"`, and `fopen("report", "r")` opens `"file:report"`.
+
+**The hard part was not the streams, it was the four names boxlib already owned
+in the global namespace**, and each needed a different answer.
+
+- `+` **`printf` and `getchar` are ONE function each, shared with boxlib rather
+  than duplicated beside it.** `<cstdio>` declares them with exactly boxlib's
+  signature and pulls them into `std` with a using-declaration, so `printf`
+  inside a `using namespace std;` block names one entity. *Which*
+  implementation runs is a link-time question: boxlib's two are `weak`, boxcxx
+  defines strong ones, and `apps/Makefile` already ordered `libboxcxx.a` before
+  `libbox.a` "so our runtime symbols always win". A C++ program therefore gets
+  the full C conversion set; a C-only program — shell and the utilities, which
+  cannot link boxcxx — keeps the smaller set it has always had. phase211 prints
+  a line through the *unqualified* `printf` containing `%#x` and `%f`, neither
+  of which boxlib's can convert, so the arrangement is proved on the real road
+  rather than asserted.
+- `!` **Declaring a second `printf` in `namespace std` was tried first and does
+  not work.** [headers]/p permits it — it leaves unspecified whether a `<cxxx>`
+  header's names also appear globally — but `cxxtest.cpp` alone contains 53
+  `using namespace std;` blocks, and inside one an unqualified `printf` sees two
+  functions with identical signatures. The build said so in twenty places. This
+  is recorded because the idea is the obvious one and will occur to the next
+  reader too.
+- `~` **`fread` and `fwrite` are NOT injected into the global namespace.**
+  boxlib's take a TagFS file id and a byte offset (`box/file.h`) — genuinely
+  different functions wearing the same name — so the two cannot be merged the
+  way `printf` was. They live in `std` only. Nothing is ambiguous, because the
+  parameter lists do not match: a call shaped like C's `fread` cannot select
+  boxlib's.
+- `~` **`fopen` takes a NAME, not a path.** TagFS has no directories to walk, so
+  `"file:report"` is the whole of it. A program that passes `"/tmp/x"` gets a
+  file whose name contains slashes rather than a silent traversal — there is no
+  working directory to be relative to and no notion of one to add later.
+- `~` **`stderr` goes to the screen, not to the serial log**, and is unbuffered.
+  The log is where a developer with a cable looks; a diagnostic that reaches
+  only it is one nobody sees on a machine that has none. `std::cerr` (Ф36) and
+  `assert` (Ф41-a) made the same call, and all three agree on purpose.
+- `?` **EOF is the writer's, not the file's.** Current answers `CURRENT_CLOSED`
+  when no more data will arrive, which for a file is exhaustion and for a stream
+  is the writer letting go. `feof` reports that, and a live keyboard never sets
+  it — it blocks, because a keyboard has no end.
+- `?` The keyboard hands back a line **without** its newline, so the byte layer
+  appends one, exactly as `<iostream>`'s console buffer does. Both must agree or
+  a program mixing `std::cin` with `getchar()` would see two different line
+  shapes.
+- `?` `FOPEN_MAX` is 16 — the guarantee, not a ceiling. Open streams live on a
+  linked list with no fixed table, so exceeding it is not an error here.
+  `FILENAME_MAX` is 32, measured from `file_info_t::filename` rather than chosen.
+- `?` **The printf engine does not generate its own digits for floating point.**
+  `<charconv>` already produces correctly-rounded fixed, scientific, general and
+  hex forms (Ф9A, MPFR-verified); printf's work here is the sign, the flags, the
+  width and the padding around them. Likewise scanf hands spans to `from_chars`
+  and only decides how much text belongs to the number.
+- `?` Both engines were checked **differentially against a hosted libc before
+  they ever booted**: printf over 35,817 format/value pairs and scanf over 441
+  input/format pairs, both to zero differences. That sweep found seven real
+  defects in this code — `+`/space applied to unsigned conversions; `#` on octal
+  adding a zero the precision had already produced; `%#g` stripping the trailing
+  zeros it exists to keep; a scanset returning EOF where C wants a matching
+  failure; `inf`/`nan` unrecognised on input; a sticky end-of-input flag that
+  lied after lookahead; and an out-of-range integer refusing the conversion
+  instead of saturating.
+- `?` scanf keeps **eight characters of pushback**, not one. Recognising
+  `"infinity"` looks ahead that far, and a single slot silently swallowed seven
+  of them. C promises a *stream* only one character of `ungetc`, and that is
+  what is handed back when the call returns; the deeper lookahead lives inside
+  one call.
 
 ## `<csetjmp>`
 

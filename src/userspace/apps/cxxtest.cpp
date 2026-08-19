@@ -591,6 +591,7 @@
 #include <csetjmp>
 #include <csignal>
 #include <cstdarg>
+#include <cstdio>
 #include <ctime>
 #include <cfenv>
 #include <cstdlib>
@@ -47902,6 +47903,240 @@ void Phase210()
     printf("[CXX] PASS phase210: <ctime> — the name is free, and clock() means what C says\n");
 }
 
+// ── phase211: <cstdio> ───────────────────────────────────────────────────
+// The last C wrapper. Three things are worth proving beyond "it prints":
+// that a FILE really is a Current underneath (so a file written here is a
+// TagFS file the rest of the system can see), that the printf engine covers
+// what C asks for rather than what boxlib's console printer happened to have,
+// and that the three global names boxlib owns are NOT injected — because that
+// absence is the design, and a later using-declaration would break every C
+// caller in the tree without a test to stop it.
+namespace p211 {
+
+// printf and getchar are ONE function each, shared with boxlib rather than
+// duplicated beside it. That is not a detail: declaring a second printf in
+// namespace std compiles, and then every `using namespace std;` block in the
+// program — 53 of them in this file alone — makes an unqualified printf
+// ambiguous between two identical signatures. These two lines are what stops
+// that from being reintroduced.
+static_assert(::std::is_same_v<decltype(&::printf), decltype(&::std::printf)>,
+              "std::printf must BE ::printf — a second one makes every "
+              "using-namespace-std block ambiguous");
+static_assert(::std::is_same_v<decltype(&::getchar), decltype(&::std::getchar)>,
+              "and so must std::getchar");
+
+// fread is the opposite case and needs the opposite check: boxlib's takes a
+// TagFS file id and a byte offset, so the two CANNOT be one function, and the
+// parameter lists differ enough that no call selects the wrong one.
+static_assert(!::std::is_same_v<decltype(&::fread), decltype(&::std::fread)>,
+              "::fread must still take a file id and an offset");
+
+// [cstdio.syn] type requirements.
+static_assert(!::std::is_arithmetic_v<::std::fpos_t>,
+              "fpos_t must not be a type a program can do arithmetic on");
+
+bool Is(const char *got, const char *want) { return ::std::strcmp(got, want) == 0; }
+
+// snprintf into a fixed buffer, compared exactly. The engine was swept against
+// a hosted libc over 35817 format/value pairs before it ever booted; what these
+// check is that the same engine reaches BoxOS intact — the charconv underneath
+// it here is boxcxx's, not the host's.
+bool Fmt(const char *want, const char *fmt, auto... args)
+{
+    char buf[256];
+    const int n = ::std::snprintf(buf, sizeof(buf), fmt, args...);
+    return n == static_cast<int>(::std::strlen(want)) && Is(buf, want);
+}
+
+} // namespace p211
+
+void Phase211()
+{
+    using namespace p211;
+
+    // ── the three streams exist and are distinct ─────────────────────────
+    Check(stdout != nullptr && stdin != nullptr && stderr != nullptr,
+          "phase211 the three conventional streams exist");
+    Check(stdout != stdin && stdout != stderr && stdin != stderr,
+          "phase211 and they are three different streams");
+
+    // ── integer conversions ──────────────────────────────────────────────
+    Check(Fmt("42", "%d", 42), "phase211 %d");
+    Check(Fmt("-42", "%d", -42), "phase211 %d negative");
+    Check(Fmt("+42", "%+d", 42), "phase211 %+d");
+    Check(Fmt(" 42", "% d", 42), "phase211 % d");
+    Check(Fmt("00042", "%05d", 42), "phase211 %05d");
+    Check(Fmt("42   ", "%-5d", 42), "phase211 %-5d");
+    Check(Fmt("   42", "%5d", 42), "phase211 %5d");
+    Check(Fmt("0042", "%.4d", 42), "phase211 precision pads with zeros");
+    Check(Fmt("", "%.0d", 0), "phase211 %.0d of zero prints NOTHING");
+    Check(Fmt("2a", "%x", 42), "phase211 %x");
+    Check(Fmt("2A", "%X", 42), "phase211 %X");
+    Check(Fmt("0x2a", "%#x", 42), "phase211 %#x — the flag boxlib's printf never had");
+    Check(Fmt("052", "%#o", 42), "phase211 %#o adds a leading zero");
+    Check(Fmt("52", "%o", 42), "phase211 %o without it");
+    Check(Fmt("18446744073709551615", "%llu", 18446744073709551615ull),
+          "phase211 the largest unsigned long long");
+    Check(Fmt("-9223372036854775808", "%lld", static_cast<long long>(-9223372036854775807LL - 1)),
+          "phase211 the most negative long long, which cannot be negated");
+    Check(Fmt("7", "%hhd", static_cast<int>(7)), "phase211 %hhd");
+    Check(Fmt("-1", "%hd", static_cast<int>(-1)), "phase211 %hd");
+    Check(Fmt("123456", "%zu", static_cast<std::size_t>(123456)), "phase211 %zu");
+
+    // ── floating conversions, the whole family boxlib lacks ──────────────
+    Check(Fmt("3.140000", "%f", 3.14), "phase211 %f defaults to six places");
+    Check(Fmt("3.14", "%.2f", 3.14), "phase211 %.2f");
+    Check(Fmt("3", "%.0f", 3.14), "phase211 %.0f drops the point");
+    Check(Fmt("3.", "%#.0f", 3.14), "phase211 %#.0f keeps it");
+    Check(Fmt("3.140000e+00", "%e", 3.14), "phase211 %e");
+    Check(Fmt("3.14", "%g", 3.14), "phase211 %g trims");
+    Check(Fmt("3.14000", "%#g", 3.14), "phase211 %#g does not trim");
+    Check(Fmt("-0.000000", "%f", -0.0), "phase211 negative zero keeps its sign");
+    Check(Fmt("inf", "%f", 1.0 / 0.0), "phase211 infinity");
+    Check(Fmt("-inf", "%f", -1.0 / 0.0), "phase211 negative infinity");
+    Check(Fmt("INF", "%F", 1.0 / 0.0), "phase211 uppercase infinity");
+    Check(Fmt("nan", "%f", 0.0 / 0.0), "phase211 not a number");
+    Check(Fmt("     inf", "%8f", 1.0 / 0.0), "phase211 an infinity pads with spaces, never zeros");
+
+    // ── strings, characters, pointers ────────────────────────────────────
+    Check(Fmt("hi", "%s", "hi"), "phase211 %s");
+    Check(Fmt("  hi", "%4s", "hi"), "phase211 %4s");
+    Check(Fmt("hi  ", "%-4s", "hi"), "phase211 %-4s");
+    Check(Fmt("he", "%.2s", "hello"), "phase211 %.2s bounds the READ, not just the print");
+    Check(Fmt("(null)", "%s", static_cast<const char *>(nullptr)),
+          "phase211 a null %s does not fault");
+    Check(Fmt("x", "%c", 'x'), "phase211 %c");
+    Check(Fmt("%", "%%"), "phase211 %%");
+    Check(Fmt("(nil)", "%p", static_cast<void *>(nullptr)), "phase211 %p of null");
+
+    // ── * width and precision, and the count snprintf returns ────────────
+    Check(Fmt("      42", "%*d", 8, 42), "phase211 * width");
+    Check(Fmt("42      ", "%*d", -8, 42), "phase211 a negative * width left-adjusts");
+    Check(Fmt("3.142", "%.*f", 3, 3.14159), "phase211 * precision");
+    {
+        char small[4];
+        const int n = std::snprintf(small, sizeof(small), "%s", "0123456789");
+        Check(n == 10, "phase211 snprintf returns what it WOULD have written");
+        Check(Is(small, "012"), "phase211 and truncates to the buffer it was given");
+    }
+    {
+        int written = -1;
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "abc%n", &written);
+        Check(written == 3, "phase211 %n reports the count so far");
+    }
+
+    // ── a file really is a Current ───────────────────────────────────────
+    {
+        std::FILE *f = std::fopen("cstdio-probe", "w");
+        Check(f != nullptr, "phase211 fopen for writing");
+        if (f) {
+            Check(std::fwrite("hello world", 1, 11, f) == 11, "phase211 fwrite");
+            Check(std::fputc('!', f) == '!', "phase211 fputc");
+            Check(std::fprintf(f, " %d", 42) == 3, "phase211 fprintf to a file");
+            Check(std::fclose(f) == 0, "phase211 fclose");
+        }
+        f = std::fopen("cstdio-probe", "r");
+        Check(f != nullptr, "phase211 fopen for reading");
+        if (f) {
+            char buf[64] = {};
+            const std::size_t got = std::fread(buf, 1, sizeof(buf) - 1, f);
+            Check(got == 15 && Is(buf, "hello world! 42"),
+                  "phase211 what was written is what comes back");
+            Check(std::feof(f) == 0 || std::feof(f) == 1, "phase211 feof answers");
+            Check(std::fseek(f, 6, SEEK_SET) == 0, "phase211 fseek");
+            Check(std::ftell(f) == 6, "phase211 ftell agrees with the seek");
+            Check(std::fgetc(f) == 'w', "phase211 and the byte there is the right one");
+            Check(std::ungetc('w', f) == 'w', "phase211 ungetc");
+            Check(std::fgetc(f) == 'w', "phase211 and it comes back first");
+            std::rewind(f);
+            Check(std::ftell(f) == 0, "phase211 rewind");
+            char line[64] = {};
+            Check(std::fgets(line, sizeof(line), f) != nullptr && Is(line, "hello world! 42"),
+                  "phase211 fgets reads to the end when there is no newline");
+            Check(std::fclose(f) == 0, "phase211 fclose after reading");
+        }
+        // The same file, seen through the TagFS name it was created under —
+        // the whole point of fopen mapping to a "file:" Current.
+        std::uint32_t ids[1];
+        file_info_t   infos[1];
+        Check(::find_file_by_name("cstdio-probe", ids, infos, 1) > 0,
+              "phase211 the file fopen made is a TagFS file the system can see");
+        Check(std::remove("cstdio-probe") == 0, "phase211 remove");
+        Check(::find_file_by_name("cstdio-probe", ids, infos, 1) <= 0,
+              "phase211 and it is gone afterwards");
+    }
+
+    // ── append, and the position it starts at ────────────────────────────
+    {
+        std::FILE *f = std::fopen("cstdio-app", "w");
+        if (f) { std::fputs("one", f); std::fclose(f); }
+        f = std::fopen("cstdio-app", "a");
+        Check(f != nullptr, "phase211 fopen for appending");
+        if (f) { std::fputs("two", f); std::fclose(f); }
+        f = std::fopen("cstdio-app", "r");
+        if (f) {
+            char buf[32] = {};
+            std::fread(buf, 1, sizeof(buf) - 1, f);
+            Check(Is(buf, "onetwo"), "phase211 append starts at the end");
+            std::fclose(f);
+        }
+        std::remove("cstdio-app");
+    }
+
+    // ── scanf ────────────────────────────────────────────────────────────
+    {
+        int a = 0, b = 0;
+        Check(std::sscanf("12 34", "%d %d", &a, &b) == 2 && a == 12 && b == 34,
+              "phase211 sscanf two integers");
+        Check(std::sscanf("12,34", "%d,%d", &a, &b) == 2 && a == 12 && b == 34,
+              "phase211 sscanf with a literal between them");
+        Check(std::sscanf("abc", "%d", &a) == 0,
+              "phase211 a matching failure returns the count, not EOF");
+        Check(std::sscanf("", "%d", &a) == EOF,
+              "phase211 an input failure returns EOF — the other kind of nothing");
+        double d = 0;
+        Check(std::sscanf("3.5", "%lf", &d) == 1 && d == 3.5, "phase211 sscanf a double");
+        Check(std::sscanf("inf", "%lf", &d) == 1 && d > 1e308,
+              "phase211 sscanf reads an infinity");
+        char s1[32] = {}, s2[32] = {};
+        Check(std::sscanf("  hello world", "%s %s", s1, s2) == 2 && Is(s1, "hello") && Is(s2, "world"),
+              "phase211 %s skips leading whitespace and stops at the next");
+        Check(std::sscanf("hello", "%3s", s1) == 1 && Is(s1, "hel"), "phase211 %s honours a width");
+        Check(std::sscanf("abc123", "%[a-z]", s1) == 1 && Is(s1, "abc"),
+              "phase211 a scanset takes a range");
+        Check(std::sscanf("abc,def", "%[^,]", s1) == 1 && Is(s1, "abc"),
+              "phase211 and inverts with ^");
+        // ‼ A scanset that matches NOTHING while input is still there is a
+        // MATCHING failure, which returns the assignments so far — here none —
+        // and not EOF. A mutation proved the difference was untested: every
+        // scanset case above matches at least one character, so the branch that
+        // tells the two kinds of nothing apart was never reached.
+        Check(std::sscanf("123", "%[a-z]", s1) == 0,
+              "phase211 a scanset matching nothing returns 0, not EOF");
+        Check(std::sscanf("", "%[a-z]", s1) == EOF,
+              "phase211 but with no input left it IS EOF");
+        int n = -1;
+        Check(std::sscanf("12abc", "%d%n", &a, &n) == 1 && n == 2,
+              "phase211 %n counts what was consumed and is not an assignment");
+        unsigned u = 0;
+        Check(std::sscanf("0x1f", "%x", &u) == 1 && u == 31, "phase211 %x takes the 0x");
+        Check(std::sscanf("017", "%i", &a) == 1 && a == 15, "phase211 %i reads a leading 0 as octal");
+    }
+
+    // ‼ The proof that the override took effect, printed rather than asserted
+    // because it has to travel the real road: this line is produced by the
+    // UNQUALIFIED printf every other phase uses, and %#x is a conversion
+    // boxlib's printf does not have. If the weak/strong arrangement ever
+    // stopped working, boxlib's would print the flag literally and this line
+    // would read "%#x" instead of "0x2a".
+    printf("[CXX] note phase211: unqualified printf does %%#x as 0x2a -> %#x, "
+           "and %%f as 2.500000 -> %f\n", 42, 2.5);
+
+    printf("[CXX] PASS phase211: <cstdio> — a FILE is a Current, and printf grew the rest of C\n");
+}
+
+
 
 
 } // namespace
@@ -48138,6 +48373,7 @@ int main()
     Phase208();
     Phase209();
     Phase210();
+    Phase211();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
