@@ -1,0 +1,224 @@
+// boxcxx — <__bits/codecvt_engine>
+//
+// The conversion protocol of <locale>'s codecvt facets, in a leaf for one
+// measured reason: a host build can include THIS FILE and diff it against a
+// reference implementation, character for character, before any of it is
+// carried onto the target. <locale> itself cannot be compiled by a host
+// compiler — it pulls <string>, which pulls the allocator, which pulls
+// BoxOS — and a differential run against a COPY of the algorithm proves
+// nothing about the copy that ships. Ф42-a learned that from the other side:
+// an exhaustive sweep verified the <cwctype> TABLES and would not have
+// noticed iswpunct reading the wrong one.
+//
+// What is here is the PROTOCOL, not the codec. The codec is <__bits/c_utf8>,
+// already swept over all 2^32 byte sequences, and this file does not repeat a
+// line of it. What a facet adds is the answer-shape [locale.codecvt.virtuals]
+// asks for: where from_next and to_next are left standing, and which of
+// ok / partial / error / noconv comes back.
+//
+// ── the state that is not there ─────────────────────────────────────────
+// codecvt is built around a stateT because encodings like ISO-2022 carry a
+// shift state between characters. UTF-8 carries none, and the protocol lets a
+// converter say so: when the source ends inside a character, do_in stops AT
+// that character instead of swallowing its bytes, returns partial, and the
+// caller offers the same bytes again with more behind them. So mbstate_t is
+// accepted here, never read and never written — and that is a property of
+// UTF-8, not a shortcut taken. Measured: libc++'s own char8_t facets answer
+// exactly this way (partial, from_next unmoved), and its wchar_t facet, the
+// one that delegates to the platform's mbsnrtowcs, does not — see <locale>.
+//
+// ── one engine, three facets ────────────────────────────────────────────
+// codecvt<wchar_t, char>, codecvt<char32_t, char8_t> and
+// codecvt<char16_t, char8_t> differ in exactly two ways: the unit types, and
+// whether a code point above the BMP becomes one internal unit or a surrogate
+// pair. That is a type parameter and a bool, not three copies of a decoder.
+#ifndef BOXCXX_BITS_CODECVT_ENGINE
+#define BOXCXX_BITS_CODECVT_ENGINE
+
+#include <__bits/c_utf8>
+#include <cstddef>
+
+namespace std {
+
+// ── codecvt_base [locale.codecvt] ───────────────────────────────────────
+// The standard puts this class in <locale>. It lives here because the engine
+// below answers IN its result type, and a leaf that cannot name its own
+// return values is not a leaf. <locale> includes this file and re-exports it
+// unchanged; nothing about the class differs from its synopsis.
+class codecvt_base {
+public:
+    enum result { ok, partial, error, noconv };
+};
+
+namespace __cvt {
+
+// UTF-16 surrogate arithmetic, spelled once. char16_t is the only internal
+// unit that cannot hold a code point on its own.
+inline constexpr char32_t kSurHi   = 0xD800;
+inline constexpr char32_t kSurLo   = 0xDC00;
+inline constexpr char32_t kSurEnd  = 0xE000;
+inline constexpr char32_t kNonBmp  = 0x10000;
+
+template <class InternT, class ExternT, bool Utf16>
+struct Utf8 {
+    // ── external → internal ─────────────────────────────────────────────
+    // [locale.codecvt.virtuals]: convert until the source runs out (ok), the
+    // destination cannot hold the next character (partial), the source ends
+    // inside a character (partial — and NOT consumed, so the caller can
+    // re-offer it), or a byte sequence no continuation could rescue (error).
+    static codecvt_base::result In(const ExternT *from, const ExternT *from_end,
+                                   const ExternT *&from_next, InternT *to,
+                                   InternT *to_end, InternT *&to_next) noexcept
+    {
+        from_next = from;
+        to_next   = to;
+
+        while (from_next < from_end) {
+            // ‼ The source is judged BEFORE the destination is measured, and
+            // that order is the only place this engine and libc++ disagree —
+            // 36 lines out of 1 114 956, every one of them a full destination
+            // standing in front of a byte sequence that is not a character.
+            // libc++ answers partial there, which asks the caller for room
+            // that cannot help; error is true whatever the destination holds,
+            // and leaves from_next in exactly the same place, so the caller
+            // loses no information by being told the real reason first.
+            char32_t cp  = 0;
+            unsigned len = 0;
+            const codecvt_base::result r = Take(from_next, from_end, cp, len);
+            if (r != codecvt_base::ok) return r;
+
+            const ptrdiff_t need = (Utf16 && cp >= kNonBmp) ? 2 : 1;
+            if (to_end - to_next < need) return codecvt_base::partial;
+
+            if (need == 2) {
+                const char32_t v = cp - kNonBmp;
+                *to_next++ = static_cast<InternT>(kSurHi + (v >> 10));
+                *to_next++ = static_cast<InternT>(kSurLo + (v & 0x3FF));
+            } else {
+                *to_next++ = static_cast<InternT>(cp);
+            }
+            from_next += len;
+        }
+        return codecvt_base::ok;
+    }
+
+    // ── internal → external ─────────────────────────────────────────────
+    // A wide character never half-emits: when the destination cannot hold the
+    // whole encoding, the character is left unconsumed and partial comes back.
+    // That is why do_out needs no state either.
+    static codecvt_base::result Out(const InternT *from, const InternT *from_end,
+                                    const InternT *&from_next, ExternT *to,
+                                    ExternT *to_end, ExternT *&to_next) noexcept
+    {
+        from_next = from;
+        to_next   = to;
+
+        while (from_next < from_end) {
+            char32_t cp   = 0;
+            unsigned used = 0;
+            const codecvt_base::result r = Gather(from_next, from_end, cp, used);
+            if (r != codecvt_base::ok) return r;
+
+            char      buf[4];
+            const int n = __utf8::Encode(buf, cp);
+            if (n < 0) return codecvt_base::error; // a surrogate, or past U+10FFFF
+            if (to_end - to_next < n) return codecvt_base::partial;
+
+            for (int i = 0; i < n; i++) *to_next++ = static_cast<ExternT>(buf[i]);
+            from_next += used;
+        }
+        return codecvt_base::ok;
+    }
+
+    // ── how many bytes make at most `max` internal units ────────────────
+    // Stops for every reason In() stops for, and counts a surrogate pair as
+    // the two units it is: asking for one unit of an astral character buys
+    // nothing, so it consumes nothing.
+    static int Length(const ExternT *from, const ExternT *from_end, size_t max) noexcept
+    {
+        const ExternT *p    = from;
+        size_t         made = 0;
+
+        while (p < from_end && made < max) {
+            char32_t cp  = 0;
+            unsigned len = 0;
+            if (Take(p, from_end, cp, len) != codecvt_base::ok) break;
+
+            const size_t units = (Utf16 && cp >= kNonBmp) ? 2u : 1u;
+            if (made + units > max) break;
+            made += units;
+            p += len;
+        }
+        return static_cast<int>(p - from);
+    }
+
+private:
+    // One decoded character out of [p, end). The staging copy is what lets
+    // <__bits/c_utf8> stay the one decoder in the system: it speaks char, the
+    // char8_t facets do not, and a second decoder written to avoid four byte
+    // copies would be a second thing to verify — the mistake Ф41-e-1 recorded
+    // as finding 46 and Ф42-b as finding 21, both times by NOT making it.
+    static codecvt_base::result Take(const ExternT *p, const ExternT *end,
+                                     char32_t &cp, unsigned &len) noexcept
+    {
+        const ptrdiff_t have = end - p;
+        const size_t    n    = static_cast<size_t>(have < 4 ? have : 4);
+
+        char stage[4];
+        for (size_t i = 0; i < n; i++) stage[i] = static_cast<char>(p[i]);
+
+        const __utf8::Decoded d = __utf8::Decode(stage, n);
+        switch (d.status) {
+        case __utf8::Status::Ok:
+            cp  = d.cp;
+            len = d.len;
+            return codecvt_base::ok;
+        case __utf8::Status::Nul:
+            // A codecvt has no terminator: U+0000 is a character like any
+            // other, one byte long. Decode reports it apart because mbtowc
+            // has to answer differently, and that is Decode's caller's job.
+            cp  = 0;
+            len = 1;
+            return codecvt_base::ok;
+        case __utf8::Status::Incomplete:
+            return codecvt_base::partial;
+        default:
+            return codecvt_base::error;
+        }
+    }
+
+    // One code point out of [p, end) of internal units. Only UTF-16 can need
+    // two of them, and only UTF-16 can be handed half a character.
+    static codecvt_base::result Gather(const InternT *p, const InternT *end,
+                                       char32_t &cp, unsigned &used) noexcept
+    {
+        // wchar_t is SIGNED here (32-bit, __WCHAR_MAX__ 0x7fffffff), and a
+        // negative one becomes the huge code point 0xFFFFFFFF that Encode
+        // refuses. That needs no help: conversion to char32_t is modular by
+        // [conv.integral]. This line used to spell an intermediate cast to
+        // unsigned to "make sure", and mutating it away changed not one
+        // character of a 1 114 956-line sweep — because it was noise. It is
+        // written the short way now, with the reason it can be.
+        const char32_t u = static_cast<char32_t>(*p);
+
+        if constexpr (Utf16) {
+            if (u >= kSurHi && u < kSurLo) { // a high surrogate
+                if (end - p < 2) return codecvt_base::partial; // its mate may follow
+                const char32_t lo = static_cast<char32_t>(static_cast<unsigned>(p[1]));
+                if (lo < kSurLo || lo >= kSurEnd) return codecvt_base::error;
+                cp   = kNonBmp + ((u - kSurHi) << 10) + (lo - kSurLo);
+                used = 2;
+                return codecvt_base::ok;
+            }
+            if (u >= kSurLo && u < kSurEnd) return codecvt_base::error; // a lone low
+        }
+        cp   = u;
+        used = 1;
+        return codecvt_base::ok;
+    }
+};
+
+} // namespace __cvt
+} // namespace std
+
+#endif // BOXCXX_BITS_CODECVT_ENGINE

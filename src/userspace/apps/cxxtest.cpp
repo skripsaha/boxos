@@ -38548,12 +38548,14 @@ void Phase153()
                                 pmr::polymorphic_allocator<char8_t>>,
                       "phase153 (22) ...and it really is the pmr allocator");
     }
-    // __cpp_lib_char8_t stays undefined even so: <locale> owns half of it and
-    // has no facets at all. See <version>.
+    // __cpp_lib_char8_t stays undefined even so, but NOT for the reason this
+    // check gave until Ф42-e. It said the codecvt<charN_t, char8_t, mbstate_t>
+    // facets were missing; both are here now (Phase216). What P0482R6 still
+    // wants and boxcxx has not got is their _byname forms and <filesystem>.
+    // See <version>.
 #ifdef __cpp_lib_char8_t
-    Check(false, "phase153 __cpp_lib_char8_t must stay undefined -- "
-                 "codecvt<charN_t, char8_t, mbstate_t> needs facets <locale> "
-                 "does not have");
+    Check(false, "phase153 __cpp_lib_char8_t must stay undefined -- P0482R6 also "
+                 "wants codecvt_byname and <filesystem>, and neither exists here");
 #endif
 
     printf("[CXX] PASS phase153: Ф31e-g-3 — apply/tuple_cat/make_from_tuple "
@@ -48995,6 +48997,402 @@ void Phase215()
     printf("[CXX] PASS phase215: stream numerics generic in CharT — ASCII in, the stream's own character out\n");
 }
 
+// ── Phase216 — <locale>: one locale, four facets, and the codec beneath ─────
+//
+// Ф42-e. What a locale is here is not what it is in the standard. There it is
+// a CONTAINER of facets, and the container exists so a program can hold
+// several locales and install its own facets into them. BoxOS has one locale
+// and no way to make another, so the facets are part of the IMAGE — the same
+// answer Ф37 gave for the symbol table: inside the binary, no allocation, no
+// lock, answerable at any instant, including the instant the program is
+// coming apart.
+//
+// The conversion was swept on the host before any of it came here.
+// <__bits/codecvt_engine> was built twice from one source — once against the
+// tree, once against libc++'s own char8_t facets — and the two streams agreed
+// on 1 114 920 of 1 114 956 lines. The 36 that differ are one shape, recorded
+// in CONFORMANCE: a full destination standing in front of a byte that is not
+// a character, where libc++ asks for more room and boxcxx says what is
+// actually wrong.
+//
+// ‼ Two things that sweep could not reach, and this phase exists for both.
+// One is this target's compiler. The other is the wchar_t facet: libc++'s
+// wchar_t codecvt delegates to the platform's mbsnrtowcs, and it was measured
+// to answer partial where the standard says error, ok where its own siblings
+// say noconv, and to lose an embedded NUL entirely — so it is an oracle for
+// nothing. The wchar_t facet is therefore proven HERE, against the char32_t
+// facet it must EQUAL: one engine, two unit types, and every code point has
+// to come out the same bytes. That doubles as the wiring check Ф42-a's
+// finding 12 asks for — a facet reaching for the wrong engine, or built with
+// the wrong Utf16 flag, cannot live through it.
+namespace p216 {
+
+using WCvt = std::codecvt<wchar_t, char, std::mbstate_t>;
+using C32  = std::codecvt<char32_t, char8_t, std::mbstate_t>;
+using C16  = std::codecvt<char16_t, char8_t, std::mbstate_t>;
+using CC   = std::codecvt<char, char, std::mbstate_t>;
+using R    = std::codecvt_base;
+
+// A facet this image does not carry. has_facet must say so without the type
+// having to be anything in particular; use_facet on it would not compile,
+// which is the whole of the difference between the two.
+struct NotOurs : std::locale::facet {};
+
+// The wide analogues of Phase144's variable templates, and for the same
+// reason its comment gives: a requires-expression over a CONCRETE type does
+// not SFINAE a deleted function away, it hard-errors. Only a dependent
+// parameter puts the deleted overload back inside the immediate context.
+// Written from scratch here rather than reused because Phase144's are bound
+// to std::ostream, and the whole question is what the WIDE one answers.
+template <class Ch>
+constexpr bool WideStreamTakesChar =
+    requires(std::basic_ostringstream<wchar_t> &os, Ch c) { os << c; };
+template <class Ch>
+constexpr bool WideStreamTakesStr =
+    requires(std::basic_ostringstream<wchar_t> &os, const Ch *s) { os << s; };
+
+struct SweepResult {
+    unsigned long converted; // code points that made the whole round trip
+    unsigned long refused;   // surrogates: no UTF-8 sequence holds one
+    unsigned      firstBad;  // where something stopped agreeing, 0 if nothing did
+    const char   *why;
+};
+
+// One pass over every code point, asking everything of each while it is in
+// hand — the shape Phase212 was rewritten into after its first version swept
+// the same range twice and the second sweep learned nothing.
+SweepResult Sweep(const WCvt &w, const C32 &c32, const C16 &c16)
+{
+    SweepResult r = {0, 0, 0, nullptr};
+    std::mbstate_t st{};
+
+    for (unsigned long cp = 0; cp <= 0x10FFFFul; cp++) {
+        const wchar_t  wc = (wchar_t)cp;
+        const char32_t c  = (char32_t)cp;
+
+        char            nb[8];
+        const wchar_t  *wn = nullptr;
+        char           *nn = nullptr;
+        const R::result rw = w.out(st, &wc, &wc + 1, wn, nb, nb + 8, nn);
+
+        char8_t         ub[8];
+        const char32_t *cn = nullptr;
+        char8_t        *un = nullptr;
+        const R::result rc = c32.out(st, &c, &c + 1, cn, ub, ub + 8, un);
+
+        if (rw != rc || (nn - nb) != (un - ub)) {
+            r.firstBad = (unsigned)cp;
+            r.why      = "wchar_t and char32_t disagree on the encoding";
+            return r;
+        }
+        for (long i = 0; i < nn - nb; i++)
+            if ((unsigned char)nb[i] != (unsigned)ub[i]) {
+                r.firstBad = (unsigned)cp;
+                r.why      = "wchar_t and char32_t produced different bytes";
+                return r;
+            }
+
+        if (rw == R::error) { // D800..DFFF, and nothing else in this range
+            r.refused++;
+            continue;
+        }
+        if (rw != R::ok || nn == nb) {
+            r.firstBad = (unsigned)cp;
+            r.why      = "a code point neither converted nor was refused";
+            return r;
+        }
+
+        wchar_t     back[2];
+        const char *bn = nullptr;
+        wchar_t    *bt = nullptr;
+        if (w.in(st, nb, nn, bn, back, back + 2, bt) != R::ok || bt - back != 1 ||
+            back[0] != wc || bn != nn) {
+            r.firstBad = (unsigned)cp;
+            r.why      = "the bytes did not decode back to the wide character";
+            return r;
+        }
+
+        // The same bytes through UTF-16, where anything astral is a pair.
+        const long     want = cp >= 0x10000ul ? 2 : 1;
+        char16_t       h[4];
+        const char8_t *hn = nullptr;
+        char16_t      *ht = nullptr;
+        if (c16.in(st, ub, un, hn, h, h + 4, ht) != R::ok || ht - h != want) {
+            r.firstBad = (unsigned)cp;
+            r.why      = "UTF-16 did not take the units it should have";
+            return r;
+        }
+        char8_t         ob[8];
+        const char16_t *on = nullptr;
+        char8_t        *ot = nullptr;
+        if (c16.out(st, h, ht, on, ob, ob + 8, ot) != R::ok || ot - ob != un - ub) {
+            r.firstBad = (unsigned)cp;
+            r.why      = "UTF-16 did not re-encode to the same length";
+            return r;
+        }
+        for (long i = 0; i < ot - ob; i++)
+            if (ob[i] != ub[i]) {
+                r.firstBad = (unsigned)cp;
+                r.why      = "UTF-16 re-encoded to different bytes";
+                return r;
+            }
+
+        r.converted++;
+    }
+    return r;
+}
+
+} // namespace p216
+
+void Phase216()
+{
+    using namespace p216;
+    using std::codecvt_base;
+    using std::has_facet;
+    using std::locale;
+    using std::use_facet;
+
+    // ── locale did not grow ──────────────────────────────────────────────
+    // The load-bearing consequence of putting facets in the image: ios_base
+    // and every basic_streambuf hold one of these by value. A registry would
+    // have made each of them carry a refcount.
+    static_assert(sizeof(locale) == 1, "phase216 locale must stay an empty class");
+    static_assert(std::is_trivially_copyable_v<locale>,
+                  "phase216 locale must stay trivially copyable");
+
+    const locale a;
+    const locale b("anything at all");
+
+    Check(has_facet<WCvt>(a) && has_facet<C32>(a) && has_facet<C16>(a) && has_facet<CC>(a),
+          "phase216 (1) the four facets Table 104 requires are all here");
+    Check(!has_facet<NotOurs>(a),
+          "phase216 (2) a facet this image does not carry is reported absent");
+
+    const WCvt &w   = use_facet<WCvt>(a);
+    const C32  &c32 = use_facet<C32>(a);
+    const C16  &c16 = use_facet<C16>(a);
+    const CC   &cc  = use_facet<CC>(a);
+
+    // The Nameplate property: one facet per program, at one address, for every
+    // locale anyone can build. Nothing is constructed on the way to it.
+    Check(&w == &use_facet<WCvt>(b) && &c32 == &use_facet<C32>(b) &&
+              &c16 == &use_facet<C16>(b) && &cc == &use_facet<CC>(b),
+          "phase216 (3) the same facet answers for every locale, at one address");
+
+    // ── what each facet says it is ───────────────────────────────────────
+    // These are the wiring: a converting facet that answered 1 and true here
+    // would be reading the identity's engine, and every conversion below could
+    // still pass. Every number was measured against libc++'s own facets.
+    Check(w.encoding() == 0 && !w.always_noconv() && w.max_length() == 4,
+          "phase216 (4) the wide facet is variable-width, converting, at most 4 bytes");
+    Check(c32.encoding() == 0 && !c32.always_noconv() && c32.max_length() == 4,
+          "phase216 (5) so is the char32_t facet");
+    Check(c16.encoding() == 0 && !c16.always_noconv() && c16.max_length() == 4,
+          "phase216 (6) and the char16_t facet");
+    Check(cc.encoding() == 1 && cc.always_noconv() && cc.max_length() == 1,
+          "phase216 (7) the identity facet is fixed-width 1 and converts nothing");
+
+    // ── the identity facet [locale.codecvt.virtuals] ─────────────────────
+    {
+        std::mbstate_t  st{};
+        const char      src[] = "abc";
+        char            dst[8];
+        const char     *fn = nullptr;
+        char           *tn = nullptr;
+        Check(cc.out(st, src, src + 3, fn, dst, dst + 8, tn) == codecvt_base::noconv &&
+                  fn == src && tn == dst,
+              "phase216 (8) out on the identity facet is noconv and moves nothing");
+        fn = nullptr;
+        tn = nullptr;
+        Check(cc.in(st, src, src + 3, fn, dst, dst + 8, tn) == codecvt_base::noconv &&
+                  fn == src && tn == dst,
+              "phase216 (9) and so is in");
+        tn = nullptr;
+        Check(cc.unshift(st, dst, dst + 8, tn) == codecvt_base::noconv && tn == dst,
+              "phase216 (10) unshift has no termination sequence to write");
+        Check(cc.length(st, src, src + 3, 99) == 3 && cc.length(st, src, src + 3, 1) == 1 &&
+                  cc.length(st, src, src + 3, 0) == 0,
+              "phase216 (11) length is the smaller of what there is and what was asked");
+    }
+
+    // ── unshift, on an encoding with no shift state ──────────────────────
+    {
+        std::mbstate_t st{};
+        char           nb[4];
+        char          *nt = nullptr;
+        Check(w.unshift(st, nb, nb + 4, nt) == codecvt_base::noconv && nt == nb,
+              "phase216 (12) UTF-8 carries no state, so there is nothing to unshift");
+    }
+
+    // ── the boundaries [locale.codecvt.virtuals] ─────────────────────────
+    {
+        std::mbstate_t st{};
+
+        // A destination that cannot hold the whole character: the character is
+        // left unconsumed, so nothing is ever half-emitted.
+        const wchar_t  one[] = {L'a', 0x4E2D};
+        char           two[3];
+        const wchar_t *wn = nullptr;
+        char          *tn = nullptr;
+        Check(w.out(st, one, one + 2, wn, two, two + 3, tn) == codecvt_base::partial &&
+                  wn - one == 1 && tn - two == 1,
+              "phase216 (13) out stops before a character the destination cannot hold");
+
+        // An embedded NUL is a character, one byte long. This is the case
+        // libc++'s wchar_t facet gets wrong: it answers partial and writes
+        // nothing, because wcsnrtombs reads the NUL as a terminator.
+        const wchar_t  nul[] = {0, L'A'};
+        char           nb[8];
+        wn = nullptr;
+        tn = nullptr;
+        Check(w.out(st, nul, nul + 2, wn, nb, nb + 8, tn) == codecvt_base::ok &&
+                  tn - nb == 2 && nb[0] == '\0' && nb[1] == 'A',
+              "phase216 (14) a NUL is a character to a codecvt, not a terminator");
+
+        // A code point no UTF-8 sequence can hold, and a negative wchar_t —
+        // which is the same thing, because wchar_t is signed here and the
+        // conversion to a code point is modular.
+        const wchar_t bad[] = {(wchar_t)0xD800};
+        wn                  = nullptr;
+        tn                  = nullptr;
+        Check(w.out(st, bad, bad + 1, wn, nb, nb + 8, tn) == codecvt_base::error &&
+                  wn == bad && tn == nb,
+              "phase216 (15) a surrogate is not a character UTF-8 can carry");
+        const wchar_t neg[] = {(wchar_t)-1};
+        wn                  = nullptr;
+        tn                  = nullptr;
+        Check(w.out(st, neg, neg + 1, wn, nb, nb + 8, tn) == codecvt_base::error,
+              "phase216 (16) a negative wchar_t is the huge code point it is, and refused");
+
+        // Input that ends inside a character: stop AT it, do not swallow its
+        // bytes. That is why mbstate_t is never written — the caller offers
+        // the same bytes again with more behind them.
+        const char  cut[] = {'a', (char)0xE4, (char)0xB8};
+        wchar_t     out[4];
+        const char *cn = nullptr;
+        wchar_t    *ot = nullptr;
+        Check(w.in(st, cut, cut + 3, cn, out, out + 4, ot) == codecvt_base::partial &&
+                  cn - cut == 1 && ot - out == 1,
+              "phase216 (17) in stops at an unfinished character and leaves it unconsumed");
+
+        const char bad2[] = {'a', (char)0xFF, 'b'};
+        cn                = nullptr;
+        ot                = nullptr;
+        Check(w.in(st, bad2, bad2 + 3, cn, out, out + 4, ot) == codecvt_base::error &&
+                  cn - bad2 == 1 && ot - out == 1,
+              "phase216 (18) and stops at a byte no continuation could rescue");
+
+        // ‼ The one place boxcxx and libc++ answer differently, pinned so the
+        // divergence is a decision and not a drift: the destination is already
+        // full AND the next byte is not a character. libc++ says partial, which
+        // asks for room that cannot help.
+        cn = nullptr;
+        ot = nullptr;
+        Check(w.in(st, bad2, bad2 + 3, cn, out, out + 1, ot) == codecvt_base::error &&
+                  cn - bad2 == 1 && ot - out == 1,
+              "phase216 (19) a full destination does not hide a byte that is not a character");
+
+        Check(w.length(st, cut, cut + 3, 9) == 1 && w.length(st, bad2, bad2 + 3, 9) == 1 &&
+                  w.length(st, "abc", "abc" + 3, 0) == 0,
+              "phase216 (20) length stops for everything in stops for, and counts bytes");
+    }
+
+    // ── the surrogate arithmetic, which only char16_t has ────────────────
+    {
+        std::mbstate_t st{};
+        char8_t        ob[8];
+
+        const char16_t lone[] = {0xD83D};
+        const char16_t *hn    = nullptr;
+        char8_t        *ot    = nullptr;
+        Check(c16.out(st, lone, lone + 1, hn, ob, ob + 8, ot) == codecvt_base::partial &&
+                  hn == lone,
+              "phase216 (21) a high surrogate at the end of the source may still find its mate");
+
+        const char16_t orphan[] = {0xD83D, 0x0041};
+        hn                      = nullptr;
+        ot                      = nullptr;
+        Check(c16.out(st, orphan, orphan + 2, hn, ob, ob + 8, ot) == codecvt_base::error,
+              "phase216 (22) one that is followed by something else never will");
+
+        const char16_t low[] = {0xDE00};
+        hn                   = nullptr;
+        ot                   = nullptr;
+        Check(c16.out(st, low, low + 1, hn, ob, ob + 8, ot) == codecvt_base::error,
+              "phase216 (23) a low surrogate on its own is not a character");
+
+        // Room for one unit is no room at all for a pair.
+        const char8_t   emoji[] = {0xF0, 0x9F, 0x98, 0x80};
+        char16_t        h[2];
+        const char8_t  *en = nullptr;
+        char16_t       *et = nullptr;
+        Check(c16.in(st, emoji, emoji + 4, en, h, h + 1, et) == codecvt_base::partial &&
+                  en == emoji && et == h,
+              "phase216 (24) a pair is not written half");
+        Check(c16.length(st, emoji, emoji + 4, 1) == 0 &&
+                  c16.length(st, emoji, emoji + 4, 2) == 4,
+              "phase216 (25) and asking length for one unit of it buys nothing");
+    }
+
+    // ── every code point, on this machine, through all three ─────────────
+    // 2048 refusals is not a round number chosen to look right: it is
+    // D800..DFFF, the surrogate range, and nothing else in 0..10FFFF fails to
+    // encode. 1 112 064 is what is left.
+    {
+        const std::clock_t t0 = std::clock();
+        const SweepResult  s  = Sweep(w, c32, c16);
+        const std::clock_t t1 = std::clock();
+
+        Check(s.why == nullptr, "phase216 (26) wchar_t, char32_t and char16_t agree "
+                                "on every code point, both directions");
+        if (s.why != nullptr)
+            printf("[CXX] note phase216: broke at U+%05X — %s\n", s.firstBad, s.why);
+        Check(s.refused == 2048ul,
+              "phase216 (27) exactly the 2048 surrogates are refused");
+        Check(s.converted == 1112064ul,
+              "phase216 (28) and the other 1112064 code points round-trip");
+
+        printf("[CXX] note phase216: swept 1114112 code points through three facets "
+               "in %u ms of CPU — %lu converted, %lu refused\n",
+               (unsigned)((t1 - t0) / (CLOCKS_PER_SEC / 1000)), s.converted, s.refused);
+    }
+
+    // ── found while making the document tell the truth ───────────────────
+    // <ostream> said the synopsis's six basic_ostream<wchar_t, traits>
+    // deletions were "deliberately not mirrored: wide streams are a permanent
+    // exclusion, there is no char_traits<wchar_t>". Both halves were false —
+    // char_traits<wchar_t> has always existed, and Ф42-d made a wide
+    // ostringstream work — so the silent wrong output those deletions exist to
+    // stop was happening unwatched on the wide side. They are mirrored now.
+    static_assert(!WideStreamTakesChar<char8_t>, "phase216 (29) char8_t");
+    static_assert(!WideStreamTakesChar<char16_t>, "phase216 (30) char16_t");
+    static_assert(!WideStreamTakesChar<char32_t>, "phase216 (31) char32_t");
+    static_assert(!WideStreamTakesStr<char8_t>, "phase216 (32) const char8_t*");
+    static_assert(!WideStreamTakesStr<char16_t>, "phase216 (33) const char16_t*");
+    static_assert(!WideStreamTakesStr<char32_t>, "phase216 (34) const char32_t*");
+    // Controls, in both directions. The deletions must not shadow what a wide
+    // stream can write, and must not accidentally delete what only Ф42-f will
+    // add: the wchar_t inserter is still absent, so wos << L'A' still promotes
+    // to int and prints 65 — Phase215 pins that, and f has to break it.
+    static_assert(WideStreamTakesChar<int>, "phase216 (35) an int still inserts");
+    static_assert(WideStreamTakesChar<double>, "phase216 (36) and a double");
+    static_assert(WideStreamTakesStr<void>, "phase216 (37) and a pointer");
+    {
+        // No wchar_t literal here on purpose: there is still no
+        // operator<<(basic_ostream<wchar_t>&, wchar_t), so L' ' would promote
+        // to int and write 32. Phase215 is where that is pinned; this check is
+        // about the deletions not shadowing what does work.
+        std::basic_ostringstream<wchar_t> wos;
+        wos << 42 << true;
+        Check(wos.str() == std::wstring(L"421"),
+              "phase216 (38) deleting the wrong character types left the wide "
+              "stream's own writing alone");
+    }
+
+    printf("[CXX] PASS phase216: <locale> — one locale, and four facets that live in "
+           "the image rather than in it\n");
+}
+
 } // namespace
 
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
@@ -49234,6 +49632,7 @@ int main()
     Phase213();
     Phase214();
     Phase215();
+    Phase216();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
