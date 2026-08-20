@@ -51080,25 +51080,225 @@ void Phase222()
               "phase222 (17) a conversion that cannot fit its buffer is failbit");
     }
 
-    // ── (18) PIN for Ф43-c-2, asserting the WRONG answer on purpose ──────
-    // Extraction does NOT go through num_get yet: the grammar in <istream>
-    // reads its own digits and knows nothing about numpunct, so a stream
-    // imbued with a comma decimal point still stops at the comma. When
-    // num_get lands, THIS MUST FAIL and be rewritten to expect 3.5.
+    // ── (18) the pin Ф43-c-1 left here, now paying out ───────────────────
+    // This asserted 3.0 until num_get landed: the grammar lived in <istream>
+    // and knew nothing about numpunct, so a comma decimal point stopped the
+    // number. It failed on the first run after the routing, and it was the
+    // ONLY thing in the whole matrix that failed — which is the useful part
+    // of the report, because moving a grammar into a facet could have moved
+    // any number of edge cases with it.
     {
         const locale       ru(classic, new RuPunct);
         std::istringstream is("3,5");
         is.imbue(ru);
         double d = 0;
         is >> d;
-        Check(d == 3.0,
-              "phase222 (18) PIN: extraction ignores numpunct -- num_get must "
-              "break this line");
+        Check(d == 3.5,
+              "phase222 (18) extraction reads the facet's decimal point");
     }
 
     printf("[CXX] PASS phase222: numpunct and num_put - the punctuation a locale "
            "with one locale never had anywhere to put\n");
 }
+
+// ── Phase223: num_get ──────────────────────────────────────────────────────
+// Extraction went through the facet in Ф43-c-2, and the interesting part is
+// what that changed and what it did NOT. It did not change any of the integer
+// edge cases the old grammar had — those are checked elsewhere and stayed
+// green through the move. What it changed is that a program's numpunct now
+// reaches the parser, and that the grammar became the standard's stage 2,
+// which never accumulates a character it cannot use and therefore never has
+// to give one back.
+namespace p223 {
+
+struct CommaPunct : std::numpunct<char> {
+protected:
+    char        do_decimal_point() const override { return ','; }
+    char        do_thousands_sep() const override { return '_'; }
+    std::string do_grouping() const override { return "\3"; }
+    std::string do_truename() const override { return "yes"; }
+    std::string do_falsename() const override { return "no"; }
+};
+
+// A num_get that reads every long as 7, whatever the input says.
+struct SevenGet : std::num_get<char> {
+protected:
+    iter_type do_get(iter_type in, iter_type, std::ios_base &, std::ios_base::iostate &,
+                     long &v) const override
+    {
+        v = 7;
+        return in;
+    }
+};
+
+} // namespace p223
+
+void Phase223()
+{
+    using namespace p223;
+    using std::locale;
+
+    const locale classic = locale::classic();
+    const locale comma(classic, new CommaPunct);
+
+    // ── (1) the facet's decimal point and separator reach the parser ──────
+    {
+        std::istringstream is("1_234_567 12,5");
+        is.imbue(comma);
+        long   n = 0;
+        double d = 0;
+        is >> n >> d;
+        Check(n == 1234567,
+              "phase223 (1) the thousands separator is read and discarded");
+        Check(d == 12.5, "phase223 (2) and the decimal point is the facet's");
+    }
+
+    // ── (3) ... and the classic locale still refuses both ────────────────
+    {
+        std::istringstream is("1_234");
+        long               n = 0;
+        is >> n;
+        Check(n == 1 && !is.fail(),
+              "phase223 (3) under \"C\" the separator is not a separator: the number "
+              "ends at the underscore");
+    }
+
+    // ── (4) boolalpha reads the facet's words ────────────────────────────
+    {
+        std::istringstream is("yes no");
+        is.imbue(comma);
+        bool a = false, b = true;
+        is >> std::boolalpha >> a >> b;
+        Check(a && !b, "phase223 (4) boolalpha matches truename/falsename, not literals");
+
+        std::istringstream bad("maybe");
+        bad.imbue(comma);
+        bool c = true;
+        bad >> std::boolalpha >> c;
+        Check(bad.fail() && !c,
+              "phase223 (5) a word that is neither fails and stores false");
+    }
+
+    // ── (6) an installed num_get replaces the parse ──────────────────────
+    {
+        std::istringstream is("123");
+        is.imbue(locale(classic, new SevenGet));
+        long n = 0;
+        is >> n;
+        Check(n == 7, "phase223 (6) an installed num_get decides what a number is");
+
+        std::istringstream other("123");
+        other.imbue(locale(classic, new SevenGet));
+        double d = 0;
+        other >> d;
+        Check(d == 123.0,
+              "phase223 (7) ... and only the overload it overrode: double is untouched");
+    }
+
+    // ── (8) stage 2 consumes the sign it could not use ───────────────────
+    // The old grammar put a lone sign back; [facet.num.get.virtuals]/3 does
+    // not, and neither do the reference implementations. Recorded as a check
+    // because it is a visible behaviour change, not an accident.
+    {
+        std::istringstream is("-x");
+        long               n = 0;
+        is >> n;
+        Check(is.fail() && n == 0,
+              "phase223 (8) a sign with no digits fails and stores zero");
+        is.clear();
+        char c = 0;
+        is >> c;
+        Check(c == 'x',
+              "phase223 (9) ... and the sign was CONSUMED: the stream is at 'x', which "
+              "is what stage 2 says and what the old putback did not do");
+    }
+
+    // ── (10) the widths that have no facet overload of their own ─────────
+    // short and int route through `long` and are range-checked afterwards.
+    {
+        std::istringstream is("40000");
+        short              s = 0;
+        is >> s;
+        Check(is.fail() && s == std::numeric_limits<short>::max(),
+              "phase223 (10) a short that does not fit clamps to its max and fails");
+
+        std::istringstream neg("-40000");
+        short              s2 = 0;
+        neg >> s2;
+        Check(neg.fail() && s2 == std::numeric_limits<short>::min(),
+              "phase223 (11) ... and the same downward");
+
+        std::istringstream ok("1234");
+        int                i = 0;
+        ok >> i;
+        Check(!ok.fail() && i == 1234, "phase223 (12) an int that fits is just read");
+    }
+
+    // ── (13) the rules that survived the move ───────────────────────────
+    {
+        std::istringstream hex("ff");
+        unsigned           u = 0;
+        hex >> std::hex >> u;
+        Check(u == 255, "phase223 (13) hex still reads hex");
+
+        std::istringstream oct("777");
+        unsigned           o = 0;
+        oct >> std::oct >> o;
+        Check(o == 511, "phase223 (14) and oct still reads oct");
+
+        std::istringstream minus("-1");
+        unsigned           w = 0;
+        minus >> w;
+        Check(w == 0xFFFFFFFFu && !minus.fail(),
+              "phase223 (15) an unsigned target WRAPS on a leading minus rather than "
+              "failing -- the strtoul rule");
+
+        std::istringstream sci("1.5e3");
+        double             d = 0;
+        sci >> d;
+        Check(d == 1500.0, "phase223 (16) exponents still parse");
+
+        std::istringstream hf("0x1p4");
+        double             h = 0;
+        hf >> h;
+        Check(h == 16.0,
+              "phase223 (17) and a hexfloat is recognized whatever floatfield says");
+    }
+
+    // ── (18) eofbit, and the pointer round trip ─────────────────────────
+    {
+        std::istringstream is("42");
+        int                n = 0;
+        is >> n;
+        Check(n == 42 && is.eof() && !is.fail(),
+              "phase223 (18) a number ending at end-of-input sets eofbit, not failbit");
+
+        int                target = 0;
+        std::ostringstream os;
+        os << static_cast<void *>(&target);
+        std::istringstream back(os.str());
+        void              *p = nullptr;
+        back >> p;
+        Check(p == static_cast<void *>(&target),
+              "phase223 (19) a pointer written by num_put reads back through num_get");
+    }
+
+    // ── (20) a wide stream extracts through its own facets ──────────────
+    {
+        std::wistringstream is(L"1_234,5");
+        is.imbue(locale(classic, new CommaPunct));   // narrow facet: not used here
+        double              d = 0;
+        is >> d;
+        // The WIDE numpunct is the classic one, so '_' ends the number at 1.
+        Check(d == 1.0,
+              "phase223 (20) a wide stream asks the WIDE facets: installing a narrow "
+              "numpunct changes nothing for it");
+    }
+
+    printf("[CXX] PASS phase223: num_get - the grammar that stopped needing to put "
+           "characters back\n");
+}
+
 
 
 
@@ -51344,6 +51544,7 @@ int main()
     Phase220();
     Phase221();
     Phase222();
+    Phase223();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

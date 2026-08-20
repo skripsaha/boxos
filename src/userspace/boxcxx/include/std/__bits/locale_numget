@@ -1,0 +1,487 @@
+// boxcxx — <__bits/locale_numget>
+//
+// num_get: the extraction grammar the stream used to carry itself.
+//
+// Moving it here did more than relocate it. [facet.num.get.virtuals]/3's
+// stage 2 says exactly which characters may be ACCUMULATED, and following
+// that rule removed every putback the old code needed — five separate
+// `sungetc` loops, there because the old gatherer took anything
+// number-shaped and then handed back whatever `from_chars` refused. A grammar
+// that never accumulates a character it cannot use has nothing to give back,
+// which is also what lets num_get work through a single-pass iterator at all.
+//
+// One behaviour changes visibly, and it changes TOWARD the standard: a lone
+// sign with no digits after it is CONSUMED now. `is >> n` on "-x" leaves the
+// stream at 'x' rather than at '-'. That is what stage 2 describes and what
+// both reference implementations do; the old putback was an undocumented
+// deviation.
+#ifndef BOXCXX_BITS_LOCALE_NUMGET
+#define BOXCXX_BITS_LOCALE_NUMGET
+
+#include <__bits/locale_core>
+#include <__bits/locale_ctype>
+#include <__bits/locale_facets>
+#include <charconv>
+#include <ios>
+#include <iterator>
+#include <limits>
+#include <streambuf>
+#include <string>
+
+namespace std {
+
+namespace __numget {
+
+// Stage 2's accumulator. It holds only what the rule needs to know: what has
+// been seen so far decides what may come next.
+template <class charT>
+struct Gatherer {
+    char  *out;
+    size_t cap;
+    size_t n        = 0;
+    bool   sawDigit = false;
+    bool   sawPoint = false;
+    bool   sawExp   = false;
+    bool   sawHex   = false;
+    int    base     = 10;
+
+    bool Push(char c)
+    {
+        if (n >= cap) return false;
+        out[n++] = c;
+        return true;
+    }
+
+    // Would `c` extend what has been accumulated? `intOnly` selects the
+    // integer grammar; the floating one additionally admits an exponent.
+    bool Extends(char c, bool intOnly) const
+    {
+        const bool hexDigits = sawHex || base == 16;
+        if (c >= '0' && c <= '9') return true;
+        if (hexDigits && ((c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return true;
+        if (c == '+' || c == '-') {
+            // Only directly after an exponent marker. A leading sign is read
+            // before the loop, and anywhere else a sign ENDS the number.
+            if (n == 0 || intOnly) return false;
+            const char prev = out[n - 1];
+            return prev == 'e' || prev == 'E' || prev == 'p' || prev == 'P';
+        }
+        if (intOnly) return false;
+        if (c == 'e' || c == 'E') return !sawHex && !sawExp && sawDigit;
+        if (c == 'p' || c == 'P') return sawHex && !sawExp && sawDigit;
+        return false;
+    }
+};
+
+} // namespace __numget
+
+template <class charT, class InputIterator = istreambuf_iterator<charT>>
+class num_get : public locale::facet {
+public:
+    using char_type = charT;
+    using iter_type = InputIterator;
+
+    constexpr explicit num_get(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e, bool &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e, long &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  unsigned short &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  unsigned int &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  unsigned long &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  long long &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  unsigned long long &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e, float &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e, double &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                  long double &v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+    iter_type get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e, void *&v) const
+    {
+        return do_get(in, end, s, e, v);
+    }
+
+protected:
+    ~num_get() = default;
+
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &str,
+                             ios_base::iostate &err, bool &v) const
+    {
+        if ((str.flags() & ios_base::boolalpha) != ios_base::fmtflags{})
+            return GetBoolAlpha(in, end, str, err, v);
+
+        long n = 0;
+        in     = GetInteger(in, end, str, err, n);
+        if ((err & ios_base::failbit) != ios_base::goodbit) return in;
+        // [facet.num.get.virtuals]/6: 0 is false, 1 is true, and anything else
+        // stores true AND fails.
+        if (n == 0) {
+            v = false;
+        } else if (n == 1) {
+            v = true;
+        } else {
+            v = true;
+            err |= ios_base::failbit;
+        }
+        return in;
+    }
+
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             long &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             unsigned short &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             unsigned int &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             unsigned long &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             long long &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             unsigned long long &v) const
+    {
+        return GetInteger(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             float &v) const
+    {
+        return GetFloat(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             double &v) const
+    {
+        return GetFloat(in, end, s, e, v);
+    }
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &s, ios_base::iostate &e,
+                             long double &v) const
+    {
+        return GetFloat(in, end, s, e, v);
+    }
+
+    // [facet.num.get.virtuals]: "as if" %p, which is what num_put writes. The
+    // basefield is as irrelevant here as it is on the way out.
+    virtual iter_type do_get(iter_type in, iter_type end, ios_base &str,
+                             ios_base::iostate &err, void *&v) const
+    {
+        unsigned long long raw   = 0;
+        const auto         saved = str.flags();
+        str.flags((saved & ~ios_base::basefield) | ios_base::hex);
+        in = GetInteger(in, end, str, err, raw);
+        str.flags(saved);
+        if ((err & ios_base::failbit) == ios_base::goodbit)
+            v = reinterpret_cast<void *>(static_cast<uintptr_t>(raw));
+        return in;
+    }
+
+private:
+    template <class T>
+    iter_type GetInteger(iter_type in, iter_type end, ios_base &str, ios_base::iostate &err,
+                         T &v) const
+    {
+        // The locale is held by value for the whole call: use_facet returns a
+        // reference INTO the table it names, and getloc() is a temporary.
+        const locale           loc = str.getloc();
+        const ctype<charT>    &ct  = use_facet<ctype<charT>>(loc);
+        const numpunct<charT> &np  = use_facet<numpunct<charT>>(loc);
+        const bool             grouped = !np.grouping().empty();
+        const charT            sep     = np.thousands_sep();
+
+        char                      buf[80];
+        __numget::Gatherer<charT> g{buf, sizeof(buf)};
+
+        const auto basefield = str.flags() & ios_base::basefield;
+        g.base = basefield == ios_base::hex   ? 16
+                 : basefield == ios_base::oct ? 8
+                 : basefield == ios_base::dec ? 10
+                                              : 0;   // no basefield: "as if" %i
+
+        bool neg = false;
+        if (in != end) {
+            const char c = ct.narrow(*in, '\0');
+            if (c == '+' || c == '-') {
+                neg = c == '-';
+                ++in;
+            }
+        }
+
+        // The 0 / 0x prefix. A bare "0" is a number in its own right, so a '0'
+        // not followed by 'x' seeds the digits — there is nothing to put back.
+        if (in != end && ct.narrow(*in, '\0') == '0' && (g.base == 0 || g.base == 16)) {
+            ++in;
+            bool consumedX = false;
+            if (in != end) {
+                const char x = ct.narrow(*in, '\0');
+                if (x == 'x' || x == 'X') {
+                    ++in;
+                    g.base    = 16;
+                    g.sawHex  = true;
+                    consumedX = true;
+                }
+            }
+            if (!consumedX) {
+                g.Push('0');
+                g.sawDigit = true;
+                if (g.base == 0) g.base = 8;
+            }
+        }
+        if (g.base == 0) g.base = 10;
+
+        bool hitEnd = false;
+        for (;;) {
+            if (in == end) {
+                hitEnd = true;
+                break;
+            }
+            const charT wide = *in;
+            if (grouped && wide == sep) {
+                ++in;   // separators are read and discarded
+                continue;
+            }
+            const char c = ct.narrow(wide, '\0');
+            if (!g.Extends(c, true)) break;
+            if (g.base == 8 && !(c >= '0' && c <= '7')) break;
+            if (g.base == 10 && !(c >= '0' && c <= '9')) break;
+            if (!g.Push(c)) break;
+            g.sawDigit = true;
+            ++in;
+        }
+
+        if (hitEnd) err |= ios_base::eofbit;
+
+        if (!g.sawDigit) {
+            err |= ios_base::failbit;
+            v = T{};
+            return in;
+        }
+
+        unsigned long long magnitude = 0;
+        auto               r = from_chars(buf, buf + g.n, magnitude, g.base);
+
+        using Lim = numeric_limits<T>;
+        bool out  = r.ec == errc::result_out_of_range;
+        if (!out) {
+            if constexpr (is_signed_v<T>) {
+                const unsigned long long limit =
+                    neg ? static_cast<unsigned long long>(Lim::max()) + 1ULL
+                        : static_cast<unsigned long long>(Lim::max());
+                if (magnitude > limit) out = true;
+            } else {
+                // An unsigned target with a leading '-' WRAPS modulo 2^width
+                // rather than failing — the strtoul rule num_get keeps.
+                if (!neg && magnitude > static_cast<unsigned long long>(Lim::max()))
+                    out = true;
+            }
+        }
+        if (out) {
+            v = neg ? Lim::min() : Lim::max();
+            err |= ios_base::failbit;
+            return in;
+        }
+        v = neg ? static_cast<T>(0ULL - magnitude) : static_cast<T>(magnitude);
+        return in;
+    }
+
+    template <class F>
+    iter_type GetFloat(iter_type in, iter_type end, ios_base &str, ios_base::iostate &err,
+                       F &v) const
+    {
+        const locale           loc = str.getloc();
+        const ctype<charT>    &ct  = use_facet<ctype<charT>>(loc);
+        const numpunct<charT> &np  = use_facet<numpunct<charT>>(loc);
+        const bool             grouped = !np.grouping().empty();
+        const charT            sep     = np.thousands_sep();
+        const charT            point   = np.decimal_point();
+
+        char                      buf[2048];
+        __numget::Gatherer<charT> g{buf, sizeof(buf)};
+
+        bool neg = false;
+        if (in != end) {
+            const char c = ct.narrow(*in, '\0');
+            if (c == '+' || c == '-') {
+                neg = c == '-';
+                ++in;
+            }
+        }
+
+        // A hexfloat is recognized whatever floatfield says: num_get's grammar
+        // is "as if strtod", and only the OUTPUT side ties hex to the hexfloat
+        // manipulator.
+        chars_format fmt = chars_format::general;
+        if (in != end && ct.narrow(*in, '\0') == '0') {
+            ++in;
+            bool consumedX = false;
+            if (in != end) {
+                const char x = ct.narrow(*in, '\0');
+                if (x == 'x' || x == 'X') {
+                    ++in;
+                    fmt       = chars_format::hex;
+                    g.sawHex  = true;
+                    consumedX = true;
+                }
+            }
+            if (!consumedX) {
+                g.Push('0');
+                g.sawDigit = true;
+            }
+        }
+
+        bool hitEnd = false;
+        for (;;) {
+            if (in == end) {
+                hitEnd = true;
+                break;
+            }
+            const charT wide = *in;
+            if (grouped && wide == sep) {
+                ++in;
+                continue;
+            }
+            if (wide == point) {
+                // One point, and not after an exponent. from_chars wants the
+                // ASCII '.' whatever the facet spells it as.
+                if (g.sawPoint || g.sawExp) break;
+                if (!g.Push('.')) break;
+                g.sawPoint = true;
+                ++in;
+                continue;
+            }
+            const char c = ct.narrow(wide, '\0');
+            if (!g.Extends(c, false)) break;
+            if (!g.Push(c)) break;
+            if (c >= '0' && c <= '9') g.sawDigit = true;
+            if (c == 'e' || c == 'E' || c == 'p' || c == 'P') g.sawExp = true;
+            ++in;
+        }
+
+        if (hitEnd) err |= ios_base::eofbit;
+
+        if (!g.sawDigit) {
+            err |= ios_base::failbit;
+            v = F{};
+            return in;
+        }
+
+        F    parsed{};
+        auto r = from_chars(buf, buf + g.n, parsed, fmt);
+        if (r.ec == errc::invalid_argument) {
+            err |= ios_base::failbit;
+            v = F{};
+            return in;
+        }
+        if (r.ec == errc::result_out_of_range) {
+            // Only failbit is mandated here; the clamped extreme carrying the
+            // parsed sign is num_get's own convention.
+            v = neg ? -numeric_limits<F>::max() : numeric_limits<F>::max();
+            err |= ios_base::failbit;
+            return in;
+        }
+        v = neg ? -parsed : parsed;
+        return in;
+    }
+
+    // boolalpha: the words come from numpunct, so a program can spell them in
+    // its own language. Characters consumed by a partial match are NOT given
+    // back — the one place [istream.formatted.arithmetic] does not restore
+    // input, and the one place a single-pass iterator could not have anyway.
+    iter_type GetBoolAlpha(iter_type in, iter_type end, ios_base &str,
+                           ios_base::iostate &err, bool &v) const
+    {
+        const locale              loc = str.getloc();
+        const numpunct<charT>    &np  = use_facet<numpunct<charT>>(loc);
+        const basic_string<charT> t   = np.truename();
+        const basic_string<charT> f   = np.falsename();
+
+        size_t i      = 0;
+        bool   tAlive = true;
+        bool   fAlive = true;
+        for (;;) {
+            // A candidate that has run out of characters IS a match — and is
+            // checked before reading, so "true" does not need a terminator.
+            if (tAlive && i >= t.size()) {
+                v = true;
+                return in;
+            }
+            if (fAlive && i >= f.size()) {
+                v = false;
+                return in;
+            }
+            if (in == end) {
+                err |= ios_base::eofbit | ios_base::failbit;
+                v = false;
+                return in;
+            }
+            const charT c = *in;
+            if (tAlive && (i >= t.size() || c != t[i])) tAlive = false;
+            if (fAlive && (i >= f.size() || c != f[i])) fAlive = false;
+            if (!tAlive && !fAlive) {
+                err |= ios_base::failbit;
+                v = false;
+                return in;
+            }
+            ++in;
+            ++i;
+        }
+    }
+};
+
+template <class charT, class InputIterator>
+locale::id num_get<charT, InputIterator>::id{};
+
+template <>
+inline locale::id num_get<char, istreambuf_iterator<char>>::id{__cvt::kIdNumGetChar};
+template <>
+inline locale::id num_get<wchar_t, istreambuf_iterator<wchar_t>>::id{__cvt::kIdNumGetWchar};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_NUMGET

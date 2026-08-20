@@ -37,5 +37,6 @@
 #include <__bits/locale_core>
 #include <__bits/locale_ctype>
 #include <__bits/locale_facets>
+#include <__bits/locale_numget>
 
 #endif // BOXCXX_LOCALE

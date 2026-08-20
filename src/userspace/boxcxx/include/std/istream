@@ -14,6 +14,7 @@
 #define BOXCXX_ISTREAM
 
 #include <ostream>
+#include <__bits/locale_numget>  // num_get — every arithmetic extractor goes through it
 #include <charconv>
 #include <limits>
 #include <type_traits>
@@ -703,439 +704,113 @@ protected:
 // ════════════════════════════════════════════════════════════════════════
 namespace __ios {
 
-// A number is written in ASCII and in nothing else, so a stream character
-// outside it is simply not part of one. Mapping such a character to '\0' lets
-// every classifier below stay a plain `char` test with no wide special case:
-// '\0' is a digit in no base, a sign in no grammar and a point in no float.
-//
-// This is the mirror of <ostream>'s widening, and it is a cast for the same
-// reason: one locale, UTF-8, and ASCII values that are their own code points.
-template <class Traits>
-inline char NarrowAscii(typename Traits::int_type c)
-{
-    const auto ch = Traits::to_char_type(c);
-    const auto u  = static_cast<make_unsigned_t<decltype(ch)>>(ch);
-    return u <= 0x7Fu ? static_cast<char>(u) : '\0';
-}
 
-inline bool IsHexDigitChar(char c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
-}
-inline bool IsDigitForBase(int base, char c)
-{
-    if (base == 16) return IsHexDigitChar(c);
-    if (c < '0' || c > '9') return false;
-    return (c - '0') < base;
-}
 
-// Resolves dec/oct/hex from ios_base::basefield, or (when NO basefield bit
-// is set) auto-detects per the classic strtol(base=0) rule: a genuine "0x"/
-// "0X" prefix (confirmed by peeking a hex digit past it before committing)
-// selects hex, a lone leading '0' selects octal, otherwise decimal. A
-// commits-only-after-peeking "0x" that turns out NOT to be followed by a
-// hex digit ungets the 'x'/'X' and treats the '0' as an ordinary digit
-// (matches strtol("0x", ...) parsing "0" and leaving "x").
-template <class CharT, class Traits>
-inline int ResolveBaseAndPrefix(basic_streambuf<CharT, Traits> *buf, ios_base::fmtflags flags,
-                                char *digitBuf, streamsize &digitLen)
-{
-    using CT      = Traits;
-    auto baseFlag = flags & ios_base::basefield;
-    int  base = baseFlag == ios_base::oct ? 8 : baseFlag == ios_base::hex ? 16
-              : baseFlag == ios_base::dec ? 10 : 0; // 0 == auto-detect
 
-    typename CT::int_type c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof()) && NarrowAscii<CT>(c) == '0' && (base == 0 || base == 16)) {
-        buf->sbumpc();
-        typename CT::int_type c1 = buf->sgetc();
-        if (!CT::eq_int_type(c1, CT::eof()) &&
-            (NarrowAscii<CT>(c1) == 'x' || NarrowAscii<CT>(c1) == 'X')) {
-            buf->sbumpc();
-            typename CT::int_type c2 = buf->sgetc();
-            if (!CT::eq_int_type(c2, CT::eof()) && IsHexDigitChar(NarrowAscii<CT>(c2))) {
-                base = 16; // genuine prefix -- '0' and 'x'/'X' both stay consumed
-            } else {
-                buf->sungetc(); // false alarm -- un-consume the 'x'/'X'
-                digitBuf[digitLen++] = '0';
-                if (base == 0) base = 8;
-            }
-        } else {
-            digitBuf[digitLen++] = '0';
-            if (base == 0) base = 8;
-        }
-    }
-    if (base == 0) base = 10;
-    return base;
-}
 
+// ── the extractors, which are num_get's callers now ─────────────────────
+// [istream.formatted.arithmetic] defines each one as
+// use_facet<num_get<charT, istreambuf_iterator<charT, traits>>>(getloc()).get(...),
+// and until Ф43-c-2 the grammar lived here. What the move bought is that
+// numpunct is now consulted — a comma decimal point, a thousands separator,
+// and the words `true` and `false` all reach extraction, which they could not
+// before.
 template <class CharT, class Traits, class T>
-ExtractStatus ExtractIntegerCore(basic_istream<CharT, Traits> &is, T &value)
+basic_istream<CharT, Traits> &ExtractThrough(basic_istream<CharT, Traits> &is, T &value)
 {
-    auto      *buf = is.rdbuf();
-    using CT       = Traits;
+    using Iter  = istreambuf_iterator<CharT, Traits>;
+    using Facet = num_get<CharT, Iter>;
 
-    streamsize signLen = 0; // 0 or 1: sungetc() only needs the COUNT to restore, not the character
-    bool       neg     = false;
-    typename CT::int_type c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof())) {
-        char ch = NarrowAscii<CT>(c);
-        if (ch == '+' || ch == '-') {
-            neg = (ch == '-');
-            ++signLen;
-            buf->sbumpc();
-        }
+    ios_base::iostate err = ios_base::goodbit;
+    try {
+        use_facet<Facet>(is.__loc_ref()).get(Iter(is), Iter(), is, err, value);
+    } catch (...) {
+        HandleException(is);
+        return is;
     }
-
-    char       digitBuf[80];
-    streamsize digitLen = 0;
-    int        base     = ResolveBaseAndPrefix(buf, is.flags(), digitBuf, digitLen);
-
-    for (;;) {
-        c = buf->sgetc();
-        if (CT::eq_int_type(c, CT::eof())) break;
-        char ch = NarrowAscii<CT>(c);
-        if (!IsDigitForBase(base, ch)) break;
-        if (digitLen >= static_cast<streamsize>(sizeof(digitBuf))) break; // full: stop BEFORE consuming
-        digitBuf[digitLen++] = ch;
-        buf->sbumpc();
-    }
-
-    if (digitLen == 0) {
-        for (streamsize i = 0; i < signLen; ++i) buf->sungetc(); // restore the consumed sign, if any
-        return CT::eq_int_type(c, CT::eof()) ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
-    }
-
-    // Parsed in ONE wide unsigned domain regardless of T's actual width or
-    // signedness -- the real standard only widens short/int specifically
-    // because its num_get facet has no direct short/int overload; boxcxx
-    // has no such facet, so parsing every width through the same wide
-    // magnitude + a uniform range check is simpler and gives identical
-    // observable results (including the INT_MIN-style edge case, since the
-    // magnitude of T::min() is representable exactly as T::max()+1 here).
-    unsigned long long magnitude = 0;
-    auto r = from_chars(digitBuf, digitBuf + digitLen, magnitude, base);
-
-    using Lim       = numeric_limits<T>;
-    bool outOfRange = (r.ec == errc::result_out_of_range);
-    if (!outOfRange) {
-        if constexpr (is_signed_v<T>) {
-            unsigned long long limit = neg ? (static_cast<unsigned long long>(Lim::max()) + 1ULL)
-                                            : static_cast<unsigned long long>(Lim::max());
-            if (magnitude > limit) outOfRange = true;
-        } else {
-            // Unsigned target + a leading '-': ALWAYS wraps modulo 2^width,
-            // never a range failure (mirrors the well-known "unsigned
-            // accepts a leading minus" num_get/strtoul rule). Only a
-            // POSITIVE magnitude that is simply too large clamps+fails.
-            if (!neg && magnitude > static_cast<unsigned long long>(Lim::max())) outOfRange = true;
-        }
-    }
-
-    if (outOfRange) {
-        value = neg ? Lim::min() : Lim::max();
-        return ExtractStatus::RangeError;
-    }
-    value = neg ? static_cast<T>(0ULL - magnitude) : static_cast<T>(magnitude);
-    return ExtractStatus::Ok;
+    // setstate is called AFTER the try: it may throw ios_base::failure, and
+    // that throw belongs to the caller rather than to HandleException, which
+    // would relabel it as an unexpected exception.
+    if (err != ios_base::goodbit) is.setstate(err);
+    return is;
 }
 
+// short and int have no num_get overload of their own: [istream.formatted.
+// arithmetic] routes them through `long` and range-checks the result, which is
+// also where their clamping behaviour comes from.
 template <class CharT, class Traits, class T>
 basic_istream<CharT, Traits> &ExtractInteger(basic_istream<CharT, Traits> &is, T &value)
 {
     typename basic_istream<CharT, Traits>::sentry ok(is, false);
-    if (ok) {
-        ExtractStatus status = ExtractStatus::NoMatch;
-        try {
-            status = ExtractIntegerCore(is, value);
-        } catch (...) {
-            HandleException(is);
-        }
-        // [facet.num.get.virtuals]/4: on a failed match, the target is set
-        // to 0 (RangeError already stores the clamped min/max itself).
-        if (status == ExtractStatus::NoMatch) {
-            value = T{};
-            is.setstate(ios_base::failbit);
-        } else if (status == ExtractStatus::NoMatchEof) {
-            value = T{};
-            is.setstate(ios_base::failbit | ios_base::eofbit);
-        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
-    } else {
+    if (!ok) {
         is.setstate(ios_base::failbit);
+        return is;
     }
-    return is;
+
+    if constexpr (is_signed_v<T> && sizeof(T) < sizeof(long)) {
+        long wide = 0;
+        ExtractThrough(is, wide);
+        if (is.fail()) {
+            // A failed match leaves the target at 0; a range failure inside
+            // num_get already clamped `wide`, and the clamp has to be
+            // re-applied in T's own range.
+            value = static_cast<T>(wide < static_cast<long>(numeric_limits<T>::min())
+                                       ? numeric_limits<T>::min()
+                                       : wide > static_cast<long>(numeric_limits<T>::max())
+                                             ? numeric_limits<T>::max()
+                                             : T{});
+            return is;
+        }
+        if (wide < static_cast<long>(numeric_limits<T>::min())) {
+            value = numeric_limits<T>::min();
+            is.setstate(ios_base::failbit);
+        } else if (wide > static_cast<long>(numeric_limits<T>::max())) {
+            value = numeric_limits<T>::max();
+            is.setstate(ios_base::failbit);
+        } else {
+            value = static_cast<T>(wide);
+        }
+        return is;
+    } else {
+        return ExtractThrough(is, value);
+    }
 }
 
-// boolalpha: matches "true"/"false" letter-by-letter, tracking which of the
-// two candidates can still extend. Unlike every other extraction path, a
-// failed/partial match does NOT put consumed characters back -- the one
-// place [istream.formatted.arithmetic] does not restore unconsumed input.
-template <class CharT, class Traits>
-ExtractStatus ExtractBoolCore(basic_istream<CharT, Traits> &is, bool &value)
-{
-    if ((is.flags() & ios_base::boolalpha) != ios_base::fmtflags{}) {
-        auto       *buf         = is.rdbuf();
-        using CT                = Traits;
-        const char *trueWord    = "true";
-        const char *falseWord   = "false";
-        streamsize  pos         = 0;
-        bool        trueAlive   = true, falseAlive = true;
-        bool        hitEof      = false;
-        for (;;) {
-            if (trueAlive && trueWord[pos] == '\0') break;
-            if (falseAlive && falseWord[pos] == '\0') break;
-            typename CT::int_type c = buf->sgetc();
-            if (CT::eq_int_type(c, CT::eof())) {
-                hitEof = true;
-                break;
-            }
-            char ch          = NarrowAscii<CT>(c);
-            bool matchesTrue  = trueAlive && trueWord[pos] != '\0' && ch == trueWord[pos];
-            bool matchesFalse = falseAlive && falseWord[pos] != '\0' && ch == falseWord[pos];
-            if (!matchesTrue && !matchesFalse) break;
-            trueAlive &= matchesTrue;
-            falseAlive &= matchesFalse;
-            buf->sbumpc();
-            ++pos;
-        }
-        if (trueAlive && pos == 4) {
-            value = true;
-            return ExtractStatus::Ok;
-        }
-        if (falseAlive && pos == 5) {
-            value = false;
-            return ExtractStatus::Ok;
-        }
-        return hitEof ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
-    }
-    // Non-boolalpha: "as if" extracting a long and testing it against zero.
-    long          wide   = 0;
-    ExtractStatus status = ExtractIntegerCore(is, wide);
-    if (status == ExtractStatus::Ok || status == ExtractStatus::RangeError) value = (wide != 0);
-    return status;
-}
 
 template <class CharT, class Traits>
 basic_istream<CharT, Traits> &ExtractBool(basic_istream<CharT, Traits> &is, bool &value)
 {
     typename basic_istream<CharT, Traits>::sentry ok(is, false);
-    if (ok) {
-        ExtractStatus status = ExtractStatus::NoMatch;
-        try {
-            status = ExtractBoolCore(is, value);
-        } catch (...) {
-            HandleException(is);
-        }
-        // [facet.num.get.virtuals]/4: on a failed match, the target is set
-        // to false.
-        if (status == ExtractStatus::NoMatch) {
-            value = false;
-            is.setstate(ios_base::failbit);
-        } else if (status == ExtractStatus::NoMatchEof) {
-            value = false;
-            is.setstate(ios_base::failbit | ios_base::eofbit);
-        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
-    } else {
+    if (!ok) {
         is.setstate(ios_base::failbit);
+        return is;
     }
-    return is;
+    return ExtractThrough(is, value);
 }
 
-// Loosely gathers anything that COULD be part of a DECIMAL float token
-// (digits, '.', exponent marker, inf/infinity/nan letters) -- from_chars is
-// the final arbiter of what's actually valid; whatever it doesn't consume
-// gets put back. Simpler and just as correct as trying to hand-encode the
-// exact (stateful: "at most one dot", etc.) float grammar here.
-inline bool CouldBeFloatChar(char c)
-{
-    if (c >= '0' && c <= '9') return true;
-    switch (c) {
-    case '.': case '+': case '-': case 'e': case 'E':
-    case 'i': case 'I': case 'n': case 'N': case 'f': case 'F':
-    case 'a': case 'A': case 't': case 'T': case 'y': case 'Y':
-        return true;
-    default:
-        return false;
-    }
-}
-// Same idea for a HEXFLOAT token, once a genuine "0x"/"0X" prefix has
-// already been confirmed and consumed.
-inline bool CouldBeHexFloatChar(char c)
-{
-    return IsHexDigitChar(c) || c == '.' || c == 'p' || c == 'P' || c == '+' || c == '-';
-}
 
-template <class CharT, class Traits, class F>
-ExtractStatus ExtractFloatCore(basic_istream<CharT, Traits> &is, F &value)
-{
-    auto *buf = is.rdbuf();
-    using CT  = Traits;
-
-    streamsize signLen = 0;
-    bool       neg     = false;
-    typename CT::int_type c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof())) {
-        char ch = NarrowAscii<CT>(c);
-        if (ch == '+' || ch == '-') {
-            neg = (ch == '-');
-            ++signLen;
-            buf->sbumpc();
-        }
-    }
-
-    // Auto-detect a genuine hexfloat "0x"/"0X" prefix -- "as if by strtod",
-    // UNCONDITIONALLY (num_get's float grammar recognizes hex notation
-    // regardless of the current floatfield flag; only the ->ostream side
-    // ties hex output specifically to the hexfloat manipulator). A "0x"
-    // that peeking confirms is NOT followed by a hex digit or '.' is backed
-    // out (sungetc the 'x'/'X') and the '0' seeds an ordinary decimal token.
-    chars_format fmt = chars_format::general;
-    streamsize   prefixConsumed = 0; // "0x"/"0X" chars consumed but NOT in token[]
-    constexpr streamsize kCap = 2048;
-    char                 token[kCap];
-    streamsize           n = 0;
-
-    c = buf->sgetc();
-    if (!CT::eq_int_type(c, CT::eof()) && NarrowAscii<CT>(c) == '0') {
-        buf->sbumpc();
-        typename CT::int_type c1 = buf->sgetc();
-        if (!CT::eq_int_type(c1, CT::eof()) &&
-            (NarrowAscii<CT>(c1) == 'x' || NarrowAscii<CT>(c1) == 'X')) {
-            buf->sbumpc();
-            typename CT::int_type c2 = buf->sgetc();
-            if (!CT::eq_int_type(c2, CT::eof()) &&
-                (IsHexDigitChar(NarrowAscii<CT>(c2)) || NarrowAscii<CT>(c2) == '.')) {
-                fmt            = chars_format::hex;
-                prefixConsumed = 2; // '0' and 'x'/'X', neither in token[]
-            } else {
-                buf->sungetc();   // false alarm -- restore the 'x'/'X'
-                token[n++] = '0'; // the '0' itself starts a decimal token
-            }
-        } else {
-            token[n++] = '0';
-        }
-    }
-
-    bool hitEof = false;
-    for (;;) {
-        c = buf->sgetc();
-        if (CT::eq_int_type(c, CT::eof())) {
-            hitEof = true;
-            break;
-        }
-        char ch = NarrowAscii<CT>(c);
-        bool extends = fmt == chars_format::hex ? CouldBeHexFloatChar(ch) : CouldBeFloatChar(ch);
-        if (!extends) break;
-        if (n >= kCap) break; // full: stop BEFORE consuming, so nothing unputbackable is lost
-        token[n++] = ch;
-        buf->sbumpc();
-    }
-
-    if (n == 0) {
-        for (streamsize i = 0; i < prefixConsumed + signLen; ++i) buf->sungetc();
-        return hitEof ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
-    }
-
-    F    parsed{};
-    auto r = from_chars(token, token + n, parsed, fmt);
-    if (r.ec == errc::invalid_argument) {
-        for (streamsize i = 0; i < n + prefixConsumed + signLen; ++i) buf->sungetc();
-        return ExtractStatus::NoMatch;
-    }
-    for (streamsize i = n; i > (r.ptr - token); --i) buf->sungetc();
-
-    if (r.ec == errc::result_out_of_range) {
-        // The standard leaves the exact stored value on a float range error
-        // unspecified (only failbit is mandated); matching num_get's own
-        // convention, an out-of-range magnitude clamps to the representable
-        // extreme with the parsed sign applied.
-        value = neg ? -numeric_limits<F>::max() : numeric_limits<F>::max();
-        return ExtractStatus::RangeError;
-    }
-    value = neg ? -parsed : parsed;
-    return ExtractStatus::Ok;
-}
 
 template <class CharT, class Traits, class F>
 basic_istream<CharT, Traits> &ExtractFloat(basic_istream<CharT, Traits> &is, F &value)
 {
     typename basic_istream<CharT, Traits>::sentry ok(is, false);
-    if (ok) {
-        ExtractStatus status = ExtractStatus::NoMatch;
-        try {
-            status = ExtractFloatCore(is, value);
-        } catch (...) {
-            HandleException(is);
-        }
-        // [facet.num.get.virtuals]/4: on a failed match, the target is set
-        // to 0 (RangeError already stores +/-numeric_limits<F>::max() itself).
-        if (status == ExtractStatus::NoMatch) {
-            value = F{};
-            is.setstate(ios_base::failbit);
-        } else if (status == ExtractStatus::NoMatchEof) {
-            value = F{};
-            is.setstate(ios_base::failbit | ios_base::eofbit);
-        } else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
-    } else {
+    if (!ok) {
         is.setstate(ios_base::failbit);
+        return is;
     }
-    return is;
+    return ExtractThrough(is, value);
 }
 
-// void*&: pointer round-tripping is inherently hex (insertion always emits
-// "0x..."), so extraction forces base 16 regardless of the current
-// basefield, reusing the same prefix-aware scanner integer extraction uses.
-template <class CharT, class Traits>
-ExtractStatus ExtractPointerCore(basic_istream<CharT, Traits> &is, void *&value)
-{
-    auto *buf = is.rdbuf();
-    using CT  = Traits;
-
-    char       digitBuf[32];
-    streamsize digitLen = 0;
-    ResolveBaseAndPrefix(buf, ios_base::hex, digitBuf, digitLen);
-
-    typename CT::int_type c;
-    for (;;) {
-        c = buf->sgetc();
-        if (CT::eq_int_type(c, CT::eof())) break;
-        char ch = NarrowAscii<CT>(c);
-        if (!IsHexDigitChar(ch)) break;
-        if (digitLen < static_cast<streamsize>(sizeof(digitBuf))) digitBuf[digitLen++] = ch;
-        buf->sbumpc();
-    }
-
-    if (digitLen == 0)
-        return CT::eq_int_type(c, CT::eof()) ? ExtractStatus::NoMatchEof : ExtractStatus::NoMatch;
-
-    unsigned long long addr = 0;
-    auto r = from_chars(digitBuf, digitBuf + digitLen, addr, 16);
-    if (r.ec == errc::result_out_of_range) {
-        value = reinterpret_cast<void *>(static_cast<uintptr_t>(~0ULL));
-        return ExtractStatus::RangeError;
-    }
-    value = reinterpret_cast<void *>(static_cast<uintptr_t>(addr));
-    return ExtractStatus::Ok;
-}
 
 template <class CharT, class Traits>
 basic_istream<CharT, Traits> &ExtractPointer(basic_istream<CharT, Traits> &is, void *&value)
 {
     typename basic_istream<CharT, Traits>::sentry ok(is, false);
-    if (ok) {
-        ExtractStatus status = ExtractStatus::NoMatch;
-        try {
-            status = ExtractPointerCore(is, value);
-        } catch (...) {
-            HandleException(is);
-        }
-        if (status == ExtractStatus::NoMatch) is.setstate(ios_base::failbit);
-        else if (status == ExtractStatus::NoMatchEof) is.setstate(ios_base::failbit | ios_base::eofbit);
-        else if (status == ExtractStatus::RangeError) is.setstate(ios_base::failbit);
-    } else {
+    if (!ok) {
         is.setstate(ios_base::failbit);
+        return is;
     }
-    return is;
+    return ExtractThrough(is, value);
 }
 
 } // namespace __ios
