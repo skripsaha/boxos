@@ -248,7 +248,10 @@ size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) 
 
     string out;
     try {
-        __chrono_fmt::render(out, format, p);
+        // string_view is explicit now that render() is a template over the
+        // format string's character type: strftime's is a narrow C string, and
+        // a const char* does not deduce a basic_string_view.
+        __chrono_fmt::render(out, string_view(format), p);
     } catch (...) {
         // render throws for a conversion it does not know; C calls that
         // undefined and every implementation returns 0. An exception must not

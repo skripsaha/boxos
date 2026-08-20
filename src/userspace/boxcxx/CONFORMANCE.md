@@ -40,7 +40,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Standard headers provided | **102** — 97 of the 105 C++23 [headers] name (8 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 140 |
 | Header source | ~93 300 lines |
-| Feature-test macros defined | 209 — 163 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
 | In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 232 phases (213 of them the numbered `PhaseN` series), 5 973 runtime checks, 1 984 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
@@ -316,9 +316,10 @@ and line — is recorded there.
 
 ## 1.2 Excluded by decision inside headers that do exist
 
-- **Wide characters — all but formatting, as of Ф42-f.** This was a flat
-  exclusion until Ф42 and is now down to one item. The honest way to state it
-  is by what has landed rather than by what is planned.
+- **Wide characters — CLOSED as of Ф42-g.** This was a flat exclusion until
+  Ф42 and is now nothing at all: the bullet stays because the ground it covers
+  is worth naming, not because anything on it is still missing. The honest way
+  to state it is by what has landed.
   **Landed:** `<cwctype>`, so the classification of a wide character is
   answered from the Unicode Character Database rather than from ASCII;
   `<cwchar>`, so wide strings, the restartable conversions, the seven `wcsto*`,
@@ -345,8 +346,37 @@ and line — is recorded there.
   inserter would fail there and be forced to rewrite it. It did, on the first
   run after the inserter landed.
 
-  **Not yet:** `<format>` is still `char`-only — no `wformat_context`, no
-  `wformat`, no `formatter<T, wchar_t>`. That is the whole of what remains.
+  **Landed in Ф42-g: formatting, which was the last of it.** `<format>` now
+  answers for both character types — `basic_format_context` (a class template
+  that had been missing outright, see §2), `wformat_context`, `wformat_args`,
+  `wformat_parse_context`, `wformat_string`, `make_wformat_args`, the wide
+  `format`/`format_to`/`format_to_n`/`formatted_size`/`vformat`/`vformat_to`,
+  and every `formatter<T, wchar_t>` the standard asks for: the scalars, the
+  strings, the pointers, [format.range], [format.tuple], all twenty-four of
+  [time.format]'s, and `formatter<thread::id, wchar_t>`. The wide half of
+  [string.conversions] came with it — `to_wstring` and the eight
+  `sto*(const wstring&)`, none of which existed.
+
+  **What made it one commit's worth of work rather than a second library** is
+  the observation the three wide layers before it had already made: the text
+  is produced in ASCII by the engine that exists. `to_chars` writes digits,
+  `<chrono>`'s renderer writes "Jan" and "+0300", `"true"` is a literal — and
+  ASCII is its own code point. So `CharT` enters at exactly three boundaries:
+  the format string on the way in, the sink on the way out, and the arguments
+  that really are characters or strings. There is no second parser, no second
+  floating-point formatter, no second Unicode table, and `<chrono>`'s
+  conversion renderer was not touched at all: it still returns a narrow string,
+  and the wide walk around it owns only the literal text BETWEEN conversions,
+  which is the one part of a chrono-spec that can be anything.
+
+  **This subphase's oracle was the library's own narrow half**, not a table of
+  expected strings: `Phase218` runs every std-format-spec the grammar can build
+  through both halves over twenty-one argument shapes — 20,286 spec/argument
+  pairs — and requires the same text widened, or the same refusal. A table can
+  only say what someone thought to write down. The one presentation allowed to
+  disagree is `'c'`, because [tab:format.type.int] makes its answer depend on
+  the character type, and the check requires that disagreement to actually
+  occur rather than merely permitting it.
 
   **What Ф42-d did close** is the numeric engine. `<ostream>` and `<istream>`
   formatted every number through helpers declared as `basic_ostream<char>&`
@@ -379,7 +409,7 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **209** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **210** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled.
 
 > This section said **201** until Ф41, and the number at the top of the document
@@ -396,7 +426,7 @@ the whole set, not sampled.
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 209 macros × 96 headers by
+  checked over the full cross-product of 210 macros × 107 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -464,7 +494,7 @@ only `<version>` reports, not counted by hand. They divide cleanly:
 |---|---|---|
 | freestanding-subset markers: not features, an unrun [compliance] audit | 26 | all 25 `__cpp_lib_freestanding_*` plus `__cpp_lib_ratio` |
 | whole-clause requirements relaxations, unprovable by inspection | 2 | `ranges`, `algorithm_iterator_requirements` |
-| the feature is excluded or absent here | 9 | `filesystem`, `char8_t`, `chrono`, `format`, `formatters`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+| the feature is excluded or absent here | 8 | `filesystem`, `char8_t`, `chrono`, `format`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` — `formatters` LEFT this row in Ф42-g |
 | C++26 draft additions no implementation has | 2 | `initializer_list` (202511L), `ranges_generate_random` (202403L) |
 
 That first row is the interesting one, and Ф41 is why it is a row at all: the
@@ -1929,8 +1959,52 @@ states the contract; the encoding already honoured it.
   `set_separator`, which the standard gives only to the sequence specialization.
   Both reference libraries reject those calls. A harmless extension, but generic
   code written strictly against the promised surface would not expect them.
-- `–` No wide formatting: `wformat_context`, `wformat_args` and
-  `format(wstring_view, …)` do not exist.
+- `✓` Closed in Ф42-g: **wide formatting exists**, and with it every name
+  [format.syn] gives the wide half. See §1.2 for the shape of the change and
+  for why it needed no second engine.
+- `✓` Closed in Ф42-g, and it had been in NEITHER column: **`basic_format_context`
+  did not exist at all.** [format.syn] names it as a class template and defines
+  both `format_context` and `wformat_context` from it; boxcxx had a plain class
+  called `format_context` and no template, and no line here said so. Found by
+  reading the synopsis against the FILE rather than against the list of what is
+  absent — the same way Ф42-f found the five `*streampos` aliases. It is now the
+  template, with exactly one specialization defined (over the erased sink
+  iterator, which is the only `Out` this library has); naming
+  `basic_format_context<MyIterator, char>` is a compile error rather than a type
+  that looks constructible and is not.
+- `✓` Closed in Ф42-g, same reading, same result: **`basic_format_context::locale()`**
+  ([format.context]) was missing. It costs the return of an empty class — `<ios>`
+  has held one of those by value in every stream since it was written.
+- `+` **A string whose character type is not the context's is REFUSED**, and this
+  is where the two reference libraries part company. `format(L"{}", std::string("hi"))`
+  is rejected here and by libstdc++ 16.1; **libc++ 22 prints `['h', 'i']`** —
+  a string IS a range of characters, `formattable<char, wchar_t>` is true, and
+  nothing in its range machinery stops it. With a string literal it goes further:
+  `format(L"{}", "abc")` yields `['a', 'b', 'c', '\u{0}']`, the terminating NUL
+  included. Measured: `format_kind<std::string>` is `sequence` in both, and
+  `formattable<std::string, wchar_t>` is **0 in libstdc++, 1 in libc++**. boxcxx
+  answers 0, through disabled partial specializations that beat the range
+  catch-all by partial ordering — exactly the defect Ф31e-a closed on the narrow
+  side, where an odd-traits string was being bracketed for the same reason.
+  Bracketing is the worse failure of the two: it produces output that looks
+  deliberate.
+- `~` **Width is measured in code units in BOTH alphabets**, which for `wchar_t`
+  is code points and therefore exact. libc++ estimates East-Asian width — its
+  `format(L"{:6}", L"中文")` pads to four units, not six — so it is not an oracle
+  for the width of non-ASCII text, and no check here pins one against it.
+- `~` **The `'c'` presentation is the one place the two alphabets are SUPPOSED to
+  disagree.** [tab:format.type.int] copies `static_cast<charT>(value)` and refuses
+  what `charT` cannot hold, so `format("{:c}", 255)` throws while
+  `format(L"{:c}", 255)` is U+00FF, and `format(L"{:c}", -7)` is `wchar_t(-7)`
+  where the narrow half writes the single byte `0xF9`. Both halves match libc++ 22
+  on both sides (measured before either was written).
+- `~` **A byte above 0x7F in a narrow body widens byte-wise**, the same way
+  `<ios>::widen` does. There is exactly one way to produce one — a `%Z`
+  abbreviation handed to `chrono::local_time_format` is a `std::string` the
+  program supplies — and `Phase219` pins it, because the alternative (decoding
+  it as UTF-8, which on this system would arguably be more useful) would install
+  a second widening rule beside `widen`'s. Two answers to one question is the
+  defect Ф42-f found in `widen` itself.
 - `?` For a type with no formatter, the intended `static_assert` message does fire
   — but four noisier errors precede it (a deleted constructor, a missing `parse`,
   and two consteval failures).
@@ -3316,6 +3390,29 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
 
 ## `<string>`
 
+- `✓` Closed in Ф42-g: **the wide half of [string.conversions] was absent
+  entirely** — no `to_wstring`, and not one of the eight `sto*(const wstring&)`.
+  Nine narrow functions and nine wide ones now share ONE engine: the wide
+  conversions narrow their argument one code unit at a time and hand it to the
+  narrow functions, and `to_wstring` delegates to `to_string` and widens the
+  result. A number has no character type, so every character a numeric literal
+  can hold is ASCII, and the narrowing is one-to-one — which is also why `pos`
+  maps straight back rather than needing its own arithmetic. `Phase219` checks
+  all eighteen against their narrow twins over 601 values each, because a claim
+  that they share an engine is testable rather than merely stated.
+- `+` **`to_wstring` inherits P2587R3, and the reference has not implemented it
+  at all.** `to_wstring(1e-9)` is `L"1e-09"` here; libc++ 22 answers
+  `L"0.000000"`, and its `to_string` says the same — so it is consistently
+  behind rather than wrong about the wide half only. Measured, and the reason
+  this pair has no host oracle: the oracle is boxcxx's own narrow half.
+- `–` **The wide `sto*` skip only the six "C" white-space characters**, not
+  Unicode `White_Space`. [string.conversions] words the wide overloads "as if by
+  `wcstol`", and boxcxx's own `wcstol` DOES skip a wide space (Ф42-b) — so
+  `stoi(L"\u2003" L"42")` throws here where `wcstol` reads 42. Delegating to
+  `wcstol` instead would have bought that one behaviour at the price of a second
+  set of rules for overflow, invalid input and `pos`, which is the shape defects
+  live in. `Phase219` pins both halves of the divergence, so it stays a decision
+  rather than becoming a surprise.
 - `✓` Closed in Ф34: **`s + sv` did not compile.** P2591R5's four
   `basic_string` + `basic_string_view` operators are provided;
   `type_identity_t` on the view parameter is what keeps them from hijacking

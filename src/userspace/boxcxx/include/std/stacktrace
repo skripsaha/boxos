@@ -41,6 +41,7 @@
 
 // [version.syn] names this header as the owner of the macro below.
 #define BOXCXX_OWNS_stacktrace
+#define BOXCXX_OWNS_formatters
 #include <__bits/version_stacktrace>
 
 #include <compare>
@@ -639,8 +640,13 @@ inline ostream &operator<<(ostream &os, const basic_stacktrace<Allocator> &st)
 
 namespace __stacktrace {
 
+// [stacktrace.format] writes formatter<stacktrace_entry> and
+// formatter<basic_stacktrace<A>> with NO charT parameter — unlike every other
+// formatter the library provides, these two are char-only by specification.
+// So this parser stays narrow, and StdSpec is named at char explicitly rather
+// than left to a default that would hide the fact.
 struct SpecParser {
-    __format::StdSpec spec_;
+    __format::StdSpec<char> spec_;
 
     constexpr typename format_parse_context::iterator parse(format_parse_context &pc)
     {

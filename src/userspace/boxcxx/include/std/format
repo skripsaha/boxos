@@ -1,4 +1,5 @@
-// boxcxx — <format>  (Ф9B-1: the C++23 formatting library core)
+// boxcxx — <format>  (Ф9B-1: the C++23 formatting library core;
+//                     Ф42-g: both character types)
 //
 // std::format / format_to / format_to_n / formatted_size / vformat[_to],
 // the std-spec parser ([[fill]align][sign][#][0][width][.precision][L][type]
@@ -10,17 +11,44 @@
 // <charconv> (Ф9A) landed first. There is no dependency on the kernel: the
 // console sink (std::print) and <iostream> arrive in Ф9B-2 / Ф9B-3.
 //
-// Deliberate scope (single char type):
-//   * char only — no wchar_t / wformat_context (wide streams are excluded).
+// ── one engine, two character types ─────────────────────────────────────
+// Ф42-g made this header answer for wchar_t as well, and it did so the way
+// the three wide layers before it did (the wide printf of Ф42-c, the stream
+// numeric engine of Ф42-d, <chrono>'s renderer): THE TEXT IS PRODUCED IN
+// ASCII BY THE ONE ENGINE THAT ALREADY EXISTED. to_chars writes digits,
+// Digits128 writes digits, "true"/"false"/"0x" are literals — all of it is
+// ASCII, and ASCII is its own code point. CharT enters at exactly three
+// boundaries:
+//
+//   in    the format string. The whole std-format-spec grammar is ASCII, so
+//         the parser is generic by construction; the only genuinely CharT
+//         position in it is the FILL character, which may be anything.
+//   out   the sink. Every ASCII run is widened once, on the way out, in
+//         WriteRun — see the note there for why the cast is spelt through
+//         unsigned char rather than written plainly.
+//   args  the arguments that really are characters or strings. Those the
+//         standard hands to a formatter<charT-something, charT>; everything
+//         else is a number, and numbers do not have a character type.
+//
+// What follows from that is the shape of the file: FormatIntCore,
+// FormatFloatCore, FormatPointer and Digits128 still speak char and always
+// will, EmitField is the seam where a char body and a CharT body meet, and
+// there is no second parser, no second float formatter and no second table.
+//
+// Deliberate scope:
+//   * char and wchar_t. char8_t/char16_t/char32_t are not formatting
+//     character types in C++23 — [format.formatter.spec] names charT as
+//     char or wchar_t and nothing else.
 //   * the `L` (localized) flag is accepted and ignored wherever the grammar
 //     has an `L` position — the arithmetic and char formatters — since there
 //     is only the "C" locale. The string and pointer formatters have no `L`
 //     position at all and reject it, as both reference libraries do.
-//   * field width is measured in code units (ASCII); no Unicode grapheme /
+//   * field width is measured in code units; no Unicode grapheme /
 //     East-Asian-width estimation — this also governs the escaped ('?')
 //     text: precision truncates it in code units and can split an escape
 //     sequence, exactly like every other string precision clamp here.
-//   * range / tuple formatting (formatter<vector<T>> &c.) is a later phase.
+//     For wchar_t a code unit IS a code point, so the wide side of that
+//     measurement is exact where the narrow side is an approximation.
 #ifndef BOXCXX_FORMAT
 #define BOXCXX_FORMAT
 
@@ -33,6 +61,7 @@
 #include <cstdint>
 #include <iterator>  // output_iterator_tag
 #include <limits>
+#include <locale>    // basic_format_context::locale() ([format.context])
 #include <stdexcept>  // runtime_error (base of format_error)
 #include <string>
 #include <string_view>
@@ -59,8 +88,26 @@ public:
 template <class T, class CharT = char> struct formatter;
 template <class Context> class basic_format_arg;
 template <class Context> class basic_format_args;
-class format_context;
-using format_args = basic_format_args<format_context>;
+template <class Out, class CharT> class basic_format_context;
+
+namespace __format {
+template <class CharT> class SinkIterator;
+
+// The two character types [format.formatter.spec] names, and the guard that
+// keeps every formatter below from matching a third. Without it a
+// formatter<int, char8_t> would be *enabled* — semiregular, with a parse()
+// and a format() that compile — and std::formattable would answer true for a
+// character type this library has no output path for.
+template <class CharT>
+concept FmtCharT = is_same_v<CharT, char> || is_same_v<CharT, wchar_t>;
+} // namespace __format
+
+using format_context =
+    basic_format_context<__format::SinkIterator<char>, char>;
+using wformat_context =
+    basic_format_context<__format::SinkIterator<wchar_t>, wchar_t>;
+using format_args  = basic_format_args<format_context>;
+using wformat_args = basic_format_args<wformat_context>;
 
 // ════════════════════════════════════════════════════════════════════════
 //  Internal: spec model + low-level helpers (namespace __format)
@@ -94,8 +141,16 @@ enum class Sign : unsigned char { Minus, Plus, Space };
 struct monostate_tag {};
 
 // Parsed standard format specification.
-struct StdSpec {
-    char   fill          = ' ';
+//
+// Two fields carry a character and only one of them is CharT. `fill` is
+// whatever the format string put there and is copied to the output as-is, so
+// it is the argument's own character type. `type` is a presentation letter
+// out of a closed ASCII set, so it is narrowed at parse time and every
+// formatter below can go on comparing it against 'd'/'s'/'?' without knowing
+// which character type it came from. What a non-ASCII character in the type
+// position narrows TO is the interesting half — see ParseSpec.
+template <class CharT> struct StdSpec {
+    CharT  fill          = CharT(' ');
     Align  align         = Align::Default;
     Sign   sign          = Sign::Minus;
     // Whether a sign character was actually written. `sign` alone cannot
@@ -116,29 +171,50 @@ struct StdSpec {
     char   type          = '\0';   // '\0' == default
 };
 
-constexpr bool IsAlignChar(char c) noexcept
+// The grammar predicates. They read a format-string character, so they are
+// generic; ToUpperAscii is not, because it reads a digit this file just
+// produced and those are char in both worlds.
+template <class CharT> constexpr bool IsAlignChar(CharT c) noexcept
 {
-    return c == '<' || c == '>' || c == '^';
+    return c == CharT('<') || c == CharT('>') || c == CharT('^');
 }
-constexpr Align AlignOf(char c) noexcept
+template <class CharT> constexpr Align AlignOf(CharT c) noexcept
 {
-    return c == '<' ? Align::Left : c == '>' ? Align::Right : Align::Center;
+    return c == CharT('<')   ? Align::Left
+           : c == CharT('>') ? Align::Right
+                             : Align::Center;
 }
-constexpr bool IsDigit(char c) noexcept { return c >= '0' && c <= '9'; }
+template <class CharT> constexpr bool IsDigit(CharT c) noexcept
+{
+    return c >= CharT('0') && c <= CharT('9');
+}
 constexpr char ToUpperAscii(char c) noexcept
 {
     return (c >= 'a' && c <= 'z') ? char(c - 'a' + 'A') : c;
+}
+
+// Narrow a format-string character to ASCII. Everything outside ASCII maps to
+// DEL, which is in no grammar position this parser recognises: it is not a
+// presentation type, not a digit, not an alignment character. That is the
+// same device Ф42-d used on the stream extractors — send what cannot be
+// spelled in ASCII to a value the grammar already rejects, so no classifier
+// downstream needs a case for "wide". Written on the unsigned value because
+// wchar_t is signed here and a negative unit must not slip through as ASCII.
+template <class CharT> constexpr char NarrowAscii(CharT c) noexcept
+{
+    return static_cast<make_unsigned_t<CharT>>(c) < 0x80u ? char(c) : '\x7F';
 }
 
 inline constexpr int kIntMax = 2147483647;
 
 // Parse a base-10 unsigned number at *p (which must start on a digit),
 // advancing p past it. Overflow past INT_MAX throws.
-constexpr size_t ParseNumber(const char *&p, const char *e)
+template <class CharT>
+constexpr size_t ParseNumber(const CharT *&p, const CharT *e)
 {
     size_t v = 0;
     while (p != e && IsDigit(*p)) {
-        v = v * 10 + size_t(*p - '0');
+        v = v * 10 + size_t(*p - CharT('0'));
         if (v > size_t(kIntMax)) throw format_error("format: number too large");
         ++p;
     }
@@ -164,9 +240,10 @@ inline constexpr int kMaxFieldWidth = 65535;
 // digit-seq_opt. A leading '0' is not a width at all — in the std-format-spec
 // the zero-pad flag has already consumed one '0', and a second one is a
 // grammar violation. Precondition: p != e && IsDigit(*p).
-constexpr int ParseWidth(const char *&p, const char *e)
+template <class CharT>
+constexpr int ParseWidth(const CharT *&p, const CharT *e)
 {
-    if (*p == '0')
+    if (*p == CharT('0'))
         throw format_error("format: width must not start with a zero digit");
     const size_t v = ParseNumber(p, e);
     if (v > size_t(kMaxFieldWidth))
@@ -176,7 +253,8 @@ constexpr int ParseWidth(const char *&p, const char *e)
 
 // precision is a nonnegative-integer — unlike width, leading zeros are legal
 // here ({:.00} == {:.0}). Precondition: p != e && IsDigit(*p).
-constexpr int ParsePrecision(const char *&p, const char *e)
+template <class CharT>
+constexpr int ParsePrecision(const CharT *&p, const CharT *e)
 {
     const size_t v = ParseNumber(p, e);
     if (v > size_t(kMaxFieldWidth))
@@ -198,9 +276,19 @@ inline constexpr bool IsStdInt =
                     unsigned int, long, unsigned long, long long,
                     unsigned long long, __int128, unsigned __int128>;
 
-// Map a (decayed) argument type to its erased kind. Shared by the argument
-// store and the compile-time checker so they always agree.
-template <class T> constexpr ArgKind MapKind() noexcept
+// Map a (decayed) argument type to its erased kind, for a context of the
+// given character type. Shared by the argument store and the compile-time
+// checker so they always agree.
+//
+// CharT is what decides three of the branches, and the asymmetry between them
+// is [format.arg]'s, not ours: a char argument is storable in a WIDE context
+// (it widens, and formatter<char, wchar_t> exists to receive it), while a
+// wchar_t argument in a narrow context is not storable at all — it falls to
+// Custom, finds no formatter<wchar_t, char>, and is rejected. Strings and
+// pointers-to-character have no widening rule at all: only the context's own
+// character type is a string here, and const char* in a wide context is a
+// pointer to something that is not text as far as this context is concerned.
+template <class T, class CharT> constexpr ArgKind MapKind() noexcept
 {
     using U = decay_t<T>;  // arrays/functions decay; char[N] → const char*
     // decay_t also strips cv, and dropping `volatile` here silently rescued an
@@ -217,7 +305,8 @@ template <class T> constexpr ArgKind MapKind() noexcept
     // with exactly what it deduced.
     if constexpr (is_volatile_v<remove_reference_t<T>>) return ArgKind::Custom;
     else if constexpr (is_same_v<U, bool>) return ArgKind::Bool;
-    else if constexpr (is_same_v<U, char>) return ArgKind::Char;
+    else if constexpr (is_same_v<U, char> || is_same_v<U, CharT>)
+        return ArgKind::Char;
     else if constexpr (is_same_v<U, __int128>) return ArgKind::Int128;
     else if constexpr (is_same_v<U, unsigned __int128>) return ArgKind::UInt128;
     else if constexpr (IsStdInt<U>) {
@@ -232,10 +321,11 @@ template <class T> constexpr ArgKind MapKind() noexcept
     else if constexpr (is_same_v<U, nullptr_t>) return ArgKind::Pointer;
     else if constexpr (is_pointer_v<U>) {
         using P = remove_cv_t<remove_pointer_t<U>>;
-        if constexpr (is_same_v<P, char>) return ArgKind::CString;
+        if constexpr (is_same_v<P, CharT>) return ArgKind::CString;
         else if constexpr (is_same_v<P, void>) return ArgKind::Pointer;
         else return ArgKind::Custom;
-    } else if constexpr (is_same_v<U, string> || is_same_v<U, string_view>)
+    } else if constexpr (is_same_v<U, basic_string<CharT>> ||
+                         is_same_v<U, basic_string_view<CharT>>)
         return ArgKind::SVString;
     else return ArgKind::Custom;
 }
@@ -327,7 +417,8 @@ private:
     size_t                  num_kinds_ = 0;
 };
 
-using format_parse_context = basic_format_parse_context<char>;
+using format_parse_context  = basic_format_parse_context<char>;
+using wformat_parse_context = basic_format_parse_context<wchar_t>;
 
 // ── the spec parser ─────────────────────────────────────────────────────
 namespace __format {
@@ -335,17 +426,18 @@ namespace __format {
 // Parse a nested replacement field used for dynamic width/precision: '{'
 // already consumed by the caller is NOT the contract — p must point AT '{'.
 // Returns the resolved argument id and advances p past the closing '}'.
-constexpr size_t ParseDynamicArgId(format_parse_context &pc, const char *&p,
-                                   const char *e)
+template <class CharT>
+constexpr size_t ParseDynamicArgId(basic_format_parse_context<CharT> &pc,
+                                   const CharT *&p, const CharT *e)
 {
     ++p;  // past '{'
     size_t id;
-    if (p != e && *p == '}') {
+    if (p != e && *p == CharT('}')) {
         id = pc.next_arg_id();
     } else if (p != e && IsDigit(*p)) {
         id = ParseNumber(p, e);
         pc.check_arg_id(id);
-        if (p == e || *p != '}')
+        if (p == e || *p != CharT('}'))
             throw format_error("format: invalid dynamic field");
     } else {
         throw format_error("format: invalid dynamic field");
@@ -358,15 +450,18 @@ constexpr size_t ParseDynamicArgId(format_parse_context &pc, const char *&p,
 // any dynamic width/precision against pc. Returns the iterator at the '}'
 // that closes the replacement field (or wherever parsing stopped — the
 // caller verifies a '}' follows).
-constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
+template <class CharT>
+constexpr const CharT *ParseSpec(basic_format_parse_context<CharT> &pc,
+                                 StdSpec<CharT> &s)
 {
-    const char *p = pc.begin();
-    const char *e = pc.end();
-    if (p == e || *p == '}') return p;
+    const CharT *p = pc.begin();
+    const CharT *e = pc.end();
+    if (p == e || *p == CharT('}')) return p;
 
-    // [fill]align — fill is any char but '{'/'}' and must be followed by an
-    // alignment character.
-    if (p + 1 < e && IsAlignChar(p[1]) && *p != '{' && *p != '}') {
+    // [fill]align — fill is any character but '{'/'}' and must be followed by
+    // an alignment character. This is the one CharT position in the whole
+    // grammar: a fill is copied to the output, never interpreted.
+    if (p + 1 < e && IsAlignChar(p[1]) && *p != CharT('{') && *p != CharT('}')) {
         s.fill  = *p;
         s.align = AlignOf(p[1]);
         p += 2;
@@ -377,29 +472,29 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
 
     // sign
     if (p != e) {
-        if (*p == '+') { s.sign = Sign::Plus; s.sign_given = true; ++p; }
-        else if (*p == '-') { s.sign = Sign::Minus; s.sign_given = true; ++p; }
-        else if (*p == ' ') { s.sign = Sign::Space; s.sign_given = true; ++p; }
+        if (*p == CharT('+')) { s.sign = Sign::Plus; s.sign_given = true; ++p; }
+        else if (*p == CharT('-')) { s.sign = Sign::Minus; s.sign_given = true; ++p; }
+        else if (*p == CharT(' ')) { s.sign = Sign::Space; s.sign_given = true; ++p; }
     }
     // '#'
-    if (p != e && *p == '#') { s.alt = true; ++p; }
+    if (p != e && *p == CharT('#')) { s.alt = true; ++p; }
     // '0' — zero pad (only meaningful for numeric types; flagged here, the
     // formatter ignores it when an explicit alignment was given)
-    if (p != e && *p == '0') { s.zero = true; ++p; }
+    if (p != e && *p == CharT('0')) { s.zero = true; ++p; }
     // width
     if (p != e && IsDigit(*p)) {
         s.width = ParseWidth(p, e);
-    } else if (p != e && *p == '{') {
+    } else if (p != e && *p == CharT('{')) {
         s.width_id      = ParseDynamicArgId(pc, p, e);
         s.width_dynamic = true;
         pc.check_dynamic_spec_integral(s.width_id);
     }
     // precision
-    if (p != e && *p == '.') {
+    if (p != e && *p == CharT('.')) {
         ++p;
         if (p != e && IsDigit(*p)) {
             s.precision = ParsePrecision(p, e);
-        } else if (p != e && *p == '{') {
+        } else if (p != e && *p == CharT('{')) {
             s.prec_id      = ParseDynamicArgId(pc, p, e);
             s.prec_dynamic = true;
             pc.check_dynamic_spec_integral(s.prec_id);
@@ -408,9 +503,13 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
         }
     }
     // 'L'
-    if (p != e && *p == 'L') { s.localized = true; ++p; }
-    // type
-    if (p != e && *p != '}') { s.type = *p; ++p; }
+    if (p != e && *p == CharT('L')) { s.localized = true; ++p; }
+    // type — narrowed, so a wide presentation character cannot alias an ASCII
+    // one. The mapping sends everything outside ASCII to a character no
+    // formatter accepts, which turns "{:ж}" into the same honest "invalid
+    // type" diagnostic that "{:ж}" would raise if ж were an ASCII letter with
+    // no meaning here.
+    if (p != e && *p != CharT('}')) { s.type = NarrowAscii(*p); ++p; }
     return p;
 }
 
@@ -419,9 +518,11 @@ constexpr const char *ParseSpec(format_parse_context &pc, StdSpec &s)
 // ── basic_format_arg ([format.arg]) ─────────────────────────────────────
 template <class Context> class basic_format_arg {
 public:
+    using char_type = typename Context::char_type;
+
     class handle {
     public:
-        void format(basic_format_parse_context<char> &pc, Context &fc) const
+        void format(basic_format_parse_context<char_type> &pc, Context &fc) const
         {
             fmt_(pc, fc, ptr_);
         }
@@ -429,7 +530,7 @@ public:
     private:
         friend class basic_format_arg;
         const void *ptr_ = nullptr;
-        void (*fmt_)(basic_format_parse_context<char> &, Context &,
+        void (*fmt_)(basic_format_parse_context<char_type> &, Context &,
                      const void *) = nullptr;
     };
 
@@ -444,7 +545,8 @@ public:
 
     // Run the matching formatter: parse the spec (leaving pc.begin() at the
     // closing '}') then format the stored value into fc.
-    void __format_to(basic_format_parse_context<char> &pc, Context &fc) const;
+    void __format_to(basic_format_parse_context<char_type> &pc,
+                     Context &fc) const;
 
     // Coerce an integer-kind argument to long long (for dynamic width /
     // precision). Throws if the stored value is not an integer type.
@@ -481,7 +583,7 @@ private:
     union Storage {
         char               nul;
         bool               b;
-        char               c;
+        char_type          c;
         int                i;
         unsigned           u;
         long long          ll;
@@ -495,8 +597,8 @@ private:
         float              f;
         double             d;
         long double        ld;
-        const char        *cs;
-        string_view        sv;
+        const char_type   *cs;
+        basic_string_view<char_type> sv;
         const void        *pv;
         constexpr Storage() noexcept : nul(0) {}
     } v_;
@@ -530,21 +632,25 @@ private:
     const basic_format_arg<Context> *data_ = nullptr;
 };
 
-// ── format_context ([format.context]) ───────────────────────────────────
+// ── basic_format_context ([format.context]) ─────────────────────────────
 namespace __format {
 
 // Type-erased output sink. format() / format_to / formatted_size /
-// format_to_n all funnel through one of these so the engine stays non-generic.
-struct OutputSink {
-    virtual void Append(char c)                = 0;
-    virtual void Append(const char *s, size_t n) = 0;
+// format_to_n all funnel through one of these so the engine is generic over
+// the CHARACTER type and nothing else — the output iterator, which is the
+// other axis the standard leaves open, stays a single type per character
+// type. That is why every formatter here can name format_context& concretely
+// instead of being a template over Out.
+template <class CharT> struct OutputSink {
+    virtual void Append(CharT c)                    = 0;
+    virtual void Append(const CharT *s, size_t n)   = 0;
 
 protected:
     ~OutputSink() = default;
 };
 
 // The single output-iterator type seen by formatters via ctx.out().
-class SinkIterator {
+template <class CharT> class SinkIterator {
 public:
     using iterator_category = output_iterator_tag;
     using value_type        = void;
@@ -553,9 +659,9 @@ public:
     using reference         = void;
 
     SinkIterator() noexcept = default;
-    explicit SinkIterator(OutputSink &s) noexcept : sink_(&s) {}
+    explicit SinkIterator(OutputSink<CharT> &s) noexcept : sink_(&s) {}
 
-    SinkIterator &operator=(char c)
+    SinkIterator &operator=(CharT c)
     {
         sink_->Append(c);
         return *this;
@@ -564,53 +670,113 @@ public:
     SinkIterator &operator++() noexcept { return *this; }
     SinkIterator  operator++(int) noexcept { return *this; }
 
-    OutputSink *__sink() const noexcept { return sink_; }
+    OutputSink<CharT> *__sink() const noexcept { return sink_; }
 
 private:
-    OutputSink *sink_ = nullptr;
+    OutputSink<CharT> *sink_ = nullptr;
 };
 
 } // namespace __format
 
-class format_context {
+// [format.syn] names basic_format_context as a class template over an
+// unspecified Out and defines both format_context and wformat_context from
+// it. The Out this library has is the erased sink iterator, so exactly one
+// specialization is defined and the primary is left undefined: naming
+// basic_format_context<MyIterator, char> is then a compile error rather than
+// a type that looks constructible and is not — the same answer <locale> gives
+// for use_facet of a facet this image does not carry, moved to where it costs
+// nothing to act on.
+template <class Out, class CharT> class basic_format_context;
+
+template <class CharT>
+class basic_format_context<__format::SinkIterator<CharT>, CharT> {
+    using Self = basic_format_context;
+
 public:
-    using iterator  = __format::SinkIterator;
-    using char_type = char;
-    template <class T> using formatter_type = formatter<T, char>;
+    using iterator  = __format::SinkIterator<CharT>;
+    using char_type = CharT;
+    template <class T> using formatter_type = formatter<T, CharT>;
 
     iterator out() noexcept { return out_; }
     void     advance_to(iterator it) noexcept { out_ = it; }
-    basic_format_arg<format_context> arg(size_t id) const noexcept
+    basic_format_arg<Self> arg(size_t id) const noexcept
     {
         return args_.get(id);
     }
-    // Internal accessor: lets a nested format_context (built around a
-    // scratch sink, e.g. range_formatter's width-triggered buffering) share
-    // this context's own argument store, so nested dynamic width/precision
-    // still resolves against the real argument list.
-    format_args __args() const noexcept { return args_; }
+    // [format.context] requires this even where there is nothing to choose:
+    // the `L` flag is parsed and ignored here, so what locale() answers is
+    // the one locale the system has. It costs a return of an empty class —
+    // <ios> already holds one of these by value in every stream.
+    std::locale locale() { return std::locale(); }
+
+    // Internal accessor: lets a nested context (built around a scratch sink,
+    // e.g. range_formatter's width-triggered buffering) share this context's
+    // own argument store, so nested dynamic width/precision still resolves
+    // against the real argument list.
+    basic_format_args<Self> __args() const noexcept { return args_; }
 
     // Internal constructor used by the engine.
-    format_context(iterator out, format_args args) noexcept
+    basic_format_context(iterator out, basic_format_args<Self> args) noexcept
         : out_(out), args_(args)
     {
     }
 
 private:
-    iterator    out_;
-    format_args args_;
+    iterator                out_;
+    basic_format_args<Self> args_;
 };
 
 // ════════════════════════════════════════════════════════════════════════
-//  Field emission helpers (need format_context complete)
+//  Field emission helpers (need basic_format_context complete)
 // ════════════════════════════════════════════════════════════════════════
 namespace __format {
 
-inline void WriteRun(format_context::iterator &out, const char *s, size_t n)
+// Spelling out basic_format_context<SinkIterator<CharT>, CharT> in every
+// signature below would bury the one thing they have in common. An alias
+// template is transparent to deduction, so CharT still deduces from the
+// argument.
+template <class CharT>
+using Ctx = basic_format_context<SinkIterator<CharT>, CharT>;
+
+// The widening boundary, and the only one. A run whose source characters are
+// already CharT goes to the sink whole; a run of ASCII — every digit this
+// file produces, "true", "0x", the escaped text — is widened one character at
+// a time on the way past.
+//
+// The cast is spelt through unsigned char on purpose, and that is not a
+// precaution — it is reachable. Ф42-f found <ios>'s widen() SIGN-EXTENDING,
+// so widen('\xD0') was wchar_t(-48) while the stream writer made U+00D0 out of
+// the same byte: two answers to one question, from two places that had never
+// before been reachable at once.
+//
+// ‼ Every run that reaches HERE is ASCII, and mutation testing is what
+// established that rather than inspection: making this cast signed changed no
+// observable output anywhere in the suite. The narrow bodies that arrive are
+// digits from to_chars, "true"/"false", a base prefix, and <chrono>'s streamed
+// text — all of them produced by this library, all of them ASCII. The one
+// narrow body a CALLER can put a byte above 0x7F into is a %Z abbreviation
+// handed to chrono::local_time_format, and that one does NOT come through
+// here: <__bits/chrono_format>'s own walk widens it, and Phase219 pins that
+// site. So the cast below is written for agreement, not for reachability —
+// three places now turn a byte into a wide character, and all three must
+// answer alike.
+//
+// Byte-wise is also a decision and not an oversight: BoxOS is UTF-8 throughout,
+// so DECODING such a body would arguably be more useful — and would install a
+// second widening rule beside <ios>::widen's, which is the shape of the defect
+// this comment exists because of.
+template <class CharT, class Src>
+inline void WriteRun(__format::SinkIterator<CharT> &out, const Src *s, size_t n)
 {
-    out.__sink()->Append(s, n);
+    if constexpr (is_same_v<Src, CharT>) {
+        out.__sink()->Append(s, n);
+    } else {
+        for (size_t i = 0; i < n; ++i)
+            out.__sink()->Append(CharT(static_cast<unsigned char>(s[i])));
+    }
 }
-inline void WriteFill(format_context::iterator &out, char c, int n)
+template <class CharT>
+inline void WriteFill(__format::SinkIterator<CharT> &out, CharT c, int n)
 {
     for (int i = 0; i < n; ++i) out.__sink()->Append(c);
 }
@@ -618,9 +784,15 @@ inline void WriteFill(format_context::iterator &out, char c, int n)
 // Emit sign_prefix + body padded to `width` according to spec. `numeric`
 // enables zero-padding (zeros inserted between sign_prefix and body) and
 // selects the default alignment when none was requested.
-inline void EmitField(format_context &ctx, const StdSpec &spec, int width,
-                      string_view sign_prefix, string_view body, Align dflt,
-                      bool numeric)
+//
+// BodyC is the seam of the whole design: a number's body is ASCII and a
+// string argument's body is CharT, and both arrive here. Only the body has
+// the freedom — a sign and a base prefix are '+'/'-'/' '/"0x" and could not
+// be anything else.
+template <class CharT, class BodyC>
+inline void EmitField(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
+                      string_view sign_prefix, basic_string_view<BodyC> body,
+                      Align dflt, bool numeric)
 {
     auto out = ctx.out();
     // core is a size_t, never an int. For a width-bearing range or tuple field
@@ -643,14 +815,14 @@ inline void EmitField(format_context &ctx, const StdSpec &spec, int width,
     const int pad = int(size_t(width) - core);
     if (spec.zero && spec.align == Align::Default && numeric) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
-        WriteFill(out, '0', pad);
+        WriteFill(out, CharT('0'), pad);
         WriteRun(out, body.data(), body.size());
         ctx.advance_to(out);
         return;
     }
 
     const Align a    = spec.align == Align::Default ? dflt : spec.align;
-    const char  fill = spec.fill;
+    const CharT fill = spec.fill;
     if (a == Align::Left) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
         WriteRun(out, body.data(), body.size());
@@ -727,9 +899,9 @@ inline int Digits128(char *out, unsigned __int128 mag, int base)
 // long long for every standard integer type and unsigned __int128 for the
 // extended ones; the narrow path keeps going through to_chars exactly as
 // before.
-template <class Mag>
-inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
-                          bool negative, Mag mag, char type)
+template <class CharT, class Mag>
+inline void FormatIntCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec,
+                          int width, bool negative, Mag mag, char type)
 {
     int         base   = 10;
     const char *prefix = "";
@@ -772,15 +944,24 @@ inline void FormatIntCore(format_context &ctx, const StdSpec &spec, int width,
               Align::Right, /*numeric=*/true);
 }
 
-inline void FormatCharCore(format_context &ctx, const StdSpec &spec, int width,
-                           char c)
+// A character argument is one of the three things that really is CharT, so
+// this one does not widen: the value came from the caller already spelt in
+// the output's own character type.
+template <class CharT>
+inline void FormatCharCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec,
+                           int width, CharT c)
 {
-    EmitField(ctx, spec, width, string_view(), string_view(&c, 1), Align::Left,
-              /*numeric=*/false);
+    EmitField(ctx, spec, width, string_view(), basic_string_view<CharT>(&c, 1),
+              Align::Left, /*numeric=*/false);
 }
 
-inline void FormatString(format_context &ctx, const StdSpec &spec, int width,
-                         int precision, string_view s)
+// BodyC is free here because the string this formats is sometimes the
+// argument's own text (CharT) and sometimes a literal this file owns —
+// "true", "false", a rendered date. Precision clamps in code units of
+// whichever it is, which is the measurement [format.string.std] asks for.
+template <class CharT, class BodyC>
+inline void FormatString(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
+                         int precision, basic_string_view<BodyC> s)
 {
     if (precision >= 0 && size_t(precision) < s.size())
         s = s.substr(0, size_t(precision));
@@ -792,8 +973,8 @@ inline void FormatString(format_context &ctx, const StdSpec &spec, int width,
 inline ptrdiff_t FmtGeneralAlt(char *buf, ptrdiff_t len, ptrdiff_t cap, int P);
 
 // Floating-point. `type` ∈ \0/e/E/f/F/g/G/a/A; precision -1 means "absent".
-template <class F>
-void FormatFloatCore(format_context &ctx, const StdSpec &spec, int width,
+template <class F, class CharT>
+void FormatFloatCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
                      int precision, F value, char type)
 {
     const bool neg   = __builtin_signbit(value);
@@ -959,7 +1140,7 @@ constexpr bool enable_nonlocking_formatter_optimization = false;
 namespace __format {
 
 // Resolve dynamic width/precision against the format context.
-inline int ResolveDynamic(format_context &ctx, size_t id)
+template <class CharT> inline int ResolveDynamic(Ctx<CharT> &ctx, size_t id)
 {
     const long long v = ctx.arg(id).__as_integer();
     if (v < 0) throw format_error("format: negative width/precision");
@@ -967,11 +1148,13 @@ inline int ResolveDynamic(format_context &ctx, size_t id)
         throw format_error("format: width/precision exceeds the field limit");
     return int(v);
 }
-inline int EffectiveWidth(format_context &ctx, const StdSpec &s)
+template <class CharT>
+inline int EffectiveWidth(Ctx<CharT> &ctx, const StdSpec<CharT> &s)
 {
     return s.width_dynamic ? ResolveDynamic(ctx, s.width_id) : s.width;
 }
-inline int EffectivePrecision(format_context &ctx, const StdSpec &s)
+template <class CharT>
+inline int EffectivePrecision(Ctx<CharT> &ctx, const StdSpec<CharT> &s)
 {
     return s.prec_dynamic ? ResolveDynamic(ctx, s.prec_id) : s.precision;
 }
@@ -985,15 +1168,20 @@ constexpr bool IsIntType(char t) noexcept
 } // namespace __format
 
 // Integer types (signed char .. unsigned long long, excluding bool/char).
-template <class T>
-    requires __format::IsStdInt<T>
-struct formatter<T, char> {
-    __format::StdSpec spec_;
+//
+// A partial specialization whose argument list is the primary's, told apart by
+// its constraints alone — legal since C++20 and verified on this toolchain
+// before the first one was written, because the whole formatter section below
+// is shaped by whether it is.
+template <class T, class CharT>
+    requires __format::IsStdInt<T> && __format::FmtCharT<CharT>
+struct formatter<T, CharT> {
+    __format::StdSpec<CharT> spec_;
 
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = __format::ParseSpec(pc, spec_);
+        const CharT *p = __format::ParseSpec(pc, spec_);
         if (!__format::IsIntType(spec_.type))
             throw format_error("format: invalid type for integer");
         if (spec_.precision >= 0 || spec_.prec_dynamic)
@@ -1004,14 +1192,18 @@ struct formatter<T, char> {
         return p;
     }
 
-    void format(T value, format_context &ctx) const
+    void format(T value, __format::Ctx<CharT> &ctx) const
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
         if (spec_.type == 'c') {
-            if (cmp_less(value, int(numeric_limits<char>::min())) ||
-                cmp_greater(value, int(numeric_limits<char>::max())))
-                throw format_error("format: integer not in char range");
-            __format::FormatCharCore(ctx, spec_, width, char(value));
+            // [tab:format.type.int]: the bound is CharT's, not char's. Measured
+            // against libc++ before it was written: format(L"{:c}", 200) yields
+            // U+00C8 while format("{:c}", 200) throws, and both are right —
+            // 200 is a character in one alphabet and not in the other.
+            if (cmp_less(value, int(numeric_limits<CharT>::min())) ||
+                cmp_greater(value, (long long)numeric_limits<CharT>::max()))
+                throw format_error("format: integer not in the character range");
+            __format::FormatCharCore(ctx, spec_, width, CharT(value));
             return;
         }
         // The magnitude carries T's own width: narrowing a 128-bit value to 64
@@ -1045,14 +1237,16 @@ struct formatter<T, char> {
 };
 
 // bool
-template <> struct formatter<bool, char> {
-    __format::StdSpec spec_;
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<bool, CharT> {
+    __format::StdSpec<CharT> spec_;
 
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = __format::ParseSpec(pc, spec_);
-        const char  t = spec_.type;
+        const CharT *p = __format::ParseSpec(pc, spec_);
+        const char   t = spec_.type;
         const bool  string_form = (t == '\0' || t == 's');
         // bool does NOT accept the 'c' presentation (unlike int/char).
         if (!(string_form || t == 'b' || t == 'B' || t == 'd' || t == 'o' ||
@@ -1066,10 +1260,13 @@ template <> struct formatter<bool, char> {
         return p;
     }
 
-    void format(bool value, format_context &ctx) const
+    void format(bool value, __format::Ctx<CharT> &ctx) const
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
         if (spec_.type == '\0' || spec_.type == 's') {
+            // "true"/"false" are spelt once, in ASCII, and widened on the way
+            // out. A wide duplicate of the two words would be a second place
+            // for them to disagree.
             __format::FormatString(ctx, spec_, width, -1,
                                    value ? string_view("true")
                                          : string_view("false"));
@@ -1080,15 +1277,21 @@ template <> struct formatter<bool, char> {
     }
 };
 
-// char
-template <> struct formatter<char, char> {
-    __format::StdSpec spec_;
+// Character arguments. Two specializations, one body: [format.formatter.spec]
+// enables formatter<charT, charT> for both character types AND
+// formatter<char, wchar_t> — a char is spellable in a wide alphabet, which is
+// why the pair is asymmetric and why the value type C is a parameter here
+// while every use of it goes through the same three presentations.
+namespace __format {
 
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+template <class C, class CharT> struct CharFormatter {
+    StdSpec<CharT> spec_;
+
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = __format::ParseSpec(pc, spec_);
-        const char  t = spec_.type;
+        const CharT *p = ParseSpec(pc, spec_);
+        const char   t = spec_.type;
         if (!(t == '\0' || t == 'c' || t == '?' || t == 'b' || t == 'B' ||
               t == 'd' || t == 'o' || t == 'x' || t == 'X'))
             throw format_error("format: invalid type for char");
@@ -1108,23 +1311,49 @@ template <> struct formatter<char, char> {
 
     constexpr void set_debug_format() noexcept { spec_.type = '?'; }
 
-    void format(char value, format_context &ctx) const
+    void format(C value, Ctx<CharT> &ctx) const
     {
-        const int width = __format::EffectiveWidth(ctx, spec_);
+        // The one conversion in this class, and the whole reason C and CharT
+        // are separate parameters. It runs through the UNSIGNED value: a char
+        // is signed here, so '\xD0' is -48, and a plain widening cast would
+        // make wchar_t(-48) out of a byte the rest of the system reads as
+        // U+00D0. libc++ answers U+00D0 for format(L"{}", '\xD0') — measured,
+        // not assumed — and it is also the only answer consistent with
+        // WriteRun, which widens every ASCII run the same way. For C == CharT
+        // the round trip is the identity.
+        const CharT wide = CharT(static_cast<make_unsigned_t<C>>(value));
+        const int   width = EffectiveWidth(ctx, spec_);
         if (spec_.type == '\0' || spec_.type == 'c') {
-            __format::FormatCharCore(ctx, spec_, width, value);
+            FormatCharCore(ctx, spec_, width, wide);
         } else if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeChar(escaped, value);
-            __format::FormatString(ctx, spec_, width, -1,
-                                   string_view(escaped.data(), escaped.size()));
+            basic_string<CharT> escaped;
+            EscapeChar(escaped, wide);
+            FormatString(ctx, spec_, width, -1,
+                         basic_string_view<CharT>(escaped.data(),
+                                                  escaped.size()));
         } else {
-            __format::FormatIntCore(ctx, spec_, width, false,
-                                    (unsigned long long)(unsigned char)value,
-                                    spec_.type);
+            // P2909R4: a character formatted with an integer presentation is a
+            // CODE UNIT, so it widens through the unsigned version of its own
+            // type — format("{:d}", char(-1)) is 255. The same rule read on
+            // wchar_t gives 128512 for U+1F600, which is what both reference
+            // libraries print.
+            FormatIntCore(ctx, spec_, width, false,
+                          (unsigned long long)static_cast<make_unsigned_t<C>>(
+                              value),
+                          spec_.type);
         }
     }
 };
+
+} // namespace __format
+
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<char, CharT> : __format::CharFormatter<char, CharT> {};
+
+template <>
+struct formatter<wchar_t, wchar_t>
+    : __format::CharFormatter<wchar_t, wchar_t> {};
 
 namespace __format {
 
@@ -1174,16 +1403,17 @@ template <> struct FmtVia<_Float64> {
 // floating-point (float / double / long double). is_floating_point_v ignores
 // cv by definition, but [format.formatter.spec]/2.4 provides formatters only
 // for cv-unqualified floating-point types — hence the second conjunct.
-template <class T>
-    requires __format::CoreFloat<T> && is_same_v<T, remove_cv_t<T>>
-struct formatter<T, char> {
-    __format::StdSpec spec_;
+template <class T, class CharT>
+    requires __format::CoreFloat<T> && is_same_v<T, remove_cv_t<T>> &&
+             __format::FmtCharT<CharT>
+struct formatter<T, CharT> {
+    __format::StdSpec<CharT> spec_;
 
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = __format::ParseSpec(pc, spec_);
-        const char  t = spec_.type;
+        const CharT *p = __format::ParseSpec(pc, spec_);
+        const char   t = spec_.type;
         if (!(t == '\0' || t == 'a' || t == 'A' || t == 'e' || t == 'E' ||
               t == 'f' || t == 'F' || t == 'g' || t == 'G'))
             throw format_error("format: invalid type for floating-point");
@@ -1191,7 +1421,7 @@ struct formatter<T, char> {
         return p;
     }
 
-    void format(T value, format_context &ctx) const
+    void format(T value, __format::Ctx<CharT> &ctx) const
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
         const int prec  = __format::EffectivePrecision(ctx, spec_);
@@ -1202,13 +1432,15 @@ struct formatter<T, char> {
 
 // The narrow extended floating-point types: same spec grammar, same output,
 // one conversion in front of it.
-template <class T>
-    requires(!is_void_v<typename __format::FmtVia<T>::type>) && is_same_v<T, remove_cv_t<T>>
-struct formatter<T, char> : formatter<typename __format::FmtVia<T>::type, char> {
-    void format(T value, format_context &ctx) const
+template <class T, class CharT>
+    requires(!is_void_v<typename __format::FmtVia<T>::type>) &&
+            is_same_v<T, remove_cv_t<T>> && __format::FmtCharT<CharT>
+struct formatter<T, CharT>
+    : formatter<typename __format::FmtVia<T>::type, CharT> {
+    void format(T value, __format::Ctx<CharT> &ctx) const
     {
         using V = typename __format::FmtVia<T>::type;
-        formatter<V, char>::format(static_cast<V>(value), ctx);
+        formatter<V, CharT>::format(static_cast<V>(value), ctx);
     }
 };
 
@@ -1217,12 +1449,12 @@ namespace __format {
 // Shared parse for the string-like formatters: type must be \0, 's' or '?';
 // precision is allowed (truncation); sign/#/0 are not. set_debug_format()
 // lives here too, so all four string-like formatters share one definition.
-struct StringSpecParser {
-    StdSpec spec_;
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+template <class CharT> struct StringSpecParser {
+    StdSpec<CharT> spec_;
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = ParseSpec(pc, spec_);
+        const CharT *p = ParseSpec(pc, spec_);
         if (!(spec_.type == '\0' || spec_.type == 's' || spec_.type == '?'))
             throw format_error("format: invalid type for string");
         // sign/#/0/L are all parsed generically by ParseSpec (for the
@@ -1237,6 +1469,25 @@ struct StringSpecParser {
         return p;
     }
     constexpr void set_debug_format() noexcept { spec_.type = '?'; }
+
+    // The body all five string-like formatters share. It was written out five
+    // times when there was one character type; at two it would have been ten,
+    // and ten copies of a rule about when to escape is nine chances for them
+    // to stop agreeing.
+    void EmitText(basic_string_view<CharT> sv, Ctx<CharT> &ctx) const
+    {
+        const int width = EffectiveWidth(ctx, spec_);
+        const int prec  = EffectivePrecision(ctx, spec_);
+        if (spec_.type == '?') {
+            basic_string<CharT> escaped;
+            EscapeInto(escaped, sv);
+            FormatString(ctx, spec_, width, prec,
+                         basic_string_view<CharT>(escaped.data(),
+                                                  escaped.size()));
+        } else {
+            FormatString(ctx, spec_, width, prec, sv);
+        }
+    }
 };
 
 } // namespace __format
@@ -1255,75 +1506,69 @@ struct StringSpecParser {
 // catch-all: `basic_string<char, Traits, Alloc>` can be deduced from an
 // arbitrary R while an arbitrary R cannot be deduced from it, so these are more
 // specialized outright and no ambiguity arises.
-template <class Traits, class Alloc>
-struct formatter<basic_string<char, Traits, Alloc>, char>
-    : __format::StringSpecParser {
-    void format(const basic_string<char, Traits, Alloc> &v,
-                format_context &ctx) const
+template <class CharT, class Traits, class Alloc>
+    requires __format::FmtCharT<CharT>
+struct formatter<basic_string<CharT, Traits, Alloc>, CharT>
+    : __format::StringSpecParser<CharT> {
+    void format(const basic_string<CharT, Traits, Alloc> &v,
+                __format::Ctx<CharT> &ctx) const
     {
-        const int         width = __format::EffectiveWidth(ctx, spec_);
-        const int         prec  = __format::EffectivePrecision(ctx, spec_);
-        const string_view sv(v.data(), v.size());
-        if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeInto(escaped, sv);
-            __format::FormatString(ctx, spec_, width, prec,
-                                   string_view(escaped.data(), escaped.size()));
-        } else {
-            __format::FormatString(ctx, spec_, width, prec, sv);
-        }
+        this->EmitText(basic_string_view<CharT>(v.data(), v.size()), ctx);
     }
 };
-template <class Traits>
-struct formatter<basic_string_view<char, Traits>, char>
-    : __format::StringSpecParser {
-    void format(basic_string_view<char, Traits> v, format_context &ctx) const
+template <class CharT, class Traits>
+    requires __format::FmtCharT<CharT>
+struct formatter<basic_string_view<CharT, Traits>, CharT>
+    : __format::StringSpecParser<CharT> {
+    void format(basic_string_view<CharT, Traits> v,
+                __format::Ctx<CharT> &ctx) const
     {
-        const int         width = __format::EffectiveWidth(ctx, spec_);
-        const int         prec  = __format::EffectivePrecision(ctx, spec_);
-        const string_view sv(v.data(), v.size());
-        if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeInto(escaped, sv);
-            __format::FormatString(ctx, spec_, width, prec,
-                                   string_view(escaped.data(), escaped.size()));
-        } else {
-            __format::FormatString(ctx, spec_, width, prec, sv);
-        }
+        this->EmitText(basic_string_view<CharT>(v.data(), v.size()), ctx);
     }
 };
-template <> struct formatter<const char *, char> : __format::StringSpecParser {
-    void format(const char *v, format_context &ctx) const
+
+// ‼ A string whose character type is NOT the context's is an ERROR, and
+// saying so out loud takes a specialization of its own. Without these two, a
+// basic_string<char> handed to format(L"…") matches no enabled formatter,
+// falls through to <__bits/format_range>'s catch-all — a string IS a range of
+// characters, and formattable<char, wchar_t> is true — and prints
+// ['h', 'i']. That is not a hypothetical: libc++ 22 does exactly that, and
+// format(L"{}", "abc") there yields ['a', 'b', 'c', '\u{0}'] with the NUL
+// included. libstdc++ 16.1 rejects the same call, and this is the same defect
+// class Ф31e-a already closed on the narrow side, where an odd-traits string
+// was being bracketed for the same reason. Rejecting is the answer both
+// times: bracketing produces output that looks deliberate.
+template <class C, class CharT, class Traits, class Alloc>
+    requires __format::FmtCharT<CharT> && (!is_same_v<C, CharT>)
+struct formatter<basic_string<C, Traits, Alloc>, CharT> {
+    formatter()                             = delete;
+    formatter(const formatter &)            = delete;
+    formatter &operator=(const formatter &) = delete;
+};
+template <class C, class CharT, class Traits>
+    requires __format::FmtCharT<CharT> && (!is_same_v<C, CharT>)
+struct formatter<basic_string_view<C, Traits>, CharT> {
+    formatter()                             = delete;
+    formatter(const formatter &)            = delete;
+    formatter &operator=(const formatter &) = delete;
+};
+
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<const CharT *, CharT> : __format::StringSpecParser<CharT> {
+    void format(const CharT *v, __format::Ctx<CharT> &ctx) const
     {
         if (!v) throw format_error("format: null C-string");
-        const int         width = __format::EffectiveWidth(ctx, spec_);
-        const int         prec  = __format::EffectivePrecision(ctx, spec_);
-        const string_view sv(v);
-        if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeInto(escaped, sv);
-            __format::FormatString(ctx, spec_, width, prec,
-                                   string_view(escaped.data(), escaped.size()));
-        } else {
-            __format::FormatString(ctx, spec_, width, prec, sv);
-        }
+        this->EmitText(basic_string_view<CharT>(v), ctx);
     }
 };
-template <> struct formatter<char *, char> : __format::StringSpecParser {
-    void format(const char *v, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<CharT *, CharT> : __format::StringSpecParser<CharT> {
+    void format(const CharT *v, __format::Ctx<CharT> &ctx) const
     {
         if (!v) throw format_error("format: null C-string");
-        const int         width = __format::EffectiveWidth(ctx, spec_);
-        const int         prec  = __format::EffectivePrecision(ctx, spec_);
-        const string_view sv(v);
-        if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeInto(escaped, sv);
-            __format::FormatString(ctx, spec_, width, prec,
-                                   string_view(escaped.data(), escaped.size()));
-        } else {
-            __format::FormatString(ctx, spec_, width, prec, sv);
-        }
+        this->EmitText(basic_string_view<CharT>(v), ctx);
     }
 };
 
@@ -1340,30 +1585,22 @@ template <> struct formatter<char *, char> : __format::StringSpecParser {
 // first NUL and falls back to the whole array when there is none: that keeps
 // a literal's output identical whether it decayed or not, and leaves no
 // input undefined.
-template <size_t N> struct formatter<char[N], char>
-    : __format::StringSpecParser {
-    void format(const char (&v)[N], format_context &ctx) const
+template <class CharT, size_t N>
+    requires __format::FmtCharT<CharT>
+struct formatter<CharT[N], CharT> : __format::StringSpecParser<CharT> {
+    void format(const CharT (&v)[N], __format::Ctx<CharT> &ctx) const
     {
         size_t n = 0;
-        while (n < N && v[n] != '\0') ++n;
-        const string_view sv(v, n);
-        const int         width = __format::EffectiveWidth(ctx, spec_);
-        const int         prec  = __format::EffectivePrecision(ctx, spec_);
-        if (spec_.type == '?') {
-            string escaped;
-            __format::EscapeInto(escaped, sv);
-            __format::FormatString(ctx, spec_, width, prec,
-                                   string_view(escaped.data(), escaped.size()));
-        } else {
-            __format::FormatString(ctx, spec_, width, prec, sv);
-        }
+        while (n < N && v[n] != CharT('\0')) ++n;
+        this->EmitText(basic_string_view<CharT>(v, n), ctx);
     }
 };
 
 // pointer
 namespace __format {
-inline void FormatPointer(format_context &ctx, const StdSpec &spec, int width,
-                          const void *p, bool upper)
+template <class CharT>
+inline void FormatPointer(Ctx<CharT> &ctx, const StdSpec<CharT> &spec,
+                          int width, const void *p, bool upper)
 {
     char digits[2 * sizeof(void *) + 1];
     auto r  = to_chars(digits, digits + sizeof(digits),
@@ -1377,12 +1614,14 @@ inline void FormatPointer(format_context &ctx, const StdSpec &spec, int width,
 }
 } // namespace __format
 
-template <> struct formatter<const void *, char> {
-    __format::StdSpec spec_;
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<const void *, CharT> {
+    __format::StdSpec<CharT> spec_;
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = __format::ParseSpec(pc, spec_);
+        const CharT *p = __format::ParseSpec(pc, spec_);
         if (!(spec_.type == '\0' || spec_.type == 'p' || spec_.type == 'P'))
             throw format_error("format: invalid type for pointer");
         // The pointer std-format-spec gained a '0' position with P2510R3
@@ -1396,22 +1635,26 @@ template <> struct formatter<const void *, char> {
         pc.advance_to(p);
         return p;
     }
-    void format(const void *v, format_context &ctx) const
+    void format(const void *v, __format::Ctx<CharT> &ctx) const
     {
         __format::FormatPointer(ctx, spec_, __format::EffectiveWidth(ctx, spec_),
                                 v, spec_.type == 'P');
     }
 };
-template <> struct formatter<void *, char> : formatter<const void *, char> {
-    void format(void *v, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<void *, CharT> : formatter<const void *, CharT> {
+    void format(void *v, __format::Ctx<CharT> &ctx) const
     {
-        formatter<const void *, char>::format(v, ctx);
+        formatter<const void *, CharT>::format(v, ctx);
     }
 };
-template <> struct formatter<nullptr_t, char> : formatter<const void *, char> {
-    void format(nullptr_t, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<nullptr_t, CharT> : formatter<const void *, CharT> {
+    void format(nullptr_t, __format::Ctx<CharT> &ctx) const
     {
-        formatter<const void *, char>::format(nullptr, ctx);
+        formatter<const void *, CharT>::format(nullptr, ctx);
     }
 };
 
@@ -1484,6 +1727,21 @@ template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<string> = true;
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<string_view> = true;
+// The wide half of [format.formatter.spec]/3. This trait is keyed on the
+// TYPE, not on the context, so the wide character and string types need
+// their own rows — the char rows above do not answer for them.
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<wchar_t> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<wchar_t *> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<const wchar_t *> = true;
+template <size_t N> inline constexpr bool
+    enable_nonlocking_formatter_optimization<wchar_t[N]> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<wstring> = true;
+template <> inline constexpr bool
+    enable_nonlocking_formatter_optimization<wstring_view> = true;
 template <> inline constexpr bool
     enable_nonlocking_formatter_optimization<nullptr_t> = true;
 template <> inline constexpr bool
@@ -1496,99 +1754,37 @@ template <> inline constexpr bool
 // ════════════════════════════════════════════════════════════════════════
 template <class Context>
 void basic_format_arg<Context>::__format_to(
-    basic_format_parse_context<char> &pc, Context &fc) const
+    basic_format_parse_context<char_type> &pc, Context &fc) const
 {
     using K = __format::ArgKind;
+    // One line per kind, because the only thing that differs between them is
+    // which union member is live: the formatter type follows from it, and the
+    // three-step parse/advance/format dance is the same for all fourteen. It
+    // was written out fourteen times when there was one character type — with
+    // two, the copies would have been the place where char and wchar_t
+    // quietly stopped doing the same thing.
+    const auto run = [&](const auto &value) {
+        formatter<remove_cvref_t<decltype(value)>, char_type> f;
+        pc.advance_to(f.parse(pc));
+        f.format(value, fc);
+    };
     switch (kind_) {
-    case K::Bool: {
-        formatter<bool, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.b, fc);
-        break;
-    }
-    case K::Char: {
-        formatter<char, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.c, fc);
-        break;
-    }
-    case K::Int: {
-        formatter<int, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.i, fc);
-        break;
-    }
-    case K::UInt: {
-        formatter<unsigned, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.u, fc);
-        break;
-    }
-    case K::LongLong: {
-        formatter<long long, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.ll, fc);
-        break;
-    }
-    case K::ULongLong: {
-        formatter<unsigned long long, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.ull, fc);
-        break;
-    }
-    case K::Int128: {
-        formatter<__int128, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.i128, fc);
-        break;
-    }
-    case K::UInt128: {
-        formatter<unsigned __int128, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.u128, fc);
-        break;
-    }
-    case K::Float: {
-        formatter<float, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.f, fc);
-        break;
-    }
-    case K::Double: {
-        formatter<double, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.d, fc);
-        break;
-    }
-    case K::LongDouble: {
-        formatter<long double, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.ld, fc);
-        break;
-    }
-    case K::CString: {
-        formatter<const char *, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.cs, fc);
-        break;
-    }
-    case K::SVString: {
-        formatter<string_view, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.sv, fc);
-        break;
-    }
-    case K::Pointer: {
-        formatter<const void *, char> f;
-        pc.advance_to(f.parse(pc));
-        f.format(v_.pv, fc);
-        break;
-    }
-    case K::Custom:
-        h_.format(pc, fc);
-        break;
-    case K::None:
-        throw format_error("format: argument not found");
+    case K::Bool: run(v_.b); break;
+    case K::Char: run(v_.c); break;
+    case K::Int: run(v_.i); break;
+    case K::UInt: run(v_.u); break;
+    case K::LongLong: run(v_.ll); break;
+    case K::ULongLong: run(v_.ull); break;
+    case K::Int128: run(v_.i128); break;
+    case K::UInt128: run(v_.u128); break;
+    case K::Float: run(v_.f); break;
+    case K::Double: run(v_.d); break;
+    case K::LongDouble: run(v_.ld); break;
+    case K::CString: run(v_.cs); break;
+    case K::SVString: run(v_.sv); break;
+    case K::Pointer: run(v_.pv); break;
+    case K::Custom: h_.format(pc, fc); break;
+    case K::None: throw format_error("format: argument not found");
     }
 }
 
@@ -1632,17 +1828,19 @@ decltype(auto) visit_format_arg(Visitor &&vis, basic_format_arg<Context> arg)
 namespace __format {
 
 // [format.formattable]'s formattable-with, adapted to boxcxx's one
-// concrete format_context (see std::formattable below for why: every
-// boxcxx formatter hard-codes format_context& rather than being generic
-// over it, so testing against the concrete type is what answers "will a
-// real std::format call work" — the question boxcxx actually has).
-template <class T>
+// concrete context per character type (see std::formattable below for why:
+// every boxcxx formatter names Ctx<CharT>& rather than being generic over
+// the output iterator, so testing against the concrete type is what answers
+// "will a real std::format call work" — the question boxcxx actually has).
+template <class T, class CharT>
 concept FormattableWith =
-    semiregular<formatter<remove_const_t<T>, char>> &&
-    requires(formatter<remove_const_t<T>, char> &f,
-             const formatter<remove_const_t<T>, char> &cf,
-             T &&t, format_context &fc, format_parse_context &pc) {
-        { f.parse(pc) } -> same_as<format_parse_context::iterator>;
+    FmtCharT<CharT> && semiregular<formatter<remove_const_t<T>, CharT>> &&
+    requires(formatter<remove_const_t<T>, CharT> &f,
+             const formatter<remove_const_t<T>, CharT> &cf,
+             T &&t, Ctx<CharT> &fc, basic_format_parse_context<CharT> &pc) {
+        {
+            f.parse(pc)
+        } -> same_as<typename basic_format_parse_context<CharT>::iterator>;
         cf.format(t, fc);
     };
 
@@ -1650,14 +1848,15 @@ concept FormattableWith =
 // const U (also lets a const object of U be formatted); fall back to
 // plain U only when const U does not work (e.g. a mutating formatter like
 // a caching peek()).
-template <class U>
-using ThunkArgT = conditional_t<FormattableWith<const U>, const U, U>;
+template <class U, class CharT>
+using ThunkArgT = conditional_t<FormattableWith<const U, CharT>, const U, U>;
 
 template <class TQ, class Context>
-void FmtThunk(basic_format_parse_context<char> &pc, Context &fc, const void *p)
+void FmtThunk(basic_format_parse_context<typename Context::char_type> &pc,
+              Context &fc, const void *p)
 {
     using Td = remove_const_t<TQ>;
-    formatter<Td, char> f;
+    formatter<Td, typename Context::char_type> f;
     pc.advance_to(f.parse(pc));
     TQ &val = *const_cast<TQ *>(static_cast<const Td *>(p));
     f.format(val, fc);
@@ -1672,18 +1871,26 @@ void FmtThunk(basic_format_parse_context<char> &pc, Context &fc, const void *p)
 // ctx.advance_to() rather than by returning an iterator.
 template <class T, class CharT>
 concept formattable =
-    same_as<CharT, char> && __format::FormattableWith<remove_reference_t<T>>;
+    __format::FormattableWith<remove_reference_t<T>, CharT>;
 
 template <class Context>
 template <class T>
 basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
 {
     using K          = __format::ArgKind;
-    constexpr K kind = __format::MapKind<T>();
+    constexpr K kind = __format::MapKind<T, char_type>();
     basic_format_arg a;
     a.kind_ = kind;
     if constexpr (kind == K::Bool) a.v_.b = v;
-    else if constexpr (kind == K::Char) a.v_.c = v;
+    else if constexpr (kind == K::Char) {
+        // [format.arg]/5: a char argument in a wide context is stored ALREADY
+        // WIDENED, which is why the engine can reach for
+        // formatter<char_type, char_type> and never needs to remember that the
+        // caller wrote a char. Through the unsigned value, for the reason
+        // spelt out in __format::CharFormatter::format.
+        a.v_.c = char_type(
+            static_cast<make_unsigned_t<remove_cvref_t<T>>>(v));
+    }
     else if constexpr (kind == K::Int) a.v_.i = int(v);
     else if constexpr (kind == K::UInt) a.v_.u = (unsigned)v;
     else if constexpr (kind == K::LongLong) a.v_.ll = (long long)v;
@@ -1694,14 +1901,15 @@ basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
     else if constexpr (kind == K::Double) a.v_.d = double(v);
     else if constexpr (kind == K::LongDouble) a.v_.ld = (long double)v;
     else if constexpr (kind == K::CString) a.v_.cs = v;  // array/ptr decays
-    else if constexpr (kind == K::SVString) a.v_.sv = string_view(v);
+    else if constexpr (kind == K::SVString)
+        a.v_.sv = basic_string_view<char_type>(v);
     else if constexpr (kind == K::Pointer) {
         if constexpr (is_same_v<remove_cvref_t<T>, nullptr_t>)
             a.v_.pv = nullptr;
         else a.v_.pv = static_cast<const void *>(v);
     } else {
         using U  = remove_cvref_t<T>;
-        using TQ = __format::ThunkArgT<U>;
+        using TQ = __format::ThunkArgT<U, char_type>;
         // [format.arg]/5 constrains on T itself, NOT on remove_const_t<T>:
         // when the argument is const but its formatter's format() only takes
         // a non-const reference, ThunkArgT picks TQ = U and FmtThunk's
@@ -1709,9 +1917,10 @@ basic_format_arg<Context> basic_format_arg<Context>::__make(T &v)
         // mutates it (silent corruption, or a fault if it lives in .rodata).
         // Checking remove_reference_t<T> turns that into a clean diagnostic,
         // which is what both reference libraries emit.
-        static_assert(__format::FormattableWith<remove_reference_t<T>>,
+        static_assert(__format::FormattableWith<remove_reference_t<T>, char_type>,
             "the type does not have an enabled std::formatter specialization "
-            "(a const argument needs a formatter whose format() takes const)");
+            "for this context's character type (a const argument needs a "
+            "formatter whose format() takes const)");
         a.h_.ptr_ = __builtin_addressof(v);
         a.h_.fmt_ = &__format::FmtThunk<TQ, Context>;
     }
@@ -1724,6 +1933,14 @@ __format_store<Context, Ts...> make_format_args(Ts &...vs)
     return {{basic_format_arg<Context>::template __make<Ts>(vs)...}};
 }
 
+// [format.arg.store] spells the wide entry point separately rather than
+// leaving it to the default argument, and so does this.
+template <class... Ts>
+__format_store<wformat_context, Ts...> make_wformat_args(Ts &...vs)
+{
+    return {{basic_format_arg<wformat_context>::template __make<Ts>(vs)...}};
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  the formatting engine + entry points
 // ════════════════════════════════════════════════════════════════════════
@@ -1731,24 +1948,26 @@ namespace __format {
 
 [[noreturn]] inline void Fail(const char *m) { throw format_error(m); }
 
-inline void DoVformat(OutputSink &sink, string_view fmt, format_args args)
+template <class CharT>
+inline void DoVformat(OutputSink<CharT> &sink, basic_string_view<CharT> fmt,
+                      basic_format_args<Ctx<CharT>> args)
 {
-    format_parse_context pc(fmt, args.__count());
-    format_context       fc(SinkIterator(sink), args);
+    basic_format_parse_context<CharT> pc(fmt, args.__count());
+    Ctx<CharT>                        fc(SinkIterator<CharT>(sink), args);
 
-    const char *p   = fmt.data();
-    const char *e   = p + fmt.size();
-    const char *lit = p;
-    auto flush = [&](const char *upto) {
+    const CharT *p   = fmt.data();
+    const CharT *e   = p + fmt.size();
+    const CharT *lit = p;
+    auto flush = [&](const CharT *upto) {
         if (upto > lit) sink.Append(lit, size_t(upto - lit));
     };
 
     while (p != e) {
-        const char c = *p;
-        if (c == '{') {
-            if (p + 1 != e && p[1] == '{') {
+        const CharT c = *p;
+        if (c == CharT('{')) {
+            if (p + 1 != e && p[1] == CharT('{')) {
                 flush(p);
-                sink.Append('{');
+                sink.Append(CharT('{'));
                 p += 2;
                 lit = p;
                 continue;
@@ -1765,24 +1984,24 @@ inline void DoVformat(OutputSink &sink, string_view fmt, format_args args)
                 id = pc.next_arg_id();
             }
             if (p == e) Fail("format: unmatched '{'");
-            if (*p == ':') {
+            if (*p == CharT(':')) {
                 ++p;
                 pc.advance_to(p);
-            } else if (*p == '}') {
+            } else if (*p == CharT('}')) {
                 pc.advance_to(p);
             } else {
                 Fail("format: invalid replacement field");
             }
-            basic_format_arg<format_context> a = args.get(id);
+            basic_format_arg<Ctx<CharT>> a = args.get(id);
             a.__format_to(pc, fc);
             p = pc.begin();
-            if (p == e || *p != '}') Fail("format: expected '}'");
+            if (p == e || *p != CharT('}')) Fail("format: expected '}'");
             ++p;
             lit = p;
-        } else if (c == '}') {
-            if (p + 1 != e && p[1] == '}') {
+        } else if (c == CharT('}')) {
+            if (p + 1 != e && p[1] == CharT('}')) {
                 flush(p);
-                sink.Append('}');
+                sink.Append(CharT('}'));
                 p += 2;
                 lit = p;
                 continue;
@@ -1795,36 +2014,36 @@ inline void DoVformat(OutputSink &sink, string_view fmt, format_args args)
     flush(e);
 }
 
-struct StringSink final : OutputSink {
-    string str;
-    void   Append(char c) override { str.push_back(c); }
-    void   Append(const char *s, size_t n) override { str.append(s, n); }
+template <class CharT> struct StringSink final : OutputSink<CharT> {
+    basic_string<CharT> str;
+    void Append(CharT c) override { str.push_back(c); }
+    void Append(const CharT *s, size_t n) override { str.append(s, n); }
 };
-struct CountingSink final : OutputSink {
+template <class CharT> struct CountingSink final : OutputSink<CharT> {
     size_t count = 0;
-    void   Append(char) override { ++count; }
-    void   Append(const char *, size_t n) override { count += n; }
+    void   Append(CharT) override { ++count; }
+    void   Append(const CharT *, size_t n) override { count += n; }
 };
-template <class Out> struct IteratorSink final : OutputSink {
+template <class CharT, class Out> struct IteratorSink final : OutputSink<CharT> {
     Out it;
     explicit IteratorSink(Out o) : it(std::move(o)) {}
-    void Append(char c) override { *it = c; ++it; }
-    void Append(const char *s, size_t n) override
+    void Append(CharT c) override { *it = c; ++it; }
+    void Append(const CharT *s, size_t n) override
     {
         for (size_t i = 0; i < n; ++i) { *it = s[i]; ++it; }
     }
 };
-template <class Out> struct TruncatingSink final : OutputSink {
+template <class CharT, class Out> struct TruncatingSink final : OutputSink<CharT> {
     Out       it;
     ptrdiff_t left;
     ptrdiff_t total = 0;
     TruncatingSink(Out o, ptrdiff_t n) : it(std::move(o)), left(n) {}
-    void Append(char c) override
+    void Append(CharT c) override
     {
         if (left > 0) { *it = c; ++it; --left; }
         ++total;
     }
-    void Append(const char *s, size_t n) override
+    void Append(const CharT *s, size_t n) override
     {
         for (size_t i = 0; i < n; ++i) Append(s[i]);
     }
@@ -1834,49 +2053,64 @@ template <class Out> struct TruncatingSink final : OutputSink {
 
 inline string vformat(string_view fmt, format_args args)
 {
-    __format::StringSink sink;
-    __format::DoVformat(sink, fmt, args);
+    __format::StringSink<char> sink;
+    __format::DoVformat<char>(sink, fmt, args);
+    return std::move(sink.str);
+}
+inline wstring vformat(wstring_view fmt, wformat_args args)
+{
+    __format::StringSink<wchar_t> sink;
+    __format::DoVformat<wchar_t>(sink, fmt, args);
     return std::move(sink.str);
 }
 
 template <class Out> Out vformat_to(Out out, string_view fmt, format_args args)
 {
-    __format::IteratorSink<Out> sink(std::move(out));
-    __format::DoVformat(sink, fmt, args);
+    __format::IteratorSink<char, Out> sink(std::move(out));
+    __format::DoVformat<char>(sink, fmt, args);
+    return std::move(sink.it);
+}
+template <class Out>
+Out vformat_to(Out out, wstring_view fmt, wformat_args args)
+{
+    __format::IteratorSink<wchar_t, Out> sink(std::move(out));
+    __format::DoVformat<wchar_t>(sink, fmt, args);
     return std::move(sink.it);
 }
 
 // ── basic_format_string + compile-time check ([format.fmt.string]) ──────
 namespace __format {
 
-template <class T>
-constexpr const char *CheckParse(format_parse_context &pc)
+template <class T, class CharT>
+constexpr const CharT *CheckParse(basic_format_parse_context<CharT> &pc)
 {
-    using D  = decay_t<T>;  // char[N]/char* validate as const char*
-    using FT = conditional_t<is_same_v<D, char *> || is_same_v<D, const char *>,
-                             const char *, remove_cvref_t<T>>;
-    formatter<FT, char> f;
+    using D = decay_t<T>;  // CharT[N]/CharT* validate as const CharT*
+    using FT =
+        conditional_t<is_same_v<D, CharT *> || is_same_v<D, const CharT *>,
+                      const CharT *, remove_cvref_t<T>>;
+    formatter<FT, CharT> f;
     return f.parse(pc);
 }
 
 // consteval validation mirroring the runtime engine, but parse-only and with
 // the argument type known statically per field.
-template <class... Args> consteval void CheckScan(string_view fmt)
+template <class CharT, class... Args>
+consteval void CheckScan(basic_string_view<CharT> fmt)
 {
     constexpr size_t N = sizeof...(Args);
-    ArgKind          kinds[N == 0 ? 1 : N] = {MapKind<Args>()...};
-    using ParseFn                          = const char *(*)(format_parse_context &);
-    ParseFn table[N == 0 ? 1 : N] = {&CheckParse<Args>...};
+    ArgKind          kinds[N == 0 ? 1 : N] = {MapKind<Args, CharT>()...};
+    using ParseFn = const CharT *(*)(basic_format_parse_context<CharT> &);
+    ParseFn table[N == 0 ? 1 : N] = {&CheckParse<Args, CharT>...};
 
-    format_parse_context pc(fmt, N);
+    basic_format_parse_context<CharT> pc(fmt, N);
     pc.__set_kinds(kinds, N);
 
-    const char *p = fmt.data();
-    const char *e = p + fmt.size();
+    const CharT *p = fmt.data();
+    const CharT *e = p + fmt.size();
     while (p != e) {
-        const char c = *p;
-        if (c == '{') {
-            if (p + 1 != e && p[1] == '{') { p += 2; continue; }
+        const CharT c = *p;
+        if (c == CharT('{')) {
+            if (p + 1 != e && p[1] == CharT('{')) { p += 2; continue; }
             ++p;
             pc.advance_to(p);
             size_t id;
@@ -1888,17 +2122,17 @@ template <class... Args> consteval void CheckScan(string_view fmt)
                 id = pc.next_arg_id();
             }
             if (p == e) throw format_error("format: unmatched '{'");
-            if (*p == ':') { ++p; pc.advance_to(p); }
-            else if (*p == '}') { pc.advance_to(p); }
+            if (*p == CharT(':')) { ++p; pc.advance_to(p); }
+            else if (*p == CharT('}')) { pc.advance_to(p); }
             else throw format_error("format: invalid replacement field");
             if (id >= N) throw format_error("format: argument index out of range");
-            const char *q = table[id](pc);
+            const CharT *q = table[id](pc);
             pc.advance_to(q);
             p = q;
-            if (p == e || *p != '}') throw format_error("format: expected '}'");
+            if (p == e || *p != CharT('}')) throw format_error("format: expected '}'");
             ++p;
-        } else if (c == '}') {
-            if (p + 1 != e && p[1] == '}') { p += 2; continue; }
+        } else if (c == CharT('}')) {
+            if (p + 1 != e && p[1] == CharT('}')) { p += 2; continue; }
             throw format_error("format: unmatched '}'");
         } else {
             ++p;
@@ -1910,35 +2144,53 @@ template <class... Args> consteval void CheckScan(string_view fmt)
 
 template <class CharT, class... Args> class basic_format_string;
 
-template <class... Args> class basic_format_string<char, Args...> {
+template <class CharT, class... Args>
+    requires __format::FmtCharT<CharT>
+class basic_format_string<CharT, Args...> {
 public:
     template <class T>
-        requires is_convertible_v<const T &, string_view>
+        requires is_convertible_v<const T &, basic_string_view<CharT>>
     consteval basic_format_string(const T &s) : str_(s)
     {
-        __format::CheckScan<Args...>(str_);
+        __format::CheckScan<CharT, Args...>(str_);
     }
 
-    constexpr string_view get() const noexcept { return str_; }
+    constexpr basic_string_view<CharT> get() const noexcept { return str_; }
 
 private:
-    string_view str_;
+    basic_string_view<CharT> str_;
 };
 
 template <class... Args>
 using format_string = basic_format_string<char, type_identity_t<Args>...>;
+template <class... Args>
+using wformat_string = basic_format_string<wchar_t, type_identity_t<Args>...>;
 
 // ── format / format_to / format_to_n / formatted_size ───────────────────
+// The narrow and wide entry points are OVERLOADS, not one template over the
+// character type: what selects between them is the format string's own type,
+// which the consteval constructor already fixed at the call site. A caller
+// never spells the character type, and never has to.
 template <class... Args>
 string format(format_string<Args...> fmt, Args &&...args)
 {
     return vformat(fmt.get(), make_format_args(args...));
+}
+template <class... Args>
+wstring format(wformat_string<Args...> fmt, Args &&...args)
+{
+    return vformat(fmt.get(), make_wformat_args(args...));
 }
 
 template <class Out, class... Args>
 Out format_to(Out out, format_string<Args...> fmt, Args &&...args)
 {
     return vformat_to(std::move(out), fmt.get(), make_format_args(args...));
+}
+template <class Out, class... Args>
+Out format_to(Out out, wformat_string<Args...> fmt, Args &&...args)
+{
+    return vformat_to(std::move(out), fmt.get(), make_wformat_args(args...));
 }
 
 template <class Out> struct format_to_n_result {
@@ -1950,16 +2202,31 @@ template <class Out, class... Args>
 format_to_n_result<Out> format_to_n(Out out, ptrdiff_t n,
                                     format_string<Args...> fmt, Args &&...args)
 {
-    __format::TruncatingSink<Out> sink(std::move(out), n);
-    __format::DoVformat(sink, fmt.get(), make_format_args(args...));
+    __format::TruncatingSink<char, Out> sink(std::move(out), n);
+    __format::DoVformat<char>(sink, fmt.get(), make_format_args(args...));
+    return {std::move(sink.it), sink.total};
+}
+template <class Out, class... Args>
+format_to_n_result<Out> format_to_n(Out out, ptrdiff_t n,
+                                    wformat_string<Args...> fmt, Args &&...args)
+{
+    __format::TruncatingSink<wchar_t, Out> sink(std::move(out), n);
+    __format::DoVformat<wchar_t>(sink, fmt.get(), make_wformat_args(args...));
     return {std::move(sink.it), sink.total};
 }
 
 template <class... Args>
 size_t formatted_size(format_string<Args...> fmt, Args &&...args)
 {
-    __format::CountingSink sink;
-    __format::DoVformat(sink, fmt.get(), make_format_args(args...));
+    __format::CountingSink<char> sink;
+    __format::DoVformat<char>(sink, fmt.get(), make_format_args(args...));
+    return sink.count;
+}
+template <class... Args>
+size_t formatted_size(wformat_string<Args...> fmt, Args &&...args)
+{
+    __format::CountingSink<wchar_t> sink;
+    __format::DoVformat<wchar_t>(sink, fmt.get(), make_wformat_args(args...));
     return sink.count;
 }
 

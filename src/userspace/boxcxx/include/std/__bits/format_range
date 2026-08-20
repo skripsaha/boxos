@@ -2,7 +2,7 @@
 //
 // range_format, format_kind, range_formatter<T,CharT>, the four
 // range-default-formatter specializations ([format.range.fmtdef/fmtmap/
-// fmtset/fmtstr]), and the formatter<R,char> catch-all that inherits from
+// fmtset/fmtstr]), and the formatter<R,CharT> catch-all that inherits from
 // them. Included from the very bottom of <format> rather than sitting with
 // its other top-of-file includes: this file needs format_context,
 // EmitField, StringSink and the string formatters' set_debug_format()
@@ -10,7 +10,7 @@
 //
 // vector<bool>'s proxy-reference formatter lives here too, not in <vector>.
 // vector<bool,Alloc>::reference is a nested class with no back-reference to
-// its container, so formatter<vector<bool,Alloc>::reference,char> cannot be
+// its container, so formatter<vector<bool,Alloc>::reference,CharT> cannot be
 // written as a partial specialization at all: a qualified-id naming a
 // member of a still-to-be-deduced template parameter is a non-deduced
 // context. <vector> gets one additive `using __container = vector;` line
@@ -97,36 +97,56 @@ constexpr auto format_kind<optional<T>> = range_format::disabled;
 namespace __format {
 
 // [format.syn]'s exposition-only const-formattable-range / fmt-maybe-const.
-template <class R>
+template <class R, class CharT>
 concept ConstFormattableRange =
     ranges::input_range<const R> &&
-    formattable<ranges::range_reference_t<const R>, char>;
+    formattable<ranges::range_reference_t<const R>, CharT>;
 
-template <class R>
-using FmtMaybeConst = conditional_t<ConstFormattableRange<R>, const R, R>;
+template <class R, class CharT>
+using FmtMaybeConst = conditional_t<ConstFormattableRange<R, CharT>, const R, R>;
 
 // SFINAE probe for range_formatter::parse()'s conditional
 // set_debug_format() call ([format.range.formatter]/9.2).
 template <class F>
 concept HasSetDebugFormat = requires(F &f) { f.set_debug_format(); };
 
-// D10 — the "range of char, formatted as one string" content builder,
+// The punctuation [format.range] and [format.tuple] hand an aggregate: the
+// separator and the brackets. It is ASCII like every other literal in this
+// library, but unlike them it cannot be widened on the way out — set_separator
+// and set_brackets take basic_string_view<charT>, so it has to EXIST as CharT.
+// Derived from the ASCII characters rather than written twice: a wide
+// duplicate of ", " is a second place for the separator to be wrong.
+// <__bits/format_tuple> reads the same table, which is why it is not called
+// RangeText.
+template <class CharT> struct FmtPunct {
+    static constexpr CharT kCommaSpace[]  = {CharT(','), CharT(' '), CharT()};
+    static constexpr CharT kColonSpace[]  = {CharT(':'), CharT(' '), CharT()};
+    static constexpr CharT kOpenSquare[]  = {CharT('['), CharT()};
+    static constexpr CharT kCloseSquare[] = {CharT(']'), CharT()};
+    static constexpr CharT kOpenCurly[]   = {CharT('{'), CharT()};
+    static constexpr CharT kCloseCurly[]  = {CharT('}'), CharT()};
+    static constexpr CharT kOpenParen[]   = {CharT('('), CharT()};
+    static constexpr CharT kCloseParen[]  = {CharT(')'), CharT()};
+};
+
+// D10 — the "range of CharT, formatted as one string" content builder,
 // shared by range_formatter's own 's'/'?s' handling and
 // RangeDefaultFormatter<string|debug_string>. f already has its format-spec
 // parsed (and, for the debug case, set_debug_format() already called): this
 // never re-derives that state, it only ever decides how to reach the
 // characters — a zero-copy view over already-contiguous storage, or one
 // copy into a temporary string when the range isn't contiguous+sized.
-template <ranges::input_range R>
-void FormatRangeAsString(R &&r, format_context &ctx,
-                         const formatter<string_view, char> &f)
+template <class CharT, ranges::input_range R>
+void FormatRangeAsString(R &&r, Ctx<CharT> &ctx,
+                         const formatter<basic_string_view<CharT>, CharT> &f)
 {
     using Raw = remove_reference_t<R>;
     if constexpr (ranges::contiguous_range<Raw> && ranges::sized_range<Raw>) {
-        f.format(string_view(ranges::data(r), ranges::size(r)), ctx);
+        f.format(basic_string_view<CharT>(ranges::data(r), ranges::size(r)),
+                 ctx);
     } else {
-        string owned(from_range, r);
-        f.format(string_view(owned.data(), owned.size()), ctx);
+        basic_string<CharT> owned(from_range, r);
+        f.format(basic_string_view<CharT>(owned.data(), owned.size()), ctx);
     }
 }
 
@@ -136,9 +156,12 @@ void FormatRangeAsString(R &&r, format_context &ctx,
 template <class T, class CharT = char>
     requires same_as<remove_cvref_t<T>, T> && formattable<T, CharT>
 class range_formatter {
+    using Text = __format::FmtPunct<CharT>;
+    using SV   = basic_string_view<CharT>;
+
 public:
-    constexpr void set_separator(string_view sep) noexcept { sep_ = sep; }
-    constexpr void set_brackets(string_view open, string_view close) noexcept
+    constexpr void set_separator(SV sep) noexcept { sep_ = sep; }
+    constexpr void set_brackets(SV open, SV close) noexcept
     {
         open_  = open;
         close_ = close;
@@ -151,11 +174,12 @@ public:
 
     // Grammar, in the exact order measured (§3/D4):
     //   [range-fill-and-align][width][n][range-type][range-underlying-spec]
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = pc.begin();
-        const char *e = pc.end();
-        auto finished = [&] { return p == e || *p == '}'; };
+        const CharT *p = pc.begin();
+        const CharT *e = pc.end();
+        auto finished = [&] { return p == e || *p == CharT('}'); };
         // "Nothing remains": commit spec_ as parsed so far, run the
         // underlying's own parse() over underlyingText ("" normally, "m"
         // for the map-type case), and — per [format.range.formatter]/9,
@@ -179,8 +203,8 @@ public:
         // [range-fill-and-align] — like the shared ParseSpec's, except the
         // fill-detector also excludes ':' (a range-underlying-spec's ':'
         // must never be swallowed as a fill character).
-        if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != '{' &&
-            *p != '}' && *p != ':') {
+        if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != CharT('{') &&
+            *p != CharT('}') && *p != CharT(':')) {
             spec_.fill  = *p;
             spec_.align = __format::AlignOf(p[1]);
             p += 2;
@@ -195,7 +219,7 @@ public:
         // along with the field limit.
         if (__format::IsDigit(*p)) {
             spec_.width = __format::ParseWidth(p, e);
-        } else if (*p == '{') {
+        } else if (*p == CharT('{')) {
             spec_.width_id      = __format::ParseDynamicArgId(pc, p, e);
             spec_.width_dynamic = true;
             pc.check_dynamic_spec_integral(spec_.width_id);
@@ -210,23 +234,23 @@ public:
         // a user of this utility who calls set_brackets() after parse() must
         // get those brackets back. no_brackets_ stays as the parse-time flag
         // the 'm' branch and the s/?s check still need.
-        if (*p == 'n') {
+        if (*p == CharT('n')) {
             ++p;
             no_brackets_ = true;
-            open_        = string_view();
-            close_       = string_view();
+            open_        = SV();
+            close_       = SV();
         }
         if (finished()) return commit("");
 
         // [range-type]
-        if (*p == 'm') {
+        if (*p == CharT('m')) {
             if constexpr (__format::FmtPairLike<T>) {
                 ++p;
                 range_type_ = 'm';
-                sep_        = ", ";
+                sep_        = Text::kCommaSpace;
                 if (!no_brackets_) {
-                    open_  = "{";
-                    close_ = "}";
+                    open_  = Text::kOpenCurly;
+                    close_ = Text::kCloseCurly;
                 }
             } else {
                 throw format_error(
@@ -237,11 +261,11 @@ public:
                     "format: no element format-spec allowed with 'm'");
             return commit("m");
         }
-        if (*p == 's' || *p == '?') {
-            const bool debug = *p == '?';
+        if (*p == CharT('s') || *p == CharT('?')) {
+            const bool debug = *p == CharT('?');
             ++p;
             if (debug) {
-                if (finished() || *p != 's')
+                if (finished() || *p != CharT('s'))
                     throw format_error(
                         "format: '?' is only allowed in combination with 's'");
                 ++p;
@@ -272,11 +296,11 @@ public:
         // nested dynamic width/precision resolves against the real
         // argument list. No set_debug_format() call in this branch — a
         // real range-underlying-spec means (9.3) fails.
-        if (*p == ':') {
+        if (*p == CharT(':')) {
             ++p;
             pc.advance_to(p);
             p = under_.parse(pc);
-            if (!(p == e || *p == '}'))
+            if (!(p == e || *p == CharT('}')))
                 throw format_error(
                     "format: range element format-spec not terminated");
             return p;
@@ -287,21 +311,22 @@ public:
     template <ranges::input_range R>
         requires formattable<ranges::range_reference_t<R>, CharT> &&
                  same_as<remove_cvref_t<ranges::range_reference_t<R>>, T>
-    void format(R &&r, format_context &ctx) const
+    void format(R &&r, __format::Ctx<CharT> &ctx) const
     {
         if (spec_.width < 0 && !spec_.width_dynamic) {
             FormatBody(r, ctx);
             return;
         }
-        const int            width = __format::EffectiveWidth(ctx, spec_);
-        __format::StringSink scratch;
+        const int                   width = __format::EffectiveWidth(ctx, spec_);
+        __format::StringSink<CharT> scratch;
         // Shares the outer argument store (D9): a nested dynamic
         // width/precision inside the buffered sub-format must still
         // resolve against the real argument list, not an empty one.
-        format_context nested(__format::SinkIterator(scratch), ctx.__args());
+        __format::Ctx<CharT> nested(__format::SinkIterator<CharT>(scratch),
+                                    ctx.__args());
         FormatBody(r, nested);
         __format::EmitField(ctx, spec_, width, string_view(),
-                            string_view(scratch.str.data(), scratch.str.size()),
+                            SV(scratch.str.data(), scratch.str.size()),
                             __format::Align::Left, /*numeric=*/false);
     }
 
@@ -311,11 +336,16 @@ private:
     // format string, so callers must not propagate it) as the underlying
     // formatter's own format-spec, asserts full consumption, then
     // conditionally arms the debug marker.
-    constexpr format_parse_context::iterator
+    constexpr typename basic_format_parse_context<CharT>::iterator
     ParseUnderlyingWithText(string_view text)
     {
-        format_parse_context npc(text, 0);
-        auto                 it = under_.parse(npc);
+        // The text is "" or "m" — ASCII, and only two characters of it, so it
+        // is widened into a local buffer rather than given a wide twin.
+        CharT wide[2] = {};
+        for (size_t i = 0; i < text.size(); ++i)
+            wide[i] = CharT(static_cast<unsigned char>(text[i]));
+        basic_format_parse_context<CharT> npc(SV(wide, text.size()), 0);
+        auto                              it = under_.parse(npc);
         if (it != npc.end())
             throw format_error(
                 "format: range element default format-spec invalid");
@@ -325,7 +355,7 @@ private:
     }
 
     template <ranges::input_range R>
-    void FormatBody(R &&r, format_context &ctx) const
+    void FormatBody(R &&r, __format::Ctx<CharT> &ctx) const
     {
         // Compile-time gate, not just the runtime range_type_ check: for
         // T != CharT, range_type_ can never actually BE 's'/'?' at runtime
@@ -335,9 +365,9 @@ private:
         // every other T, e.g. vector<int>.
         if constexpr (same_as<T, CharT>) {
             if (range_type_ == 's' || range_type_ == '?') {
-                formatter<string_view, char> f;
+                formatter<SV, CharT> f;
                 if (range_type_ == '?') f.set_debug_format();
-                __format::FormatRangeAsString(r, ctx, f);
+                __format::FormatRangeAsString<CharT>(r, ctx, f);
                 return;
             }
         }
@@ -348,7 +378,7 @@ private:
         // nullptr) — which set_brackets({}, {}) and n both produce — out of
         // WriteRun, whose contract is a real pointer.
         auto out    = ctx.out();
-        auto writeSv = [&](string_view s) {
+        auto writeSv = [&](SV s) {
             if (!s.empty()) __format::WriteRun(out, s.data(), s.size());
         };
         writeSv(open_);
@@ -364,110 +394,88 @@ private:
         ctx.advance_to(out);
     }
 
-    __format::StdSpec   spec_;              // .fill/.align/.width[_dynamic] only
+    __format::StdSpec<CharT> spec_;         // .fill/.align/.width[_dynamic] only
     bool                 no_brackets_ = false;  // 'n'
     char                 range_type_  = '\0';   // '\0' | 'm' | 's' | '?' ("?s")
-    string_view          sep_         = ", ";
-    string_view          open_        = "[";
-    string_view          close_       = "]";
+    SV                   sep_         = Text::kCommaSpace;
+    SV                   open_        = Text::kOpenSquare;
+    SV                   close_       = Text::kCloseSquare;
     formatter<T, CharT>  under_;
 };
 
 namespace __format {
 
-template <range_format K, class R> struct RangeDefaultFormatter;  // unreachable
+template <range_format K, class R, class CharT>
+struct RangeDefaultFormatter;  // unreachable
 
-template <class R>  // [format.range.fmtdef]
-struct RangeDefaultFormatter<range_format::sequence, R> {
-    range_formatter<remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>,
-                    char>
-        under_;
+// The three bracket-and-separator specializations differ in nothing but the
+// punctuation their constructor installs, so they share one base: at one
+// character type the triplication was already the file's weakest joint, and
+// at two it would have been six copies of the same four forwarding members.
+template <class R, class CharT> struct RangeCommonFormatter {
+    using Text  = FmtPunct<CharT>;
+    using SV    = basic_string_view<CharT>;
+    using ElemT = remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R, CharT>>>;
 
-public:
-    constexpr void set_separator(string_view s) noexcept
-    {
-        under_.set_separator(s);
-    }
-    constexpr void set_brackets(string_view o, string_view c) noexcept
+    range_formatter<ElemT, CharT> under_;
+
+    constexpr void set_separator(SV s) noexcept { under_.set_separator(s); }
+    constexpr void set_brackets(SV o, SV c) noexcept
     {
         under_.set_brackets(o, c);
     }
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
         return under_.parse(pc);
     }
-    void format(FmtMaybeConst<R> &r, format_context &ctx) const
+    void format(FmtMaybeConst<R, CharT> &r, Ctx<CharT> &ctx) const
     {
         under_.format(r, ctx);
     }
 };
 
-template <class R>  // [format.range.fmtmap]
-struct RangeDefaultFormatter<range_format::map, R> {
-    using ElemT = remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>;
-    static_assert(FmtPairLike<ElemT>);
-    range_formatter<ElemT, char> under_;
+template <class R, class CharT>  // [format.range.fmtdef]
+struct RangeDefaultFormatter<range_format::sequence, R, CharT>
+    : RangeCommonFormatter<R, CharT> {};
 
-public:
+template <class R, class CharT>  // [format.range.fmtmap]
+struct RangeDefaultFormatter<range_format::map, R, CharT>
+    : RangeCommonFormatter<R, CharT> {
+    using Base = RangeCommonFormatter<R, CharT>;
+    using Text = typename Base::Text;
+    static_assert(FmtPairLike<typename Base::ElemT>);
+
     constexpr RangeDefaultFormatter()
     {
-        under_.set_brackets("{", "}");
-        under_.underlying().set_brackets(string_view(), string_view());
-        under_.underlying().set_separator(": ");
-    }
-    constexpr void set_separator(string_view s) noexcept
-    {
-        under_.set_separator(s);
-    }
-    constexpr void set_brackets(string_view o, string_view c) noexcept
-    {
-        under_.set_brackets(o, c);
-    }
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
-    {
-        return under_.parse(pc);
-    }
-    void format(FmtMaybeConst<R> &r, format_context &ctx) const
-    {
-        under_.format(r, ctx);
+        this->under_.set_brackets(Text::kOpenCurly, Text::kCloseCurly);
+        this->under_.underlying().set_brackets(basic_string_view<CharT>(),
+                                               basic_string_view<CharT>());
+        this->under_.underlying().set_separator(Text::kColonSpace);
     }
 };
 
-template <class R>  // [format.range.fmtset]
-struct RangeDefaultFormatter<range_format::set, R> {
-    range_formatter<remove_cvref_t<ranges::range_reference_t<FmtMaybeConst<R>>>,
-                    char>
-        under_;
+template <class R, class CharT>  // [format.range.fmtset]
+struct RangeDefaultFormatter<range_format::set, R, CharT>
+    : RangeCommonFormatter<R, CharT> {
+    using Base = RangeCommonFormatter<R, CharT>;
+    using Text = typename Base::Text;
 
-public:
-    constexpr RangeDefaultFormatter() { under_.set_brackets("{", "}"); }
-    constexpr void set_separator(string_view s) noexcept
+    constexpr RangeDefaultFormatter()
     {
-        under_.set_separator(s);
-    }
-    constexpr void set_brackets(string_view o, string_view c) noexcept
-    {
-        under_.set_brackets(o, c);
-    }
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
-    {
-        return under_.parse(pc);
-    }
-    void format(FmtMaybeConst<R> &r, format_context &ctx) const
-    {
-        under_.format(r, ctx);
+        this->under_.set_brackets(Text::kOpenCurly, Text::kCloseCurly);
     }
 };
 
-template <range_format K, class R>  // [format.range.fmtstr]
+template <range_format K, class R, class CharT>  // [format.range.fmtstr]
     requires(K == range_format::string || K == range_format::debug_string)
-struct RangeDefaultFormatter<K, R> {
+struct RangeDefaultFormatter<K, R, CharT> {
     // [format.range.fmtstr]/1 Mandates. Only reachable through a user
     // specialization of format_kind (ComputeFmtKind never yields string /
     // debug_string), and without this the non-contiguous branch below would
     // silently element-wise CONVERT a range of int/unsigned char/bool into a
     // string instead of being ill-formed.
-    static_assert(same_as<remove_cvref_t<ranges::range_reference_t<R>>, char>,
+    static_assert(same_as<remove_cvref_t<ranges::range_reference_t<R>>, CharT>,
                   "format_kind::string / debug_string requires a range whose "
                   "reference type is charT ([format.range.fmtstr]/1)");
 
@@ -479,19 +487,20 @@ struct RangeDefaultFormatter<K, R> {
     // fmtstr]/4's "return underlying_.format(s, ctx)" names the very object
     // parse() configured, so a fresh, unconfigured formatter here would
     // silently drop width).
-    formatter<string_view, char> under_;
+    formatter<basic_string_view<CharT>, CharT> under_;
 
 public:
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
         auto it = under_.parse(pc);
         if constexpr (K == range_format::debug_string) under_.set_debug_format();
         return it;
     }
     void format(conditional_t<ranges::input_range<const R>, const R, R> &r,
-               format_context &ctx) const
+               Ctx<CharT> &ctx) const
     {
-        FormatRangeAsString(r, ctx, under_);
+        FormatRangeAsString<CharT>(r, ctx, under_);
     }
 };
 
@@ -506,16 +515,17 @@ public:
 // that an arbitrary R can be deduced from but which cannot be deduced from an
 // arbitrary R — so each is more specialized outright and wins with no
 // ambiguity, for any traits and any allocator (D12).
-template <ranges::input_range R>
-    requires(format_kind<R> != range_format::disabled) &&
-            formattable<ranges::range_reference_t<R>, char>
-struct formatter<R, char> : __format::RangeDefaultFormatter<format_kind<R>, R> {
-};
+template <ranges::input_range R, class CharT>
+    requires __format::FmtCharT<CharT> &&
+             (format_kind<R> != range_format::disabled) &&
+             formattable<ranges::range_reference_t<R>, CharT>
+struct formatter<R, CharT>
+    : __format::RangeDefaultFormatter<format_kind<R>, R, CharT> {};
 
 // ── D14 (owner-approved option A) — vector<bool,Alloc>::reference ──────
 // vector<bool,Alloc>::reference is a nested class of vector<bool,Alloc>
 // with no back-reference to its container, so formatter<vector<bool,Alloc>
-// ::reference,char> cannot name that proxy type as a specialization
+// ::reference,CharT> cannot name that proxy type as a specialization
 // pattern (a qualified-id naming a member of a still-to-be-deduced
 // template parameter is a non-deduced context). <vector>'s reference class
 // instead carries a `__container` alias (via the injected-class-name, so
@@ -539,16 +549,17 @@ concept FmtVectorBoolProxy =
 
 } // namespace __format
 
-template <class T>
-    requires __format::FmtVectorBoolProxy<T>
-struct formatter<T, char> {
-    formatter<bool, char> under_;
+template <class T, class CharT>
+    requires __format::FmtVectorBoolProxy<T> && __format::FmtCharT<CharT>
+struct formatter<T, CharT> {
+    formatter<bool, CharT> under_;
 
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
         return under_.parse(pc);
     }
-    void format(const T &v, format_context &ctx) const
+    void format(const T &v, __format::Ctx<CharT> &ctx) const
     {
         under_.format(static_cast<bool>(v), ctx);
     }

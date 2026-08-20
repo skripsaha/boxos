@@ -27341,8 +27341,8 @@ void Phase126()
     // implementation of it).
     {
         auto formatDirect = [](auto &f, auto value) {
-            std::__format::StringSink sink;
-            std::format_context ctx(std::__format::SinkIterator(sink), std::format_args{});
+            std::__format::StringSink<char> sink;
+            std::format_context ctx(std::__format::SinkIterator<char>(sink), std::format_args{});
             f.format(value, ctx);
             return std::move(sink.str);
         };
@@ -27465,15 +27465,15 @@ void Phase126()
     {
         Check(std::formattable<char[4], char>, "phase126 formattable<char[4],char> is true");
         std::formatter<char[4], char> f;
-        std::__format::StringSink     sink;
-        std::format_context ctx(std::__format::SinkIterator(sink), std::format_args{});
+        std::__format::StringSink<char> sink;
+        std::format_context ctx(std::__format::SinkIterator<char>(sink), std::format_args{});
         const char          lit[4] = {'a', 'b', 'c', '\0'};
         f.format(lit, ctx);
         Check(feq(std::move(sink.str), "abc"),
               "phase126 formatter<char[N]> stops at the first NUL (a literal formats as itself)");
 
-        std::__format::StringSink sink2;
-        std::format_context ctx2(std::__format::SinkIterator(sink2), std::format_args{});
+        std::__format::StringSink<char> sink2;
+        std::format_context ctx2(std::__format::SinkIterator<char>(sink2), std::format_args{});
         const char          raw[3] = {'x', 'y', 'z'};  // no terminator at all
         std::formatter<char[3], char> f2;
         f2.format(raw, ctx2);
@@ -27770,8 +27770,8 @@ void Phase127()
         Check(!std::formattable<const decltype(fv), char>,
               "phase127 (49) formattable<const filter_view,char> is false -- "
               "const filter_view is not even a range");
-        static_assert(!std::__format::ConstFormattableRange<decltype(fv)>);
-        static_assert(std::same_as<std::__format::FmtMaybeConst<decltype(fv)>, decltype(fv)>);
+        static_assert(!std::__format::ConstFormattableRange<decltype(fv), char>);
+        static_assert(std::same_as<std::__format::FmtMaybeConst<decltype(fv), char>, decltype(fv)>);
     }
 
     // (56, D14 owner-approved option A) vector<bool,Alloc>::reference, for
@@ -28104,8 +28104,8 @@ void Phase128()
               "phase128 (41) parse() accepts an empty parse context whose data() is "
               "null, without touching it");
 
-        std::__format::StringSink sink;
-        std::format_context       ctx(std::__format::SinkIterator(sink), std::format_args{});
+        std::__format::StringSink<char> sink;
+        std::format_context       ctx(std::__format::SinkIterator<char>(sink), std::format_args{});
         f.format(p2, ctx);
         Check(feq(sink.str, "<1 | 2>"),
               "phase128 (42) parse() with no tuple-type present leaves pre-set "
@@ -29619,9 +29619,10 @@ static_assert(__cpp_lib_execution == 201902L, "phase131: __cpp_lib_execution —
 #ifdef __cpp_lib_format
 #  error "phase131: __cpp_lib_format must stay undefined"
 #endif
-#ifdef __cpp_lib_formatters
-#  error "phase131: __cpp_lib_formatters must stay undefined"
-#endif
+static_assert(__cpp_lib_formatters == 202302L,
+              "phase131: __cpp_lib_formatters — closed by Ф42-g, when "
+              "formatter<thread::id, wchar_t> arrived; it was the only half of "
+              "P2693R1 still missing, and this pin is what said so");
 static_assert(__cpp_lib_hypot == 201603L, "phase131: __cpp_lib_hypot — closed by Ф31e");
 static_assert(__cpp_lib_interpolate == 201902L, "phase131: __cpp_lib_interpolate — closed by Ф31e");
 #ifdef __cpp_lib_is_implicit_lifetime
@@ -30289,9 +30290,9 @@ void Phase132()
     // does not build.
     {
         constexpr std::__format::ArgKind kinds[] = {
-            std::__format::MapKind<__int128>(),
-            std::__format::MapKind<unsigned __int128>(),
-            std::__format::MapKind<int>(),
+            std::__format::MapKind<__int128, char>(),
+            std::__format::MapKind<unsigned __int128, char>(),
+            std::__format::MapKind<int, char>(),
         };
         static_assert(!std::__format::KindIsIntegral(kinds[0]));
         static_assert(!std::__format::KindIsIntegral(kinds[1]));
@@ -36557,20 +36558,20 @@ void Phase144()
     // consulted. The rejection itself is a hard error no requires-expression
     // can observe, so what is pinned here is the mechanism that produces it:
     // volatile now reaches the branch that carries the diagnostic.
-    static_assert(std::__format::MapKind<volatile int>() ==
+    static_assert(std::__format::MapKind<volatile int, char>() ==
                   std::__format::ArgKind::Custom);
-    static_assert(std::__format::MapKind<volatile int &>() ==
+    static_assert(std::__format::MapKind<volatile int &, char>() ==
                   std::__format::ArgKind::Custom);
-    static_assert(std::__format::MapKind<volatile double>() ==
+    static_assert(std::__format::MapKind<volatile double, char>() ==
                   std::__format::ArgKind::Custom);
     static_assert(!std::formattable<volatile int, char>);
     // Controls: the non-volatile kinds are untouched.
-    static_assert(std::__format::MapKind<int>() == std::__format::ArgKind::Int);
-    static_assert(std::__format::MapKind<const int &>() ==
+    static_assert(std::__format::MapKind<int, char>() == std::__format::ArgKind::Int);
+    static_assert(std::__format::MapKind<const int &, char>() ==
                   std::__format::ArgKind::Int);
-    static_assert(std::__format::MapKind<double>() ==
+    static_assert(std::__format::MapKind<double, char>() ==
                   std::__format::ArgKind::Double);
-    static_assert(std::__format::MapKind<char[4]>() ==
+    static_assert(std::__format::MapKind<char[4], char>() ==
                   std::__format::ArgKind::CString);
 
     // ── <vector>: vector<bool> is a real output range ────────────────────
@@ -49737,6 +49738,707 @@ void Phase217()
 // cxxtest_traits.cpp — phase 2 header torture (compile-time); links iff green.
 int CxxTraitsTortureCompiled();
 
+// ── phase218: <format> answers for wchar_t (Ф42-g) ──────────────────────
+// The oracle here is not a table of expected strings — it is the NARROW half
+// of this same library. Every std-format-spec the grammar can build is run
+// through both, over the same argument, and the two must agree: the same text
+// widened, or the same refusal. A table can only say what someone thought to
+// write down; this says that one engine serves two alphabets, which is the
+// whole claim of the subphase.
+//
+// What a narrow/wide sweep CANNOT check is what only the wide side can do — a
+// non-ASCII fill, a wide character escaped, literal wide text in a chrono
+// spec. Those are pinned against values measured on a host libc++ (Ф42-c
+// lesson: compute expectations, never reason them), and only for cases where
+// the reference is authoritative. It is not authoritative for the WIDTH of
+// non-ASCII text: libc++ estimates East-Asian width, boxcxx counts code units
+// and says so in CONFORMANCE, so no such case is pinned against it.
+namespace p218 {
+
+std::wstring Widen(const std::string &s)
+{
+    std::wstring w;
+    w.reserve(s.size());
+    for (char c : s) w.push_back(wchar_t(static_cast<unsigned char>(c)));
+    return w;
+}
+
+// Runs one spec through both halves. vformat, not format, on purpose: a
+// consteval format string cannot be built in a loop, and the error paths only
+// exist at run time anyway.
+//
+// ‼ The one carve-out, and it is the standard's rather than ours. [tab:format.
+// type.int]'s 'c' copies static_cast<charT>(value) and refuses what charT
+// cannot hold — so it is the ONE presentation whose answer is SUPPOSED to
+// depend on the character type: format("{:c}", 255) throws while
+// format(L"{:c}", 255) is U+00FF, and format(L"{:c}", -7) is wchar_t(-7) where
+// the narrow half writes one byte 0xF9. Both halves match libc++ 22 on both
+// sides (measured). Rather than dropping 'c' from the corpus, disagreement is
+// ALLOWED only there and REQUIRED to actually happen — see (2a) below, without
+// which the carve-out would be a hole rather than a statement.
+template <class N, class W>
+bool Agrees(const std::string &spec, N &nv, W &wv, std::string &why)
+{
+    std::string  n;
+    std::wstring w;
+    bool         nthrew = false, wthrew = false;
+    try {
+        n = std::vformat(spec, std::make_format_args(nv));
+    } catch (const std::format_error &) { nthrew = true; }
+    try {
+        w = std::vformat(Widen(spec), std::make_wformat_args(wv));
+    } catch (const std::format_error &) { wthrew = true; }
+
+    if (nthrew != wthrew) {
+        why = spec + (nthrew ? ": narrow threw, wide did not"
+                             : ": wide threw, narrow did not");
+        return false;
+    }
+    if (nthrew) return true;
+    if (w != Widen(n)) {
+        why = spec + ": narrow gave \"" + n + "\", wide differs";
+        return false;
+    }
+    return true;
+}
+
+bool IsCharPresentation(const std::string &spec)
+{
+    return spec.size() >= 2 && spec[spec.size() - 2] == 'c';
+}
+
+// The std-format-spec grammar. Not the full cross product — that is 80640
+// skeletons, and at four minutes of process time it would have cost more than
+// every other phase in this suite put together. What replaces it is every
+// position ALONE (so each is reachable), every position ABSENT (the corpus
+// lesson of Ф42-b: a generator that cannot produce a value the standard names
+// separately cannot test it), and the pairings where two positions actually
+// interact — '0' against an explicit alignment, '#' against '0', a sign
+// against a base prefix, a width against a precision, and both of those in
+// their dynamic form.
+const char *kSkeletons[] = {
+    "",     "<",    ">",    "^",    "*<",   "*>",   "*^",   "0<",   "0>",
+    "+",    "-",    " ",    "#",    "0",
+    "+#",   "+0",   "#0",   "+#0",  "0>+#", "*^+#",
+    "1",    "6",    "12",   "06",   "+06",  "#06",  "*>6",  "*^12", "<6",
+    ".0",   ".1",   ".3",   "6.3",  "*>9.3", "+.3", "#.3",  "0.3",
+    "{}",   ".{}",  "{}.{}", "*>{}", "0{}",
+    "L",    "6L",   ".3L",  "+#06.3L",
+};
+// Every presentation character the library knows, plus two it must refuse:
+// 'z' is in no table, and '\x7F' is what a presentation character outside
+// ASCII narrows to.
+const char *kTypes = "\0" "dbBoxXcsp?aAeEfFgGz\x7F";
+
+template <class N, class W>
+int Sweep(N nv, W wv, std::string &why, int &charDisagreements, int &pairs)
+{
+    for (const char *sk : kSkeletons)
+        for (const char *t = kTypes; t < kTypes + 21; ++t) {
+            std::string s = "{:";
+            s += sk;
+            if (*t) s.push_back(*t);
+            s.push_back('}');
+            // The dynamic skeletons need their own arguments; the sweep gives
+            // them from a fixed pair so the spec still describes one field.
+            const bool dyn = s.find('{', 2) != std::string::npos;
+            ++pairs;
+            bool ok;
+            if (dyn) {
+                std::string  n;
+                std::wstring w;
+                bool         nt = false, wt = false;
+                int          d1 = 5, d2 = 2;
+                try { n = std::vformat(s, std::make_format_args(nv, d1, d2)); }
+                catch (const std::format_error &) { nt = true; }
+                try { w = std::vformat(Widen(s), std::make_wformat_args(wv, d1, d2)); }
+                catch (const std::format_error &) { wt = true; }
+                ok = (nt == wt) && (nt || w == Widen(n));
+                if (!ok) why = s + ": the dynamic forms disagree";
+            } else {
+                ok = Agrees(s, nv, wv, why);
+            }
+            if (!ok) {
+                if (IsCharPresentation(s)) { ++charDisagreements; continue; }
+                return 1;
+            }
+        }
+    return 0;
+}
+
+} // namespace p218
+
+void Phase218()
+{
+    using namespace std;
+    using namespace p218;
+
+    // ── the names [format.syn] asks for ──────────────────────────────────
+    static_assert(is_same_v<wformat_context::char_type, wchar_t>,
+                  "phase218 wformat_context::char_type");
+    static_assert(is_same_v<wformat_context,
+                            basic_format_context<wformat_context::iterator, wchar_t>>,
+                  "phase218 wformat_context comes from basic_format_context");
+    static_assert(is_same_v<format_context,
+                            basic_format_context<format_context::iterator, char>>,
+                  "phase218 format_context does too -- the template was absent "
+                  "from the tree AND from the list of what is absent");
+    static_assert(is_same_v<wformat_args, basic_format_args<wformat_context>>,
+                  "phase218 wformat_args");
+    static_assert(is_same_v<wformat_parse_context, basic_format_parse_context<wchar_t>>,
+                  "phase218 wformat_parse_context");
+    static_assert(is_same_v<wformat_string<int>, basic_format_string<wchar_t, int>>,
+                  "phase218 wformat_string");
+    static_assert(is_same_v<wformat_context::formatter_type<int>, formatter<int, wchar_t>>,
+                  "phase218 formatter_type");
+
+    // ── which types are formattable where ────────────────────────────────
+    // The asymmetry is [format.arg]'s: a char is spellable in a wide alphabet,
+    // a wchar_t is not spellable in a narrow one.
+    static_assert(formattable<char, wchar_t>, "phase218 char in a wide context");
+    static_assert(formattable<wchar_t, wchar_t>, "phase218 wchar_t");
+    static_assert(!formattable<wchar_t, char>, "phase218 wchar_t stays out of char");
+    static_assert(!formattable<const wchar_t *, char>, "phase218 wide C-string");
+    static_assert(!formattable<int, char16_t>, "phase218 char16_t is not a "
+                                               "formatting character type");
+    static_assert(!formattable<int, char8_t>, "phase218 nor is char8_t");
+    // ‼ The one measured against a reference that gets it WRONG. libc++ 22
+    // routes a narrow string in a wide context to the RANGE formatter and
+    // prints ['h', 'i'] -- with format(L"{}", "abc") it even includes the
+    // terminating NUL as '\u{0}'. libstdc++ 16.1 rejects it, and so does this:
+    // exactly the defect Ф31e-a closed on the narrow side, where an odd-traits
+    // string was bracketed for the same reason.
+    static_assert(!formattable<string, wchar_t>,
+                  "phase218 a narrow string is NOT a range of characters to a "
+                  "wide context");
+    static_assert(!formattable<string_view, wchar_t>, "phase218 nor a view of one");
+    static_assert(!formattable<wstring, char>, "phase218 and not the other way");
+    static_assert(formattable<wstring, wchar_t>, "phase218 a wide string is");
+    static_assert(formattable<vector<int>, wchar_t>, "phase218 ranges are");
+    static_assert(formattable<pair<int, double>, wchar_t>, "phase218 pairs are");
+
+    // [format.formatter.spec]/3, the wide rows
+    static_assert(enable_nonlocking_formatter_optimization<wchar_t>, "phase218 nl wchar_t");
+    static_assert(enable_nonlocking_formatter_optimization<wstring>, "phase218 nl wstring");
+    static_assert(enable_nonlocking_formatter_optimization<wstring_view>, "phase218 nl wsv");
+    static_assert(enable_nonlocking_formatter_optimization<const wchar_t *>, "phase218 nl wcs");
+    static_assert(enable_nonlocking_formatter_optimization<wchar_t[4]>, "phase218 nl warr");
+
+    // ── ‼ the sweep: one engine, two alphabets ───────────────────────────
+    const clock_t t0 = clock();
+    int           swept = 0, failed = 0, charDis = 0, pairs = 0;
+    string        why;
+    auto run = [&](auto nv, auto wv, const char *tag) {
+        const int bad = Sweep(nv, wv, why, charDis, pairs);
+        swept += 1;
+        if (bad) {
+            ++failed;
+            printf("[CXX] FAIL phase218 sweep %s: %s\n", tag, why.c_str());
+            g_failures++;
+        }
+    };
+    run(42, 42, "int 42");
+    run(-7, -7, "int -7");
+    run(0u, 0u, "unsigned 0");
+    run((long long)-9223372036854775807LL - 1, (long long)-9223372036854775807LL - 1,
+        "long long min");
+    run(255, 255, "int 255");
+    run(3.14159, 3.14159, "double pi");
+    run(-0.0, -0.0, "double -0.0");
+    run(1.0 / 0.0 * 0.0 + 0.0, 1.0 / 0.0 * 0.0 + 0.0, "double nan-ish");
+    run(1e300, 1e300, "double 1e300");
+    run(0.0f, 0.0f, "float zero");
+    run(true, true, "bool true");
+    run(false, false, "bool false");
+    run('x', 'x', "char x");
+    run((void *)0x1234, (void *)0x1234, "void*");
+    run(nullptr, nullptr, "nullptr");
+    // The paired arguments: same text, each in its own alphabet.
+    run(string("hello"), wstring(L"hello"), "string hello");
+    run(string(""), wstring(L""), "empty string");
+    run(string("a\tb"), wstring(L"a\tb"), "string with a tab");
+    run('q', L'q', "char vs wchar_t");
+    run(vector<int>{1, 2, 3}, vector<int>{1, 2, 3}, "vector<int>");
+    run(pair<int, double>{1, 0.5}, pair<int, double>{1, 0.5}, "pair");
+    Check(failed == 0, "phase218 (1) ‼ narrow and wide agree on every "
+                       "std-format-spec the grammar can build, for every "
+                       "argument shape -- one engine, two alphabets");
+    Check(swept == 21, "phase218 (2) and all twenty-one argument shapes ran");
+    // Without this the carve-out above would be a hole: a sweep that ALLOWS a
+    // disagreement it never sees has not tested anything. 255 and -7 are the
+    // two inputs that produce one; both were measured against libc++ 22 first,
+    // which answers the same on both sides.
+    Check(charDis > 0,
+          "phase218 (2a) ‼ and the only presentation allowed to disagree, 'c', "
+          "actually does -- it is the one place [tab:format.type.int] makes "
+          "the answer depend on the character type");
+    Check(pairs > 15000,
+          "phase218 (2b) and the sweep really ran that many spec/argument "
+          "pairs, rather than falling out of a loop early");
+
+    // The same sweep for the shapes whose grammar is not std-format-spec:
+    // [format.range] and [format.tuple] have their own productions.
+    {
+        const char *kRangeSpecs[] = {
+            "{}", "{:}", "{:n}", "{::}", "{::d}", "{::>4}", "{:6}", "{:*<9}",
+            "{:^11}", "{:n:x}", "{:m}", "{:s}", "{:?s}", "{::#x}", "{:{}}",
+            "{:z}", "{::z}", "{:ns}", "{:sn}",
+        };
+        vector<int> v{1, 2, 3};
+        int         bad = 0;
+        for (const char *sp : kRangeSpecs)
+            if (!Agrees(string(sp), v, v, why)) { ++bad; break; }
+        Check(bad == 0, "phase218 (3) and on every range-format-spec too");
+
+        const char *kTupleSpecs[] = {"{}",   "{:}",  "{:n}", "{:m}",
+                                     "{:8}", "{:*^12}", "{:mn}", "{:z}"};
+        pair<int, double> pr{1, 0.5};
+        bad = 0;
+        for (const char *sp : kTupleSpecs)
+            if (!Agrees(string(sp), pr, pr, why)) { ++bad; break; }
+        Check(bad == 0, "phase218 (4) and on every tuple-format-spec");
+    }
+
+    // Replacement-field shapes that are not a spec at all.
+    {
+        const char *kFields[] = {
+            "",        "plain text",  "{}",      "{0}",     "{{",
+            "}}",      "{{}}",        "a{}b",    "{0}{0}",  "{:{}}",
+            "{:.{}}",  "{",           "}",       "{x}",     "{0",
+            "{:",      "{0:d}",       "{1}",     "{:{1}}",
+        };
+        int a = 7, b = 3, bad = 0;
+        for (const char *sp : kFields) {
+            std::string  n;
+            std::wstring w;
+            bool         nt = false, wt = false;
+            try { n = vformat(string(sp), make_format_args(a, b)); }
+            catch (const format_error &) { nt = true; }
+            try { w = vformat(Widen(string(sp)), make_wformat_args(a, b)); }
+            catch (const format_error &) { wt = true; }
+            if (nt != wt || (!nt && w != Widen(n))) { ++bad; why = sp; break; }
+        }
+        Check(bad == 0, "phase218 (5) and on the replacement-field grammar, "
+                        "including every way of getting it wrong");
+    }
+
+    // ── what only the wide half can do (host-measured, Ф42-c lesson 60) ──
+    Check(format(L"{:\u0436>6}", 42) == L"\u0436\u0436\u0436\u043642",
+          "phase218 (6) a fill character outside ASCII is copied, not widened "
+          "-- it never went through a char");
+    Check(format(L"{:?}", wstring(L"a\tb")) == L"\"a\\tb\"",
+          "phase218 (7) the escaped presentation over wide text");
+    Check(format(L"{:?}", wstring(L"\u00e9")) == L"\"\u00e9\"",
+          "phase218 (8) a printable non-ASCII scalar value stays raw");
+    Check(format(L"{:?}", wstring(L"\u0301")) == L"\"\\u{301}\"",
+          "phase218 (9) a leading combining mark is escaped");
+    Check(format(L"{:?}", wstring(L"e\u0301")) == L"\"e\u0301\"",
+          "phase218 (10) but not when it follows an unescaped character");
+    {
+        // ‼ The wide half has an ill-formed case the narrow half reaches only
+        // through UTF-8: a lone surrogate, and anything past U+10FFFF, is not
+        // a scalar value even though it fits in one code unit.
+        wstring sur;
+        sur.push_back((wchar_t)0xD800);
+        Check(format(L"{:?}", sur) == L"\"\\x{d800}\"",
+              "phase218 (11) a lone surrogate is ill-formed, not a character");
+        wstring past;
+        past.push_back((wchar_t)0x110000);
+        past.push_back(L'a');
+        Check(format(L"{:?}", past) == L"\"\\x{110000}a\"",
+              "phase218 (12) and so is anything past U+10FFFF -- the run ends "
+              "at the first well-formed unit after it");
+    }
+    Check(format(L"{:?}", L'\u00e9') == L"'\u00e9'", "phase218 (13) a wide character escaped");
+    Check(format(L"{:?}", L'\'') == L"'\\''", "phase218 (14) the apostrophe asymmetry");
+    Check(format(L"{:?}", L'"') == L"'\"'", "phase218 (15) and the quote half of it");
+    Check(format(L"{:d}", (wchar_t)0xD0) == L"208",
+          "phase218 (16) P2909R4 on a wide code unit: it widens through the "
+          "UNSIGNED wchar_t");
+    Check(format(L"{:x}", (wchar_t)0x1F600) == L"1f600",
+          "phase218 (17) and an astral one is one code unit, not two");
+
+    // ── the char/wchar_t boundary, where a cast could have been wrong ────
+    Check(format(L"{}", (char)0xD0) == L"\u00d0",
+          "phase218 (18) ‼ a char argument widens through unsigned char -- a "
+          "plain cast would have made wchar_t(-48) of a byte the rest of this "
+          "system reads as U+00D0, which is the defect Ф42-f found in widen()");
+    Check(format(L"{:d}", (char)0xD0) == L"208",
+          "phase218 (19) and its integer presentation agrees with the narrow one");
+    Check(format(L"{:?}", (char)0xD0) == L"'\u00d0'",
+          "phase218 (20) escaped, it is a CHARACTER here and a broken byte in "
+          "the narrow context -- because it was widened before it was escaped");
+    Check(format("{:?}", (char)0xD0) == "'\\x{d0}'",
+          "phase218 (21) which is what the narrow context still says");
+    Check(format(L"{:c}", 200) == L"\u00c8",
+          "phase218 (22) ‼ 'c' bounds an integer by CharT's range, not char's");
+    {
+        bool threw = false;
+        try { (void)vformat("{:c}", make_format_args(*(new int(200)))); }
+        catch (const format_error &) { threw = true; }
+        Check(threw, "phase218 (23) so the same 200 is refused by the narrow "
+                     "context, and both answers are right");
+    }
+    Check(format(L"{:c}", 0x4E2D) == L"\u4e2d",
+          "phase218 (24) a CJK code point is in range for a wide field");
+
+    // ── the entry points ─────────────────────────────────────────────────
+    {
+        wchar_t buf[16] = {};
+        auto    it      = format_to(buf, L"{}-{}", 4, 2);
+        Check(wstring(buf, it) == L"4-2", "phase218 (25) wide format_to");
+        wchar_t small[4] = {};
+        auto    r        = format_to_n(small, 3, L"{}", 123456);
+        Check(r.size == 6 && wstring(small, r.out) == L"123",
+              "phase218 (26) wide format_to_n truncates and reports the whole size");
+        Check(formatted_size(L"{:>8}", 1) == 8, "phase218 (27) wide formatted_size");
+        int x = 5;
+        Check(vformat(L"{}", make_wformat_args(x)) == L"5",
+              "phase218 (28) wide vformat over make_wformat_args");
+        wstring out;
+        (void)vformat_to(back_inserter(out), wstring_view(L"{}!"), make_wformat_args(x));
+        Check(out == L"5!", "phase218 (29) and wide vformat_to");
+    }
+
+    // ── basic_format_arg carries the context's character type ────────────
+    {
+        wchar_t                          wc = L'\u0436';
+        auto                             st = make_wformat_args(wc);
+        wformat_args                     ar = st;
+        basic_format_arg<wformat_context> a  = ar.get(0);
+        bool                              seen = false;
+        visit_format_arg(
+            [&](auto v) {
+                if constexpr (is_same_v<decltype(v), wchar_t>)
+                    seen = (v == L'\u0436');
+            },
+            a);
+        Check(seen, "phase218 (30) a wide character arrives at the visitor as "
+                    "wchar_t, not as an int");
+    }
+    {
+        // [format.context] requires locale(), which was missing here for as
+        // long as <format> has existed and was in no list of what is missing.
+        __format::StringSink<wchar_t> sink;
+        wformat_context ctx(__format::SinkIterator<wchar_t>(sink), wformat_args{});
+        Check(ctx.locale() == locale(), "phase218 (31) basic_format_context::locale()");
+    }
+    {
+        // ‼ FOUND BY MUTATION, and it was a hole of a shape worth naming.
+        // format(L"{}", some_char) widens at the ARGUMENT — [format.arg]/5
+        // stores an already-wide value — so the widening inside
+        // formatter<char, wchar_t> is never reached through std::format at
+        // all, and a cast broken there changed nothing any check could see.
+        // [format.formatter.spec] requires that specialization to work on its
+        // own, and a program may reach for it directly; so must this.
+        __format::StringSink<wchar_t> sink;
+        wformat_context ctx(__format::SinkIterator<wchar_t>(sink), wformat_args{});
+        formatter<char, wchar_t> f;
+        wformat_parse_context    pc(wstring_view(L"}"), 0);
+        (void)f.parse(pc);
+        f.format((char)0xD0, ctx);
+        Check(sink.str == wstring(1, wchar_t(0x00D0)),
+              "phase218 (32) formatter<char, wchar_t> used DIRECTLY widens "
+              "through unsigned char too -- the same answer the argument store "
+              "gives, reached by the other road");
+    }
+    {
+        // ‼ ALSO FOUND BY MUTATION: the narrow/wide sweep can only build
+        // specs out of ASCII — that is what makes it an equivalence oracle —
+        // so a presentation character OUTSIDE ASCII appears in no corpus it
+        // can generate. It is exactly the "nothing matched" branch this suite
+        // has now been caught missing four times.
+        int  v      = 1;
+        auto refuse = [&](const wchar_t *f) {
+            try { (void)vformat(wstring_view(f), make_wformat_args(v)); }
+            catch (const format_error &) { return true; }
+            return false;
+        };
+        Check(refuse(L"{:\u0436}"),
+              "phase218 (33) ‼ a presentation character outside ASCII is "
+              "REFUSED -- it narrows to a character no formatter accepts, so "
+              "it can never be mistaken for one that is spelled in ASCII");
+        Check(refuse(L"{:\u0430}"), "phase218 (34) and so is one that would "
+                                    "narrow onto a real letter if truncated");
+        wstring wv(L"s");
+        Check(format(L"{:\u0436>3}", 1) == L"\u0436\u04361",
+              "phase218 (35) while the SAME character in the fill position is "
+              "still copied -- the two positions are told apart by the "
+              "alignment character that follows one of them");
+    }
+
+    printf("[CXX] note phase218: %d spec/argument pairs in %ld ms of CPU, %d "
+           "of them the 'c' carve-out\n",
+           pairs, (long)((clock() - t0) * 1000 / CLOCKS_PER_SEC), charDis);
+    printf("[CXX] PASS phase218: <format> in two alphabets - the narrow half "
+           "is the oracle for the wide one\n");
+}
+
+// ── phase219: wide <chrono> formatting and the wide half of
+//              [string.conversions] (Ф42-g) ─────────────────────────────
+// <chrono>'s renderer never became a second renderer. Its conversions are
+// ASCII to the last one -- digits, "Jan", "+0300" -- so they still go through
+// the same RenderOne the narrow half uses, and the only thing the wide walk
+// owns is the LITERAL text between conversions, which comes out of the format
+// string and can be anything. That claim is what (7) below tests; everything
+// before it tests that the twenty-four formatters agree with the narrow half
+// they share an engine with.
+namespace p219 {
+
+template <class T>
+bool ChronoAgrees(const char *spec, const T &v, std::string &why)
+{
+    std::string  n;
+    std::wstring w;
+    bool         nt = false, wt = false;
+    try { n = std::vformat(std::string(spec), std::make_format_args(v)); }
+    catch (const std::format_error &) { nt = true; }
+    try { w = std::vformat(p218::Widen(std::string(spec)), std::make_wformat_args(v)); }
+    catch (const std::format_error &) { wt = true; }
+    if (nt != wt) { why = std::string(spec) + ": one threw, the other did not"; return false; }
+    if (nt) return true;
+    if (w != p218::Widen(n)) { why = std::string(spec) + ": narrow gave \"" + n + "\""; return false; }
+    return true;
+}
+
+// Every conversion specifier [time.format] names, the two modifiers, the
+// field-and-width positions, and four ways of being wrong. A type that cannot
+// satisfy a specifier must refuse it in BOTH alphabets, which is why the
+// refusals are in the corpus and not filtered out of it.
+const char *kChronoSpecs[] = {
+    "{}",         "{:}",        "{:%Y}",      "{:%y}",      "{:%C}",
+    "{:%m}",      "{:%d}",      "{:%e}",      "{:%H}",      "{:%I}",
+    "{:%M}",      "{:%S}",      "{:%p}",      "{:%R}",      "{:%T}",
+    "{:%r}",      "{:%D}",      "{:%F}",      "{:%x}",      "{:%X}",
+    "{:%c}",      "{:%a}",      "{:%A}",      "{:%b}",      "{:%B}",
+    "{:%h}",      "{:%u}",      "{:%w}",      "{:%j}",      "{:%g}",
+    "{:%G}",      "{:%U}",      "{:%V}",      "{:%W}",      "{:%z}",
+    "{:%Z}",      "{:%Q}",      "{:%q}",      "{:%n}",      "{:%t}",
+    "{:%%}",      "{:%Ey}",     "{:%Od}",     "{:%EY %OH}", "{:%F %T}",
+    "{:12%F}",    "{:*>14%F}",  "{:*<14%F}",  "{:^14%F}",   "{:.3%S}",
+    "{:%}",       "{:%K}",      "{:%E}",      "{:%Eq}",     "{:{}%F}",
+    "{:literal}", "{:%Y-%m-%d}", "{:[%F]}",
+};
+
+} // namespace p219
+
+void Phase219()
+{
+    using namespace std;
+    using namespace std::chrono;
+    using namespace p219;
+
+    const clock_t t0 = clock();
+    string        why;
+    int           bad = 0;
+    auto run = [&](const auto &v, const char *tag) {
+        for (const char *sp : kChronoSpecs)
+            if (!ChronoAgrees(sp, v, why)) {
+                printf("[CXX] FAIL phase219 %s: %s\n", tag, why.c_str());
+                g_failures++;
+                ++bad;
+                return;
+            }
+    };
+    run(day{3}, "day");
+    run(day{99}, "invalid day");
+    run(month{2}, "month");
+    run(month{13}, "invalid month");
+    run(year{2026}, "year");
+    run(year{-44}, "negative year");
+    run(weekday{3}, "weekday");
+    run(weekday{9}, "invalid weekday");
+    run(weekday_indexed{Monday, 2}, "weekday_indexed");
+    run(weekday_last{Monday}, "weekday_last");
+    run(month_day{August, day{20}}, "month_day");
+    run(month_day_last{August}, "month_day_last");
+    run(month_weekday{August, weekday_indexed{Monday, 1}}, "month_weekday");
+    run(month_weekday_last{August, weekday_last{Monday}}, "month_weekday_last");
+    run(2026y / August, "year_month");
+    run(2026y / 8 / 20, "year_month_day");
+    run(2026y / 2 / 30, "invalid year_month_day");
+    run(2026y / August / last, "year_month_day_last");
+    run(2026y / August / weekday_indexed{Monday, 1}, "year_month_weekday");
+    run(2026y / August / weekday_last{Monday}, "year_month_weekday_last");
+    run(hh_mm_ss{seconds{3661}}, "hh_mm_ss");
+    run(hh_mm_ss{-seconds{3661}}, "negative hh_mm_ss");
+    run(sys_seconds{seconds{0}}, "sys_time");
+    run(sys_days{days{20320}}, "sys_days");
+    run(utc_seconds{seconds{0}}, "utc_time");
+    run(tai_seconds{seconds{0}}, "tai_time");
+    run(gps_seconds{seconds{0}}, "gps_time");
+    run(local_seconds{seconds{0}}, "local_time");
+    run(seconds{5}, "seconds");
+    run(milliseconds{7}, "milliseconds");
+    run(duration<double>{1.5}, "floating duration");
+    run(duration<int, ratio<3, 7>>{2}, "an odd period");
+    Check(bad == 0, "phase219 (1) ‼ all twenty-four chrono formatters say the "
+                    "same thing in both alphabets -- for every conversion "
+                    "specifier [time.format] names, and for every one it "
+                    "refuses");
+
+    // ── ‼ the one thing the sweep cannot reach ───────────────────────────
+    // A chrono-spec's literal characters come out of the FORMAT STRING, so
+    // they are the argument's character type and cannot be produced by the
+    // ASCII engine at all. This is the reason render() was split in two.
+    Check(format(L"{:%Y год}", 2026y / 8 / 20) == L"2026 год",
+          "phase219 (2) ‼ literal wide text inside a chrono-spec reaches the "
+          "output intact -- the conversions are ASCII, the words between them "
+          "are not");
+    Check(format(L"{:ж>14%F}", 2026y / 8 / 20) == L"жжжж2026-08-20",
+          "phase219 (3) and a non-ASCII fill works on a chrono field");
+    Check(format(L"{}", month{13}) == L"13 is not a valid month",
+          "phase219 (4) the streamed diagnostics widen -- they are the "
+          "library's own ASCII, not the caller's");
+    Check(format(L"{:%F %T}", sys_seconds{seconds{0}}) == L"1970-01-01 00:00:00",
+          "phase219 (5) a clock time point");
+    {
+        // ‼ The ONE narrow body a caller can put a byte above 0x7F into: a %Z
+        // abbreviation is a std::string the program supplies. It widens in
+        // <__bits/chrono_format>'s own walk -- NOT in <format>'s WriteRun,
+        // which mutation testing showed only ever sees ASCII. Pinned so that
+        // site keeps answering what <ios>::widen answers; the disagreement
+        // Ф42-f found between two such places was the whole reason widen()
+        // got fixed. Byte-wise, deliberately: decoding the UTF-8 here would be
+        // a SECOND widening rule.
+        const string ab = "\xd0\x96";  // U+0416 as UTF-8, two bytes
+        const auto   lf = chrono::local_time_format(local_seconds{seconds{0}}, &ab);
+        const wstring got = format(L"{:%Z}", lf);
+        wstring       want;
+        want.push_back(wchar_t(0x00D0));
+        want.push_back(wchar_t(0x0096));
+        Check(got == want,
+              "phase219 (5a) ‼ a caller-supplied %Z abbreviation widens byte "
+              "by byte through unsigned char, exactly as <ios>::widen does");
+        Check(format("{:%Z}", lf) == ab,
+              "phase219 (5b) and the narrow half passes the same bytes through "
+              "untouched");
+    }
+    {
+        // A conversion specifier outside ASCII is refused rather than
+        // silently taken for one that is: %<something wide> narrows to a
+        // character [time.format]'s table does not contain.
+        bool threw = false;
+        try { (void)vformat(wstring_view(L"{:%\u0436}"),
+                            make_wformat_args(*(new day{3}))); }
+        catch (const format_error &) { threw = true; }
+        Check(threw, "phase219 (5c) a chrono conversion specifier outside "
+                     "ASCII is refused");
+    }
+    Check(format(L"{:>8}", this_thread::get_id()) ==
+              p218::Widen(format("{:>8}", this_thread::get_id())),
+          "phase219 (6) formatter<thread::id, wchar_t> -- the last thing "
+          "__cpp_lib_formatters was waiting on, and it inherits the integer "
+          "spec parser in both alphabets");
+    static_assert(!formattable<stacktrace_entry, wchar_t>,
+                  "phase219 [stacktrace.format] writes its two formatters with "
+                  "NO charT parameter -- char-only by specification, not by gap");
+
+    // ── the wide half of [string.conversions] ────────────────────────────
+    // One engine again: to_wstring delegates to to_string and widens, so it
+    // inherits P2587R3 rather than reimplementing it. libc++ 22 has not
+    // implemented that paper at all -- its to_string(1e-9) is "0.000000" and
+    // its to_wstring says the same -- so the reference is behind here, and
+    // the oracle is this library's own narrow half.
+    Check(to_wstring(-42) == L"-42", "phase219 (7) to_wstring(int)");
+    Check(to_wstring(42u) == L"42", "phase219 (8) to_wstring(unsigned)");
+    Check(to_wstring(-9223372036854775807LL - 1) == L"-9223372036854775808",
+          "phase219 (9) to_wstring(long long) at the edge");
+    Check(to_wstring(18446744073709551615ULL) == L"18446744073709551615",
+          "phase219 (10) to_wstring(unsigned long long) at the edge");
+    Check(to_wstring(3.5) == L"3.5", "phase219 (11) to_wstring(double)");
+    Check(to_wstring(1e-9) == L"1e-09",
+          "phase219 (12) ‼ P2587R3, inherited rather than rewritten -- the "
+          "reference still answers 0.000000 here, for to_string as well");
+    {
+        // Exhaustive by construction: every to_wstring must be its to_string
+        // widened, for every argument, or the two families have drifted.
+        int  bad2 = 0;
+        auto same = [&](const wstring &w, const string &n) {
+            if (w != p218::Widen(n)) ++bad2;
+        };
+        for (int i = -300; i <= 300; ++i) {
+            same(to_wstring(i), to_string(i));
+            same(to_wstring((long)i), to_string((long)i));
+            same(to_wstring((long long)i), to_string((long long)i));
+            same(to_wstring((unsigned)(i + 400)), to_string((unsigned)(i + 400)));
+            same(to_wstring((unsigned long)(i + 400)), to_string((unsigned long)(i + 400)));
+            same(to_wstring((unsigned long long)(i + 400)),
+                 to_string((unsigned long long)(i + 400)));
+            const double d = double(i) / 7.0;
+            same(to_wstring(d), to_string(d));
+            same(to_wstring((float)d), to_string((float)d));
+            same(to_wstring((long double)d), to_string((long double)d));
+        }
+        Check(bad2 == 0, "phase219 (13) and all nine overloads agree with "
+                         "their narrow twins over 601 values each");
+    }
+
+    // sto* the same way: narrow one-to-one, then the narrow engine. `pos` maps
+    // straight back because the narrowing never changes a length.
+    {
+        size_t pos = 0;
+        Check(stoi(wstring(L" -17abc"), &pos) == -17 && pos == 4,
+              "phase219 (14) stoi(wstring) with pos");
+        Check(stol(wstring(L"7f"), nullptr, 16) == 127, "phase219 (15) stol base 16");
+        Check(stoll(wstring(L"-9223372036854775808")) == -9223372036854775807LL - 1,
+              "phase219 (16) stoll at the edge");
+        Check(stoul(wstring(L"4294967295")) == 4294967295UL, "phase219 (17) stoul");
+        Check(stoull(wstring(L"18446744073709551615")) == 18446744073709551615ULL,
+              "phase219 (18) stoull at the edge");
+        Check(stof(wstring(L"1.5")) == 1.5f, "phase219 (19) stof");
+        pos = 0;
+        Check(stod(wstring(L"2.5e2xyz"), &pos) == 250.0 && pos == 5,
+              "phase219 (20) stod with pos");
+        Check(stold(wstring(L"1.5")) == 1.5L, "phase219 (21) stold");
+
+        int threw = 0;
+        try { (void)stoi(wstring(L"zzz")); } catch (const invalid_argument &) { ++threw; }
+        try { (void)stoi(wstring(L"99999999999999999999")); }
+        catch (const out_of_range &) { ++threw; }
+        try { (void)stoi(wstring(L"")); } catch (const invalid_argument &) { ++threw; }
+        // ‼ A non-ASCII character is not a digit in any base, so it ends the
+        // number exactly where a wide non-digit should -- including when it is
+        // the FIRST character, which is the "nothing matched" branch.
+        try { (void)stoi(wstring(L"ж")); } catch (const invalid_argument &) { ++threw; }
+        Check(threw == 4, "phase219 (22) and every way of failing throws what "
+                          "the narrow half throws");
+        Check(stoi(wstring(L"12ж34")) == 12,
+              "phase219 (23) a wide character stops the parse where it stands");
+        // ‼ The measured deviation, recorded rather than hidden: the leading
+        // white space is the six "C" characters, not Unicode White_Space.
+        // wcstol (Ф42-b) DOES skip a wide space; these do not, because the
+        // alternative was a second set of rules for overflow, invalid input
+        // and pos -- the shape defects live in.
+        int wideSpaceThrew = 0;
+        try { (void)stoi(wstring(L" " L"42")); }
+        catch (const invalid_argument &) { ++wideSpaceThrew; }
+        Check(wideSpaceThrew == 1,
+              "phase219 (24) ‼ a wide space does NOT introduce a number here, "
+              "and CONFORMANCE says so");
+        Check(wcstol(L" " L"42", nullptr, 10) == 42,
+              "phase219 (25) while wcstol, which owns that rule, still does");
+    }
+    {
+        // Same construction as to_wstring: every sto* is its narrow twin.
+        int bad3 = 0;
+        for (int i = -500; i <= 500; ++i) {
+            const string  n = to_string(i);
+            const wstring w = to_wstring(i);
+            size_t        np = 0, wp = 0;
+            if (stoi(n, &np) != stoi(w, &wp) || np != wp) ++bad3;
+            if (stod(n) != stod(w)) ++bad3;
+        }
+        Check(bad3 == 0, "phase219 (26) and every wide sto* answers what its "
+                         "narrow twin answers, value and pos alike");
+    }
+
+    printf("[CXX] note phase219: chrono and [string.conversions] in %ld ms of CPU\n",
+           (long)((clock() - t0) * 1000 / CLOCKS_PER_SEC));
+    printf("[CXX] PASS phase219: wide <chrono> and to_wstring - the literal "
+           "text is the only thing that was ever made of characters\n");
+}
+
 int main()
 {
     g_clock_at_entry = std::clock();
@@ -49973,6 +50675,8 @@ int main()
     Phase215();
     Phase216();
     Phase217();
+    Phase218();
+    Phase219();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
