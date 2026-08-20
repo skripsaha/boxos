@@ -22,7 +22,8 @@
 
 #include <atomic>
 #include <iosfwd>
-#include <__bits/locale_core>  // locale — the facets that need ios_base are in <locale>
+#include <__bits/locale_core>   // locale — the facets that need ios_base are in <locale>
+#include <__bits/locale_ctype>  // ctype — [basic.ios.members] defines widen/narrow as calls into it
 #include <system_error>
 #include <vector>
 
@@ -244,6 +245,14 @@ public:
         return old;
     }
     locale getloc() const { return __loc; }
+
+protected:
+    // The locale itself, not the copy getloc() returns. use_facet hands back a
+    // reference INTO the table a locale names, so binding one to a temporary
+    // is the shape basic_streambuf::__loc_ref() exists to avoid.
+    const locale &__loc_ref() const noexcept { return __loc; }
+
+public:
 
     // ── extensible storage [ios.base.storage] ─────────────────────────
     // xalloc() hands out a fresh, process-wide-unique, monotonically
@@ -494,18 +503,20 @@ public:
     // default parameter and must return something, narrow has one and uses
     // it. [locale.ctype] only ever requires the round trip for the basic
     // character set.
+    // [basic.ios.members]: both are defined as calls into the ctype facet of
+    // THIS stream's locale, and since Ф43-a that is a real question — a
+    // program can install its own ctype and imbue the stream with it. Until
+    // Ф43-b these two answered by themselves, so an installed ctype would
+    // have been ignored in silence. The answers for the classic facet are the
+    // same ones, and the reasoning that produced them now lives in
+    // <__bits/locale_ctype> beside the facet that gives them.
     char narrow(char_type c, char dflt) const
     {
-        if constexpr (is_same_v<char_type, char>) {
-            (void)dflt;
-            return c;
-        } else {
-            return static_cast<unsigned long long>(c) < 0x80u ? static_cast<char>(c) : dflt;
-        }
+        return use_facet<ctype<char_type>>(this->__loc_ref()).narrow(c, dflt);
     }
     char_type widen(char c) const
     {
-        return static_cast<char_type>(static_cast<unsigned char>(c));
+        return use_facet<ctype<char_type>>(this->__loc_ref()).widen(c);
     }
 
     basic_ios(const basic_ios &) = delete;

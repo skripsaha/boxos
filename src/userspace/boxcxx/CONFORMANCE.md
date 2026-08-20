@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 141 |
+| Internal implementation leaves (`include/std/__bits/`) | 142 |
 | Header source | ~99 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 235 phases (216 of them the numbered `PhaseN` series), 6 068 runtime checks, 2 011 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 236 phases (217 of them the numbered `PhaseN` series), 6 094 runtime checks, 2 011 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,8 +61,8 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **235** —
-216 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
+there are exactly as many as there are phase definitions. That is **236** —
+217 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
 rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
 alone, which is why both numbers are given above: neither can drift without
 the other contradicting it.
@@ -2203,6 +2203,18 @@ combinations the table leaves out.
   `static_cast<char>(c)`, so `narrow(L'ж', '?')` returned `0x36` — the digit
   `'6'`, a plausible character, from the function whose second parameter exists
   precisely to say *there is no such character*.
+- `✓` Closed in Ф43-b: **`widen` and `narrow` answered for themselves.**
+  [basic.ios.members] defines both as calls into `use_facet<ctype<charT>>` of
+  the stream's own locale, and until Ф43-b they computed the answer inline.
+  While there was no `ctype` to install that was a distinction without a
+  difference; the moment Ф43-a made a locale a container it became one, and a
+  program that installed its own `ctype` would have watched the stream ignore
+  it in silence. The answers for the classic facet did not change — the
+  reasoning below moved into `<__bits/locale_ctype>` beside the facet that now
+  gives them. The same routing reached the whitespace question: the sentry's
+  skip, the character-array extractor, `operator>>(istream&, string&)` and
+  `std::ws` all ask `ctype<charT>::is(space, c)` now, where they used to call
+  an `__ios::IsSpace` of their own — which is gone.
 - `?` **The pair is not a round trip above ASCII, on purpose.** Only ASCII has a
   single-byte form in this system's encoding, and `<cwchar>`'s `wctob` already
   says so (`wctob(L'ж')` is `EOF`, measured in Ф42-b), so `narrow` answers with
@@ -2394,11 +2406,25 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   what `locale()` returns, so a stream constructed afterwards is imbued with
   the new one, and it calls `setlocale(LC_ALL, name)` for a named locale as
   [locale.statics] requires.
-- `–` **No category facets yet.** No `ctype`, `num_get`, `num_put`, `numpunct`,
-  `collate`, `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` or
-  `messages`. A program that needs real facet-based i18n fails to compile
-  rather than silently behaving as `"C"`. The container Ф43-a built is what
-  they will be installed into.
+- `~` **`ctype` is here; the other category facets are not yet.** Ф43-b built
+  `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization with its
+  table, `ctype<wchar_t>`, `ctype_byname` and the fourteen [classification]
+  functions. Still absent: `num_get`, `num_put`, `numpunct`, `collate`,
+  `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put`, `messages` —
+  a program needing those fails to compile rather than silently behaving as
+  `"C"`.
+
+  **`ctype` answers two different questions under one name, and that is
+  deliberate.** `ctype<char>` classifies BYTES the way `"C"` does, from a
+  256-entry table derived at compile time from the rules `<cctype>` states.
+  `ctype<wchar_t>` classifies CODE POINTS the way Unicode 17 does, from the
+  tables Ф42-a generated. So byte `0xA0` is not whitespace (it is half of
+  U+00A0) while the character U+00A0 is, and `toupper(L'ж')` is `L'Ж'` while
+  `toupper('\xD0')` is itself. `digit` and `xdigit` stay ASCII in both, for
+  the reason §2 `<cwctype>` gives.
+
+  `ctype<char>`'s destructor honours the `del` flag of its constructor, which
+  makes it the one facet here that owns something other than itself.
 - `–` **Of the `_byname` family, only `codecvt_byname` exists**, because it is
   the only one whose base facet exists. It validates the name and is otherwise
   its base, and it shares that base's `locale::id` — so installing one is found
