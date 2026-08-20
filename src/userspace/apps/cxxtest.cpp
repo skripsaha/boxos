@@ -16,6 +16,7 @@
 
 #include "box/print.h"
 #include "box/system.h"
+#include "box/ipc.h"      // receive_args - the launch args pick which phases run
 #include "box/strand.h"   // strand_spawn / strand_exit (phase35 sibling strand)
 #include "box/sync.h"     // addr_park / addr_wake (phase35 join)
 #include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
@@ -51445,259 +51446,377 @@ void Phase224()
 
 
 
-int main()
+// ── phase2: the compile-time half of the suite ─────────────────────────
+// cxxtest_traits.cpp is a translation unit that only has to COMPILE; this
+// asks the linker whether it did. It sits last in the table so a full run
+// prints it exactly where it always printed.
+void Phase2()
 {
-    g_clock_at_entry = std::clock();
-
-    Phase0();
-    Phase1();
-    Phase3();
-    Phase4a();
-    Phase4b();
-    Phase5();
-    Phase6();
-    Phase7a();
-    Phase7b();
-    Phase7c();
-    Phase7d();
-    Phase8a();
-    Phase8b();
-    Phase8c();
-    Phase8d();
-    Phase8e();
-    Phase8f();
-    Phase9a();
-    Phase9a2();
-    Phase9a3();
-    Phase9a4();
-    Phase9b();
-    Phase9c();
-    PhaseCurrent();
-    Phase10();
-    Phase11();
-    Phase12();
-    Phase13();
-    Phase14();
-    Phase15();
-    Phase16();
-    Phase17();
-    Phase18();
-    Phase19();
-    Phase20();
-    Phase21();
-    Phase22();
-    Phase23();
-    Phase24();
-    Phase25();
-    Phase26();
-    Phase27();
-    Phase28();
-    Phase29();
-    Phase30();
-    Phase31();
-    Phase32();
-    Phase33();
-    Phase34();
-    Phase35();
-    Phase36();
-    Phase37();
-    Phase38();
-    Phase39();
-    Phase40();
-    Phase41();
-    Phase42();
-    Phase43();
-    Phase44();
-    Phase45();
-    Phase46();
-    Phase47();
-    Phase48();
-    Phase49();
-    Phase50();
-    Phase51();
-    Phase52();
-    Phase53();
-    Phase54();
-    Phase55();
-    Phase56();
-    Phase57();
-    Phase58();
-    Phase59();
-    Phase60();
-    Phase61();
-    Phase62();
-    Phase63();
-    Phase64();
-    Phase65();
-    Phase66();
-    Phase67();
-    Phase68();
-    Phase69();
-    Phase70();
-    Phase71();
-    Phase72();
-    Phase73();
-    Phase74();
-    Phase75();
-    Phase76();
-    Phase77();
-    Phase78();
-    Phase79();
-    Phase80();
-    Phase81();
-    Phase82();
-    Phase83();
-    Phase84();
-    Phase85();
-    Phase86();
-    Phase87();
-    Phase88();
-    Phase89();
-    Phase90();
-    Phase91();
-    Phase92();
-    Phase93();
-    Phase94();
-    Phase95();
-    Phase96();
-    Phase97();
-    Phase98();
-    Phase99();
-    Phase100();
-    Phase101();
-    Phase102();
-    Phase103();
-    Phase104();
-    Phase105();
-    Phase106();
-    Phase107();
-    Phase108();
-    Phase109();
-    Phase110();
-    Phase111();
-    Phase112();
-    Phase113();
-    Phase114();
-    Phase115();
-    Phase116();
-    Phase117();
-    Phase118();
-    Phase119();
-    Phase120();
-    Phase121();
-    Phase122();
-    Phase123();
-    Phase124();
-    Phase125();
-    Phase126();
-    Phase127();
-    Phase128();
-    Phase129();
-    Phase130();
-    Phase131();
-    Phase132();
-    Phase133();
-    Phase134();
-    Phase135();
-    Phase136();
-    Phase137();
-    Phase138();
-    Phase139();
-    Phase140();
-    Phase141();
-    Phase142();
-    Phase143();
-    Phase144();
-    Phase145();
-    Phase146();
-    Phase147();
-    Phase148();
-    Phase149();
-    Phase150();
-    Phase151();
-    Phase152();
-    Phase153();
-    Phase154();
-    Phase155();
-    Phase156();
-    Phase157();
-    Phase158();
-    Phase159();
-    Phase160();
-    Phase161();
-    Phase162();
-    Phase163();
-    Phase164();
-    Phase165();
-    Phase166();
-    Phase167();
-    Phase168();
-    Phase169();
-    Phase170();
-    Phase171();
-    Phase172();
-    Phase173();
-    Phase174();
-    Phase175();
-    Phase176();
-    Phase177();
-    Phase178();
-    Phase179();
-    Phase180();
-    Phase181();
-    Phase182();
-    Phase183();
-    Phase184();
-    Phase185();
-    Phase186();
-    Phase187();
-    Phase188();
-    Phase189();
-    Phase190();
-    Phase191();
-    Phase192();
-    Phase193();
-    Phase194();
-    Phase195();
-    Phase196();
-    Phase197();
-    Phase198();
-    Phase199();
-    Phase200();
-    Phase201();
-    Phase202();
-    Phase203();
-    Phase204();
-    Phase205();
-    Phase206();
-    Phase207();
-    Phase208();
-    Phase209();
-    Phase210();
-    Phase211();
-    Phase212();
-    Phase213();
-    Phase214();
-    Phase215();
-    Phase216();
-    Phase217();
-    Phase218();
-    Phase219();
-    Phase220();
-    Phase221();
-    Phase222();
-    Phase223();
-    Phase224();
-
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
     } else {
         printf("[CXX] FAIL phase2\n");
         g_failures++;
     }
+}
+
+// ── selective execution: main() is a table, the launch args pick rows ───
+// A gate that boots an emulator to prove five phases has no business running
+// 240 of them: measured, the phases relevant to one subphase are ~10 s of the
+// 7-minute run. With no selector every row runs, in the order it always ran,
+// and the run still ends in "[CXX] ALL PASS" -- the stress matrix sees no
+// change. With a selector the run ends in "[CXX] SUBSET PASS", which is a
+// different sentence on purpose: a partial run must never be able to claim
+// the word ALL.
+struct PhaseRow {
+    const char *name;
+    void      (*run)();
+};
+
+const PhaseRow kPhases[] = {
+    {"0", Phase0},
+    {"1", Phase1},
+    {"3", Phase3},
+    {"4a", Phase4a},
+    {"4b", Phase4b},
+    {"5", Phase5},
+    {"6", Phase6},
+    {"7a", Phase7a},
+    {"7b", Phase7b},
+    {"7c", Phase7c},
+    {"7d", Phase7d},
+    {"8a", Phase8a},
+    {"8b", Phase8b},
+    {"8c", Phase8c},
+    {"8d", Phase8d},
+    {"8e", Phase8e},
+    {"8f", Phase8f},
+    {"9a", Phase9a},
+    {"9a2", Phase9a2},
+    {"9a3", Phase9a3},
+    {"9a4", Phase9a4},
+    {"9b", Phase9b},
+    {"9c", Phase9c},
+    {"current", PhaseCurrent},
+    {"10", Phase10},
+    {"11", Phase11},
+    {"12", Phase12},
+    {"13", Phase13},
+    {"14", Phase14},
+    {"15", Phase15},
+    {"16", Phase16},
+    {"17", Phase17},
+    {"18", Phase18},
+    {"19", Phase19},
+    {"20", Phase20},
+    {"21", Phase21},
+    {"22", Phase22},
+    {"23", Phase23},
+    {"24", Phase24},
+    {"25", Phase25},
+    {"26", Phase26},
+    {"27", Phase27},
+    {"28", Phase28},
+    {"29", Phase29},
+    {"30", Phase30},
+    {"31", Phase31},
+    {"32", Phase32},
+    {"33", Phase33},
+    {"34", Phase34},
+    {"35", Phase35},
+    {"36", Phase36},
+    {"37", Phase37},
+    {"38", Phase38},
+    {"39", Phase39},
+    {"40", Phase40},
+    {"41", Phase41},
+    {"42", Phase42},
+    {"43", Phase43},
+    {"44", Phase44},
+    {"45", Phase45},
+    {"46", Phase46},
+    {"47", Phase47},
+    {"48", Phase48},
+    {"49", Phase49},
+    {"50", Phase50},
+    {"51", Phase51},
+    {"52", Phase52},
+    {"53", Phase53},
+    {"54", Phase54},
+    {"55", Phase55},
+    {"56", Phase56},
+    {"57", Phase57},
+    {"58", Phase58},
+    {"59", Phase59},
+    {"60", Phase60},
+    {"61", Phase61},
+    {"62", Phase62},
+    {"63", Phase63},
+    {"64", Phase64},
+    {"65", Phase65},
+    {"66", Phase66},
+    {"67", Phase67},
+    {"68", Phase68},
+    {"69", Phase69},
+    {"70", Phase70},
+    {"71", Phase71},
+    {"72", Phase72},
+    {"73", Phase73},
+    {"74", Phase74},
+    {"75", Phase75},
+    {"76", Phase76},
+    {"77", Phase77},
+    {"78", Phase78},
+    {"79", Phase79},
+    {"80", Phase80},
+    {"81", Phase81},
+    {"82", Phase82},
+    {"83", Phase83},
+    {"84", Phase84},
+    {"85", Phase85},
+    {"86", Phase86},
+    {"87", Phase87},
+    {"88", Phase88},
+    {"89", Phase89},
+    {"90", Phase90},
+    {"91", Phase91},
+    {"92", Phase92},
+    {"93", Phase93},
+    {"94", Phase94},
+    {"95", Phase95},
+    {"96", Phase96},
+    {"97", Phase97},
+    {"98", Phase98},
+    {"99", Phase99},
+    {"100", Phase100},
+    {"101", Phase101},
+    {"102", Phase102},
+    {"103", Phase103},
+    {"104", Phase104},
+    {"105", Phase105},
+    {"106", Phase106},
+    {"107", Phase107},
+    {"108", Phase108},
+    {"109", Phase109},
+    {"110", Phase110},
+    {"111", Phase111},
+    {"112", Phase112},
+    {"113", Phase113},
+    {"114", Phase114},
+    {"115", Phase115},
+    {"116", Phase116},
+    {"117", Phase117},
+    {"118", Phase118},
+    {"119", Phase119},
+    {"120", Phase120},
+    {"121", Phase121},
+    {"122", Phase122},
+    {"123", Phase123},
+    {"124", Phase124},
+    {"125", Phase125},
+    {"126", Phase126},
+    {"127", Phase127},
+    {"128", Phase128},
+    {"129", Phase129},
+    {"130", Phase130},
+    {"131", Phase131},
+    {"132", Phase132},
+    {"133", Phase133},
+    {"134", Phase134},
+    {"135", Phase135},
+    {"136", Phase136},
+    {"137", Phase137},
+    {"138", Phase138},
+    {"139", Phase139},
+    {"140", Phase140},
+    {"141", Phase141},
+    {"142", Phase142},
+    {"143", Phase143},
+    {"144", Phase144},
+    {"145", Phase145},
+    {"146", Phase146},
+    {"147", Phase147},
+    {"148", Phase148},
+    {"149", Phase149},
+    {"150", Phase150},
+    {"151", Phase151},
+    {"152", Phase152},
+    {"153", Phase153},
+    {"154", Phase154},
+    {"155", Phase155},
+    {"156", Phase156},
+    {"157", Phase157},
+    {"158", Phase158},
+    {"159", Phase159},
+    {"160", Phase160},
+    {"161", Phase161},
+    {"162", Phase162},
+    {"163", Phase163},
+    {"164", Phase164},
+    {"165", Phase165},
+    {"166", Phase166},
+    {"167", Phase167},
+    {"168", Phase168},
+    {"169", Phase169},
+    {"170", Phase170},
+    {"171", Phase171},
+    {"172", Phase172},
+    {"173", Phase173},
+    {"174", Phase174},
+    {"175", Phase175},
+    {"176", Phase176},
+    {"177", Phase177},
+    {"178", Phase178},
+    {"179", Phase179},
+    {"180", Phase180},
+    {"181", Phase181},
+    {"182", Phase182},
+    {"183", Phase183},
+    {"184", Phase184},
+    {"185", Phase185},
+    {"186", Phase186},
+    {"187", Phase187},
+    {"188", Phase188},
+    {"189", Phase189},
+    {"190", Phase190},
+    {"191", Phase191},
+    {"192", Phase192},
+    {"193", Phase193},
+    {"194", Phase194},
+    {"195", Phase195},
+    {"196", Phase196},
+    {"197", Phase197},
+    {"198", Phase198},
+    {"199", Phase199},
+    {"200", Phase200},
+    {"201", Phase201},
+    {"202", Phase202},
+    {"203", Phase203},
+    {"204", Phase204},
+    {"205", Phase205},
+    {"206", Phase206},
+    {"207", Phase207},
+    {"208", Phase208},
+    {"209", Phase209},
+    {"210", Phase210},
+    {"211", Phase211},
+    {"212", Phase212},
+    {"213", Phase213},
+    {"214", Phase214},
+    {"215", Phase215},
+    {"216", Phase216},
+    {"217", Phase217},
+    {"218", Phase218},
+    {"219", Phase219},
+    {"220", Phase220},
+    {"221", Phase221},
+    {"222", Phase222},
+    {"223", Phase223},
+    {"224", Phase224},
+    {"2", Phase2},
+};
+
+constexpr int kMaxArgv = 16;
+
+int AsciiLower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c;
+}
+
+bool NameEq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (AsciiLower(*a) != AsciiLower(*b)) return false;
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+// Digits at the front of a phase name: "9a4" -> 9, "224" -> 224, "current" -> -1.
+long LeadingNumber(const char *s)
+{
+    if (*s < '0' || *s > '9') return -1;
+    long v = 0;
+    for (; *s >= '0' && *s <= '9'; ++s) v = v * 10 + (*s - '0');
+    return v;
+}
+
+// A selector is one of: a phase name ("9a4", "current"), a phase NUMBER ("9",
+// which takes 9a/9a2/9a3/9a4/9b/9c with it), an inclusive range ("220-224"),
+// or "all".
+bool Selects(const char *tok, const PhaseRow &row)
+{
+    if (NameEq(tok, "all"))      return true;
+    if (NameEq(tok, row.name))   return true;
+
+    const long n = LeadingNumber(row.name);
+    if (n < 0) return false;            // a named phase answers to its name only
+
+    const long lo = LeadingNumber(tok);
+    if (lo < 0) return false;
+
+    const char *p = tok;
+    while (*p >= '0' && *p <= '9') ++p;
+    if (*p == '\0') return n == lo;
+    if (*p != '-')   return false;      // "9a4" was already answered by NameEq
+
+    const long hi = LeadingNumber(p + 1);
+    if (hi < 0) return false;
+    return n >= lo && n <= hi;
+}
+
+int main()
+{
+    g_clock_at_entry = std::clock();
+
+    int  argc = 0;
+    char argv[kMaxArgv][64];
+    receive_args(&argc, argv, kMaxArgv);
+    if (argc > kMaxArgv) argc = kMaxArgv;
+
+    const char *sel[kMaxArgv];
+    int         nsel = 0;
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] != '\0') sel[nsel++] = argv[i];
+    }
+
+    constexpr int kTotal = (int)(sizeof(kPhases) / sizeof(kPhases[0]));
+
+    if (nsel == 0) {
+        for (const PhaseRow &row : kPhases) row.run();
+
+        if (g_failures == 0) {
+            printf("[CXX] ALL PASS\n");
+            return 0;
+        }
+        printf("[CXX] TOTAL FAILURES: %d\n", g_failures);
+        return 1;
+    }
+
+    // A selector that names nothing is a failure, not an empty run. Reporting
+    // a pass over zero work is the one thing a gate must never be able to do,
+    // and a mistyped phase number is exactly how that would happen.
+    for (int i = 0; i < nsel; i++) {
+        bool any = false;
+        for (const PhaseRow &row : kPhases) {
+            if (Selects(sel[i], row)) { any = true; break; }
+        }
+        if (!any) {
+            printf("[CXX] FAIL: selector \"%s\" names no phase\n", sel[i]);
+            g_failures++;
+        }
+    }
+
+    int ran = 0;
+    for (const PhaseRow &row : kPhases) {
+        for (int i = 0; i < nsel; i++) {
+            if (Selects(sel[i], row)) { row.run(); ran++; break; }
+        }
+    }
 
     if (g_failures == 0) {
-        printf("[CXX] ALL PASS\n");
+        printf("[CXX] SUBSET PASS: %d of %d phases\n", ran, kTotal);
         return 0;
     }
     printf("[CXX] TOTAL FAILURES: %d\n", g_failures);

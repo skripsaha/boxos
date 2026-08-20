@@ -8,11 +8,15 @@
 # slow and carry the pre-existing AMP-storage UEFI-16c flake. This keeps the
 # signal about the phase clean and the run fast ("только нужные тесты").
 #
-# Usage:  tools/cxx_phase_matrix.sh "<app [app2 ...]>" "<PASS-marker-regex>" [configs]
+# Usage:  tools/cxx_phase_matrix.sh "<cmdline[;cmdline2...]>" "<PASS-marker-regex>" [configs]
 #   configs (optional): subset of  bios1 bios16 uefi1 uefi16  (default: all four)
+# The first argument is a SEMICOLON-separated list of shell command lines, so a
+# command may carry arguments of its own -- "cxxtest 220-224" is one command,
+# not two. (It used to split on whitespace, which made an argument impossible.)
 # Examples:
-#   tools/cxx_phase_matrix.sh cxxtest '\[CXX\] ALL PASS'            # full matrix
-#   tools/cxx_phase_matrix.sh cxxtest '\[CXX\] ALL PASS' bios1      # quick smoke
+#   tools/cxx_phase_matrix.sh cxxtest '\[CXX\] ALL PASS'                    # full matrix
+#   tools/cxx_phase_matrix.sh cxxtest '\[CXX\] ALL PASS' bios1              # quick smoke
+#   tools/cxx_phase_matrix.sh "cxxtest 220-224" '\[CXX\] SUBSET PASS'       # four configs, five phases
 #
 # Per-config PASS = marker appears AND no PANIC / [EXCEPTION] / TOTAL FAILURES.
 # Exit 0 iff every requested config passes.
@@ -53,10 +57,14 @@ for cfg in $CONFIGS; do
     fi
     sleep 2
 
-    for c in $APPS; do
-        tools/qemu-input.sh type "$c" >/dev/null 2>&1
-        tools/qemu-input.sh key  ret >/dev/null 2>&1
-    done
+    (
+        IFS=';'
+        for c in $APPS; do
+            [ -z "$c" ] && continue
+            tools/qemu-input.sh type "$c" >/dev/null 2>&1
+            tools/qemu-input.sh key  ret >/dev/null 2>&1
+        done
+    )
 
     hit=0
     # 3600s post-shell budget: the correctly-rounded cmath suite (Phase66+) runs
