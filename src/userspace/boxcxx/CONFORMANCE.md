@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 144 |
+| Internal implementation leaves (`include/std/__bits/`) | 145 |
 | Header source | ~99 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 237 phases (218 of them the numbered `PhaseN` series), 6 113 runtime checks, 2 011 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 238 phases (219 of them the numbered `PhaseN` series), 6 133 runtime checks, 2 011 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,8 +61,8 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **237** —
-218 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
+there are exactly as many as there are phase definitions. That is **238** —
+219 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
 rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
 alone, which is why both numbers are given above: neither can drift without
 the other contradicting it.
@@ -2296,6 +2296,32 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   which was an honest no-op for the whole epic, now does the other half:
   its last destructor flushes the streams while they are still alive.
 
+## `<istream>`
+
+- `✓` Closed in Ф43-c-2: **every arithmetic extractor carried its own
+  grammar.** [istream.formatted.arithmetic] defines each as a call into
+  `num_get`, and moving the grammar there did more than relocate it.
+  [facet.num.get.virtuals]/3's stage 2 states exactly which characters may be
+  ACCUMULATED, and following that rule removed **five separate `sungetc`
+  loops**: the old gatherer took anything number-shaped and then handed back
+  whatever `from_chars` refused, while a grammar that never accumulates a
+  character it cannot use has nothing to give back. That is also what lets
+  extraction run through a single-pass iterator at all.
+- `~` **A lone sign is CONSUMED now.** `is >> n` on `"-x"` used to leave the
+  stream positioned at the `'-'`; it now leaves it at the `'x'`, fails, and
+  stores zero. Stage 2 describes exactly this, and both reference
+  implementations do it — the old putback was an undocumented deviation, and
+  it is recorded here because it is the one visible behaviour change the move
+  brought.
+- `✓` **Whitespace is the `ctype` facet's answer** as of Ф43-b: the sentry's
+  skip, the character-array extractor, `operator>>(istream&, string&)` and
+  `std::ws` all ask `ctype<charT>::is(space, c)`, where they used to call an
+  `__ios::IsSpace` of their own.
+- What a program gains: `numpunct` reaches the parser. A comma decimal point,
+  a thousands separator skipped as it is read, and `truename`/`falsename`
+  under `boolalpha` all work on the way IN, which they could not before —
+  there was no facet to ask.
+
 ## `<istream>` / `<ostream>` — the free inserters and extractors
 
 - `~` **Whitespace is not the same question for the two character types, and
@@ -2409,9 +2435,10 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 - `~` **`ctype`, `numpunct` and `num_put` are here; the rest are not yet.**
   Ф43-b built `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization
   with its table, `ctype<wchar_t>`, `ctype_byname` and the fourteen
-  [classification] functions; Ф43-c added `numpunct`, `numpunct_byname` and
-  `num_put`, and pointed every arithmetic inserter at the last of those. Still
-  absent: `num_get`, `collate`, `moneypunct`, `money_get`, `money_put`,
+  [classification] functions; Ф43-c added `numpunct`, `numpunct_byname`,
+  `num_put` and `num_get`, and pointed every arithmetic inserter and extractor
+  at the last two. Still
+  absent: `collate`, `moneypunct`, `money_get`, `money_put`,
   `time_get`, `time_put`, `messages` — a program needing those fails to
   compile rather than silently behaving as `"C"`.
 
