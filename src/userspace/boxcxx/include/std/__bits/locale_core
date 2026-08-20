@@ -139,6 +139,13 @@ public:
 
     bool operator==(const locale &other) const;
 
+    // A locale IS a comparator: sort(v.begin(), v.end(), loc) orders by its
+    // collation. Defined in <__bits/locale_text>, because it is a call into
+    // the collate facet and that facet is not declared here.
+    template <class charT, class traits, class Allocator>
+    bool operator()(const basic_string<charT, traits, Allocator> &s1,
+                    const basic_string<charT, traits, Allocator> &s2) const;
+
     static locale        global(const locale &loc);
     static const locale &classic() noexcept;
 
@@ -354,7 +361,11 @@ inline constexpr size_t kIdNumPutChar      = 8;
 inline constexpr size_t kIdNumPutWchar     = 9;
 inline constexpr size_t kIdNumGetChar      = 10;
 inline constexpr size_t kIdNumGetWchar     = 11;
-inline constexpr size_t kBuiltinFacets     = 12;
+inline constexpr size_t kIdCollateChar     = 12;
+inline constexpr size_t kIdCollateWchar    = 13;
+inline constexpr size_t kIdMessagesChar    = 14;
+inline constexpr size_t kIdMessagesWchar   = 15;
+inline constexpr size_t kBuiltinFacets     = 16;
 
 // The public half of every codecvt: seven members that do nothing but call
 // the virtual half. Written once because it IS once — [locale.codecvt] gives

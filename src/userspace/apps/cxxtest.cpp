@@ -51299,6 +51299,148 @@ void Phase223()
            "characters back\n");
 }
 
+// ── Phase224: collate and messages ─────────────────────────────────────────
+// Two facets whose "C" answers look like doing nothing, and are not. Collation
+// order in "C" IS code-unit order, and a system with no message catalogs
+// answers -1 to open and hands back the default — those ARE the answers, and
+// the thing that makes them honest rather than empty is that a program can
+// derive from either and supply real ones. Both directions are checked here.
+namespace p224 {
+
+// Collation that sorts backwards. Nothing else in the library could produce
+// this order, so a test that sees it knows the facet was consulted.
+struct Backwards : std::collate<char> {
+protected:
+    int do_compare(const char *l1, const char *h1, const char *l2,
+                   const char *h2) const override
+    {
+        return -std::collate<char>::do_compare(l1, h1, l2, h2);
+    }
+};
+
+// A catalog that exists. open() hands out a real handle and get() answers from
+// a table, which is exactly the shape a program with translations would use.
+struct RealCatalog : std::messages<char> {
+protected:
+    catalog do_open(const std::string &fn, const std::locale &) const override
+    {
+        return fn == "boxos" ? 7 : -1;
+    }
+    std::string do_get(catalog c, int set, int msgid,
+                       const std::string &dfault) const override
+    {
+        if (c == 7 && set == 1 && msgid == 2) return "translated";
+        return dfault;
+    }
+};
+
+} // namespace p224
+
+void Phase224()
+{
+    using namespace p224;
+    using std::locale;
+    using std::use_facet;
+
+    const locale classic = locale::classic();
+
+    // ── (1) collation in "C" is code-unit order ──────────────────────────
+    {
+        const std::collate<char> &c = use_facet<std::collate<char>>(classic);
+        const char a[] = "apple", b[] = "banana", a2[] = "apple";
+        Check(c.compare(a, a + 5, b, b + 6) < 0 && c.compare(b, b + 6, a, a + 5) > 0 &&
+                  c.compare(a, a + 5, a2, a2 + 5) == 0,
+              "phase224 (1) collate<char> orders as char_traits::compare does");
+        Check(c.compare(a, a + 2, a, a + 5) < 0,
+              "phase224 (2) a prefix sorts before what extends it");
+    }
+
+    // ── (3) transform is the identity, and hash agrees with compare ──────
+    {
+        const std::collate<char> &c = use_facet<std::collate<char>>(classic);
+        const char                s[] = "text";
+        Check(c.transform(s, s + 4) == "text",
+              "phase224 (3) transform is the identity: there is no reordering to bake in");
+        const char t[] = "text";
+        Check(c.hash(s, s + 4) == c.hash(t, t + 4),
+              "phase224 (4) and equal keys hash equally, which is the whole contract");
+    }
+
+    // ── (5) a locale IS a comparator ─────────────────────────────────────
+    // [locale.members]: operator() lets a locale be passed anywhere a
+    // comparator is. It could not be written until collate existed.
+    {
+        std::vector<std::string> v{"pear", "apple", "fig"};
+        std::sort(v.begin(), v.end(), classic);
+        Check(v[0] == "apple" && v[1] == "fig" && v[2] == "pear",
+              "phase224 (5) sort(v.begin(), v.end(), loc) orders by the locale");
+
+        const locale backwards(classic, new Backwards);
+        std::sort(v.begin(), v.end(), backwards);
+        Check(v[0] == "pear" && v[1] == "fig" && v[2] == "apple",
+              "phase224 (6) ... and an installed collate reverses it, which nothing "
+              "else in this library could have done");
+    }
+
+    // ── (7) collate<wchar_t> answers about code points ───────────────────
+    {
+        const std::collate<wchar_t> &w = use_facet<std::collate<wchar_t>>(classic);
+        const wchar_t a[] = L"ж", b[] = L"я";
+        Check(w.compare(a, a + 1, b, b + 1) < 0,
+              "phase224 (7) the wide facet compares code points, so ZHE precedes YA");
+    }
+
+    // ── (8) messages: no catalogs, and that is an answer ─────────────────
+    {
+        const std::messages<char> &m = use_facet<std::messages<char>>(classic);
+        const auto                 c = m.open("anything", classic);
+        Check(c < 0, "phase224 (8) opening a catalog on a system with none answers -1");
+        Check(m.get(c, 1, 2, "fallback") == "fallback",
+              "phase224 (9) and get() hands back the default, which is what it is for");
+        m.close(c);   // must not fault
+    }
+
+    // ── (10) ... and a program can supply real ones ──────────────────────
+    {
+        const locale                with(classic, new RealCatalog);
+        const std::messages<char>  &m = use_facet<std::messages<char>>(with);
+        const auto                  c = m.open("boxos", with);
+        Check(c == 7, "phase224 (10) an installed messages facet opens its own catalog");
+        Check(m.get(c, 1, 2, "fallback") == "translated",
+              "phase224 (11) ... and answers from it");
+        Check(m.get(c, 9, 9, "fallback") == "fallback",
+              "phase224 (12) ... falling back where it has nothing to say");
+        Check(m.open("elsewhere", with) < 0,
+              "phase224 (13) ... and still refusing a catalog it does not have");
+    }
+
+    // ── (14) the _byname forms ───────────────────────────────────────────
+    {
+        bool threwCollate = false, threwMessages = false;
+        try {
+            (void)new std::collate_byname<char>("sv_SE.UTF-8");
+        } catch (const std::runtime_error &) {
+            threwCollate = true;
+        }
+        try {
+            (void)new std::messages_byname<char>("sv_SE.UTF-8");
+        } catch (const std::runtime_error &) {
+            threwMessages = true;
+        }
+        Check(threwCollate && threwMessages,
+              "phase224 (14) both _byname facets refuse a name this system is not");
+
+        const locale byname(classic, new std::collate_byname<char>("C"));
+        const char   a[] = "a", b[] = "b";
+        Check(use_facet<std::collate<char>>(byname).compare(a, a + 1, b, b + 1) < 0,
+              "phase224 (15) ... and the one it is collates like \"C\"");
+    }
+
+    printf("[CXX] PASS phase224: collate and messages - two facets whose \"C\" "
+           "answers are answers, not absences\n");
+}
+
+
 
 
 
@@ -51545,6 +51687,7 @@ int main()
     Phase221();
     Phase222();
     Phase223();
+    Phase224();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

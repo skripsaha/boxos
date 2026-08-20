@@ -1,0 +1,195 @@
+// boxcxx — <__bits/locale_text>
+//
+// collate, messages, and the locale::operator() that could not be written
+// until collate existed.
+//
+// Neither facet takes an `ios_base&`, so both could have lived beside ctype;
+// they are here instead because they answer a different question. ctype is
+// about what a character IS; these two are about what a program does with
+// text it did not write — ordering it, and looking it up.
+#ifndef BOXCXX_BITS_LOCALE_TEXT
+#define BOXCXX_BITS_LOCALE_TEXT
+
+#include <__bits/locale_core>
+#include <cstddef>
+#include <string>
+
+namespace std {
+
+// ── collate [locale.collate] ────────────────────────────────────────────
+// In the "C" locale, collation order IS code-unit order — [locale.collate] is
+// explicit that the classic facet compares as if by char_traits::compare —
+// so do_compare is a plain lexicographic walk and do_transform is the
+// identity. That is not a simplification: a facet that reordered anything
+// would be claiming a language this system does not have.
+//
+// The interesting one is do_hash, whose contract is only "equal keys under
+// do_compare hash equally". With transform the identity, that reduces to
+// hashing the bytes, and the hash used is the one <string> already uses for
+// std::hash — one function, so two spellings of "the hash of this text"
+// cannot drift apart.
+template <class charT>
+class collate : public locale::facet {
+public:
+    using char_type   = charT;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit collate(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    int compare(const charT *low1, const charT *high1, const charT *low2,
+                const charT *high2) const
+    {
+        return do_compare(low1, high1, low2, high2);
+    }
+    string_type transform(const charT *low, const charT *high) const
+    {
+        return do_transform(low, high);
+    }
+    long hash(const charT *low, const charT *high) const { return do_hash(low, high); }
+
+protected:
+    ~collate() = default;
+
+    virtual int do_compare(const charT *low1, const charT *high1, const charT *low2,
+                           const charT *high2) const
+    {
+        for (; low1 != high1 && low2 != high2; ++low1, ++low2) {
+            if (char_traits<charT>::lt(*low1, *low2)) return -1;
+            if (char_traits<charT>::lt(*low2, *low1)) return 1;
+        }
+        if (low1 == high1) return low2 == high2 ? 0 : -1;
+        return 1;
+    }
+
+    virtual string_type do_transform(const charT *low, const charT *high) const
+    {
+        return string_type(low, high);
+    }
+
+    virtual long do_hash(const charT *low, const charT *high) const
+    {
+        // std::hash, not this class's own hash() member, which would hide it.
+        return static_cast<long>(
+            std::hash<basic_string_view<charT>>{}(basic_string_view<charT>(low, high)));
+    }
+};
+
+template <class charT>
+locale::id collate<charT>::id{};
+
+template <>
+inline locale::id collate<char>::id{__cvt::kIdCollateChar};
+template <>
+inline locale::id collate<wchar_t>::id{__cvt::kIdCollateWchar};
+
+template <class charT>
+class collate_byname : public collate<charT> {
+public:
+    using string_type = basic_string<charT>;
+
+    explicit collate_byname(const char *name, size_t refs = 0) : collate<charT>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit collate_byname(const string &name, size_t refs = 0)
+        : collate_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~collate_byname() = default;
+};
+
+// ── locale::operator() [locale.members] ─────────────────────────────────
+// A locale is a comparator: `sort(v.begin(), v.end(), loc)` orders strings by
+// the locale's collation. It is defined here rather than in locale_core
+// because it IS a call into collate, and collate did not exist there.
+template <class charT, class traits, class Allocator>
+bool locale::operator()(const basic_string<charT, traits, Allocator> &s1,
+                        const basic_string<charT, traits, Allocator> &s2) const
+{
+    // std::collate, not locale::collate — the category constant of the same
+    // name is a member of this very class and would win lookup.
+    return use_facet<std::collate<charT>>(*this).compare(s1.data(), s1.data() + s1.size(),
+                                                    s2.data(), s2.data() + s2.size()) < 0;
+}
+
+// ── messages [locale.messages] ──────────────────────────────────────────
+// A message catalog is a FILE of translated strings, opened by name. There
+// are no catalogs on this system and no second language to put in one, so
+// do_open answers -1 — which [locale.messages.virtuals] defines as "no
+// catalog could be opened" — and do_get returns the default the caller
+// supplied, which is what it is for.
+//
+// This is not a stub: -1 and the default ARE the answers for a system with no
+// catalogs, and a facet that invented a catalog would be inventing a
+// translation. What makes it honest rather than empty is that a program can
+// derive from it and supply real ones.
+class messages_base {
+public:
+    using catalog = ptrdiff_t;
+};
+
+template <class charT>
+class messages : public locale::facet, public messages_base {
+public:
+    using char_type   = charT;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit messages(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    catalog open(const string &fn, const locale &loc) const { return do_open(fn, loc); }
+    string_type get(catalog c, int set, int msgid, const string_type &dfault) const
+    {
+        return do_get(c, set, msgid, dfault);
+    }
+    void close(catalog c) const { do_close(c); }
+
+protected:
+    ~messages() = default;
+
+    virtual catalog do_open(const string &, const locale &) const { return -1; }
+    virtual string_type do_get(catalog, int, int, const string_type &dfault) const
+    {
+        return dfault;
+    }
+    // [locale.messages.virtuals]: closing a catalog that was never opened is a
+    // precondition violation, not something to detect — and there is nothing
+    // here to release.
+    virtual void do_close(catalog) const {}
+};
+
+template <class charT>
+locale::id messages<charT>::id{};
+
+template <>
+inline locale::id messages<char>::id{__cvt::kIdMessagesChar};
+template <>
+inline locale::id messages<wchar_t>::id{__cvt::kIdMessagesWchar};
+
+template <class charT>
+class messages_byname : public messages<charT> {
+public:
+    using catalog     = typename messages<charT>::catalog;
+    using string_type = basic_string<charT>;
+
+    explicit messages_byname(const char *name, size_t refs = 0) : messages<charT>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit messages_byname(const string &name, size_t refs = 0)
+        : messages_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~messages_byname() = default;
+};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_TEXT

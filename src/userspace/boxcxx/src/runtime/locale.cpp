@@ -74,6 +74,11 @@ using NumGetWchar = std::num_get<wchar_t>;
 constinit FacetCell<NumGetChar>  gNumGetChar{};
 constinit FacetCell<NumGetWchar> gNumGetWchar{};
 
+constinit FacetCell<std::collate<char>>     gCollateChar{};
+constinit FacetCell<std::collate<wchar_t>>  gCollateWchar{};
+constinit FacetCell<std::messages<char>>    gMessagesChar{};
+constinit FacetCell<std::messages<wchar_t>> gMessagesWchar{};
+
 // Table 104 of [locale.category] puts all four codecvts in the ctype
 // category, which is what the category-combining constructors select on.
 constinit const std::__loc::Slot kClassicSlots[std::__cvt::kBuiltinFacets] = {
@@ -89,6 +94,10 @@ constinit const std::__loc::Slot kClassicSlots[std::__cvt::kBuiltinFacets] = {
     {&gNumPutWchar.obj,   std::locale::numeric},
     {&gNumGetChar.obj,    std::locale::numeric},
     {&gNumGetWchar.obj,   std::locale::numeric},
+    {&gCollateChar.obj,   std::locale::collate},
+    {&gCollateWchar.obj,  std::locale::collate},
+    {&gMessagesChar.obj,  std::locale::messages},
+    {&gMessagesWchar.obj, std::locale::messages},
 };
 
 constinit const std::locale::__Table kClassicTable{kClassicSlots,
