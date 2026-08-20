@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 145 |
+| Internal implementation leaves (`include/std/__bits/`) | 146 |
 | Header source | ~99 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 238 phases (219 of them the numbered `PhaseN` series), 6 133 runtime checks, 2 011 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 239 phases (220 of them the numbered `PhaseN` series), 6 148 runtime checks, 2 011 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,8 +61,8 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **238** —
-219 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
+there are exactly as many as there are phase definitions. That is **239** —
+220 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
 rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
 alone, which is why both numbers are given above: neither can drift without
 the other contradicting it.
@@ -2437,9 +2437,11 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   with its table, `ctype<wchar_t>`, `ctype_byname` and the fourteen
   [classification] functions; Ф43-c added `numpunct`, `numpunct_byname`,
   `num_put` and `num_get`, and pointed every arithmetic inserter and extractor
-  at the last two. Still
-  absent: `collate`, `moneypunct`, `money_get`, `money_put`,
-  `time_get`, `time_put`, `messages` — a program needing those fails to
+  at the last two; Ф43-d-1 added `collate`, `messages` and their `_byname`
+  forms, and with `collate` came `locale::operator()` — a locale can be passed
+  as a comparator now, which it could not be while nothing knew how to order
+  text. Still
+  absent: `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` — a program needing those fails to
   compile rather than silently behaving as `"C"`.
 
   **Grouping exists as of Ф43-c, and had never been written before it.** The
@@ -2461,6 +2463,16 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
   `ctype<char>`'s destructor honours the `del` flag of its constructor, which
   makes it the one facet here that owns something other than itself.
+
+  **`collate` and `messages` answer with what looks like nothing, and is not.**
+  Collation order in `"C"` IS code-unit order — [locale.collate] says the
+  classic facet compares as if by `char_traits::compare` — so `do_transform`
+  is the identity and a facet that reordered anything would be claiming a
+  language this system does not have. `messages` answers `-1` to `open` and
+  returns the caller's default from `get`, which is what [locale.messages.virtuals]
+  defines for a catalog that could not be opened; there are no catalogs here.
+  Both are the real answers rather than placeholders, and a program that has
+  its own ordering or its own translations installs a facet and gets them.
 - `–` **Of the `_byname` family, only `codecvt_byname` exists**, because it is
   the only one whose base facet exists. It validates the name and is otherwise
   its base, and it shares that base's `locale::id` — so installing one is found
