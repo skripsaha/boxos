@@ -102,7 +102,7 @@ private:
     // lookup. A cached pointer would have to be carried by the move
     // constructor, the move assignment, swap() and Disown() — four more
     // places for two objects' state to drift apart, bought for nothing.
-    const Codecvt &Cvt() const { return use_facet<Codecvt>(this->getloc()); }
+    const Codecvt &Cvt() const { return use_facet<Codecvt>(this->__loc_ref()); }
     bool Conv() const { return !Cvt().always_noconv(); }
 
     static constexpr bool Has(ios_base::openmode m, ios_base::openmode f) noexcept

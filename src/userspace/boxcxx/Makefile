@@ -52,6 +52,7 @@ SRCS = src/runtime/cxa_runtime.cpp \
        src/runtime/mutex.cpp \
        src/runtime/stdexcept.cpp \
        src/runtime/system_error.cpp \
+       src/runtime/locale.cpp \
        src/runtime/ios.cpp \
        src/runtime/iostream.cpp \
        src/runtime/syncstream.cpp \

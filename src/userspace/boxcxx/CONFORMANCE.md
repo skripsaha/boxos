@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **102** — 97 of the 105 C++23 [headers] name (8 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 140 |
-| Header source | ~93 300 lines |
+| Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 141 |
+| Header source | ~99 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 232 phases (213 of them the numbered `PhaseN` series), 5 973 runtime checks, 1 984 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 235 phases (216 of them the numbered `PhaseN` series), 6 068 runtime checks, 2 011 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -53,25 +53,37 @@ and Ф38 re-derived every row and found that one off by exactly that
 directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are `Phase*();`
 call sites in `main`; checks are occurrences of `Check(` in `cxxtest.cpp` and
-`static_assert`s are occurrences of the bare token `static_assert` (which is 21
+`static_assert`s are occurrences of the bare token `static_assert` (which is 24
 more than `static_assert(`, the difference being the times the keyword is
 named in a comment — the two rows were never counted the same way, and saying
 so is cheaper than renumbering both). `tools/cxx_ftm_audit.sh` re-derives the
 macro count and checks it against [version.syn] on every run.
 
-The phase count has drifted three times, in both directions, so it is now
-stated with the rule that produces it: `Phase*();` call sites in `main`, of
-which there are exactly as many as there are phase definitions. That is
-**230** — 211 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2`
-and the rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered
-series alone, which is why both numbers are given above: neither can drift
-without the other contradicting it.
+The phase count has drifted four times, in both directions, so it is stated
+with the rule that produces it: `Phase*();` call sites in `main`, of which
+there are exactly as many as there are phase definitions. That is **235** —
+216 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
+rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
+alone, which is why both numbers are given above: neither can drift without
+the other contradicting it.
 
 **The third drift was this paragraph against the table two rows up.** Ф41
 raised the table to 221 and left the sentence here saying 217, so the document
 disagreed with itself about a number it had already been corrected on twice.
 Ф42 re-derived both from the same two commands and they now differ by exactly
 the suffixed phases, which is the only difference they are allowed to have.
+
+**The fourth drift was the whole table, and Ф42 caused it by fixing the
+prose.** Ф42-g rewrote every sentence that named a wide feature and left the
+counted rows exactly as it found them, so on the day it shipped the document
+said 102 headers five lines above §1.1 saying 102 of 105 are IN the tree and 3
+are not — 107 files described as 102, and a header count contradicting its own
+breakdown. The suite row was stale by two phases, 66 checks and 26
+`static_assert`s at the same time. Ф43 re-derived all six rows from the
+commands above; **the lesson is that this table has now drifted every time
+someone edited the document without running them**, which is why the numbers
+here are worth exactly as much as the last person's willingness to type six
+shell commands, and no more.
 
 Built freestanding: `-nostdinc++ -nostdlib -ffreestanding -fno-builtin`, with
 `-fexceptions -frtti -fcoroutines -fasynchronous-unwind-tables
@@ -396,14 +408,16 @@ and line — is recorded there.
   correctly-rounded floating-point path included, with `setfill(L'ж')` filling
   in a character no byte can hold.
 
-- **Locales beyond `"C"`.** There is one locale and no way to construct
-  another; the `L` format specifier is accepted and ignored. What changed in
-  Ф42-e is what a locale CONTAINS: `<locale>` used to have no facets at all,
-  and now has the four `codecvt` specializations Table 104 of
-  [locale.category] requires. It still has no ctype, no num_get/num_put, no
-  numpunct, collate, moneypunct, time_get/time_put or messages, no way to
-  install a facet, and no `_byname` family. Details and the reasoning are in
-  §2 `<locale>`.
+- **Locales beyond `"C"`.** There is one locale, and now there is a way to
+  build variants of it: Ф43-a made `locale` a container, so a program can
+  install its own facet with `locale(loc, new my_facet)`, combine two locales
+  by category, and imbue a stream with the result. What is still absent is a
+  second locale to *name* — `locale("de_DE")` throws rather than answering as
+  `"C"` — and the category facets themselves: no ctype, num_get/num_put,
+  numpunct, collate, moneypunct, time_get/time_put or messages, so the only
+  facets there are to install are `codecvt` and `codecvt_byname`. The `L`
+  format specifier is still accepted and ignored, and will stay that way until
+  `numpunct` exists for it to ask. Details and reasoning are in §2 `<locale>`.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
   `zoned_time`, and no leap-second table.
 
@@ -1008,10 +1022,12 @@ Two consequences are worth stating rather than discovering.
   spells "that selection cannot be honoured", and it is not the same as a quiet
   fallback to `"C"`, which would let a program believe it had got what it asked
   for. `setlocale(LC_ALL, "en_US.UTF-8")` fails; `""` succeeds, because the
-  implementation-defined native locale here **is** `"C"`. Note the deliberate
-  asymmetry with `std::locale` in `<locale>`, which accepts and ignores any
-  name — different APIs, different contracts, and `<locale>`'s simplification is
-  recorded in its own entry.
+  implementation-defined native locale here **is** `"C"`. This entry used to
+  note a deliberate ASYMMETRY here — `std::locale` accepted and ignored any
+  name while `setlocale` refused it — and that asymmetry is gone as of Ф43-a:
+  `std::locale("en_US.UTF-8")` now throws `runtime_error` where `setlocale`
+  returns `nullptr`. Two spellings of the same refusal, which is what they
+  should always have been.
 - `?` Every `char` member of `lconv` is `CHAR_MAX`, which C defines as "this
   locale does not say" — **not** zero, which would be the claim that there are
   no fractional digits. `decimal_point` is `"."`; every other string is empty.
@@ -2321,51 +2337,74 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
 
 ## `<locale>`
 
-- `~` **A locale here is a NAME, not a container.** In the standard a locale owns
-  a vector of facets indexed by `locale::id`, refcounts each, and `use_facet<F>`
-  is a lookup in that vector — a shape that exists so a program can hold several
-  locales and install its own facets into them. BoxOS has one locale and no way
-  to construct another, so that vector would be a table with one row and the row
-  would be the program. The facets are therefore part of the **image**, the same
-  answer Ф37 gave for the symbol table, and `use_facet<F>(loc)` ignores `loc`.
-  Three consequences, each measured rather than argued:
-  `std::locale` stays an **empty, trivially copyable** class, so `ios_base` and
-  every `basic_streambuf` — which hold one by value — did not grow a refcount;
-  a facet is **eight bytes of `.rodata`** — its vtable pointer and nothing
-  else — constant-initialized, with no guard variable, no `__cxa_guard_acquire`,
-  no `__cxa_atexit` and no `_GLOBAL__sub_I` in the generated object (it is
-  `.rodata` and not `.data.rel.ro` because this target links `-fno-pic` and
-  static, so no load-time relocation is left to keep the page writable for);
-  and they answer at **any** instant, including during static destruction,
-  because nothing ever destroys them.
-- `~` **`locale::facet`'s destructor is not virtual.** This is the one thing that
-  design cost. The standard makes it virtual because a locale owns its facets and
-  deletes them through a `facet*`; nothing here owns a facet, so the virtual
-  destructor would buy exactly one thing — mortality. Measured with
-  `x86_64-elf-g++ 15.2.0`: mark it `virtual` and every facet object gains an
-  `__cxa_atexit` registration, is torn down during static destruction, and has
-  its vptr rewritten to a base with no `do_in`. GCC does not implement the
-  `no_destroy` attribute that would suppress that — it warns `-Wattributes` and
-  ignores it. A facet that stops answering before the program stops running is
-  the worse of the two failures in a library where nothing deletes one at all.
-- `?` `locale::id` exists, because every facet's synopsis declares
-  `static locale::id id;` and a program may name it, but it carries **no index**:
-  lookup is by type, so there is no vector for an index to point into.
-- `?` `facet(size_t refs)` accepts its argument and does not store it. Its meaning
-  is "0: the locale destroys this facet; nonzero: it does not", and no locale here
-  destroys any facet ever.
-- `+` `use_facet<F>` for a facet this image does not carry is a **compile error**,
-  not a `bad_cast` thrown at run time. `has_facet<F>` still answers `false` for
-  one, as the standard says. The same answer, moved to where it costs nothing to
-  act on.
-- `–` No facet **installation**: `locale(const locale&, Facet*)` and the
-  category-combining constructors are absent, and so is the whole `_byname`
-  family including `codecvt_byname`. A `codecvt_byname("ru_RU.KOI8-R")` that
-  quietly produced UTF-8 would be the silent lie this header refuses to tell.
-- `–` No category facets: no `ctype`, `num_get`, `num_put`, `numpunct`, `collate`,
-  `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` or `messages`.
-  A program that needs real facet-based i18n fails to compile rather than
-  silently behaving as `"C"`.
+- `✓` **A locale was a NAME and is now a CONTAINER.** Until Ф43 a locale here
+  owned nothing: the facets were part of the image the way Ф37's Nameplate is,
+  and `use_facet<F>(loc)` ignored `loc` entirely. The reason given was true —
+  with no way to construct a second locale and no way to install a facet, a
+  per-locale table would have been a table with one row and the row would have
+  been the program — and Ф43 removed the premise rather than the conclusion. A
+  program can now build `locale(loc, new my_facet)` and imbue a stream with it,
+  which is the whole point of the mechanism and the one thing the old shape
+  could not do at all. What it cost, measured: `locale` is one pointer instead
+  of an empty class, so **`ios_base` and every `basic_streambuf` grew by 8
+  bytes and stopped being trivially copyable** — each now holds a counted
+  reference. A lookup is still two loads and no call, because the classic
+  table is constant-initialized.
+- `✓` **`locale::facet`'s destructor was not virtual, and now is.** The old
+  entry recorded a real measurement — mark it `virtual` and the facet object
+  moves from `.rodata` to `.data` and gains a `__cxa_atexit` registration whose
+  destructor rewrites the vptr, so the facet stops answering during static
+  teardown — and drew a conclusion wider than the measurement supported. Ф43
+  measured the case the old entry never tried: a facet inside a **union cell**.
+  A union does not destroy its active member, so the registered destructor runs
+  and does nothing, and the facet answers at any instant just as before.
+  `.rodata` did not come back with it — a virtual destructor makes the object
+  writable-in-principle, and forcing the section anyway makes the assembler
+  answer `setting incorrect section attributes for .rodata`, which is the
+  protection keeping its name and losing its meaning. That is the price of the
+  one thing a non-virtual destructor cannot do: end an object whose type it
+  does not know. The standard's own mechanism — `delete this` from inside
+  `facet`, where the protected destructor is reachable and virtual dispatch
+  finds the real one — works for **any** facet a program writes, including one
+  written to the letter with a protected destructor of its own.
+- `✓` **`locale::id` carried no index, and now carries one.** The facets the
+  image itself provides are numbered at compile time, which is what lets the
+  classic table be an array finished before `main`; a facet a program writes
+  takes its number from a counter the first time anyone asks. Two threads
+  asking at once is settled by one compare-exchange, and the loser's number is
+  dropped rather than reused — one empty column in a table that was always
+  going to be sparse, against a lock on every lookup.
+- `✓` **`facet(size_t refs)` accepted its argument and did not store it.** It
+  stores it now, because [locale.facet]/2 makes it the answer to a question
+  only the facet can answer: a locale handed a `facet*` has no other way to
+  learn whether it is being given the object or merely shown it. `refs == 0`
+  becomes a live count; anything else becomes a value no count can reach, so
+  the whole question stays one comparison. A facet is 16 bytes rather than 8.
+- `✓` **`use_facet<F>` for a facet the image did not carry was a COMPILE
+  error.** It is `bad_cast` now, as [locale.convenience] says. The old answer
+  was defensible while the set of facets was fixed at link time; a program can
+  install one at run time now, so the question cannot be settled any earlier
+  than it is asked. `has_facet<F>` still answers `false` rather than throwing.
+- `~` **A locale name that is not this locale's is REFUSED.** `locale("C")`,
+  `locale("POSIX")` and `locale("")` all name the one locale there is; any
+  other name throws `runtime_error`. Until Ф43 the named constructor accepted
+  anything and behaved as `"C"` — precisely the silent lie the rest of this
+  document refuses to tell, sitting in the constructor whose entire job is to
+  say which language you asked for. `locale::global` is real too: it replaces
+  what `locale()` returns, so a stream constructed afterwards is imbued with
+  the new one, and it calls `setlocale(LC_ALL, name)` for a named locale as
+  [locale.statics] requires.
+- `–` **No category facets yet.** No `ctype`, `num_get`, `num_put`, `numpunct`,
+  `collate`, `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` or
+  `messages`. A program that needs real facet-based i18n fails to compile
+  rather than silently behaving as `"C"`. The container Ф43-a built is what
+  they will be installed into.
+- `–` **Of the `_byname` family, only `codecvt_byname` exists**, because it is
+  the only one whose base facet exists. It validates the name and is otherwise
+  its base, and it shares that base's `locale::id` — so installing one is found
+  by `use_facet<codecvt<wchar_t, char, mbstate_t>>`, exactly as
+  [locale.facet]/4 describes. A `codecvt_byname("ru_RU.KOI8-R")` throws rather
+  than quietly producing UTF-8.
 - `–` The two Annex D `codecvt` specializations deprecated in C++20 —
   `codecvt<char16_t, char, mbstate_t>` and `codecvt<char32_t, char, mbstate_t>` —
   are not provided. C++26 is already removing the neighbouring deprecated Unicode
@@ -2824,9 +2863,10 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   `codecvt<char32_t, char8_t, mbstate_t>` and their `_byname` forms. **Both
   codecvt specializations exist as of Ф42-e**, so the reason this entry gave
   until then — "`<locale>` has no facets at all, and that exclusion is
-  permanent" — is dead. What still blocks the macro is the `_byname` forms,
-  which need a locale that can be named, and `<filesystem>`, which is an absent
-  header (§1.1).
+  permanent" — is dead. Ф43-a closed the second of the two gaps that were left:
+  `codecvt_byname` is in the tree, because a locale can be named now and a name
+  that is not this locale's is refused. **`<filesystem>` is the only thing
+  still blocking the macro**, and it is an absent header (§1.1).
 
 ## `<print>`
 
