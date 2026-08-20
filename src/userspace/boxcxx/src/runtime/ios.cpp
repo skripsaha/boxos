@@ -11,34 +11,15 @@
  *   iostream_category()        error_category singleton
  *   ios_base::xalloc()         backed by a real atomic<int> global
  *
- *   __ios::IsSpace(wchar_t)    the wide whitespace test, out of line so that
- *                               <istream> need not carry Unicode tables
- *
  * ios_base::Init is NOT here. Since Ф36 it sequences something real — the
  * four stream objects — so it lives with them, in iostream.cpp. Putting it
  * here would make every user of <ios> drag the console streams in.
  */
 
-#include <cwctype>
 #include <ios>
 #include <istream>
 
 namespace std {
-
-namespace __ios {
-
-// Declared in <istream>. A wide stream's characters are code points, so its
-// whitespace is Unicode White_Space and not the six of the "C" locale — the
-// same decision Ф42-a made for <cwctype> and Ф42-b for wcstod, which has to
-// skip an EM SPACE before a number. Defined here rather than in the header
-// because iswspace stands on 1 312 lines of generated tables, and a header
-// that every formatted insertion includes should not carry them.
-bool IsSpace(wchar_t c)
-{
-    return iswspace(static_cast<wint_t>(c)) != 0;
-}
-
-} // namespace __ios
 
 ios_base::~ios_base()
 {

@@ -69,7 +69,9 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
         bool       hitEof = false;
         try {
             s.erase();
-            auto *buf = is.rdbuf();
+            auto               *buf = is.rdbuf();
+            const locale        loc = is.getloc();
+            const ctype<CharT> &ct  = use_facet<ctype<CharT>>(loc);
             for (; count < n;) {
                 typename Traits::int_type c = buf->sgetc();
                 if (Traits::eq_int_type(c, Traits::eof())) {
@@ -77,7 +79,7 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
                     break;
                 }
                 CharT ch = Traits::to_char_type(c);
-                if (__ios::IsSpace(ch)) break;
+                if (ct.is(ctype_base::space, ch)) break;
                 s.push_back(ch);
                 buf->sbumpc();
                 ++count;

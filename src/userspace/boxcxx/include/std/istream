@@ -39,11 +39,7 @@ namespace __ios {
 // contradict both. It is declared here and defined in ios.cpp so that
 // <istream> does not have to pull 1 312 lines of Unicode tables into every
 // translation unit that formats a number.
-inline bool IsSpace(char c)
-{
-    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
-}
-bool IsSpace(wchar_t c);
+
 
 // Outcome of a Core extraction routine. The wrapper (which owns the sentry
 // and the try/catch) turns this into the right setstate call AFTER the try
@@ -95,14 +91,16 @@ public:
             }
             if (is.tie()) is.tie()->flush();
             if (!noskipws && (is.flags() & ios_base::skipws) != ios_base::fmtflags{}) {
-                auto *buf = is.rdbuf();
+                auto       *buf = is.rdbuf();
+                const locale loc = is.getloc();
+                const ctype<CharT> &ct = use_facet<ctype<CharT>>(loc);
                 for (;;) {
                     typename Traits::int_type c = buf->sgetc();
                     if (Traits::eq_int_type(c, Traits::eof())) {
                         is.setstate(ios_base::failbit | ios_base::eofbit);
                         return;
                     }
-                    if (!__ios::IsSpace(Traits::to_char_type(c))) break;
+                    if (!ct.is(ctype_base::space, Traits::to_char_type(c))) break;
                     buf->sbumpc();
                 }
             }
@@ -597,6 +595,8 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, CharT
         bool       hitEof   = false;
         try {
             auto *buf = is.rdbuf();
+            const locale        loc = is.getloc();
+            const ctype<CharT> &ct  = use_facet<ctype<CharT>>(loc);
             for (; n < maxChars;) {
                 auto c = buf->sgetc();
                 if (Traits::eq_int_type(c, Traits::eof())) {
@@ -604,7 +604,7 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is, CharT
                     break;
                 }
                 CharT ch = Traits::to_char_type(c);
-                if (__ios::IsSpace(ch)) break;
+                if (ct.is(ctype_base::space, ch)) break;
                 s[n++] = ch;
                 buf->sbumpc();
             }
@@ -637,13 +637,15 @@ basic_istream<CharT, Traits> &ws(basic_istream<CharT, Traits> &is)
     typename basic_istream<CharT, Traits>::sentry ok(is, true);
     if (ok) {
         auto *buf = is.rdbuf();
+        const locale        loc = is.getloc();
+        const ctype<CharT> &ct  = use_facet<ctype<CharT>>(loc);
         for (;;) {
             typename Traits::int_type c = buf->sgetc();
             if (Traits::eq_int_type(c, Traits::eof())) {
                 is.setstate(ios_base::eofbit);
                 break;
             }
-            if (!__ios::IsSpace(Traits::to_char_type(c))) break;
+            if (!ct.is(ctype_base::space, Traits::to_char_type(c))) break;
             buf->sbumpc();
         }
     }

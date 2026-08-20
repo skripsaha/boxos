@@ -1,0 +1,468 @@
+// boxcxx — <__bits/locale_ctype>
+//
+// ctype_base, ctype<charT>, ctype<char>, ctype<wchar_t>, ctype_byname, and the
+// fourteen convenience functions of [classification].
+//
+// ── why this is a leaf beside locale_core and not part of <locale> ──────
+// Every other category facet takes an `ios_base&` and reads flags() and
+// width() out of it, so none of them can be defined anywhere <ios> can reach.
+// ctype takes no such thing: it answers about CHARACTERS. That is what lets
+// <ios> include it — and <ios> must, because [basic.ios.members] defines
+// widen() and narrow() as calls into this facet, and a widen() that went
+// around the facet would silently ignore an installed ctype. The whole reason
+// Ф43 made locale a container was so that installing one would work.
+//
+// ── where the answers come from ─────────────────────────────────────────
+// Nothing here is a new table. `ctype<char>` reads a 256-entry mask table
+// built at compile time from the same ASCII rules <cctype> states, and
+// `ctype<wchar_t>` asks the Unicode 17 predicates Ф42-a generated for
+// <cwctype>. Two facets, one source of truth each, and the divergence between
+// them is the one Ф42-a recorded and defended: a byte is not a character, so
+// `ctype<char>` classifies bytes as "C" does, and `ctype<wchar_t>` classifies
+// code points as Unicode does.
+#ifndef BOXCXX_BITS_LOCALE_CTYPE
+#define BOXCXX_BITS_LOCALE_CTYPE
+
+#include <__bits/locale_core>
+#include <__bits/unicode_wctype>
+#include <cstddef>
+
+namespace std {
+
+// ── ctype_base [category.ctype] ─────────────────────────────────────────
+// mask is implementation-defined; a bitmask type is all the standard asks
+// for. unsigned short is the narrowest that holds the ten independent bits,
+// and it is what makes the classic table 512 bytes instead of 1 024.
+class ctype_base {
+public:
+    using mask = unsigned short;
+
+    static constexpr mask space  = 1 << 0;
+    static constexpr mask print  = 1 << 1;
+    static constexpr mask cntrl  = 1 << 2;
+    static constexpr mask upper  = 1 << 3;
+    static constexpr mask lower  = 1 << 4;
+    static constexpr mask alpha  = 1 << 5;
+    static constexpr mask digit  = 1 << 6;
+    static constexpr mask punct  = 1 << 7;
+    static constexpr mask xdigit = 1 << 8;
+    static constexpr mask blank  = 1 << 9;
+
+    // [category.ctype] defines these two as unions rather than bits of their
+    // own, which is why is(alnum, c) is true for a digit without anything
+    // having to set an alnum bit anywhere.
+    static constexpr mask alnum = alpha | digit;
+    static constexpr mask graph = alnum | punct;
+};
+
+namespace __ctype {
+
+// The classic table, built at compile time from the rules <cctype> states —
+// not copied from it, DERIVED from it, so the two cannot drift. It is const
+// data with no virtual anything, so it lands in .rodata and stays there.
+struct Table {
+    ctype_base::mask m[256];
+};
+
+inline constexpr Table kClassic = [] {
+    Table t{};
+    for (int c = 0; c < 256; ++c) {
+        ctype_base::mask v = 0;
+        const bool lower_ = c >= 'a' && c <= 'z';
+        const bool upper_ = c >= 'A' && c <= 'Z';
+        const bool digit_ = c >= '0' && c <= '9';
+        const bool blank_ = c == ' ' || c == '\t';
+        const bool space_ = blank_ || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+        const bool print_ = c >= 0x20 && c <= 0x7E;
+        const bool graph_ = c >= 0x21 && c <= 0x7E;
+
+        if (space_) v |= ctype_base::space;
+        if (print_) v |= ctype_base::print;
+        if ((c >= 0 && c <= 0x1F) || c == 0x7F) v |= ctype_base::cntrl;
+        if (upper_) v |= ctype_base::upper;
+        if (lower_) v |= ctype_base::lower;
+        if (upper_ || lower_) v |= ctype_base::alpha;
+        if (digit_) v |= ctype_base::digit;
+        if (graph_ && !(upper_ || lower_ || digit_)) v |= ctype_base::punct;
+        if (digit_ || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+            v |= ctype_base::xdigit;
+        if (blank_) v |= ctype_base::blank;
+        t.m[c] = v;
+    }
+    return t;
+}();
+
+// The wide answers, one per bit, over the Unicode 17 tables Ф42-a generated.
+// Written as a switch over the bits rather than a table because a table over
+// 1 114 112 code points is what the run-length edges in <__bits/unicode_wctype>
+// already are.
+inline bool WideIs(ctype_base::mask m, char32_t cp) noexcept
+{
+    const auto has = [m](ctype_base::mask bit) { return (m & bit) != 0; };
+
+    if (has(ctype_base::space) && __unicode::IsWhiteSpace(cp)) return true;
+    if (has(ctype_base::print) && __unicode::IsPrint(cp)) return true;
+    if (has(ctype_base::cntrl) && __unicode::IsControl(cp)) return true;
+    if (has(ctype_base::upper) && __unicode::IsUppercase(cp)) return true;
+    if (has(ctype_base::lower) && __unicode::IsLowercase(cp)) return true;
+    if (has(ctype_base::alpha) && __unicode::IsAlphabetic(cp)) return true;
+    if (has(ctype_base::punct) && __unicode::IsPunct(cp)) return true;
+    if (has(ctype_base::blank) && __unicode::IsBlank(cp)) return true;
+
+    // digit and xdigit stay ASCII, and that is not an omission: C fixes them
+    // by its own 5.2.1, both reference implementations agree, and Ф42-a
+    // measured it — iswdigit(U+0660) is 0 everywhere. So U+0660 is print and
+    // nothing else.
+    if (has(ctype_base::digit) && cp >= U'0' && cp <= U'9') return true;
+    if (has(ctype_base::xdigit) &&
+        ((cp >= U'0' && cp <= U'9') || (cp >= U'a' && cp <= U'f') ||
+         (cp >= U'A' && cp <= U'F')))
+        return true;
+    return false;
+}
+
+} // namespace __ctype
+
+// ── ctype<charT> [locale.ctype] ─────────────────────────────────────────
+// The primary template, which is what ctype<wchar_t> instantiates. Its
+// answers are Unicode's, because a wchar_t here holds a code point —
+// __STDC_ISO_10646__ says so since Ф42-a, and a facet that classified code
+// points as ASCII would be contradicting the header next door.
+template <class charT>
+class ctype : public locale::facet, public ctype_base {
+public:
+    using char_type = charT;
+
+    constexpr explicit ctype(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    bool is(mask m, charT c) const { return do_is(m, c); }
+    const charT *is(const charT *low, const charT *high, mask *vec) const
+    {
+        return do_is(low, high, vec);
+    }
+    const charT *scan_is(mask m, const charT *low, const charT *high) const
+    {
+        return do_scan_is(m, low, high);
+    }
+    const charT *scan_not(mask m, const charT *low, const charT *high) const
+    {
+        return do_scan_not(m, low, high);
+    }
+
+    charT        toupper(charT c) const { return do_toupper(c); }
+    const charT *toupper(charT *low, const charT *high) const
+    {
+        return do_toupper(low, high);
+    }
+    charT        tolower(charT c) const { return do_tolower(c); }
+    const charT *tolower(charT *low, const charT *high) const
+    {
+        return do_tolower(low, high);
+    }
+
+    charT       widen(char c) const { return do_widen(c); }
+    const char *widen(const char *low, const char *high, charT *to) const
+    {
+        return do_widen(low, high, to);
+    }
+    char         narrow(charT c, char dfault) const { return do_narrow(c, dfault); }
+    const charT *narrow(const charT *low, const charT *high, char dfault, char *to) const
+    {
+        return do_narrow(low, high, dfault, to);
+    }
+
+protected:
+    ~ctype() = default;
+
+    virtual bool do_is(mask m, charT c) const
+    {
+        return __ctype::WideIs(m, static_cast<char32_t>(c));
+    }
+    virtual const charT *do_is(const charT *low, const charT *high, mask *vec) const
+    {
+        for (const charT *p = low; p != high; ++p, ++vec) {
+            const char32_t cp = static_cast<char32_t>(*p);
+            mask           v  = 0;
+            for (mask bit :
+                 {space, print, cntrl, upper, lower, alpha, digit, punct, xdigit, blank})
+                if (__ctype::WideIs(bit, cp)) v = static_cast<mask>(v | bit);
+            *vec = v;
+        }
+        return high;
+    }
+    virtual const charT *do_scan_is(mask m, const charT *low, const charT *high) const
+    {
+        while (low != high && !do_is(m, *low)) ++low;
+        return low;
+    }
+    virtual const charT *do_scan_not(mask m, const charT *low, const charT *high) const
+    {
+        while (low != high && do_is(m, *low)) ++low;
+        return low;
+    }
+
+    // The simple case mappings, as Ф42-a decided for towupper/towlower: the
+    // full ones (SpecialCasing) cannot be expressed as one code point, so
+    // toupper(U+00DF) is U+00DF and not "SS". Every implementation answers
+    // the same, for the same reason.
+    virtual charT do_toupper(charT c) const
+    {
+        return static_cast<charT>(__unicode::ToUpper(static_cast<char32_t>(c)));
+    }
+    virtual const charT *do_toupper(charT *low, const charT *high) const
+    {
+        for (; low != high; ++low) *low = do_toupper(*low);
+        return high;
+    }
+    virtual charT do_tolower(charT c) const
+    {
+        return static_cast<charT>(__unicode::ToLower(static_cast<char32_t>(c)));
+    }
+    virtual const charT *do_tolower(charT *low, const charT *high) const
+    {
+        for (; low != high; ++low) *low = do_tolower(*low);
+        return high;
+    }
+
+    // widen takes a BYTE and must produce a character. A byte above 0x7F is
+    // not a character in this system's encoding — it is a piece of one — so
+    // widening it byte-wise is the only answer that does not invent a code
+    // point. Ф42-f fixed the same function in <ios> when it was sign-extending
+    // and producing NEGATIVE wchar_t; the cast through unsigned char is that
+    // fix, kept here where it now belongs.
+    virtual charT do_widen(char c) const
+    {
+        return static_cast<charT>(static_cast<unsigned char>(c));
+    }
+    virtual const char *do_widen(const char *low, const char *high, charT *to) const
+    {
+        for (; low != high; ++low, ++to) *to = do_widen(*low);
+        return high;
+    }
+
+    // ... and narrow is not its inverse above ASCII, deliberately. Only ASCII
+    // has a single-byte form here, <cwchar>'s wctob says so (wctob(L'ж') is
+    // EOF, measured in Ф42-b), and dfault is the parameter that exists
+    // precisely to say "there is no such character". Truncating instead would
+    // turn L'ж' into '6'.
+    virtual char do_narrow(charT c, char dfault) const
+    {
+        return static_cast<unsigned long long>(c) < 0x80u ? static_cast<char>(c) : dfault;
+    }
+    virtual const charT *do_narrow(const charT *low, const charT *high, char dfault,
+                                   char *to) const
+    {
+        for (; low != high; ++low, ++to) *to = do_narrow(*low, dfault);
+        return high;
+    }
+};
+
+// The primary template's id, for any charT a program instantiates itself. The
+// two the image carries get fixed numbers below, because the classic table is
+// an array built before main and a lazily numbered facet cannot be placed in
+// one.
+template <class charT>
+locale::id ctype<charT>::id{};
+
+template <>
+inline locale::id ctype<wchar_t>::id{__cvt::kIdCtypeWchar};
+
+// ── ctype<char> [facet.ctype.special] ───────────────────────────────────
+// A different class, not a tuning of the one above: is() and scan_is() are
+// NON-virtual here and read a table, which is the whole point of the
+// specialization — classifying a byte is an array index, and the standard
+// lets a program supply its own table instead of overriding a virtual.
+template <>
+class ctype<char> : public locale::facet, public ctype_base {
+public:
+    using char_type = char;
+
+    static constexpr size_t table_size = 256;
+
+    constexpr explicit ctype(const mask *tab = nullptr, bool del = false,
+                             size_t refs = 0) noexcept
+        : locale::facet(refs), __tab(tab != nullptr ? tab : classic_table()),
+          __del(tab != nullptr && del)
+    {
+    }
+
+    static locale::id id;
+
+    bool is(mask m, char c) const
+    {
+        return (__tab[static_cast<unsigned char>(c)] & m) != 0;
+    }
+    const char *is(const char *low, const char *high, mask *vec) const
+    {
+        for (; low != high; ++low, ++vec) *vec = __tab[static_cast<unsigned char>(*low)];
+        return high;
+    }
+    const char *scan_is(mask m, const char *low, const char *high) const
+    {
+        while (low != high && !is(m, *low)) ++low;
+        return low;
+    }
+    const char *scan_not(mask m, const char *low, const char *high) const
+    {
+        while (low != high && is(m, *low)) ++low;
+        return low;
+    }
+
+    char        toupper(char c) const { return do_toupper(c); }
+    const char *toupper(char *low, const char *high) const { return do_toupper(low, high); }
+    char        tolower(char c) const { return do_tolower(c); }
+    const char *tolower(char *low, const char *high) const { return do_tolower(low, high); }
+
+    char        widen(char c) const { return do_widen(c); }
+    const char *widen(const char *low, const char *high, char *to) const
+    {
+        return do_widen(low, high, to);
+    }
+    char        narrow(char c, char dfault) const { return do_narrow(c, dfault); }
+    const char *narrow(const char *low, const char *high, char dfault, char *to) const
+    {
+        return do_narrow(low, high, dfault, to);
+    }
+
+protected:
+    const mask         *table() const noexcept { return __tab; }
+    static constexpr const mask *classic_table() noexcept { return __ctype::kClassic.m; }
+
+    // [facet.ctype.special]/2: the destructor deletes the table if the
+    // constructor was told to. It is the one place a facet owns something
+    // other than itself.
+    ~ctype() override
+    {
+        if (__del) delete[] __tab;
+    }
+
+    virtual char do_toupper(char c) const
+    {
+        return is(lower, c) ? static_cast<char>(c - 'a' + 'A') : c;
+    }
+    virtual const char *do_toupper(char *low, const char *high) const
+    {
+        for (; low != high; ++low) *low = do_toupper(*low);
+        return high;
+    }
+    virtual char do_tolower(char c) const
+    {
+        return is(upper, c) ? static_cast<char>(c - 'A' + 'a') : c;
+    }
+    virtual const char *do_tolower(char *low, const char *high) const
+    {
+        for (; low != high; ++low) *low = do_tolower(*low);
+        return high;
+    }
+
+    // For char both directions are the identity: the character IS the byte.
+    virtual char do_widen(char c) const { return c; }
+    virtual const char *do_widen(const char *low, const char *high, char *to) const
+    {
+        for (; low != high; ++low, ++to) *to = *low;
+        return high;
+    }
+    virtual char do_narrow(char c, char) const { return c; }
+    virtual const char *do_narrow(const char *low, const char *high, char, char *to) const
+    {
+        for (; low != high; ++low, ++to) *to = *low;
+        return high;
+    }
+
+private:
+    const mask *__tab;
+    bool        __del;
+};
+
+inline locale::id ctype<char>::id{__cvt::kIdCtypeChar};
+
+// __FacetHome<F> constructs F(1) — "the image owns this, no locale does" — and
+// for ctype<char> the first parameter is the TABLE, not refs. So this
+// specialization says the same thing in that constructor's own words. Caught
+// by the compiler rather than by a test: `1` converted to a mask pointer is
+// not something a facet would have survived being asked.
+template <>
+class __FacetHome<ctype<char>> final : public ctype<char> {
+public:
+    constexpr __FacetHome() noexcept : ctype<char>(nullptr, false, 1) {}
+};
+
+// ── ctype_byname [locale.ctype.byname] ──────────────────────────────────
+template <class charT>
+class ctype_byname : public ctype<charT> {
+public:
+    using mask = typename ctype<charT>::mask;
+
+    explicit ctype_byname(const char *name, size_t refs = 0) : ctype<charT>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit ctype_byname(const string &name, size_t refs = 0)
+        : ctype_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~ctype_byname() = default;
+};
+
+template <>
+class ctype_byname<char> : public ctype<char> {
+public:
+    explicit ctype_byname(const char *name, size_t refs = 0)
+        : ctype<char>(nullptr, false, refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit ctype_byname(const string &name, size_t refs = 0)
+        : ctype_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~ctype_byname() = default;
+};
+
+// ── the fourteen [classification] functions ─────────────────────────────
+// Each is one line because each IS one line: the standard defines them as
+// use_facet<ctype<charT>>(loc).is(bit, c). They are here rather than in
+// <locale> so that <ios> can reach them too.
+#define BOXCXX_CTYPE_CLASSIFY(NAME, BIT)                                        \
+    template <class charT>                                                      \
+    bool NAME(charT c, const locale &loc)                                       \
+    {                                                                           \
+        return use_facet<ctype<charT>>(loc).is(ctype_base::BIT, c);             \
+    }
+
+BOXCXX_CTYPE_CLASSIFY(isspace, space)
+BOXCXX_CTYPE_CLASSIFY(isprint, print)
+BOXCXX_CTYPE_CLASSIFY(iscntrl, cntrl)
+BOXCXX_CTYPE_CLASSIFY(isupper, upper)
+BOXCXX_CTYPE_CLASSIFY(islower, lower)
+BOXCXX_CTYPE_CLASSIFY(isalpha, alpha)
+BOXCXX_CTYPE_CLASSIFY(isdigit, digit)
+BOXCXX_CTYPE_CLASSIFY(ispunct, punct)
+BOXCXX_CTYPE_CLASSIFY(isxdigit, xdigit)
+BOXCXX_CTYPE_CLASSIFY(isalnum, alnum)
+BOXCXX_CTYPE_CLASSIFY(isgraph, graph)
+BOXCXX_CTYPE_CLASSIFY(isblank, blank)
+
+#undef BOXCXX_CTYPE_CLASSIFY
+
+template <class charT>
+charT toupper(charT c, const locale &loc)
+{
+    return use_facet<ctype<charT>>(loc).toupper(c);
+}
+
+template <class charT>
+charT tolower(charT c, const locale &loc)
+{
+    return use_facet<ctype<charT>>(loc).tolower(c);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_CTYPE

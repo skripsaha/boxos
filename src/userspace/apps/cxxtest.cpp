@@ -50657,6 +50657,226 @@ void Phase220()
            "byname, and a facet that ends exactly when the last locale lets go\n");
 }
 
+// ── Phase221: ctype, and the streams that stopped answering for themselves ──
+// Ф43-b's real claim is not that the facet exists — it is that the STREAM asks
+// it. widen(), narrow() and every whitespace skip used to answer on their own,
+// so an installed ctype would have been ignored in silence. The checks that
+// matter here are the ones where a deliberately strange facet changes what a
+// stream does.
+namespace p221 {
+
+using Mask = std::ctype_base::mask;
+
+// A ctype<char> whose table says 'X' is whitespace and nothing else changed.
+// Built by copying the classic answers out of the classic facet, so the test
+// cannot accidentally assert the table's whole content.
+inline const Mask *StrangeTable()
+{
+    static Mask t[256];
+    static bool built = false;
+    if (!built) {
+        const auto &classic = std::use_facet<std::ctype<char>>(std::locale::classic());
+        for (int c = 0; c < 256; ++c) {
+            Mask v = 0;
+            for (Mask bit : {std::ctype_base::space, std::ctype_base::print,
+                             std::ctype_base::cntrl, std::ctype_base::upper,
+                             std::ctype_base::lower, std::ctype_base::alpha,
+                             std::ctype_base::digit, std::ctype_base::punct,
+                             std::ctype_base::xdigit, std::ctype_base::blank})
+                if (classic.is(bit, static_cast<char>(c))) v = static_cast<Mask>(v | bit);
+            t[c] = v;
+        }
+        t[static_cast<unsigned char>('X')] =
+            static_cast<Mask>(t[static_cast<unsigned char>('X')] | std::ctype_base::space);
+        built = true;
+    }
+    return t;
+}
+
+// A ctype<char> that widens the digit '4' to 'W'. Nothing in the library
+// should reach it today; [facet.num.put.virtuals] says the number formatter
+// will, once num_put exists, and Ф43-c has to make that true.
+struct WidenSpy : std::ctype<char> {
+    WidenSpy() : std::ctype<char>(nullptr, false, 0) {}
+
+protected:
+    char do_widen(char c) const override { return c == '4' ? 'W' : c; }
+};
+
+} // namespace p221
+
+void Phase221()
+{
+    using namespace p221;
+    using std::ctype;
+    using std::ctype_base;
+    using std::locale;
+    using std::use_facet;
+
+    const locale        classic = locale::classic();
+    const ctype<char>  &cc      = use_facet<ctype<char>>(classic);
+    const ctype<wchar_t> &cw    = use_facet<ctype<wchar_t>>(classic);
+
+    // ── (1) the narrow facet classifies BYTES, as "C" does ───────────────
+    Check(cc.is(ctype_base::alpha, 'a') && cc.is(ctype_base::lower, 'a') &&
+              !cc.is(ctype_base::upper, 'a') && cc.is(ctype_base::alnum, 'a'),
+          "phase221 (1) ctype<char>: 'a' is alpha, lower and alnum");
+    Check(cc.is(ctype_base::digit, '7') && cc.is(ctype_base::xdigit, '7') &&
+              cc.is(ctype_base::alnum, '7') && !cc.is(ctype_base::punct, '7'),
+          "phase221 (2) ... '7' is digit, xdigit and alnum but not punct");
+    Check(cc.is(ctype_base::punct, ',') && cc.is(ctype_base::graph, ',') &&
+              cc.is(ctype_base::print, ','),
+          "phase221 (3) ... ',' is punct, and punct implies graph implies print");
+    Check(cc.is(ctype_base::space, ' ') && cc.is(ctype_base::blank, ' ') &&
+              cc.is(ctype_base::space, '\n') && !cc.is(ctype_base::blank, '\n'),
+          "phase221 (4) ... '\\n' is space but not blank; ' ' is both");
+    Check(cc.is(ctype_base::cntrl, '\x7F') && !cc.is(ctype_base::print, '\x7F'),
+          "phase221 (5) ... DEL is cntrl and not print");
+
+    // ── (6) the divergence between the two facets, and why it is right ────
+    // 0xA0 as a BYTE is half of U+00A0 and is not a character at all; U+00A0
+    // as a code point is White_Space. Two facets, two questions, two answers.
+    Check(!cc.is(ctype_base::space, '\xA0'),
+          "phase221 (6) ctype<char>: byte 0xA0 is not whitespace -- it is half a character");
+    Check(cw.is(ctype_base::space, L' '),
+          "phase221 (7) ctype<wchar_t>: U+00A0 IS whitespace -- it is a code point");
+
+    // ── (8) the wide facet answers Unicode, as <cwctype> does ────────────
+    Check(cw.is(ctype_base::alpha, L'ж') && cw.toupper(L'ж') == L'Ж' &&
+              cw.tolower(L'Ж') == L'ж',
+          "phase221 (8) ctype<wchar_t>: CYRILLIC ZHE is alpha and cases both ways");
+    Check(!cw.is(ctype_base::digit, L'٠') && !cw.is(ctype_base::alnum, L'٠') &&
+              cw.is(ctype_base::print, L'٠'),
+          "phase221 (9) ... but digit stays ASCII: ARABIC-INDIC ZERO is print and no more");
+    Check(cw.toupper(L'ß') == L'ß',
+          "phase221 (10) ... and the case mappings are the SIMPLE ones: sharp s is not \"SS\"");
+
+    // ── (11) the range overloads ─────────────────────────────────────────
+    {
+        const char  src[] = "a1 ,";
+        Mask        vec[4];
+        cc.is(src, src + 4, vec);
+        Check((vec[0] & ctype_base::alpha) && (vec[1] & ctype_base::digit) &&
+                  (vec[2] & ctype_base::space) && (vec[3] & ctype_base::punct),
+              "phase221 (11) is(low, high, vec) fills one mask per character");
+        Check(cc.scan_is(ctype_base::space, src, src + 4) == src + 2 &&
+                  cc.scan_not(ctype_base::alnum, src, src + 4) == src + 2,
+              "phase221 (12) scan_is and scan_not both stop at the space");
+
+        char buf[] = "aBc";
+        cc.toupper(buf, buf + 3);
+        Check(buf[0] == 'A' && buf[1] == 'B' && buf[2] == 'C',
+              "phase221 (13) the in-place toupper range overload");
+    }
+
+    // ── (14) widen and narrow, including the pair that is NOT a round trip ─
+    Check(cc.widen('q') == 'q' && cc.narrow('q', '?') == 'q',
+          "phase221 (14) for char both directions are the identity");
+    Check(cw.widen('\x41') == L'A' && cw.widen('\xD0') == L'Ð',
+          "phase221 (15) widen goes through unsigned char: 0xD0 is U+00D0, not a negative");
+    Check(cw.narrow(L'A', '?') == 'A' && cw.narrow(L'ж', '?') == '?',
+          "phase221 (16) narrow refuses what has no single-byte form, rather than truncating");
+
+    // ── (17) the fourteen [classification] functions ─────────────────────
+    Check(std::isalpha('a', classic) && !std::isalpha('1', classic) &&
+              std::isdigit('1', classic) && std::isxdigit('f', classic) &&
+              std::isspace(' ', classic) && std::isblank('\t', classic) &&
+              std::iscntrl('\n', classic) && std::isprint('~', classic) &&
+              std::isgraph('~', classic) && std::ispunct('!', classic) &&
+              std::isupper('A', classic) && std::islower('a', classic) &&
+              std::isalnum('z', classic),
+          "phase221 (17) all twelve classification functions answer through the facet");
+    Check(std::toupper('a', classic) == 'A' && std::tolower('A', classic) == 'a' &&
+              std::toupper(L'ж', classic) == L'Ж',
+          "phase221 (18) ... and so do toupper/tolower, narrow and wide alike");
+
+    // ── (19) ctype_byname ────────────────────────────────────────────────
+    {
+        bool threw = false;
+        try {
+            (void)new std::ctype_byname<char>("de_DE.UTF-8");
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase221 (19) ctype_byname refuses a name this system is not");
+
+        const locale byname(classic, new std::ctype_byname<char>("C"));
+        Check(use_facet<ctype<char>>(byname).is(ctype_base::alpha, 'a'),
+              "phase221 (20) ... and accepts the one it is");
+    }
+
+    // ── (21) THE POINT: an installed facet changes what a stream does ─────
+    // Every check above would pass with the streams still answering for
+    // themselves. These are the ones that would not.
+    {
+        const locale strange(classic, new ctype<char>(StrangeTable(), false, 0));
+
+        std::istringstream is("abXcd");
+        is.imbue(strange);
+        std::string word;
+        is >> word;
+        Check(word == "ab",
+              "phase221 (21) an installed ctype decides where a word ENDS: 'X' is "
+              "whitespace now, and >> believed the facet rather than itself");
+
+        std::istringstream skip("XXhi");
+        skip.imbue(strange);
+        std::string after;
+        skip >> after;
+        Check(after == "hi",
+              "phase221 (22) ... and where one BEGINS: the sentry skipped two 'X'");
+
+        // widen('q') would be 'q' whether or not the facet were asked, so it
+        // proves nothing on its own — the spy is what makes the question
+        // answerable at all.
+        std::ostringstream os;
+        os.imbue(locale(classic, new WidenSpy));
+        Check(os.widen('4') == 'W' && os.widen('5') == '5',
+              "phase221 (23) basic_ios::widen routes through the facet -- an installed "
+              "one that widens '4' to 'W' is what says so");
+
+        std::wostringstream wos;
+        Check(wos.narrow(L'ж', '?') == '?' && wos.widen('\xD0') == L'Ð',
+              "phase221 (23a) and basic_ios::narrow/widen on a WIDE stream reach "
+              "ctype<wchar_t>, which refuses rather than truncating");
+    }
+
+    // ── (24) getline is NOT the facet's business ─────────────────────────
+    // [string.io] gives getline a delimiter, not a whitespace question, so a
+    // strange ctype must not move it. A routing change that swept too widely
+    // would show up right here.
+    {
+        const locale     strange(classic, new ctype<char>(StrangeTable(), false, 0));
+        std::istringstream is("aXb\ncd");
+        is.imbue(strange);
+        std::string line;
+        std::getline(is, line);
+        Check(line == "aXb",
+              "phase221 (24) getline stops at its delimiter, not at whatever the "
+              "facet calls whitespace");
+    }
+
+    // ── (25) PIN for Ф43-c, deliberately asserting the WRONG answer ──────
+    // [facet.num.put.virtuals] says the number formatter widens its digits
+    // through the ctype facet. It does not yet — the digits go straight from
+    // to_chars into the buffer — so a facet that widens '4' to 'W' changes
+    // nothing today. When Ф43-c routes <ostream> through num_put, THIS CHECK
+    // MUST FAIL and be rewritten to expect "W2". That is what it is for.
+    {
+        const locale       spy(classic, new WidenSpy);
+        std::ostringstream os;
+        os.imbue(spy);
+        os << 42;
+        Check(os.str() == "42",
+              "phase221 (25) PIN: the number formatter does NOT go through "
+              "ctype::widen yet -- Ф43-c must break this line");
+    }
+
+    printf("[CXX] PASS phase221: ctype, and the streams that stopped answering "
+           "the whitespace question for themselves\n");
+}
+
+
 
 int main()
 {
@@ -50897,6 +51117,7 @@ int main()
     Phase218();
     Phase219();
     Phase220();
+    Phase221();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");
