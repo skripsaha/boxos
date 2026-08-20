@@ -23358,14 +23358,33 @@ void Phase115()
         Check(buf.getloc() == std::locale::classic(), "phase115 basic_streambuf::getloc: reflects the imbued locale");
     }
 
-    // (20) std::locale -- minimal "C"-only stand-in.
+    // (20) std::locale -- one locale, and it now REFUSES the names it is not.
+    //      Until Ф43 the named constructor accepted anything and behaved as
+    //      "C", which is the silent lie the rest of this library refuses to
+    //      tell; the three checks below pin the three names that do mean this
+    //      locale and the refusal of one that does not.
     {
         Check(std::locale::classic().name() == "C", "phase115 std::locale: classic().name() == \"C\"");
-        std::locale namedIgnored("en_US.UTF-8");
-        Check(namedIgnored == std::locale::classic(),
-              "phase115 std::locale: named ctor accepts+ignores any name, behaves as classic()");
-        Check(std::locale::global(namedIgnored) == std::locale::classic(),
-              "phase115 std::locale: global() is a no-op returning classic()");
+        Check(std::locale("C") == std::locale::classic(),
+              "phase115 std::locale: locale(\"C\") is the classic locale");
+        Check(std::locale("POSIX") == std::locale::classic(),
+              "phase115 std::locale: locale(\"POSIX\") names the same one");
+        Check(std::locale("") == std::locale::classic(),
+              "phase115 std::locale: locale(\"\") -- the native environment -- is it too");
+
+        bool threw = false;
+        try {
+            std::locale unknown("en_US.UTF-8");
+            (void)unknown;
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase115 std::locale: an unknown name THROWS rather than answering as \"C\"");
+
+        Check(std::locale::global(std::locale::classic()) == std::locale::classic(),
+              "phase115 std::locale::global: returns the locale it replaced");
+        Check(std::locale() == std::locale::classic(),
+              "phase115 std::locale: the default constructor is the global locale");
     }
 
     // (21) AUDIT-HARDENING traps (Ф30e commit 1 review): each exercises a
@@ -49036,10 +49055,16 @@ using C16  = std::codecvt<char16_t, char8_t, std::mbstate_t>;
 using CC   = std::codecvt<char, char, std::mbstate_t>;
 using R    = std::codecvt_base;
 
-// A facet this image does not carry. has_facet must say so without the type
-// having to be anything in particular; use_facet on it would not compile,
-// which is the whole of the difference between the two.
-struct NotOurs : std::locale::facet {};
+// A facet this image does not carry. Until Ф43 it needed no locale::id,
+// because has_facet answered from a variable template of the types linked in;
+// now the answer is a table lookup, so it needs the id [locale.facet] says
+// every facet has. use_facet on it throws bad_cast rather than failing to
+// compile, for the reason the header gives: the set is no longer fixed at
+// link time.
+struct NotOurs : std::locale::facet {
+    static std::locale::id id;
+};
+inline std::locale::id NotOurs::id{};
 
 // The wide analogues of Phase144's variable templates, and for the same
 // reason its comment gives: a requires-expression over a CONCRETE type does
@@ -49155,21 +49180,37 @@ void Phase216()
     using std::locale;
     using std::use_facet;
 
-    // ── locale did not grow ──────────────────────────────────────────────
-    // The load-bearing consequence of putting facets in the image: ios_base
-    // and every basic_streambuf hold one of these by value. A registry would
-    // have made each of them carry a refcount.
-    static_assert(sizeof(locale) == 1, "phase216 locale must stay an empty class");
-    static_assert(std::is_trivially_copyable_v<locale>,
-                  "phase216 locale must stay trivially copyable");
+    // ── what locale became, and what it cost ─────────────────────────────
+    // Ф42-e pinned the OPPOSITE of both lines below — sizeof 1 and trivially
+    // copyable — because a locale was an empty class and its facets were the
+    // program's. Ф43 made it a container, so ios_base and every
+    // basic_streambuf now carry a counted reference. Both numbers are asserted
+    // rather than commented so the next change to this shape has to say so.
+    static_assert(sizeof(locale) == sizeof(void *),
+                  "phase216 a locale is one pointer: the table it names");
+    static_assert(!std::is_trivially_copyable_v<locale>,
+                  "phase216 a locale is counted, so copying it is not a memcpy");
+    static_assert(std::is_nothrow_copy_constructible_v<locale> &&
+                      std::is_nothrow_default_constructible_v<locale>,
+                  "phase216 [locale.cons] marks both of these noexcept");
 
     const locale a;
-    const locale b("anything at all");
+    const locale b("POSIX");
 
     Check(has_facet<WCvt>(a) && has_facet<C32>(a) && has_facet<C16>(a) && has_facet<CC>(a),
           "phase216 (1) the four facets Table 104 requires are all here");
     Check(!has_facet<NotOurs>(a),
           "phase216 (2) a facet this image does not carry is reported absent");
+
+    {
+        bool threw = false;
+        try {
+            (void)use_facet<NotOurs>(a);
+        } catch (const std::bad_cast &) {
+            threw = true;
+        }
+        Check(threw, "phase216 (2a) use_facet for an absent facet throws bad_cast");
+    }
 
     const WCvt &w   = use_facet<WCvt>(a);
     const C32  &c32 = use_facet<C32>(a);
@@ -50439,6 +50480,184 @@ void Phase219()
            "text is the only thing that was ever made of characters\n");
 }
 
+// ── Phase220: the locale is a container now ────────────────────────────────
+// Ф43-a turned locale from a NAME into a table of facets. Everything below is
+// something that could not be asked before it: installing a facet, combining
+// two locales, refusing a name, and — the one that decides whether the
+// ownership model is real — watching an installed facet be destroyed exactly
+// when the last locale naming it goes away.
+namespace p220 {
+
+using WCvt = std::codecvt<wchar_t, char, std::mbstate_t>;
+
+// A facet a PROGRAM writes: same id as its base, so use_facet<WCvt> finds it,
+// and one visibly different answer so the test can tell which one it got.
+// It counts its own destructions, which is how lifetime is measured here
+// rather than argued about.
+inline int g_loudDestroyed = 0;
+
+struct LoudCvt : WCvt {
+    explicit LoudCvt(std::size_t refs = 0) : WCvt(refs) {}
+    ~LoudCvt() override { ++g_loudDestroyed; }
+
+protected:
+    // 7 is not a plausible UTF-8 answer, which is the point: nothing else in
+    // the library could produce it by accident.
+    int do_max_length() const noexcept override { return 7; }
+};
+
+} // namespace p220
+
+void Phase220()
+{
+    using namespace p220;
+    using std::locale;
+    using std::has_facet;
+    using std::use_facet;
+
+    const locale classic = locale::classic();
+
+    // ── (1) installing a facet ───────────────────────────────────────────
+    {
+        const locale custom(classic, new LoudCvt);
+        Check(use_facet<WCvt>(custom).max_length() == 7,
+              "phase220 (1) an installed facet is what use_facet finds");
+        Check(use_facet<WCvt>(classic).max_length() == 4,
+              "phase220 (2) and the locale it was built FROM is untouched");
+        Check(custom.name() == "*",
+              "phase220 (3) [locale.members]: a locale with an installed facet has no name");
+        Check(!(custom == classic),
+              "phase220 (4) an unnamed locale equals only itself");
+    }
+    Check(g_loudDestroyed == 1,
+          "phase220 (5) refs == 0 means the locale owns it: destroyed with the last locale");
+
+    // ── (6) refs != 0 means the locale never destroys it ─────────────────
+    {
+        const int before = g_loudDestroyed;
+        LoudCvt   mine(1);                       // on the stack, refs nonzero
+        {
+            const locale custom(classic, &mine);
+            Check(use_facet<WCvt>(custom).max_length() == 7,
+                  "phase220 (6) a facet the program keeps is installed the same way");
+        }
+        Check(g_loudDestroyed == before,
+              "phase220 (7) ... and refs != 0 kept the locale from destroying it");
+    }
+
+    // ── (8) a facet outlives the locale it came from ─────────────────────
+    // This is why the refcount is per FACET and not per table: combine()
+    // takes a facet out of a locale that is about to end.
+    {
+        const int before = g_loudDestroyed;
+        locale    kept   = classic;
+        {
+            const locale temp(classic, new LoudCvt);
+            kept = classic.combine<WCvt>(temp);
+        }
+        Check(g_loudDestroyed == before,
+              "phase220 (8) the facet survived the locale it was combined out of");
+        Check(use_facet<WCvt>(kept).max_length() == 7,
+              "phase220 (9) and still answers");
+        kept = classic;
+        Check(g_loudDestroyed == before + 1,
+              "phase220 (10) ... until the last locale naming it lets go");
+    }
+
+    // ── (11) combine from a locale that has no such facet ────────────────
+    {
+        bool threw = false;
+        try {
+            (void)classic.combine<p216::NotOurs>(classic);
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase220 (11) combine() of a facet the source lacks throws");
+    }
+
+    // ── (12) the category-combining constructor ──────────────────────────
+    // codecvt is in the ctype category (Table 104), so asking for ctype from
+    // the classic locale takes the installed one back out again.
+    {
+        const locale custom(classic, new LoudCvt);
+        const locale back(custom, classic, locale::ctype);
+        Check(use_facet<WCvt>(back).max_length() == 4,
+              "phase220 (12) ctype came from the classic side, replacing the installed facet");
+
+        const locale kept(custom, classic, locale::monetary);
+        Check(use_facet<WCvt>(kept).max_length() == 7,
+              "phase220 (13) a category that does not name codecvt leaves it alone");
+
+        // The other direction, and the one that says whether an installed
+        // facet KEEPS its category. A facet is in the category its
+        // locale::id names, not the one whoever installed it chose, so
+        // taking `ctype` out of `custom` has to bring the installed codecvt
+        // with it. Nothing above would notice if an installed slot silently
+        // fell into no category at all.
+        const locale taken(classic, custom, locale::ctype);
+        Check(use_facet<WCvt>(taken).max_length() == 7,
+              "phase220 (13a) an installed facet is still in its id's category, so "
+              "asking for that category takes it");
+
+        const locale named(classic, "C", locale::all);
+        Check(named.name() == "C",
+              "phase220 (14) combining two named locales keeps the name");
+        Check(locale(custom, "C", locale::monetary).name() == "*",
+              "phase220 (15) ... and an unnamed source makes the result unnamed");
+    }
+
+    // ── (16) codecvt_byname ──────────────────────────────────────────────
+    {
+        using ByName = std::codecvt_byname<wchar_t, char, std::mbstate_t>;
+        const locale byname(classic, new ByName("C"));
+        Check(use_facet<WCvt>(byname).max_length() == 4,
+              "phase220 (16) codecvt_byname(\"C\") IS the C codecvt, found under the base id");
+
+        bool threw = false;
+        try {
+            (void)new ByName("ru_RU.KOI8-R");
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw,
+              "phase220 (17) a _byname facet refuses a name it cannot be, rather than "
+              "quietly producing UTF-8");
+    }
+
+    // ── (18) the global locale is genuinely global ───────────────────────
+    // A stream built AFTER global() sees the new locale, which is the whole
+    // observable difference between a global that works and one that does not.
+    {
+        const locale custom(classic, new LoudCvt);
+        const locale previous = locale::global(custom);
+        Check(previous == classic, "phase220 (18) global() returns the locale it replaced");
+        Check(locale() == custom, "phase220 (19) a default-constructed locale is the global one");
+
+        std::wostringstream fresh;
+        Check(use_facet<WCvt>(fresh.getloc()).max_length() == 7,
+              "phase220 (20) a stream built afterwards is imbued with the global locale");
+
+        (void)locale::global(previous);
+        Check(locale() == classic, "phase220 (21) and putting it back is the same operation");
+    }
+
+    // ── (22) imbue reaches the facet through the stream ──────────────────
+    {
+        const locale     custom(classic, new LoudCvt);
+        std::wostringstream os;
+        Check(use_facet<WCvt>(os.getloc()).max_length() == 4,
+              "phase220 (22) before imbue the stream carries the global locale");
+        os.imbue(custom);
+        Check(use_facet<WCvt>(os.getloc()).max_length() == 7,
+              "phase220 (23) after imbue it carries the installed facet -- which is what "
+              "imbue was for and could not do before Ф43");
+    }
+
+    printf("[CXX] PASS phase220: locale is a container - installed facets, combine, "
+           "byname, and a facet that ends exactly when the last locale lets go\n");
+}
+
+
 int main()
 {
     g_clock_at_entry = std::clock();
@@ -50677,6 +50896,7 @@ int main()
     Phase217();
     Phase218();
     Phase219();
+    Phase220();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

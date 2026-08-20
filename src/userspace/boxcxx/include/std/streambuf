@@ -201,11 +201,20 @@ protected:
         }
         return put;
     }
+    // The locale ITSELF, not the copy getloc() hands out. use_facet returns a
+    // reference INTO the table a locale names, and since Ф43 that table is
+    // refcounted — so `use_facet<F>(getloc())` binds a reference into a
+    // temporary, and the compiler says so (-Wdangling-reference). It happens
+    // to survive, because the copy shares the table with this member and the
+    // member outlives the expression; it is still the shape of a bug, and the
+    // fix is to hand the facet lookup something that is not about to end.
+    const locale &__loc_ref() const noexcept { return __loc; }
+
     virtual int_type overflow(int_type = Traits::eof()) { return Traits::eof(); }
     virtual int_type pbackfail(int_type = Traits::eof()) { return Traits::eof(); }
 
 private:
-    locale __loc          = locale::classic();
+    locale __loc;   // [streambuf.cons]: getloc() == locale(), the global one
     char_type *__eback = nullptr;
     char_type *__gptr  = nullptr;
     char_type *__egptr = nullptr;

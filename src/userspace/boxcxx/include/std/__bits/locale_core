@@ -1,0 +1,652 @@
+// boxcxx — <__bits/locale_core>
+//
+// locale, locale::id, locale::facet, the codecvt facets, and the table that
+// now sits between them.
+//
+// ── why this file exists at all ─────────────────────────────────────────
+// <ios> needs `locale` — ios_base holds one by value — and a category facet
+// like num_put needs a COMPLETE ios_base, because its do_put reads flags(),
+// width() and precision(). Those two facts point in opposite directions, so
+// the header they used to share is split: everything <ios> needs is here, and
+// everything that needs <ios> is in <__bits/locale_facets>, which <locale>
+// includes after it. Neither leaf includes the other.
+//
+// ── what a locale is here, as of Ф43 ────────────────────────────────────
+// A CONTAINER of facets, which is what the standard says and what boxcxx
+// declined to build until now. The refusal had a reason, recorded in
+// CONFORMANCE §2 <locale>: with no way to construct a second locale and no
+// way to install a facet, a per-locale table would have been a table with one
+// row, and the row would have been the program. Ф43 removed the premise
+// rather than the conclusion — a program can now install its own facet and
+// imbue a stream with it, so the table has something to hold.
+//
+// ── what that cost, measured rather than estimated ──────────────────────
+// The facet lifetime question was decided on this measurement, taken with
+// x86_64-elf-g++ 15.2.0 and this target's own flags:
+//
+//     ~facet() non-virtual                 .rodata, no __cxa_atexit
+//     ~facet() virtual                     .data,   one __cxa_atexit at -O0
+//     ~facet() virtual, inside a union     .data,   one __cxa_atexit at -O0
+//
+// Forcing the third case into .rodata with a section attribute "works" and is
+// a forgery: the assembler answers `setting incorrect section attributes for
+// .rodata`, which is it saying the section has been made writable — the
+// protection would keep its name and lose its meaning.
+//
+// So a facet is no longer read-only memory, and that is the price of the one
+// thing a non-virtual destructor cannot do: delete an object whose type it
+// does not know. The standard's mechanism is `delete this` from INSIDE facet,
+// where the protected destructor is reachable and virtual dispatch finds the
+// real one — which is why it works for any facet a program writes, including
+// one written to the letter with a protected destructor of its own.
+//
+// What the shape still keeps:
+//
+//   * the image's facets ANSWER AT ANY INSTANT, including during static
+//     teardown. Each lives inside a union cell (see locale.cpp): a union does
+//     not destroy its active member, so the registered destructor is a no-op
+//     and the vptr is never rewritten. Without that, a facet would stop
+//     answering before the program stopped running.
+//   * a facet lookup is still two loads and no call. use_facet indexes a
+//     table instead of naming a variable, but the classic table is constant-
+//     initialized, so nothing is built at startup and there is no guard.
+//   * the facets the image carries are numbered at COMPILE time, which is
+//     what lets the classic table be an array that exists before main.
+//
+// And what it cost elsewhere: a facet grew from 8 bytes to 16 (the refcount
+// [locale.facet]/2 describes has nowhere else to live), and ios_base and every
+// basic_streambuf grew by 8 and stopped being trivially copyable, because a
+// locale is now a counted reference rather than an empty class.
+#ifndef BOXCXX_BITS_LOCALE_CORE
+#define BOXCXX_BITS_LOCALE_CORE
+
+#include <__bits/c_mbstate>
+#include <__bits/codecvt_engine>
+#include <atomic>
+#include <cstddef>
+#include <string>
+
+namespace std {
+
+class locale;
+
+namespace __loc {
+
+// The index a facet has not been given yet. Not 0: zero is a perfectly good
+// index and the image's own facets start there.
+inline constexpr size_t kUnassigned = static_cast<size_t>(-1);
+
+// The refcount of a facet no locale may destroy — [locale.facet]/2's "refs is
+// nonzero" case. Kept as a value rather than a flag so the whole question is
+// one comparison on the path that matters.
+inline constexpr size_t kNotOwned = static_cast<size_t>(-1);
+
+// Hands out the next index for a facet the image does not carry. The image's
+// own facets are numbered at compile time; this counter starts past them.
+size_t NextFacetIndex() noexcept;
+
+[[noreturn]] void ThrowBadCast();
+[[noreturn]] void ThrowUnknownLocale(const char *name);
+[[noreturn]] void ThrowNoSuchFacet();
+
+// "C", "POSIX" and "" name the one locale there is; any other name is refused,
+// because a locale that accepted a name and behaved as "C" would be lying
+// about which language it was speaking.
+bool IsClassicName(const char *name) noexcept;
+
+} // namespace __loc
+
+// ── locale [locale] ─────────────────────────────────────────────────────
+class locale {
+public:
+    class id;
+    class facet;
+    class __Table;
+
+    using category = int;
+    static constexpr category none     = 0;
+    static constexpr category ctype    = 1 << 0;
+    static constexpr category numeric  = 1 << 1;
+    static constexpr category collate  = 1 << 2;
+    static constexpr category time     = 1 << 3;
+    static constexpr category monetary = 1 << 4;
+    static constexpr category messages = 1 << 5;
+    static constexpr category all = ctype | numeric | collate | time | monetary | messages;
+
+    // [locale.cons]. The default constructor is a copy of the GLOBAL locale,
+    // not of the classic one — they are the same until someone calls global().
+    locale() noexcept;
+    locale(const locale &other) noexcept;
+    ~locale();
+    const locale &operator=(const locale &other) noexcept;
+
+    explicit locale(const char *std_name);
+    explicit locale(const string &std_name) : locale(std_name.c_str()) {}
+    locale(const locale &other, const char *std_name, category cat);
+    locale(const locale &other, const string &std_name, category cat)
+        : locale(other, std_name.c_str(), cat)
+    {
+    }
+    locale(const locale &other, const locale &one, category cat);
+
+    template <class Facet>
+    locale(const locale &other, Facet *f);
+
+    template <class Facet>
+    locale combine(const locale &other) const;
+
+    string name() const;
+
+    bool operator==(const locale &other) const;
+
+    static locale        global(const locale &loc);
+    static const locale &classic() noexcept;
+
+    // The lookup has_facet and use_facet stand on. Out here rather than a
+    // private friend list because both are templates written outside this
+    // class, and so is every facet that will ever be added.
+    const facet *__at(size_t index) const noexcept;
+
+private:
+    friend class __Table;
+
+    explicit constexpr locale(const __Table *t) noexcept : __table(t) {}
+
+    // classic() hands back a reference, so the object has to exist somewhere.
+    // A function-local static would have brought a guard variable with it —
+    // measured: __cxa_guard_acquire showed up in locale.o — which is a branch
+    // on every call and a flag that outlives the object it guards. As a static
+    // member it is constant-initialized data, and asking for the classic
+    // locale is an address again.
+    static const locale __classic;
+
+    const __Table *__table;
+};
+
+// ── locale::id [locale.id] ──────────────────────────────────────────────
+// Now carries the index it always meant to carry. A facet the image itself
+// provides is given a fixed one where its id is defined, so the classic table
+// can be an array that exists before the program starts; a facet a program
+// writes gets one from a counter the first time anybody asks, which is the
+// only moment its identity is needed.
+class locale::id {
+public:
+    constexpr id() noexcept = default;
+    id(const id &)             = delete;
+    void operator=(const id &) = delete;
+
+    constexpr explicit id(size_t fixed) noexcept : __idx(fixed) {}
+
+    size_t __index() const noexcept
+    {
+        size_t v = __idx.load(memory_order_acquire);
+        if (v != __loc::kUnassigned) return v;
+        const size_t fresh = __loc::NextFacetIndex();
+        // Whoever gets there first wins, and the loser's number is simply not
+        // used. A dropped index costs one empty column in a table that was
+        // going to be sparse anyway; a lock here would cost every lookup.
+        if (__idx.compare_exchange_strong(v, fresh, memory_order_acq_rel, memory_order_acquire))
+            return fresh;
+        return v;
+    }
+
+private:
+    mutable atomic<size_t> __idx{__loc::kUnassigned};
+};
+
+// ── locale::facet [locale.facet] ────────────────────────────────────────
+// ~facet() is virtual, and __remove_ref's `delete this` is why: it runs from
+// INSIDE the class, where the protected destructor is reachable, and virtual
+// dispatch finds the real one. That is what makes a facet a program writes
+// deletable without the program having to expose anything.
+//
+// The refcount is per FACET, not per locale, which is what [locale.facet]/2
+// describes and what makes combine() safe: a facet named by two locales
+// outlives either of them.
+class locale::facet {
+public:
+    facet(const facet &)          = delete;
+    void operator=(const facet &) = delete;
+
+    void __add_ref() const noexcept
+    {
+        if (__refs.load(memory_order_relaxed) != __loc::kNotOwned)
+            __refs.fetch_add(1, memory_order_relaxed);
+    }
+
+    void __remove_ref() const noexcept
+    {
+        if (__refs.load(memory_order_relaxed) == __loc::kNotOwned) return;
+        if (__refs.fetch_sub(1, memory_order_acq_rel) == 1) delete this;
+    }
+
+protected:
+    // [locale.facet]/2: refs == 0 means the locale destroys this facet, and
+    // anything else means it never does. The second case is stored as a value
+    // no count can reach rather than as a separate flag.
+    constexpr explicit facet(size_t refs = 0) noexcept
+        : __refs(refs == 0 ? size_t(0) : __loc::kNotOwned)
+    {
+    }
+    virtual ~facet() = default;
+
+private:
+    mutable atomic<size_t> __refs;
+};
+
+namespace __loc {
+
+// One row of a locale's table. The category is what the category-combining
+// constructors select on; a facet a program installs belongs to none, which is
+// why [locale.cons] leaves the resulting locale unnamed.
+struct Slot {
+    const locale::facet *face;
+    int                  cat;
+};
+
+} // namespace __loc
+
+// ── locale::__Table ─────────────────────────────────────────────────────
+// The facets a locale carries. Two kinds exist and they differ only in who
+// ends them: the classic table is constant-initialized in the library image
+// and is never freed, and every other one is built by a constructor above and
+// freed when the last locale naming it goes away.
+class locale::__Table {
+public:
+    constexpr __Table(const __loc::Slot *slots, size_t count, const char *name) noexcept
+        : __slots(slots), __count(count), __name(name), __refs(1), __immortal(true)
+    {
+    }
+
+    const facet *__at(size_t index) const noexcept
+    {
+        return index < __count ? __slots[index].face : nullptr;
+    }
+
+    const char *__name_of() const noexcept { return __name; }
+
+    void __acquire() const noexcept
+    {
+        if (!__immortal) __refs.fetch_add(1, memory_order_relaxed);
+    }
+
+    void __release() const noexcept
+    {
+        if (__immortal) return;
+        if (__refs.fetch_sub(1, memory_order_acq_rel) == 1) __destroy();
+    }
+
+    // Built in locale.cpp: making one allocates and ending one runs facet
+    // destructors, and neither belongs in a header every stream includes.
+    static const __Table *__with_facet(const __Table *base, size_t index,
+                                       const facet *f);
+    static const __Table *__combine(const __Table *base, const __Table *from, category cat);
+    static const __Table *__classic() noexcept;
+
+private:
+    __Table(const __loc::Slot *slots, size_t count, const char *name, bool) noexcept
+        : __slots(slots), __count(count), __name(name), __refs(1), __immortal(false)
+    {
+    }
+
+    void __destroy() const noexcept;
+
+    const __loc::Slot   *__slots;
+    size_t               __count;
+    const char          *__name;
+    mutable atomic<long> __refs;
+    bool                 __immortal;
+};
+
+inline const locale::facet *locale::__at(size_t index) const noexcept
+{
+    return __table->__at(index);
+}
+
+inline locale::locale(const locale &other) noexcept : __table(other.__table)
+{
+    __table->__acquire();
+}
+
+inline locale::~locale() { __table->__release(); }
+
+inline const locale &locale::operator=(const locale &other) noexcept
+{
+    const __Table *t = other.__table;
+    t->__acquire();        // acquire before release, so self-assignment cannot
+    __table->__release();  // free the table it is about to keep
+    __table = t;
+    return *this;
+}
+
+// ── codecvt_base ────────────────────────────────────────────────────────
+// Defined in <__bits/codecvt_engine>, which needs to name its own result
+// type. It is re-exported by <locale> unchanged, which is where [locale.syn]
+// puts it.
+
+// ── codecvt [locale.codecvt] ────────────────────────────────────────────
+// Declared for every triple, defined for the four Table 104 requires:
+// <char, char>, <wchar_t, char>, <char16_t, char8_t> and <char32_t, char8_t>.
+// Any other combination is an incomplete type rather than a silently wrong
+// conversion. The two Annex D pairs deprecated in C++20 —
+// codecvt<char16_t, char, mbstate_t> and codecvt<char32_t, char, mbstate_t> —
+// are not here: C++26 is already removing the neighbouring deprecated Unicode
+// conversion machinery (P2871R3), and building new code onto a surface the
+// standard is walking away from is taking on a debt at the moment of writing.
+template <class InternT, class ExternT, class StateT>
+class codecvt;
+
+namespace __cvt {
+
+// The fixed indices of the facets the image itself carries. They exist so the
+// classic table can be an ARRAY finished before main starts: a lazily numbered
+// facet could not be placed in one. Table 104 of [locale.category] puts all
+// four codecvts in the ctype category.
+inline constexpr size_t kIdCodecvtChar   = 0;
+inline constexpr size_t kIdCodecvtWchar  = 1;
+inline constexpr size_t kIdCodecvtChar16 = 2;
+inline constexpr size_t kIdCodecvtChar32 = 3;
+inline constexpr size_t kBuiltinFacets   = 4;
+
+// The public half of every codecvt: seven members that do nothing but call
+// the virtual half. Written once because it IS once — [locale.codecvt] gives
+// every specialization the same seven, and four hand-copied sets would be
+// four chances for a forwarder to reach the wrong virtual. That failure mode
+// is not hypothetical: Ф42-a found iswpunct reading the blank table, and an
+// exhaustive sweep of the tables themselves could never have seen it.
+template <class I, class E, class S>
+class Face : public locale::facet, public codecvt_base {
+public:
+    using intern_type = I;
+    using extern_type = E;
+    using state_type  = S;
+
+    result out(S &state, const I *from, const I *from_end, const I *&from_next,
+               E *to, E *to_end, E *&to_next) const
+    {
+        return do_out(state, from, from_end, from_next, to, to_end, to_next);
+    }
+
+    result in(S &state, const E *from, const E *from_end, const E *&from_next,
+              I *to, I *to_end, I *&to_next) const
+    {
+        return do_in(state, from, from_end, from_next, to, to_end, to_next);
+    }
+
+    result unshift(S &state, E *to, E *to_end, E *&to_next) const
+    {
+        return do_unshift(state, to, to_end, to_next);
+    }
+
+    int  encoding() const noexcept       { return do_encoding(); }
+    bool always_noconv() const noexcept  { return do_always_noconv(); }
+    int  max_length() const noexcept     { return do_max_length(); }
+
+    int length(S &state, const E *from, const E *end, size_t max) const
+    {
+        return do_length(state, from, end, max);
+    }
+
+protected:
+    constexpr explicit Face(size_t refs = 0) noexcept : locale::facet(refs) {}
+    ~Face() = default;
+
+    virtual result do_out(S &, const I *, const I *, const I *&,
+                          E *, E *, E *&) const = 0;
+    virtual result do_in(S &, const E *, const E *, const E *&,
+                         I *, I *, I *&) const = 0;
+    virtual result do_unshift(S &, E *, E *, E *&) const = 0;
+    virtual int    do_encoding() const noexcept          = 0;
+    virtual bool   do_always_noconv() const noexcept     = 0;
+    virtual int    do_length(S &, const E *, const E *, size_t) const = 0;
+    virtual int    do_max_length() const noexcept        = 0;
+};
+
+// The three converting facets, which differ only in their unit types and in
+// whether a code point above the BMP takes one internal unit or a surrogate
+// pair. mbstate_t is named in every signature and read in none: UTF-8 has no
+// shift state, and the protocol lets a converter say so by stopping at an
+// unfinished character instead of swallowing it. See <__bits/codecvt_engine>.
+template <class I, class E, bool Utf16>
+class Utf8Face : public Face<I, E, mbstate_t> {
+    using Base   = Face<I, E, mbstate_t>;
+    using Engine = Utf8<I, E, Utf16>;
+
+public:
+    using result = typename Base::result;
+
+protected:
+    constexpr explicit Utf8Face(size_t refs = 0) noexcept : Base(refs) {}
+    ~Utf8Face() = default;
+
+    result do_out(mbstate_t &, const I *from, const I *from_end, const I *&from_next,
+                  E *to, E *to_end, E *&to_next) const override
+    {
+        return Engine::Out(from, from_end, from_next, to, to_end, to_next);
+    }
+
+    result do_in(mbstate_t &, const E *from, const E *from_end, const E *&from_next,
+                 I *to, I *to_end, I *&to_next) const override
+    {
+        return Engine::In(from, from_end, from_next, to, to_end, to_next);
+    }
+
+    // noconv, not ok: [locale.codecvt.virtuals] gives noconv the meaning "no
+    // termination sequence is needed for this state_type", which is precisely
+    // true of an encoding with no shift state. libc++'s own char8_t facets
+    // answer noconv here too; only its wchar_t facet — the one delegating to
+    // the platform — answers ok.
+    result do_unshift(mbstate_t &, E *to, E *, E *&to_next) const override
+    {
+        to_next = to;
+        return codecvt_base::noconv;
+    }
+
+    // 0 = "variable number of external units per internal one", which is what
+    // UTF-8 is. -1 would mean state-dependent, and this encoding is not.
+    int  do_encoding() const noexcept override      { return 0; }
+    bool do_always_noconv() const noexcept override { return false; }
+
+    // 4 for all three, and for char16_t that is deliberately NOT the literal
+    // answer. [locale.codecvt.virtuals] defines max_length as the largest
+    // do_length(state, from, from_end, 1) can return, and with room for one
+    // UTF-16 unit an astral character yields nothing at all, so the literal
+    // maximum is 3 — the longest BMP sequence. But what every caller uses this
+    // number for is sizing the byte buffer that must hold one character's
+    // worth of input, and a surrogate pair's is four. Both reference
+    // implementations answer 4 here for the same reason.
+    int  do_max_length() const noexcept override    { return 4; }
+
+    int do_length(mbstate_t &, const E *from, const E *end, size_t max) const override
+    {
+        return Engine::Length(from, end, max);
+    }
+};
+
+} // namespace __cvt
+
+// codecvt<char, char, mbstate_t> — the identity. [locale.codecvt.virtuals]
+// requires noconv from a facet whose internal and external types are the
+// same, and noconv means the caller should move the characters itself: from_next
+// and to_next stay where they started and nothing is written.
+template <>
+class codecvt<char, char, mbstate_t> : public __cvt::Face<char, char, mbstate_t> {
+    using Base = __cvt::Face<char, char, mbstate_t>;
+
+public:
+    constexpr explicit codecvt(size_t refs = 0) noexcept : Base(refs) {}
+
+    static locale::id id;
+
+protected:
+    ~codecvt() = default;
+
+    result do_out(mbstate_t &, const char *from, const char *, const char *&from_next,
+                  char *to, char *, char *&to_next) const override
+    {
+        from_next = from;
+        to_next   = to;
+        return noconv;
+    }
+
+    result do_in(mbstate_t &, const char *from, const char *, const char *&from_next,
+                 char *to, char *, char *&to_next) const override
+    {
+        from_next = from;
+        to_next   = to;
+        return noconv;
+    }
+
+    result do_unshift(mbstate_t &, char *to, char *, char *&to_next) const override
+    {
+        to_next = to;
+        return noconv;
+    }
+
+    int  do_encoding() const noexcept override      { return 1; }
+    bool do_always_noconv() const noexcept override { return true; }
+    int  do_max_length() const noexcept override    { return 1; }
+
+    int do_length(mbstate_t &, const char *from, const char *end, size_t max) const override
+    {
+        const size_t have = static_cast<size_t>(end - from);
+        return static_cast<int>(have < max ? have : max);
+    }
+};
+
+inline locale::id codecvt<char, char, mbstate_t>::id{__cvt::kIdCodecvtChar};
+
+// codecvt<wchar_t, char, mbstate_t> — the one <fstream> and the wide console
+// stand on. wchar_t is 32-bit here and holds a code point, so this is UTF-8
+// against UTF-32 with no surrogate arithmetic at all.
+template <>
+class codecvt<wchar_t, char, mbstate_t>
+    : public __cvt::Utf8Face<wchar_t, char, false> {
+    using Base = __cvt::Utf8Face<wchar_t, char, false>;
+
+public:
+    constexpr explicit codecvt(size_t refs = 0) noexcept : Base(refs) {}
+
+    static locale::id id;
+
+protected:
+    ~codecvt() = default;
+};
+
+inline locale::id codecvt<wchar_t, char, mbstate_t>::id{__cvt::kIdCodecvtWchar};
+
+// codecvt<char16_t, char8_t, mbstate_t> — the only one that pairs surrogates.
+template <>
+class codecvt<char16_t, char8_t, mbstate_t>
+    : public __cvt::Utf8Face<char16_t, char8_t, true> {
+    using Base = __cvt::Utf8Face<char16_t, char8_t, true>;
+
+public:
+    constexpr explicit codecvt(size_t refs = 0) noexcept : Base(refs) {}
+
+    static locale::id id;
+
+protected:
+    ~codecvt() = default;
+};
+
+inline locale::id codecvt<char16_t, char8_t, mbstate_t>::id{__cvt::kIdCodecvtChar16};
+
+// codecvt<char32_t, char8_t, mbstate_t> — the same conversion as the wchar_t
+// facet, told in the unit types the standard chose for it.
+template <>
+class codecvt<char32_t, char8_t, mbstate_t>
+    : public __cvt::Utf8Face<char32_t, char8_t, false> {
+    using Base = __cvt::Utf8Face<char32_t, char8_t, false>;
+
+public:
+    constexpr explicit codecvt(size_t refs = 0) noexcept : Base(refs) {}
+
+    static locale::id id;
+
+protected:
+    ~codecvt() = default;
+};
+
+inline locale::id codecvt<char32_t, char8_t, mbstate_t>::id{__cvt::kIdCodecvtChar32};
+
+// ── codecvt_byname [locale.codecvt.byname] ──────────────────────────────
+// A _byname facet is the facet of a NAMED locale, and there is one name here.
+// So this validates the name and is otherwise its base: codecvt_byname("C") is
+// UTF-8 because that is what "C" means on this system, and
+// codecvt_byname("ru_RU.KOI8-R") throws rather than quietly producing UTF-8.
+//
+// It shares its base's locale::id, which is what makes it useful: install one
+// and use_facet<codecvt<wchar_t, char, mbstate_t>> finds it, exactly as
+// [locale.facet]/4 describes.
+template <class InternT, class ExternT, class StateT>
+class codecvt_byname : public codecvt<InternT, ExternT, StateT> {
+public:
+    explicit codecvt_byname(const char *name, size_t refs = 0)
+        : codecvt<InternT, ExternT, StateT>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit codecvt_byname(const string &name, size_t refs = 0)
+        : codecvt_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~codecvt_byname() = default;
+};
+
+// ── where a facet the image carries lives ───────────────────────────────
+// Deriving is what reaches the protected destructor, and `final` is what stops
+// anyone reaching further. refs is 1: the image owns these, no locale does.
+template <class Facet>
+class __FacetHome final : public Facet {
+public:
+    constexpr __FacetHome() noexcept : Facet(1) {}
+};
+
+// ── has_facet / use_facet [locale.convenience] ──────────────────────────
+// Both are genuine table lookups now. Until Ф43, use_facet<F> for a facet this
+// image did not carry was a COMPILE error — the set was fixed at link time, so
+// the question could be answered then. It cannot be any more: a program can
+// install a facet at run time, so the answer is bad_cast, which is what
+// [locale.convenience] says it should have been all along.
+template <class Facet>
+bool has_facet(const locale &loc) noexcept
+{
+    return loc.__at(Facet::id.__index()) != nullptr;
+}
+
+template <class Facet>
+const Facet &use_facet(const locale &loc)
+{
+    const locale::facet *f = loc.__at(Facet::id.__index());
+    if (f == nullptr) __loc::ThrowBadCast();
+    return static_cast<const Facet &>(*f);
+}
+
+// ── installing a facet [locale.cons] ────────────────────────────────────
+template <class Facet>
+locale::locale(const locale &other, Facet *f) : __table(other.__table)
+{
+    if (f == nullptr) {         // [locale.cons]: a null facet leaves the
+        __table->__acquire();   // locale as a copy of other
+        return;
+    }
+    __table = __Table::__with_facet(other.__table, Facet::id.__index(), f);
+}
+
+template <class Facet>
+locale locale::combine(const locale &other) const
+{
+    const facet *f = other.__at(Facet::id.__index());
+    if (f == nullptr) __loc::ThrowNoSuchFacet();
+    // The facet is refcounted individually, so the result keeps it alive
+    // whatever happens to `other` — which is the whole reason the count lives
+    // in the facet rather than in the table.
+    return locale(__Table::__with_facet(__table, Facet::id.__index(), f));
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_CORE

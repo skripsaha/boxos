@@ -165,12 +165,14 @@
 //                          has facets now, and those two are among the four
 //                          it carries -- so the reason this entry gave until
 //                          then, "<locale> has no facets AT ALL", is dead
-//                          and is not repeated here. Two gaps remain, and
-//                          both are outside this header: the _byname forms
-//                          (there is no codecvt_byname, because a locale
-//                          cannot be named here -- CONFORMANCE §1.2), and
-//                          <filesystem> for path's char8_t members, which is
-//                          an absent header (§1.1). The entry before that
+//                          and is not repeated here. ONE gap remains, and it
+//                          is outside this header: <filesystem>, for path's
+//                          char8_t members, which is an absent header (§1.1).
+//                          The other gap this entry named until Ф43 -- "there
+//                          is no codecvt_byname, because a locale cannot be
+//                          named here" -- is closed: locale is a container
+//                          now, names are validated rather than ignored, and
+//                          codecvt_byname is in the tree (§2 <locale>). The entry before that
 //                          one said pmr::u8string was the last gap and the
 //                          macro was "one alias away", which was measured
 //                          and wrong; pmr::u8string has existed since

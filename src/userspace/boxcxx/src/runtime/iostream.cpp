@@ -119,7 +119,7 @@ protected:
     streamsize xsputn(const char_type *s, streamsize n) override
     {
         if (n <= 0) return 0;
-        const Codecvt &cvt = use_facet<Codecvt>(this->getloc());
+        const Codecvt &cvt = use_facet<Codecvt>(this->__loc_ref());
 
         const char_type       *from = s;
         const char_type *const end  = s + n;
@@ -171,7 +171,7 @@ protected:
     {
         if (gptr() < egptr()) return traits_type::to_int_type(*gptr());
 
-        const Codecvt &cvt = use_facet<Codecvt>(this->getloc());
+        const Codecvt &cvt = use_facet<Codecvt>(this->__loc_ref());
         char_type      *w  = __wbuf;
         char_type *const wend = __wbuf + kW;
 

@@ -22,7 +22,7 @@
 
 #include <atomic>
 #include <iosfwd>
-#include <locale>
+#include <__bits/locale_core>  // locale — the facets that need ios_base are in <locale>
 #include <system_error>
 #include <vector>
 
@@ -350,7 +350,7 @@ private:
     fmtflags __flags        = fmtflags{};
     streamsize __precision  = 0;
     streamsize __width      = 0;
-    locale __loc            = locale::classic();
+    locale __loc;   // [basic.ios.cons]: init() leaves getloc() == locale()
     vector<long> __iwords;
     vector<void *> __pwords;
     vector<CallbackEntry> __callbacks;
