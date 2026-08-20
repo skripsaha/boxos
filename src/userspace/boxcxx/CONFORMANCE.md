@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 142 |
+| Internal implementation leaves (`include/std/__bits/`) | 144 |
 | Header source | ~99 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 236 phases (217 of them the numbered `PhaseN` series), 6 094 runtime checks, 2 011 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 237 phases (218 of them the numbered `PhaseN` series), 6 113 runtime checks, 2 011 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -61,8 +61,8 @@ macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
 with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **236** —
-217 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
+there are exactly as many as there are phase definitions. That is **237** —
+218 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
 rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
 alone, which is why both numbers are given above: neither can drift without
 the other contradicting it.
@@ -2406,13 +2406,22 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   what `locale()` returns, so a stream constructed afterwards is imbued with
   the new one, and it calls `setlocale(LC_ALL, name)` for a named locale as
   [locale.statics] requires.
-- `~` **`ctype` is here; the other category facets are not yet.** Ф43-b built
-  `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization with its
-  table, `ctype<wchar_t>`, `ctype_byname` and the fourteen [classification]
-  functions. Still absent: `num_get`, `num_put`, `numpunct`, `collate`,
-  `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put`, `messages` —
-  a program needing those fails to compile rather than silently behaving as
-  `"C"`.
+- `~` **`ctype`, `numpunct` and `num_put` are here; the rest are not yet.**
+  Ф43-b built `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization
+  with its table, `ctype<wchar_t>`, `ctype_byname` and the fourteen
+  [classification] functions; Ф43-c added `numpunct`, `numpunct_byname` and
+  `num_put`, and pointed every arithmetic inserter at the last of those. Still
+  absent: `num_get`, `collate`, `moneypunct`, `money_get`, `money_put`,
+  `time_get`, `time_put`, `messages` — a program needing those fails to
+  compile rather than silently behaving as `"C"`.
+
+  **Grouping exists as of Ф43-c, and had never been written before it.** The
+  `"C"` locale groups nothing — its `grouping()` is empty — so there had been
+  nothing to ask; a program can install a `numpunct` now and get separators,
+  a different decimal point, and its own spellings of `true` and `false`. The
+  grouping string is read RIGHT to left with its last element repeating, and a
+  `0` or `CHAR_MAX` element stops grouping from there on. Separators count
+  toward the field width, so padding is computed after grouping.
 
   **`ctype` answers two different questions under one name, and that is
   deliberate.** `ctype<char>` classifies BYTES the way `"C"` does, from a
@@ -2827,6 +2836,33 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   the call operator rather than the class.
 
 ## `<ostream>`
+
+- `✓` Closed in Ф43-c: **every arithmetic inserter rendered the number
+  itself.** [ostream.inserters.arithmetic] defines each one as
+  `use_facet<num_put<charT, ostreambuf_iterator<charT, traits>>>(getloc()).put(...)`,
+  and until Ф43-c the rendering lived in `<ostream>` — which was defensible
+  while no `num_put` existed to install, and became a silent lie the moment
+  Ф43-a made a locale a container. The engine was not rewritten; it MOVED,
+  into `num_put::do_put`, with the width/fill/adjustfield part factored into
+  `<__bits/field_engine>` because the character and string inserters still
+  need it and are *not* the locale's business ([ostream.inserters.character]
+  never mentions a facet).
+
+  Three things that had to survive the move, and each of which broke first:
+  a facet has no stream to set a bit on, so a conversion that cannot fit its
+  buffer signals through a private exception type that the inserter turns back
+  into `failbit`; [ostream.inserters.arithmetic]/2's conversions are not a
+  plain widening, since a signed type narrower than `long` goes through the
+  UNSIGNED type of its width for `oct` and `hex` (so `hex << short(-1)` is
+  `"ffff"`, not a 64-bit sign-extension); and the digits are widened THROUGH
+  the ctype facet, which the first routing skipped whenever the stream's
+  character type already matched the ASCII source — leaving a narrow stream
+  consulting no `ctype` at all.
+
+  The comment that used to sit on the widening path said it was "a cast and
+  not a facet call ... exactly what a ctype facet's widen() would return,
+  without a facet to consult". That was true, and it stopped being true the
+  day a facet could be installed.
 
 - `✓` Closed in Ф40, found by building `<syncstream>`: **`emit_on_flush`,
   `noemit_on_flush` and `flush_emit` had been no-ops.** They were honest about
