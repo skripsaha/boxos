@@ -1,12 +1,30 @@
 // boxcxx — <__bits/format_escape>
 //
-// [format.string.escaped] — builds the escaped std::string that the '?'
-// presentation type copies to the output: quote-delimited for a string,
+// [format.string.escaped] — builds the escaped basic_string<CharT> that the
+// '?' presentation type copies to the output: quote-delimited for a string,
 // apostrophe-delimited for a single character. Pure text transform: reads
-// the source, returns a complete std::string through an out-parameter.
+// the source, returns a complete string through an out-parameter.
 // <format> then feeds that string through its existing FormatString /
 // EmitField for width/fill/align/precision, so nothing here ever touches a
-// format_context.
+// format context.
+//
+// ── the one thing that differs between the two character types ──────────
+// [format.string.escaped] is written over SCALAR VALUES, not code units, so
+// the whole classification below — the table, the escape categories, the
+// grapheme-extend rule — is code-point work and is shared verbatim. What
+// differs is only how a scalar value is READ out of the source:
+//
+//   char     a UTF-8 code unit sequence, decoded by Utf8Decode, which can
+//            fail (a lone continuation byte, an overlong form, a truncated
+//            sequence, an encoded surrogate) — 2.2.3's ill-formed case.
+//   wchar_t  the unit IS the value, 32 bits of it. It still has an
+//            ill-formed case, and it is a real one rather than a formality:
+//            a surrogate or anything past U+10FFFF is not a scalar value,
+//            and nothing stops a program from putting one in a wstring.
+//
+// So NextScalar is the only if-constexpr in this file, and everything after
+// it is written once. The escape TEXT is ASCII in both worlds and is widened
+// on append.
 //
 // Includes <string>/<string_view> itself, so its position in <format>'s
 // include list is not order-sensitive.
@@ -16,6 +34,7 @@
 #include <__bits/unicode_escape>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace std {
 namespace __format {
@@ -100,22 +119,64 @@ constexpr bool Utf8Decode(const char *&p, const char *e, char32_t &cp) noexcept
     return true;
 }
 
+// Read one [format.string.escaped]/2.2 unit out of the source. Same contract
+// as Utf8Decode for both character types: true means cp is a scalar value and
+// p advanced past the whole sequence; false means the unit at the ORIGINAL p
+// is ill-formed, cp carries that unit's own value for the \x{} escape, and p
+// advanced by exactly one unit so the caller recovers in order.
+//
+// The wide branch is not the trivial one it looks like. wchar_t here is a
+// signed 32-bit type, so the range test is written on the unsigned value:
+// a negative unit is past 0x10FFFF once read as a magnitude, which is the
+// right answer, and reading it as a signed compare would have let it pass.
+template <class CharT>
+constexpr bool NextScalar(const CharT *&p, const CharT *e, char32_t &cp) noexcept
+{
+    if constexpr (is_same_v<CharT, char>) {
+        return Utf8Decode(p, e, cp);
+    } else {
+        (void)e;
+        const auto v = static_cast<make_unsigned_t<CharT>>(*p);
+        ++p;
+        cp = char32_t(v);
+        return v <= 0x10FFFFu && !(v >= 0xD800u && v <= 0xDFFFu);
+    }
+}
+
+// The escape text is ASCII wherever it appears, and ASCII is its own code
+// point, so widening is the cast and not a conversion. Spelt through
+// unsigned char because the source characters here come from narrow literals
+// and a signed char would sign-extend — the defect Ф42-f found in <ios>'s
+// widen(), which is the reason this is a named helper rather than an
+// open-coded cast at each of the six append sites.
+template <class CharT> inline void PutAscii(basic_string<CharT> &out, char c)
+{
+    out += CharT(static_cast<unsigned char>(c));
+}
+template <class CharT>
+inline void PutAscii(basic_string<CharT> &out, const char *s)
+{
+    for (; *s; ++s) PutAscii(out, *s);
+}
+
 // Table 114 — the two-character escape for one of the five characters
 // [format.string.escaped] maps directly. Returns false for everything else.
-inline bool EscapeTableChar(string &out, char32_t cp)
+template <class CharT>
+inline bool EscapeTableChar(basic_string<CharT> &out, char32_t cp)
 {
     switch (cp) {
-    case U'\t': out += "\\t"; return true;
-    case U'\n': out += "\\n"; return true;
-    case U'\r': out += "\\r"; return true;
-    case U'"':  out += "\\\""; return true;
-    case U'\\': out += "\\\\"; return true;
+    case U'\t': PutAscii(out, "\\t"); return true;
+    case U'\n': PutAscii(out, "\\n"); return true;
+    case U'\r': PutAscii(out, "\\r"); return true;
+    case U'"':  PutAscii(out, "\\\""); return true;
+    case U'\\': PutAscii(out, "\\\\"); return true;
     default: return false;
     }
 }
 
 // Appends \prefix{hex}: lowercase hex digits, no leading zeros (D7).
-inline void EscapeHex(string &out, char prefix, char32_t value)
+template <class CharT>
+inline void EscapeHex(basic_string<CharT> &out, char prefix, char32_t value)
 {
     char     digits[8];
     unsigned n = 0;
@@ -124,28 +185,29 @@ inline void EscapeHex(string &out, char prefix, char32_t value)
         digits[n++] = char(nibble < 10 ? '0' + nibble : 'a' + (nibble - 10));
         value >>= 4;
     } while (value != 0);
-    out += '\\';
-    out += prefix;
-    out += '{';
-    while (n > 0) out += digits[--n];
-    out += '}';
+    PutAscii(out, '\\');
+    PutAscii(out, prefix);
+    PutAscii(out, '{');
+    while (n > 0) PutAscii(out, digits[--n]);
+    PutAscii(out, '}');
 }
 
 // Classifies and appends exactly one [format.string.escaped]/2.2 unit
 // starting at p (p != e is a precondition): a whole scalar value (table
-// escape, \u{} escape, or a raw copy) when Utf8Decode succeeds, otherwise
-// the complete run of ill-formed code units at *p — Utf8Decode only ever
-// recovers one byte per call, so the run ends the moment a well-formed
+// escape, \u{} escape, or a raw copy) when NextScalar succeeds, otherwise
+// the complete run of ill-formed code units at *p — NextScalar only ever
+// recovers one unit per call, so the run ends the moment a well-formed
 // unit follows. Advances p past whatever it consumed and updates
 // prevEscaped per 2.2.1.2.2: reset to true exactly once per ill-formed
-// run, not once per code unit inside it (this only matters if Utf8Decode
-// is ever changed to recover more than one byte at a time).
-inline void EscapeUnit(string &out, const char *&p, const char *e,
+// run, not once per code unit inside it (this only matters if NextScalar
+// is ever changed to recover more than one unit at a time).
+template <class CharT>
+inline void EscapeUnit(basic_string<CharT> &out, const CharT *&p, const CharT *e,
                        bool &prevEscaped)
 {
-    const char *start = p;
-    char32_t    cp;
-    if (Utf8Decode(p, e, cp)) {
+    const CharT *start = p;
+    char32_t     cp;
+    if (NextScalar(p, e, cp)) {
         if (EscapeTableChar(out, cp)) {
             prevEscaped = true;
         } else if (cp != U' ' && __unicode::NeedsEscapeCategory(cp)) {
@@ -161,12 +223,12 @@ inline void EscapeUnit(string &out, const char *&p, const char *e,
         return;
     }
 
-    EscapeHex(out, 'x', (unsigned char)*start);
+    EscapeHex(out, 'x', cp);
     for (;;) {
         if (p == e) break;
-        const char *attempt = p;
-        char32_t    peek;
-        if (Utf8Decode(attempt, e, peek)) break;  // run ends here
+        const CharT *attempt = p;
+        char32_t     peek;
+        if (NextScalar(attempt, e, peek)) break;  // run ends here
         EscapeHex(out, 'x', peek);
         p = attempt;
     }
@@ -175,14 +237,15 @@ inline void EscapeUnit(string &out, const char *&p, const char *e,
 
 // [format.string.escaped]/2 — the quote-delimited escaped representation
 // of a string.
-inline void EscapeInto(string &out, string_view s)
+template <class CharT>
+inline void EscapeInto(basic_string<CharT> &out, basic_string_view<CharT> s)
 {
-    out += '"';
-    const char *p = s.data();
-    const char *e = p + s.size();
-    bool        prevEscaped = true;
+    PutAscii(out, '"');
+    const CharT *p = s.data();
+    const CharT *e = p + s.size();
+    bool         prevEscaped = true;
     while (p != e) EscapeUnit(out, p, e, prevEscaped);
-    out += '"';
+    PutAscii(out, '"');
 }
 
 // [format.string.escaped]/3 — the apostrophe-delimited escaped
@@ -190,20 +253,19 @@ inline void EscapeInto(string &out, string_view s)
 // asymmetry of 3.2/3.3 (which both take priority over the table: an
 // apostrophe is escaped here even though it has no Table 114 entry, and a
 // quote is left raw even though Table 114 maps it for the string form).
-inline void EscapeChar(string &out, char c)
+template <class CharT> inline void EscapeChar(basic_string<CharT> &out, CharT c)
 {
-    out += '\'';
-    if (c == '\'') {
-        out += '\\';
-        out += '\'';
-    } else if (c == '"') {
-        out += '"';
+    PutAscii(out, '\'');
+    if (c == CharT('\'')) {
+        PutAscii(out, "\\'");
+    } else if (c == CharT('"')) {
+        PutAscii(out, '"');
     } else {
-        const char *p           = &c;
-        bool        prevEscaped = true;  // a lone character has no real predecessor
+        const CharT *p           = &c;
+        bool         prevEscaped = true;  // a lone character has no real predecessor
         EscapeUnit(out, p, &c + 1, prevEscaped);
     }
-    out += '\'';
+    PutAscii(out, '\'');
 }
 
 } // namespace __format

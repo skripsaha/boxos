@@ -1569,6 +1569,121 @@ inline long double stold(const string &str, size_t *pos = nullptr)
     return __string_impl::ParseStof<long double>(str, pos, "stold");
 }
 
+// ── the wide half of [string.conversions] (Ф42-g) ───────────────────────
+// Nine narrow functions above, nine wide ones below, and ONE engine under
+// both. A number has no character type: every character a numeric literal can
+// contain is ASCII, so the wide conversions narrow their argument one code
+// unit at a time and hand it to the very functions above — the same move
+// Ф42-b made for the wcsto* family, and for the same reason (there, the
+// endptr came back by addition; here, `pos` does, because the narrowing is
+// one-to-one and never changes a length).
+//
+// Everything outside ASCII narrows to DEL, which cannot appear in a number in
+// any base, so it ends the parse exactly where a wide non-digit should.
+//
+// ‼ The one measured consequence: leading white space is the six "C"
+// characters, not Unicode White_Space. [string.conversions] words the wide
+// overloads "as if by wcstol", and boxcxx's own wcstol DOES skip a wide space
+// (Ф42-b) — so stoi(L"\u2003" L"42") throws here where wcstol reads 42. The
+// alternative was a second set of rules for overflow, invalid input and pos,
+// which is the shape defects live in; recorded in CONFORMANCE rather than
+// bought.
+namespace __string_impl {
+
+inline string NarrowForSto(const wstring &w)
+{
+    string out;
+    out.reserve(w.size());
+    for (wchar_t c : w)
+        out.push_back(static_cast<make_unsigned_t<wchar_t>>(c) < 0x80u
+                          ? char(c)
+                          : '\x7F');
+    return out;
+}
+
+} // namespace __string_impl
+
+inline int stoi(const wstring &str, size_t *pos = nullptr, int base = 10)
+{
+    return stoi(__string_impl::NarrowForSto(str), pos, base);
+}
+inline long stol(const wstring &str, size_t *pos = nullptr, int base = 10)
+{
+    return stol(__string_impl::NarrowForSto(str), pos, base);
+}
+inline long long stoll(const wstring &str, size_t *pos = nullptr, int base = 10)
+{
+    return stoll(__string_impl::NarrowForSto(str), pos, base);
+}
+inline unsigned long stoul(const wstring &str, size_t *pos = nullptr,
+                           int base = 10)
+{
+    return stoul(__string_impl::NarrowForSto(str), pos, base);
+}
+inline unsigned long long stoull(const wstring &str, size_t *pos = nullptr,
+                                 int base = 10)
+{
+    return stoull(__string_impl::NarrowForSto(str), pos, base);
+}
+inline float stof(const wstring &str, size_t *pos = nullptr)
+{
+    return stof(__string_impl::NarrowForSto(str), pos);
+}
+inline double stod(const wstring &str, size_t *pos = nullptr)
+{
+    return stod(__string_impl::NarrowForSto(str), pos);
+}
+inline long double stold(const wstring &str, size_t *pos = nullptr)
+{
+    return stold(__string_impl::NarrowForSto(str), pos);
+}
+
+// to_wstring: the same six overloads, and the same engine again. The digits
+// to_string produces are ASCII, so widening them is the cast — and because
+// this delegates rather than reimplementing, to_wstring inherits P2587R3 for
+// free: to_wstring(1e-9) is L"1e-09" here, where libc++ 22 still answers
+// L"0.000000" (measured, and its to_string says the same, so the reference is
+// consistently behind rather than wrong about the wide half only).
+namespace __string_impl {
+
+inline wstring WidenAscii(const string &s)
+{
+    wstring out;
+    out.reserve(s.size());
+    for (char c : s) out.push_back(wchar_t(static_cast<unsigned char>(c)));
+    return out;
+}
+
+} // namespace __string_impl
+
+inline wstring to_wstring(int v) { return __string_impl::WidenAscii(to_string(v)); }
+inline wstring to_wstring(long v) { return __string_impl::WidenAscii(to_string(v)); }
+inline wstring to_wstring(long long v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+inline wstring to_wstring(unsigned v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+inline wstring to_wstring(unsigned long v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+inline wstring to_wstring(unsigned long long v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+inline wstring to_wstring(float v) { return __string_impl::WidenAscii(to_string(v)); }
+inline wstring to_wstring(double v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+inline wstring to_wstring(long double v)
+{
+    return __string_impl::WidenAscii(to_string(v));
+}
+
 // ── deduction guide ([string.cons]) ───────────────────────────────────────
 // basic_string has no other deduction guides in boxcxx (none pre-existed;
 // CTAD from a raw const charT* / basic_string_view is out of scope here) —

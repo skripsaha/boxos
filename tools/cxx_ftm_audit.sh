@@ -42,6 +42,12 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф42-g raised it 170 -> 171, and the delta is ONE macro reaching
+#           ONE header: __cpp_lib_formatters, whose owners are <stacktrace>
+#           and <thread>, becomes visible from <future> because <future>
+#           includes <thread>. Measured as a set difference against the
+#           previous run: exactly that pair, and nothing stopped leaking.
+#
 #           Ф40's fourth commit raised it 169 -> 170, and the delta is ONE
 #           macro: __cpp_lib_parallel_algorithm, whose owners are <algorithm>
 #           and <numeric> and which therefore reaches everything <algorithm>
@@ -108,7 +114,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=170
+LEAK_BUDGET=171
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

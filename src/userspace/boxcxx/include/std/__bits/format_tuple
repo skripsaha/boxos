@@ -1,6 +1,6 @@
 // boxcxx — <__bits/format_tuple>  ([format.tuple])
 //
-// formatter<pair<T1,T2>,char> and formatter<tuple<Ts...>,char>. Included
+// formatter<pair<T1,T2>,CharT> and formatter<tuple<Ts...>,CharT>. Included
 // from the bottom of <format>, after <__bits/format_range>: it reuses
 // format_range's HasSetDebugFormat probe and needs format_context,
 // EmitField and StringSink already complete, same as format_range itself.
@@ -17,12 +17,13 @@
 // suppression-vs-parse-time-clear bug precisely because it kept such a
 // flag, and this design has no flag for that bug to hide behind.
 //
-// No CharT template parameter: like every scalar/string formatter in this
-// file (and unlike range_formatter, which the standard exposes as a public
-// utility for OTHER programs' formatters to reuse with any charT), this
-// specialization is never named by user code with a charT other than char
-// -- boxcxx has no wchar_t formatting anywhere, so a CharT parameter here
-// would be decorative only.
+// This file used to carry a paragraph explaining why it had NO CharT
+// parameter: "boxcxx has no wchar_t formatting anywhere, so a CharT parameter
+// here would be decorative only." Ф42-g made that false, and nothing in this
+// file changed on the day it did -- the same shape as the claim <ostream>
+// was caught making about its deleted overloads. A reason that rests on what
+// the REST of the library does has to be re-read when the rest of the library
+// moves, and nothing makes that happen except looking.
 #ifndef BOXCXX_BITS_FORMAT_TUPLE
 #define BOXCXX_BITS_FORMAT_TUPLE
 
@@ -36,22 +37,26 @@ namespace __format {
 // Self is the exact pair<T1,T2> or tuple<Ts...> instantiation (needed only
 // to name format()'s parameter type per [format.tuple]/9); Ts... is that
 // same type's element pack.
-template <class Self, class... Ts>
+template <class Self, class CharT, class... Ts>
 class TupleFormatterBase {
+    using Text = FmtPunct<CharT>;
+    using SV   = basic_string_view<CharT>;
+
 public:
-    constexpr void set_separator(string_view sep) noexcept { sep_ = sep; }
-    constexpr void set_brackets(string_view open, string_view close) noexcept
+    constexpr void set_separator(SV sep) noexcept { sep_ = sep; }
+    constexpr void set_brackets(SV open, SV close) noexcept
     {
         open_  = open;
         close_ = close;
     }
 
     // Grammar (/2): [tuple-fill-and-align][width][m|n] -- nothing else.
-    constexpr format_parse_context::iterator parse(format_parse_context &pc)
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = pc.begin();
-        const char *e = pc.end();
-        auto finished = [&] { return p == e || *p == '}'; };
+        const CharT *p = pc.begin();
+        const CharT *e = pc.end();
+        auto finished = [&] { return p == e || *p == CharT('}'); };
         auto commit   = [&] {
             pc.advance_to(p);
             ParseElems(index_sequence_for<Ts...>{});
@@ -71,8 +76,8 @@ public:
         // literally what the engine hands us once it strips the field's
         // OWN introducing colon) must fall through to "invalid" below
         // rather than being swallowed as a fill character.
-        if (p + 1 < e && IsAlignChar(p[1]) && *p != '{' && *p != '}' &&
-            *p != ':') {
+        if (p + 1 < e && IsAlignChar(p[1]) && *p != CharT('{') &&
+            *p != CharT('}') && *p != CharT(':')) {
             spec_.fill  = *p;
             spec_.align = AlignOf(p[1]);
             p += 2;
@@ -86,7 +91,7 @@ public:
         // ParseWidth already enforces along with the field limit.
         if (IsDigit(*p)) {
             spec_.width = ParseWidth(p, e);
-        } else if (*p == '{') {
+        } else if (*p == CharT('{')) {
             spec_.width_id      = ParseDynamicArgId(pc, p, e);
             spec_.width_dynamic = true;
             pc.check_dynamic_spec_integral(spec_.width_id);
@@ -97,17 +102,17 @@ public:
         // land directly on separator_/opening-bracket_/closing-bracket_,
         // so a member is only ever touched when its row requires it --
         // /7's "if and only if required by the tuple-type, if present".
-        if (*p == 'm') {
+        if (*p == CharT('m')) {
             if constexpr (sizeof...(Ts) == 2) {
-                set_separator(": ");
-                set_brackets(string_view(), string_view());
+                set_separator(Text::kColonSpace);
+                set_brackets(SV(), SV());
                 ++p;
             } else {
                 throw format_error(
                     "format: 'm' requires a pair or a two-element tuple");
             }
-        } else if (*p == 'n') {
-            set_brackets(string_view(), string_view());
+        } else if (*p == CharT('n')) {
+            set_brackets(SV(), SV());
             ++p;
         }
 
@@ -119,21 +124,21 @@ public:
     // /9: elems is const Self& when every element is const-formattable,
     // otherwise Self& -- the same P2418 selection applied per element
     // instead of to a single format argument.
-    using ElemsRef = conditional_t<(formattable<const Ts, char> && ...),
+    using ElemsRef = conditional_t<(formattable<const Ts, CharT> && ...),
                                    const Self &, Self &>;
 
-    void format(ElemsRef elems, format_context &ctx) const
+    void format(ElemsRef elems, Ctx<CharT> &ctx) const
     {
         if (spec_.width < 0 && !spec_.width_dynamic) {
             FormatBody(elems, ctx);
             return;
         }
-        const int      width = EffectiveWidth(ctx, spec_);
-        StringSink     scratch;
-        format_context nested(SinkIterator(scratch), ctx.__args());
+        const int          width = EffectiveWidth(ctx, spec_);
+        StringSink<CharT>  scratch;
+        Ctx<CharT> nested(SinkIterator<CharT>(scratch), ctx.__args());
         FormatBody(elems, nested);
         EmitField(ctx, spec_, width, string_view(),
-                 string_view(scratch.str.data(), scratch.str.size()),
+                 SV(scratch.str.data(), scratch.str.size()),
                  Align::Left, /*numeric=*/false);
     }
 
@@ -163,8 +168,8 @@ private:
     template <size_t I>
     constexpr void ParseOneElem()
     {
-        format_parse_context pc(string_view(), 0);
-        auto                &f  = get<I>(underlying_);
+        basic_format_parse_context<CharT> pc(SV(), 0);
+        auto                             &f  = get<I>(underlying_);
         auto                 it = f.parse(pc);
         if (it != pc.end())
             throw format_error(
@@ -173,10 +178,10 @@ private:
             f.set_debug_format();
     }
 
-    void FormatBody(ElemsRef elems, format_context &ctx) const
+    void FormatBody(ElemsRef elems, Ctx<CharT> &ctx) const
     {
         auto out     = ctx.out();
-        auto writeSv = [&](string_view s) {
+        auto writeSv = [&](SV s) {
             if (!s.empty()) WriteRun(out, s.data(), s.size());
         };
         writeSv(open_);
@@ -188,7 +193,7 @@ private:
     }
 
     template <size_t... Is>
-    void FormatElems(ElemsRef elems, format_context &ctx,
+    void FormatElems(ElemsRef elems, Ctx<CharT> &ctx,
                      index_sequence<Is...>) const
     {
         (WriteElem<Is>(elems, ctx), ...);
@@ -197,7 +202,7 @@ private:
     // /10: "if I != 0, separator_" -- a compile-time check, so the
     // separator can never be written before the first element.
     template <size_t I>
-    void WriteElem(ElemsRef elems, format_context &ctx) const
+    void WriteElem(ElemsRef elems, Ctx<CharT> &ctx) const
     {
         if constexpr (I != 0) {
             auto out = ctx.out();
@@ -207,25 +212,26 @@ private:
         get<I>(underlying_).format(get<I>(elems), ctx);
     }
 
-    StdSpec                                       spec_;
-    string_view                                   sep_   = ", ";
-    string_view                                   open_  = "(";
-    string_view                                   close_ = ")";
-    tuple<formatter<remove_cvref_t<Ts>, char>...> underlying_;
+    StdSpec<CharT>                                 spec_;
+    SV                                             sep_   = Text::kCommaSpace;
+    SV                                             open_  = Text::kOpenParen;
+    SV                                             close_ = Text::kCloseParen;
+    tuple<formatter<remove_cvref_t<Ts>, CharT>...> underlying_;
 };
 
 } // namespace __format
 
-template <class T1, class T2>
-    requires formattable<T1, char> && formattable<T2, char>
-struct formatter<pair<T1, T2>, char>
-    : __format::TupleFormatterBase<pair<T1, T2>, T1, T2> {
+template <class T1, class T2, class CharT>
+    requires __format::FmtCharT<CharT> && formattable<T1, CharT> &&
+             formattable<T2, CharT>
+struct formatter<pair<T1, T2>, CharT>
+    : __format::TupleFormatterBase<pair<T1, T2>, CharT, T1, T2> {
 };
 
-template <class... Ts>
-    requires(formattable<Ts, char> && ...)
-struct formatter<tuple<Ts...>, char>
-    : __format::TupleFormatterBase<tuple<Ts...>, Ts...> {
+template <class CharT, class... Ts>
+    requires __format::FmtCharT<CharT> && (formattable<Ts, CharT> && ...)
+struct formatter<tuple<Ts...>, CharT>
+    : __format::TupleFormatterBase<tuple<Ts...>, CharT, Ts...> {
 };
 
 // [format.tuple] — the other subclause that "specifies otherwise" for

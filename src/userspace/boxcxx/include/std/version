@@ -185,19 +185,24 @@
 // constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
 //                          constexpr.
 // filesystem               no <filesystem> header.
-// format                   <format> is char-only: no wchar_t, no
-//                          wformat_context, no wformat/wformat_to.
-// formatters               P2693R1 puts two unrelated formatters under one
-//                          macro. Since Ф37 boxcxx has BOTH narrow ones:
-//                          formatter<thread::id, char> (with its
-//                          enable_nonlocking_formatter_optimization) and
-//                          formatter<stacktrace_entry> /
-//                          formatter<basic_stacktrace<A>>. What is still
-//                          absent is the wide half -- formatter<thread::id,
-//                          wchar_t> -- because boxcxx has no wide formatting
-//                          at all (CONFORMANCE §1.2), and that is now the
-//                          ONLY thing holding this macro back. Half a feature
-//                          is not the feature.
+// format                   the reason this entry gave until Ф42-g -- "<format>
+//                          is char-only: no wchar_t, no wformat_context, no
+//                          wformat/wformat_to" -- is dead: all of that exists.
+//                          What holds the macro back now is a DEVIATION rather
+//                          than an absence, and it is deliberate.
+//                          [format.string.std]/13 measures a field's width as
+//                          the ESTIMATED width of the formatted text, with
+//                          East-Asian wide characters counting two; boxcxx
+//                          counts code units in both alphabets and says so
+//                          (CONFORMANCE §2 <format>). Field width is also
+//                          capped at 65535, which the standard does not
+//                          permit either. Both are chosen, both are recorded,
+//                          and a macro claiming the feature would be claiming
+//                          the parts that were declined along with the parts
+//                          that were built.
+//
+//                          formatters LEFT this list in Ф42-g -- see
+//                          <__bits/version_thread>.
 // is_implicit_lifetime     the trait cannot be written correctly without
 //                          compiler support, and x86_64-elf-g++ 15.2.0 has
 //                          no __builtin_is_implicit_lifetime (measured; nor

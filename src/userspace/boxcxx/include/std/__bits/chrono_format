@@ -319,154 +319,173 @@ inline void RequireDate(const Parts &p)
         throw format_error("chrono format: the value is not a valid date");
 }
 
-// Walk a chrono-format string, appending rendered fields to `o`. Every
-// conversion specifier here was already accepted by parse() against the type's
-// field mask, so only value-dependent failures (%Z without a zone, an invalid
-// month for %b) can still throw.
-inline void render(string &o, string_view f, const Parts &p)
+// Render ONE conversion specifier. Everything a chrono type can say is ASCII —
+// digits, "Jan", "+0300", "UTC" — so this half of the walk never learned about
+// character types and does not need to: it is the engine, the same one both
+// output alphabets go through. Every specifier here was already accepted by
+// parse() against the type's field mask, so only value-dependent failures
+// (%Z without a zone, an invalid month for %b) can still throw.
+inline void RenderOne(string &o, char k, char mod, const Parts &p)
 {
-    const char *q = f.data();
-    const char *e = q + f.size();
+    switch (k) {
+    case 'Y': put_year(o, p.year); break;
+    case 'y': put_uint(o, AbsLL(p.year) % 100, 2); break;
+    case 'C': put_century(o, p.year); break;
+    case 'm': put_uint(o, p.month, 2); break;
+    case 'd': put_uint(o, p.day, 2); break;
+    case 'e': put_uint_sp(o, p.day, 2); break;
+    case 'H': put_uint(o, (unsigned long long)p.h, 2); break;
+    case 'I': put_uint(o, Hour12(p.h), 2); break;
+    case 'M': put_uint(o, (unsigned long long)p.mi, 2); break;
+    case 'S': put_secs(o, p, true); break;
+    case 'T': put_time24(o, p, true); break;
+    case 'X': put_time24(o, p, false); break;
+    case 'R':
+        put_uint(o, (unsigned long long)p.h, 2);
+        o.push_back(':');
+        put_uint(o, (unsigned long long)p.mi, 2);
+        break;
+    case 'r':
+        put_uint(o, Hour12(p.h), 2);
+        o.push_back(':');
+        put_uint(o, (unsigned long long)p.mi, 2);
+        o.push_back(':');
+        put_secs(o, p, false);
+        o.push_back(' ');
+        o.append(p.h < 12 ? "AM" : "PM");
+        break;
+    case 'c': // "C" locale date+time: %a %b %e %H:%M:%S %Y
+        if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+        if (!p.mon_ok) throw format_error("chrono format: invalid month");
+        o.append(kWdAbbr[p.wd % 7]);
+        o.push_back(' ');
+        o.append(kMonAbbr[(p.month - 1) % 12]);
+        o.push_back(' ');
+        put_uint_sp(o, p.day, 2);
+        o.push_back(' ');
+        put_time24(o, p, false);
+        o.push_back(' ');
+        put_year(o, p.year);
+        break;
+    case 'F':
+        put_year(o, p.year);
+        o.push_back('-');
+        put_uint(o, p.month, 2);
+        o.push_back('-');
+        put_uint(o, p.day, 2);
+        break;
+    case 'D':
+    case 'x': // "C" locale date: %m/%d/%y
+        put_uint(o, p.month, 2);
+        o.push_back('/');
+        put_uint(o, p.day, 2);
+        o.push_back('/');
+        put_uint(o, AbsLL(p.year) % 100, 2);
+        break;
+    case 'j':
+        // For a duration this is the number of whole days, unpadded.
+        if (!p.have_date) { put_int(o, p.h / 24, 1); break; }
+        RequireDate(p);
+        put_int(o, p.yday, 3);
+        break;
+    case 'U':
+        RequireDate(p);
+        put_int(o, WeekNumber(p, false), 2);
+        break;
+    case 'W':
+        RequireDate(p);
+        put_int(o, WeekNumber(p, true), 2);
+        break;
+    case 'V': {
+        RequireDate(p);
+        long long iy, iw;
+        IsoWeek(p, iy, iw);
+        put_int(o, iw, 2);
+    } break;
+    case 'G': {
+        RequireDate(p);
+        long long iy, iw;
+        IsoWeek(p, iy, iw);
+        put_year(o, iy);
+    } break;
+    case 'g': {
+        RequireDate(p);
+        long long iy, iw;
+        IsoWeek(p, iy, iw);
+        put_uint(o, AbsLL(iy) % 100, 2);
+    } break;
+    case 'a':
+        if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+        o.append(kWdAbbr[p.wd % 7]);
+        break;
+    case 'A':
+        if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
+        o.append(kWdFull[p.wd % 7]);
+        break;
+    case 'b':
+    case 'h':
+        if (!p.mon_ok) throw format_error("chrono format: invalid month");
+        o.append(kMonAbbr[(p.month - 1) % 12]);
+        break;
+    case 'B':
+        if (!p.mon_ok) throw format_error("chrono format: invalid month");
+        o.append(kMonFull[(p.month - 1) % 12]);
+        break;
+    case 'p': o.append(p.h < 12 ? "AM" : "PM"); break;
+    case 'u': put_uint(o, (unsigned long long)(p.wd == 0 ? 7 : p.wd), 1); break;
+    case 'w': put_uint(o, (unsigned long long)p.wd, 1); break;
+    case 'z': {
+        if (!p.has_zoff)
+            throw format_error("chrono format: no offset information");
+        const long long    sec = p.zoff_sec;
+        unsigned long long am  = AbsLL(sec) / 60u; // whole minutes
+        o.push_back(sec < 0 ? '-' : '+');
+        put_uint(o, am / 60u, 2);
+        if (mod) o.push_back(':'); // %Ez / %Oz insert the colon
+        put_uint(o, am % 60u, 2);
+    } break;
+    case 'Z':
+        if (!p.has_zone)
+            throw format_error("chrono format: no time zone abbreviation");
+        o.append(p.zone.data(), p.zone.size());
+        break;
+    case 'Q': o.append(p.qtext.data(), p.qtext.size()); break;
+    case 'q': o.append(p.unit.data(), p.unit.size()); break;
+    case 'n': o.push_back('\n'); break;
+    case 't': o.push_back('\t'); break;
+    case '%': o.push_back('%'); break;
+    default: throw format_error("chrono format: unsupported conversion");
+    }
+}
+
+// Walk a chrono-format string. This is the only half that knows the character
+// type, and it knows it for one reason: the LITERAL text between conversions
+// comes straight out of the format string, so "{:%Y \u0433\u043e\u0434}" has to reach
+// the output with its two words intact. Everything else is handed to
+// RenderOne, produced in ASCII, and widened here — the same division the wide
+// printf of Ф42-c drew, where the narrow engine formatted the directive and
+// the wide layer owned only what was really made of characters.
+template <class CharT>
+inline void render(basic_string<CharT> &o, basic_string_view<CharT> f,
+                   const Parts &p)
+{
+    string       piece;  // reused across conversions
+    const CharT *q = f.data();
+    const CharT *e = q + f.size();
     while (q != e) {
-        char c = *q++;
-        if (c != '%') { o.push_back(c); continue; }
+        const CharT c = *q++;
+        if (c != CharT('%')) { o.push_back(c); continue; }
         if (q == e) throw format_error("chrono format: trailing '%'");
         char mod = 0;
-        char k   = *q++;
+        char k   = __format::NarrowAscii(*q++);
         if (k == 'E' || k == 'O') {
             if (q == e) throw format_error("chrono format: trailing modifier");
             mod = k;
-            k   = *q++;
+            k   = __format::NarrowAscii(*q++);
         }
-        switch (k) {
-        case 'Y': put_year(o, p.year); break;
-        case 'y': put_uint(o, AbsLL(p.year) % 100, 2); break;
-        case 'C': put_century(o, p.year); break;
-        case 'm': put_uint(o, p.month, 2); break;
-        case 'd': put_uint(o, p.day, 2); break;
-        case 'e': put_uint_sp(o, p.day, 2); break;
-        case 'H': put_uint(o, (unsigned long long)p.h, 2); break;
-        case 'I': put_uint(o, Hour12(p.h), 2); break;
-        case 'M': put_uint(o, (unsigned long long)p.mi, 2); break;
-        case 'S': put_secs(o, p, true); break;
-        case 'T': put_time24(o, p, true); break;
-        case 'X': put_time24(o, p, false); break;
-        case 'R':
-            put_uint(o, (unsigned long long)p.h, 2);
-            o.push_back(':');
-            put_uint(o, (unsigned long long)p.mi, 2);
-            break;
-        case 'r':
-            put_uint(o, Hour12(p.h), 2);
-            o.push_back(':');
-            put_uint(o, (unsigned long long)p.mi, 2);
-            o.push_back(':');
-            put_secs(o, p, false);
-            o.push_back(' ');
-            o.append(p.h < 12 ? "AM" : "PM");
-            break;
-        case 'c': // "C" locale date+time: %a %b %e %H:%M:%S %Y
-            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
-            if (!p.mon_ok) throw format_error("chrono format: invalid month");
-            o.append(kWdAbbr[p.wd % 7]);
-            o.push_back(' ');
-            o.append(kMonAbbr[(p.month - 1) % 12]);
-            o.push_back(' ');
-            put_uint_sp(o, p.day, 2);
-            o.push_back(' ');
-            put_time24(o, p, false);
-            o.push_back(' ');
-            put_year(o, p.year);
-            break;
-        case 'F':
-            put_year(o, p.year);
-            o.push_back('-');
-            put_uint(o, p.month, 2);
-            o.push_back('-');
-            put_uint(o, p.day, 2);
-            break;
-        case 'D':
-        case 'x': // "C" locale date: %m/%d/%y
-            put_uint(o, p.month, 2);
-            o.push_back('/');
-            put_uint(o, p.day, 2);
-            o.push_back('/');
-            put_uint(o, AbsLL(p.year) % 100, 2);
-            break;
-        case 'j':
-            // For a duration this is the number of whole days, unpadded.
-            if (!p.have_date) { put_int(o, p.h / 24, 1); break; }
-            RequireDate(p);
-            put_int(o, p.yday, 3);
-            break;
-        case 'U':
-            RequireDate(p);
-            put_int(o, WeekNumber(p, false), 2);
-            break;
-        case 'W':
-            RequireDate(p);
-            put_int(o, WeekNumber(p, true), 2);
-            break;
-        case 'V': {
-            RequireDate(p);
-            long long iy, iw;
-            IsoWeek(p, iy, iw);
-            put_int(o, iw, 2);
-        } break;
-        case 'G': {
-            RequireDate(p);
-            long long iy, iw;
-            IsoWeek(p, iy, iw);
-            put_year(o, iy);
-        } break;
-        case 'g': {
-            RequireDate(p);
-            long long iy, iw;
-            IsoWeek(p, iy, iw);
-            put_uint(o, AbsLL(iy) % 100, 2);
-        } break;
-        case 'a':
-            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
-            o.append(kWdAbbr[p.wd % 7]);
-            break;
-        case 'A':
-            if (!p.wd_ok) throw format_error("chrono format: invalid weekday");
-            o.append(kWdFull[p.wd % 7]);
-            break;
-        case 'b':
-        case 'h':
-            if (!p.mon_ok) throw format_error("chrono format: invalid month");
-            o.append(kMonAbbr[(p.month - 1) % 12]);
-            break;
-        case 'B':
-            if (!p.mon_ok) throw format_error("chrono format: invalid month");
-            o.append(kMonFull[(p.month - 1) % 12]);
-            break;
-        case 'p': o.append(p.h < 12 ? "AM" : "PM"); break;
-        case 'u': put_uint(o, (unsigned long long)(p.wd == 0 ? 7 : p.wd), 1); break;
-        case 'w': put_uint(o, (unsigned long long)p.wd, 1); break;
-        case 'z': {
-            if (!p.has_zoff)
-                throw format_error("chrono format: no offset information");
-            const long long    sec = p.zoff_sec;
-            unsigned long long am  = AbsLL(sec) / 60u; // whole minutes
-            o.push_back(sec < 0 ? '-' : '+');
-            put_uint(o, am / 60u, 2);
-            if (mod) o.push_back(':'); // %Ez / %Oz insert the colon
-            put_uint(o, am % 60u, 2);
-        } break;
-        case 'Z':
-            if (!p.has_zone)
-                throw format_error("chrono format: no time zone abbreviation");
-            o.append(p.zone.data(), p.zone.size());
-            break;
-        case 'Q': o.append(p.qtext.data(), p.qtext.size()); break;
-        case 'q': o.append(p.unit.data(), p.unit.size()); break;
-        case 'n': o.push_back('\n'); break;
-        case 't': o.push_back('\t'); break;
-        case '%': o.push_back('%'); break;
-        default: throw format_error("chrono format: unsupported conversion");
-        }
+        piece.clear();
+        RenderOne(piece, k, mod, p);
+        for (char b : piece) o.push_back(CharT(static_cast<unsigned char>(b)));
     }
 }
 
@@ -509,13 +528,14 @@ constexpr bool ModifierOk(char mod, char k)
 // union of what the chrono-specs actually asked for, so a formatter can skip
 // work nothing referenced (the duration formatter must not decompose a value
 // into a time of day for "{:%Q}").
-constexpr unsigned validate_specs(string_view f, unsigned fields)
+template <class CharT>
+constexpr unsigned validate_specs(basic_string_view<CharT> f, unsigned fields)
 {
-    unsigned    used = 0;
-    const char *q    = f.data();
-    const char *e    = q + f.size();
+    unsigned     used = 0;
+    const CharT *q    = f.data();
+    const CharT *e    = q + f.size();
     while (q != e) {
-        const char c = *q++;
+        const char c = __format::NarrowAscii(*q++);
         // literal-char is "any character other than {, }, or %"
         // ([time.format]/1); parse_spec already stops at '}'.
         if (c == '{')
@@ -523,11 +543,11 @@ constexpr unsigned validate_specs(string_view f, unsigned fields)
         if (c != '%') continue;
         if (q == e) throw format_error("chrono format: trailing '%'");
         char mod = 0;
-        char k   = *q++;
+        char k   = __format::NarrowAscii(*q++);
         if (k == 'E' || k == 'O') {
             if (q == e) throw format_error("chrono format: trailing modifier");
             mod = k;
-            k   = *q++;
+            k   = __format::NarrowAscii(*q++);
         }
         if (mod && !ModifierOk(mod, k))
             throw format_error("chrono format: invalid E/O modifier");
@@ -556,18 +576,21 @@ constexpr unsigned validate_specs(string_view f, unsigned fields)
 // then the %-conversion tail. constexpr — the consteval format-string checker
 // calls formatter::parse(), so every diagnostic below is a compile error for a
 // literal format string.
-constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
-                                 string_view &chrono, unsigned fields,
-                                 unsigned &used)
+template <class CharT>
+constexpr const CharT *parse_spec(basic_format_parse_context<CharT> &pc,
+                                  __format::StdSpec<CharT> &s,
+                                  basic_string_view<CharT> &chrono,
+                                  unsigned fields, unsigned &used)
 {
-    const char *p = pc.begin();
-    const char *e = pc.end();
+    const CharT *p = pc.begin();
+    const CharT *e = pc.end();
     if (p == e) { // an empty spec: forming p + 1 below would be out of bounds
-        chrono = string_view(p, size_t(0));
+        chrono = basic_string_view<CharT>(p, size_t(0));
         used   = 0;
         return p;
     }
-    if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != '{' && *p != '}') {
+    if (p + 1 < e && __format::IsAlignChar(p[1]) && *p != CharT('{') &&
+        *p != CharT('}')) {
         s.fill  = *p;
         s.align = __format::AlignOf(p[1]);
         p += 2;
@@ -577,16 +600,16 @@ constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
     }
     if (p != e && __format::IsDigit(*p)) {
         s.width = __format::ParseWidth(p, e);
-    } else if (p != e && *p == '{') {
+    } else if (p != e && *p == CharT('{')) {
         s.width_id      = __format::ParseDynamicArgId(pc, p, e);
         s.width_dynamic = true;
         pc.check_dynamic_spec_integral(s.width_id);
     }
-    if (p != e && *p == '.') {
+    if (p != e && *p == CharT('.')) {
         ++p;
         if (p != e && __format::IsDigit(*p))
             s.precision = __format::ParsePrecision(p, e);
-        else if (p != e && *p == '{') {
+        else if (p != e && *p == CharT('{')) {
             s.prec_id      = __format::ParseDynamicArgId(pc, p, e);
             s.prec_dynamic = true;
             pc.check_dynamic_spec_integral(s.prec_id);
@@ -596,26 +619,32 @@ constexpr const char *parse_spec(format_parse_context &pc, __format::StdSpec &s,
     if ((s.precision >= 0 || s.prec_dynamic) && !(fields & kPrec))
         throw format_error("chrono format: a precision is only valid for a "
                            "duration with a floating-point representation");
-    if (p != e && *p == 'L') { // formatting locale — always "C" here
+    if (p != e && *p == CharT('L')) { // formatting locale — always "C" here
         s.localized = true;
         ++p;
     }
-    const char *start = p;
-    while (p != e && *p != '}') ++p;
-    chrono = string_view(start, size_t(p - start));
+    const CharT *start = p;
+    while (p != e && *p != CharT('}')) ++p;
+    chrono = basic_string_view<CharT>(start, size_t(p - start));
     // chrono-specs derives from conversion-spec, so it cannot start with a
     // literal character.
-    if (!chrono.empty() && chrono.front() != '%')
+    if (!chrono.empty() && chrono.front() != CharT('%'))
         throw format_error("chrono format: chrono-specs must start with '%'");
     used = validate_specs(chrono, fields);
     return p;
 }
 
-inline void emit(format_context &ctx, const __format::StdSpec &s,
-                 const string &body)
+// BodyC is free because a chrono body comes in two kinds. The streamed text
+// of [time.format]/7 — "Jan", "Sunday", "is not a valid day" — is ASCII and
+// stays narrow all the way here; a walked body may carry literal characters
+// out of the format string and is CharT. FormatString widens the first and
+// passes the second through, so both spellings arrive at one function.
+template <class CharT, class BodyC>
+inline void emit(__format::Ctx<CharT> &ctx, const __format::StdSpec<CharT> &s,
+                 const basic_string<BodyC> &body)
 {
     __format::FormatString(ctx, s, __format::EffectiveWidth(ctx, s), -1,
-                           string_view(body.data(), body.size()));
+                           basic_string_view<BodyC>(body.data(), body.size()));
 }
 
 inline Parts date_parts(const chrono::year_month_day &ymd)
@@ -743,16 +772,32 @@ template <class Period> inline string unit_suffix()
 // captures the %-conversion tail and validates it against the type's field
 // mask. Mirrors __format::StringSpecParser so each formatter only defines
 // format(). spec_/chrono_ are inherited.
-template <unsigned F> struct SpecParser {
-    __format::StdSpec spec_;
-    string_view       chrono_;
-    unsigned          used_ = 0; // which fields the chrono-specs referenced
-    constexpr typename format_parse_context::iterator
-    parse(format_parse_context &pc)
+template <unsigned F, class CharT> struct SpecParser {
+    __format::StdSpec<CharT> spec_;
+    basic_string_view<CharT> chrono_;
+    unsigned                 used_ = 0; // fields the chrono-specs referenced
+    constexpr typename basic_format_parse_context<CharT>::iterator
+    parse(basic_format_parse_context<CharT> &pc)
     {
-        const char *p = parse_spec(pc, spec_, chrono_, F, used_);
+        const CharT *p = parse_spec(pc, spec_, chrono_, F, used_);
         pc.advance_to(p);
         return p;
+    }
+
+    // The two ways a chrono body is made, so that twenty-four formatters do
+    // not each have to spell out which of them is narrow. `streamed` is the
+    // ASCII text a type prints with an empty chrono-specs; the walked form
+    // goes through render(), which is the only thing here that can produce a
+    // character the format string chose.
+    void EmitStreamed(__format::Ctx<CharT> &ctx, const string &body) const
+    {
+        emit(ctx, spec_, body);
+    }
+    void EmitWalked(__format::Ctx<CharT> &ctx, const Parts &p) const
+    {
+        basic_string<CharT> body;
+        render(body, chrono_, p);
+        emit(ctx, spec_, body);
     }
 };
 
@@ -761,212 +806,226 @@ template <unsigned F> struct SpecParser {
 // ── formatter<day/month/year/weekday> ───────────────────────────────────
 // The empty-chrono-specs form is the streamed text ([time.format]/7), which
 // for the calendar types carries the "… is not a valid …" diagnostics.
-template <>
-struct formatter<chrono::day, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDay> {
-    void format(const chrono::day &d, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::day, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDay, CharT> {
+    void format(const chrono::day &d, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_day_text(body, d);
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p;
             p.day = unsigned(d);
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
-template <>
-struct formatter<chrono::month, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth> {
-    void format(const chrono::month &m, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::month, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth, CharT> {
+    void format(const chrono::month &m, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty())
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_month_text(body, m);
-        else
-            __chrono_fmt::render(body, chrono_, __chrono_fmt::month_parts(m));
-        __chrono_fmt::emit(ctx, spec_, body);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        this->EmitWalked(ctx, __chrono_fmt::month_parts(m));
     }
 };
 
-template <>
-struct formatter<chrono::year, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kYear> {
-    void format(const chrono::year &y, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kYear, CharT> {
+    void format(const chrono::year &y, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_text(body, y);
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p;
             p.year = (long long)int(y);
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
-template <>
-struct formatter<chrono::weekday, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
-    void format(const chrono::weekday &w, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::weekday, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday, CharT> {
+    void format(const chrono::weekday &w, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty())
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_weekday_text(body, w);
-        else
-            __chrono_fmt::render(body, chrono_, __chrono_fmt::weekday_parts(w));
-        __chrono_fmt::emit(ctx, spec_, body);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        this->EmitWalked(ctx, __chrono_fmt::weekday_parts(w));
     }
 };
 
-template <>
-struct formatter<chrono::weekday_indexed, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
-    void format(const chrono::weekday_indexed &wdi, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::weekday_indexed, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday, CharT> {
+    void format(const chrono::weekday_indexed &wdi, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty())
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_weekday_indexed_text(body, wdi);
-        else
-            __chrono_fmt::render(body, chrono_,
-                                 __chrono_fmt::weekday_parts(wdi.weekday()));
-        __chrono_fmt::emit(ctx, spec_, body);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        this->EmitWalked(ctx, __chrono_fmt::weekday_parts(wdi.weekday()));
     }
 };
 
-template <>
-struct formatter<chrono::weekday_last, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday> {
-    void format(const chrono::weekday_last &wdl, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::weekday_last, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kWeekday, CharT> {
+    void format(const chrono::weekday_last &wdl, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty())
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_weekday_last_text(body, wdl);
-        else
-            __chrono_fmt::render(body, chrono_,
-                                 __chrono_fmt::weekday_parts(wdl.weekday()));
-        __chrono_fmt::emit(ctx, spec_, body);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        this->EmitWalked(ctx, __chrono_fmt::weekday_parts(wdl.weekday()));
     }
 };
 
 // ── formatter<month_day / month_day_last> ───────────────────────────────
-template <>
-struct formatter<chrono::month_day, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kDay> {
-    void format(const chrono::month_day &md, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::month_day, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kDay, CharT> {
+    void format(const chrono::month_day &md, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_month_text(body, md.month());
             body.push_back('/');
             __chrono_fmt::put_day_text(body, md.day());
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p = __chrono_fmt::month_parts(md.month());
             p.day                 = unsigned(md.day());
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
 // month_day_last has no day: which one it is depends on a year it does not
 // carry, so %d is not in its set.
-template <>
-struct formatter<chrono::month_day_last, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth> {
-    void format(const chrono::month_day_last &mdl, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::month_day_last, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth, CharT> {
+    void format(const chrono::month_day_last &mdl, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_month_text(body, mdl.month());
             body += "/last";
-        } else {
-            __chrono_fmt::render(body, chrono_,
-                                 __chrono_fmt::month_parts(mdl.month()));
+            this->EmitStreamed(ctx, body);
+            return;
         }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, __chrono_fmt::month_parts(mdl.month()));
     }
 };
 
 // ── formatter<month_weekday / month_weekday_last> ───────────────────────
-template <>
-struct formatter<chrono::month_weekday, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday> {
-    void format(const chrono::month_weekday &mwd, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::month_weekday, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday, CharT> {
+    void format(const chrono::month_weekday &mwd, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_month_text(body, mwd.month());
             body.push_back('/');
             __chrono_fmt::put_weekday_indexed_text(body, mwd.weekday_indexed());
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p = __chrono_fmt::month_parts(mwd.month());
             const chrono::weekday w = mwd.weekday_indexed().weekday();
             p.wd                    = w.c_encoding();
             p.wd_ok                 = w.ok();
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
-template <>
-struct formatter<chrono::month_weekday_last, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday> {
-    void format(const chrono::month_weekday_last &mwdl, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::month_weekday_last, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kMonth | __chrono_fmt::kWeekday, CharT> {
+    void format(const chrono::month_weekday_last &mwdl, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_month_text(body, mwdl.month());
             body.push_back('/');
             __chrono_fmt::put_weekday_last_text(body, mwdl.weekday_last());
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p = __chrono_fmt::month_parts(mwdl.month());
             const chrono::weekday w = mwdl.weekday_last().weekday();
             p.wd                    = w.c_encoding();
             p.wd_ok                 = w.ok();
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
 // ── formatter<year_month> ───────────────────────────────────────────────
-template <>
-struct formatter<chrono::year_month, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kYear | __chrono_fmt::kMonth> {
-    void format(const chrono::year_month &ym, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year_month, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kYear | __chrono_fmt::kMonth, CharT> {
+    void format(const chrono::year_month &ym, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_text(body, ym.year());
             body.push_back('/');
             __chrono_fmt::put_month_text(body, ym.month());
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
             __chrono_fmt::Parts p = __chrono_fmt::month_parts(ym.month());
             p.year                = (long long)int(ym.year());
-            __chrono_fmt::render(body, chrono_, p);
-        }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, p);
     }
 };
 
 // ── formatter<year_month_day / year_month_day_last> ─────────────────────
-template <>
-struct formatter<chrono::year_month_day, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
-    void format(const chrono::year_month_day &ymd, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year_month_day, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate, CharT> {
+    void format(const chrono::year_month_day &ymd, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty())
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_month_day_text(body, ymd);
-        else
-            __chrono_fmt::render(body, chrono_, __chrono_fmt::date_parts(ymd));
-        __chrono_fmt::emit(ctx, spec_, body);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        this->EmitWalked(ctx, __chrono_fmt::date_parts(ymd));
     }
 };
 
@@ -975,23 +1034,23 @@ struct formatter<chrono::year_month_day, char>
 // %Y-%m-%d here. libstdc++ instead round-trips through sys_days, which for an
 // out-of-range month normalizes its %F while its own %Y/%m still report the
 // stored fields.
-template <>
-struct formatter<chrono::year_month_day_last, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
-    void format(const chrono::year_month_day_last &ymdl, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year_month_day_last, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate, CharT> {
+    void format(const chrono::year_month_day_last &ymdl, __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_text(body, ymdl.year());
             body.push_back('/');
             __chrono_fmt::put_month_text(body, ymdl.month());
             body += "/last";
-        } else {
-            __chrono_fmt::render(
-                body, chrono_,
-                __chrono_fmt::date_parts(chrono::year_month_day{ymdl}));
+            this->EmitStreamed(ctx, body);
+            return;
         }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(
+            ctx, __chrono_fmt::date_parts(chrono::year_month_day{ymdl}));
     }
 };
 
@@ -1009,59 +1068,73 @@ template <class T> inline Parts resolved_parts(const T &v)
 }
 } // namespace __chrono_fmt
 
-template <>
-struct formatter<chrono::year_month_weekday, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
-    void format(const chrono::year_month_weekday &ymwd, format_context &ctx) const
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year_month_weekday, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate, CharT> {
+    void format(const chrono::year_month_weekday &ymwd,
+                __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_text(body, ymwd.year());
             body.push_back('/');
             __chrono_fmt::put_month_text(body, ymwd.month());
             body.push_back('/');
             __chrono_fmt::put_weekday_indexed_text(body, ymwd.weekday_indexed());
-        } else {
-            __chrono_fmt::render(body, chrono_,
-                                 __chrono_fmt::resolved_parts(ymwd));
+            this->EmitStreamed(ctx, body);
+            return;
         }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, __chrono_fmt::resolved_parts(ymwd));
     }
 };
 
-template <>
-struct formatter<chrono::year_month_weekday_last, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDate> {
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::year_month_weekday_last, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate, CharT> {
     void format(const chrono::year_month_weekday_last &ymwdl,
-                format_context &ctx) const
+                __format::Ctx<CharT> &ctx) const
     {
-        string body;
-        if (chrono_.empty()) {
+        if (this->chrono_.empty()) {
+            string body;
             __chrono_fmt::put_year_text(body, ymwdl.year());
             body.push_back('/');
             __chrono_fmt::put_month_text(body, ymwdl.month());
             body.push_back('/');
             __chrono_fmt::put_weekday_last_text(body, ymwdl.weekday_last());
-        } else {
-            __chrono_fmt::render(body, chrono_,
-                                 __chrono_fmt::resolved_parts(ymwdl));
+            this->EmitStreamed(ctx, body);
+            return;
         }
-        __chrono_fmt::emit(ctx, spec_, body);
+        this->EmitWalked(ctx, __chrono_fmt::resolved_parts(ymwdl));
     }
 };
 
 // ── formatter<hh_mm_ss<Duration>> ───────────────────────────────────────
-template <class Duration>
-struct formatter<chrono::hh_mm_ss<Duration>, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kTime> {
-    void format(const chrono::hh_mm_ss<Duration> &hms, format_context &ctx) const
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::hh_mm_ss<Duration>, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kTime, CharT> {
+    void format(const chrono::hh_mm_ss<Duration> &hms,
+                __format::Ctx<CharT> &ctx) const
     {
         __chrono_fmt::Parts p;
         __chrono_fmt::fill_time(p, hms);
-        string body;
-        if (p.neg) body.push_back('-');
-        __chrono_fmt::render(body, chrono_.empty() ? string_view("%T") : chrono_, p);
-        __chrono_fmt::emit(ctx, spec_, body);
+        // The empty chrono-specs default is "%T", which this file owns and
+        // spells in ASCII; only a caller-supplied spec is CharT. The two
+        // cannot share a ternary any more, and separating them is what makes
+        // the '-' below belong to the body in both worlds.
+        if (this->chrono_.empty()) {
+            string body;
+            if (p.neg) body.push_back('-');
+            __chrono_fmt::render(body, string_view("%T"), p);
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        basic_string<CharT> body;
+        if (p.neg) body.push_back(CharT('-'));
+        __chrono_fmt::render(body, this->chrono_, p);
+        __chrono_fmt::emit(ctx, this->spec_, body);
     }
 };
 
@@ -1153,23 +1226,36 @@ inline constexpr ZoneInfo kZoneTai{string_view("TAI"), true, true, 0};
 inline constexpr ZoneInfo kZoneGps{string_view("GPS"), true, true, 0};
 inline constexpr ZoneInfo kZoneNone{};
 
-inline void emit_parts(format_context &ctx, const __format::StdSpec &spec,
-                       string_view chrono_specs, string_view deflt, Parts p,
-                       const ZoneInfo &z)
+// The default chrono-specs ("%F %T" and friends) belong to [time.format], not
+// to the caller, so they are ASCII and render narrow; only a caller-supplied
+// spec can carry a character the format string chose. The two branches are
+// what used to be a ternary — a ternary cannot span two character types.
+template <class CharT>
+inline void emit_parts(__format::Ctx<CharT> &ctx,
+                       const __format::StdSpec<CharT> &spec,
+                       basic_string_view<CharT> chrono_specs, string_view deflt,
+                       Parts p, const ZoneInfo &z)
 {
     p.zone     = z.zone;
     p.has_zone = z.has_zone;
     p.has_zoff = z.has_offset;
     p.zoff_sec = z.offset_sec;
-    string body;
-    render(body, chrono_specs.empty() ? deflt : chrono_specs, p);
+    if (chrono_specs.empty()) {
+        string body;
+        render(body, deflt, p);
+        emit(ctx, spec, body);
+        return;
+    }
+    basic_string<CharT> body;
+    render(body, chrono_specs, p);
     emit(ctx, spec, body);
 }
 
 // Renders an instant already reduced to the sys timeline, with a zone.
-template <class Duration>
-inline void emit_clock(format_context &ctx, const __format::StdSpec &spec,
-                       string_view chrono_specs, string_view deflt,
+template <class CharT, class Duration>
+inline void emit_clock(__format::Ctx<CharT> &ctx,
+                       const __format::StdSpec<CharT> &spec,
+                       basic_string_view<CharT> chrono_specs, string_view deflt,
                        const chrono::sys_time<Duration> &sys, const ZoneInfo &z)
 {
     emit_parts(ctx, spec, chrono_specs, deflt, sys_parts(sys), z);
@@ -1177,13 +1263,14 @@ inline void emit_clock(format_context &ctx, const __format::StdSpec &spec,
 
 } // namespace __chrono_fmt
 
-template <class Duration>
-struct formatter<chrono::sys_time<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::sys_time<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
-    void format(const chrono::sys_time<Duration> &tp, format_context &ctx) const
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::sys_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
-        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+        __chrono_fmt::emit_clock(ctx, this->spec_, this->chrono_,
                                  __chrono_fmt::clock_default<Duration>(), tp,
                                  __chrono_fmt::kZoneUtc);
     }
@@ -1194,41 +1281,44 @@ struct formatter<chrono::sys_time<Duration>, char>
 // many leap seconds have been inserted, and %S never shows the 60th second of
 // an insertion — a documented deviation, not an approximation of the shift the
 // standard specifies for tai and gps below (those are exact).
-template <class Duration>
-struct formatter<chrono::utc_time<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::utc_time<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
-    void format(const chrono::utc_time<Duration> &tp, format_context &ctx) const
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::utc_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
-        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+        __chrono_fmt::emit_clock(ctx, this->spec_, this->chrono_,
                                  string_view("%F %T"),
                                  chrono::sys_time<Duration>{tp.time_since_epoch()},
                                  __chrono_fmt::kZoneUtc);
     }
 };
 
-template <class Duration>
-struct formatter<chrono::tai_time<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::tai_time<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
-    void format(const chrono::tai_time<Duration> &tp, format_context &ctx) const
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::tai_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
         __chrono_fmt::emit_parts(
-            ctx, spec_, chrono_, string_view("%F %T"),
+            ctx, this->spec_, this->chrono_, string_view("%F %T"),
             __chrono_fmt::shifted_parts(tp.time_since_epoch(),
                                         __chrono_fmt::kTaiShiftDays),
             __chrono_fmt::kZoneTai);
     }
 };
 
-template <class Duration>
-struct formatter<chrono::gps_time<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::gps_time<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
-    void format(const chrono::gps_time<Duration> &tp, format_context &ctx) const
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::gps_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
         __chrono_fmt::emit_parts(
-            ctx, spec_, chrono_, string_view("%F %T"),
+            ctx, this->spec_, this->chrono_, string_view("%F %T"),
             __chrono_fmt::shifted_parts(tp.time_since_epoch(),
                                         -__chrono_fmt::kGpsShiftDays),
             __chrono_fmt::kZoneGps);
@@ -1237,13 +1327,14 @@ struct formatter<chrono::gps_time<Duration>, char>
 
 // BoxOS's file_clock shares the system_clock epoch (the epoch is
 // implementation-defined and clock_cast is the identity here).
-template <class Duration>
-struct formatter<chrono::file_time<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::file_time<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
-    void format(const chrono::file_time<Duration> &tp, format_context &ctx) const
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::file_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
-        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+        __chrono_fmt::emit_clock(ctx, this->spec_, this->chrono_,
                                  string_view("%F %T"),
                                  chrono::sys_time<Duration>{tp.time_since_epoch()},
                                  __chrono_fmt::kZoneUtc);
@@ -1251,12 +1342,13 @@ struct formatter<chrono::file_time<Duration>, char>
 };
 
 // A local_time carries no zone at all, so %Z and %z are not in its set.
-template <class Duration>
-struct formatter<chrono::local_time<Duration>, char>
-    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime> {
-    void format(const chrono::local_time<Duration> &tp, format_context &ctx) const
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::local_time<Duration>, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime, CharT> {
+    void format(const chrono::local_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
-        __chrono_fmt::emit_clock(ctx, spec_, chrono_,
+        __chrono_fmt::emit_clock(ctx, this->spec_, this->chrono_,
                                  __chrono_fmt::clock_default<Duration>(),
                                  chrono::sys_time<Duration>{tp.time_since_epoch()},
                                  __chrono_fmt::kZoneNone);
@@ -1284,44 +1376,49 @@ LocalTimeFormat<Duration> local_time_format(local_time<Duration> time,
 
 } // namespace chrono
 
-template <class Duration>
-struct formatter<chrono::LocalTimeFormat<Duration>, char>
+template <class Duration, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::LocalTimeFormat<Duration>, CharT>
     : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
-                               __chrono_fmt::kZone> {
+                               __chrono_fmt::kZone, CharT> {
     void format(const chrono::LocalTimeFormat<Duration> &f,
-                format_context &ctx) const
+                __format::Ctx<CharT> &ctx) const
     {
         const __chrono_fmt::ZoneInfo z{
             f.abbrev ? string_view(*f.abbrev) : string_view{},
             f.abbrev != nullptr, f.offset_sec != nullptr,
             f.offset_sec ? f.offset_sec->count() : 0LL};
         __chrono_fmt::emit_clock(
-            ctx, spec_, chrono_, string_view("%F %T %Z"),
+            ctx, this->spec_, this->chrono_, string_view("%F %T %Z"),
             chrono::sys_time<Duration>{f.time.time_since_epoch()}, z);
     }
 };
 
 // ── formatter<duration<Rep,Period>> ─────────────────────────────────────
-template <class Rep, class Period>
-struct formatter<chrono::duration<Rep, Period>, char>
+template <class Rep, class Period, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::duration<Rep, Period>, CharT>
     // [time.format]/1 allows a precision only when "rep denotes a
     // floating-point type" — is_floating_point_v, not treat_as_floating_point_v
     // (a user rep may specialise the latter without being one).
     : __chrono_fmt::SpecParser<__chrono_fmt::kTime | __chrono_fmt::kDuration |
                                (is_floating_point_v<Rep>
                                     ? unsigned(__chrono_fmt::kPrec)
-                                    : 0u)> {
-    void format(const chrono::duration<Rep, Period> &d, format_context &ctx) const
+                                    : 0u), CharT> {
+    void format(const chrono::duration<Rep, Period> &d, __format::Ctx<CharT> &ctx) const
     {
-        using D          = chrono::duration<Rep, Period>;
-        const int  prec  = __format::EffectivePrecision(ctx, this->spec_);
-        string     body;
+        using D         = chrono::duration<Rep, Period>;
+        const int prec  = __format::EffectivePrecision(ctx, this->spec_);
         if (this->chrono_.empty()) {
             // [time.format]/7: as if streamed — count() then the unit suffix.
+            string body;
             __chrono_fmt::PutRep(body, d.count(), prec, /*shortest=*/false,
                                  /*magnitude=*/false);
             body += __chrono_fmt::unit_suffix<typename D::period>();
-        } else {
+            this->EmitStreamed(ctx, body);
+            return;
+        }
+        {
             // [time.format]/4: the positive value, prefixed with '-'.
             string qtext;
             __chrono_fmt::PutRep(qtext, d.count(), prec, /*shortest=*/true,
@@ -1345,10 +1442,11 @@ struct formatter<chrono::duration<Rep, Period>, char>
             }
             p.qtext = string_view(qtext.data(), qtext.size());
             p.unit  = string_view(unit.data(), unit.size());
-            if (p.neg) body.push_back('-');
+            basic_string<CharT> body;
+            if (p.neg) body.push_back(CharT('-'));
             __chrono_fmt::render(body, this->chrono_, p);
+            __chrono_fmt::emit(ctx, this->spec_, body);
         }
-        __chrono_fmt::emit(ctx, this->spec_, body);
     }
 };
 

@@ -5,7 +5,12 @@
 // surface and condition_variable_any's stop_token overloads. Both headers
 // include this leaf.
 //
-// __cpp_lib_formatters is NOT defined -- see <version>'s list.
+// It also carries __cpp_lib_formatters, which [version.syn] gives jointly to
+// <stacktrace> and <thread>: P2693R1 is formatter<thread::id, charT> AND
+// formatter<stacktrace_entry>/formatter<basic_stacktrace<A>>, two unrelated
+// formatters under one macro. It stayed on <version>'s "deliberately not
+// defined" list until Ф42-g for a reason that named exactly one missing piece
+// -- the WIDE half of the thread one -- and that piece now exists.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -21,3 +26,8 @@
 #  define __cpp_lib_jthread 201911L
 #endif
 #undef BOXCXX_OWNS_jthread
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_formatters)) && \
+    !defined(__cpp_lib_formatters)
+#  define __cpp_lib_formatters 202302L
+#endif
+#undef BOXCXX_OWNS_formatters

@@ -22,3 +22,11 @@
 #  define __cpp_lib_stacktrace 202011L
 #endif
 #undef BOXCXX_OWNS_stacktrace
+// The other half of P2693R1's __cpp_lib_formatters -- see
+// <__bits/version_thread>, which carries the same block for the same macro
+// because [version.syn] names both headers as owners.
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_formatters)) && \
+    !defined(__cpp_lib_formatters)
+#  define __cpp_lib_formatters 202302L
+#endif
+#undef BOXCXX_OWNS_formatters

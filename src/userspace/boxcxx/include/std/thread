@@ -27,6 +27,7 @@
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_jthread
+#define BOXCXX_OWNS_formatters
 #include <__bits/version_thread>
 
 // box::strand::completion() (Ф24b co_await join) reads this thread's join flag
@@ -350,11 +351,17 @@ struct hash<thread::id> {
 // formatter<thread::id>: print the pid in decimal. Inherits the integer spec
 // parser/state from formatter<uint32_t> (so width/fill/align all work) and just
 // feeds the pid through it.
-template <>
-struct formatter<thread::id, char> : formatter<uint32_t, char> {
-    auto format(thread::id v, format_context &ctx) const
+//
+// [thread.thread.id] writes this over charT, not over char, and the wide half
+// is the last thing __cpp_lib_formatters was waiting on: P2693R1 puts
+// formatter<thread::id> and formatter<stacktrace_entry> under one macro, and
+// this one is the only half of it that has a character type at all.
+template <class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<thread::id, CharT> : formatter<uint32_t, CharT> {
+    auto format(thread::id v, __format::Ctx<CharT> &ctx) const
     {
-        return formatter<uint32_t, char>::format(v.pid_, ctx);
+        return formatter<uint32_t, CharT>::format(v.pid_, ctx);
     }
 };
 
