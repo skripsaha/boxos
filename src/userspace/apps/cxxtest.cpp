@@ -50856,25 +50856,250 @@ void Phase221()
               "facet calls whitespace");
     }
 
-    // ── (25) PIN for Ф43-c, deliberately asserting the WRONG answer ──────
-    // [facet.num.put.virtuals] says the number formatter widens its digits
-    // through the ctype facet. It does not yet — the digits go straight from
-    // to_chars into the buffer — so a facet that widens '4' to 'W' changes
-    // nothing today. When Ф43-c routes <ostream> through num_put, THIS CHECK
-    // MUST FAIL and be rewritten to expect "W2". That is what it is for.
+    // ── (25) the pin Ф43-b left here, now paying out ─────────────────────
+    // This asserted "42" until Ф43-c, on the grounds that the digits went
+    // straight from to_chars into the buffer without the facet being asked.
+    // [facet.num.put.virtuals] says otherwise, and routing <ostream> through
+    // num_put made it so — the pin failed on the first run afterwards, which
+    // is exactly what it was written to do.
+    //
+    // It caught something subtler than "the facet is unused", too: the first
+    // routing DID call num_put and still printed "42", because the sink
+    // skipped widening whenever the stream's character type already matched
+    // the ASCII source. A narrow stream consulted no ctype at all, and only
+    // this check noticed.
     {
         const locale       spy(classic, new WidenSpy);
         std::ostringstream os;
         os.imbue(spy);
         os << 42;
-        Check(os.str() == "42",
-              "phase221 (25) PIN: the number formatter does NOT go through "
-              "ctype::widen yet -- Ф43-c must break this line");
+        Check(os.str() == "W2",
+              "phase221 (25) the number formatter widens its digits THROUGH the "
+              "installed ctype facet");
+
+        std::ostringstream other;
+        other.imbue(spy);
+        other << 42.5;
+        Check(other.str() == "W2.5",
+              "phase221 (25a) ... floats too, and only the digits: the decimal "
+              "point comes from numpunct");
     }
 
     printf("[CXX] PASS phase221: ctype, and the streams that stopped answering "
            "the whitespace question for themselves\n");
 }
+
+// ── Phase222: numpunct and num_put ─────────────────────────────────────────
+// The "C" locale groups nothing, so grouping had never been written at all —
+// there was no way to ask for it. These are the answers a stream gives once a
+// program can install a numpunct: a different decimal point, a thousands
+// separator that is actually used, the words `true` and `false` in another
+// language, and a num_put that replaces the rendering outright.
+namespace p222 {
+
+// A numpunct that changes all four things independently, so a test can tell
+// which one moved.
+struct RuPunct : std::numpunct<char> {
+protected:
+    char        do_decimal_point() const override { return ','; }
+    char        do_thousands_sep() const override { return ' '; }
+    std::string do_grouping() const override { return "\3"; }
+    std::string do_truename() const override { return "yes"; }
+    std::string do_falsename() const override { return "no"; }
+};
+
+// Grouping that is not uniform, and then stops. "\1\2\3" reads RIGHT to left:
+// one digit, then two, then three, then three for ever.
+struct OddGroups : std::numpunct<char> {
+protected:
+    char        do_thousands_sep() const override { return '.'; }
+    std::string do_grouping() const override { return "\1\2\3"; }
+};
+
+// A zero terminates grouping: group the low three digits and leave the rest
+// alone, which is how a program says "only the last group is special".
+struct StopGroups : std::numpunct<char> {
+protected:
+    char        do_thousands_sep() const override { return '\''; }
+    std::string do_grouping() const override { return std::string("\3\0", 2); }
+};
+
+struct WidePunct : std::numpunct<wchar_t> {
+protected:
+    wchar_t     do_decimal_point() const override { return L','; }
+    wchar_t     do_thousands_sep() const override { return L' '; }  // NBSP
+    std::string do_grouping() const override { return "\3"; }
+};
+
+// A num_put that renders every integer as the single word "number". Nothing
+// short of replacing the facet could do this, which is the point.
+struct Shouty : std::num_put<char> {
+protected:
+    iter_type do_put(iter_type s, std::ios_base &, char_type, long) const override
+    {
+        for (char c : std::string("number")) *s++ = c;
+        return s;
+    }
+};
+
+template <class T>
+std::string Narrow(const std::locale &loc, T v, std::ios_base::fmtflags extra = {})
+{
+    std::ostringstream os;
+    os.imbue(loc);
+    if (extra != std::ios_base::fmtflags{}) os.setf(extra);
+    os << v;
+    return os.str();
+}
+
+} // namespace p222
+
+void Phase222()
+{
+    using namespace p222;
+    using std::locale;
+    using std::numpunct;
+    using std::use_facet;
+
+    const locale classic = locale::classic();
+
+    // ── (1) what the "C" locale punctuates with ──────────────────────────
+    {
+        const numpunct<char>    &np = use_facet<numpunct<char>>(classic);
+        const numpunct<wchar_t> &wp = use_facet<numpunct<wchar_t>>(classic);
+        Check(np.decimal_point() == '.' && np.thousands_sep() == ',' &&
+                  np.grouping().empty(),
+              "phase222 (1) \"C\" punctuates with '.', names ',' and groups NOTHING");
+        Check(np.truename() == "true" && np.falsename() == "false",
+              "phase222 (2) ... and spells the two words out");
+        Check(wp.decimal_point() == L'.' && wp.truename() == L"true",
+              "phase222 (3) ... in both character types");
+    }
+
+    // ── (4) an installed numpunct changes what a stream prints ───────────
+    {
+        const locale ru(classic, new RuPunct);
+        Check(Narrow(ru, 3.5) == "3,5",
+              "phase222 (4) the decimal point comes from the facet");
+        Check(Narrow(ru, 1234567) == "1 234 567",
+              "phase222 (5) and so does grouping -- which \"C\" never asked for");
+        Check(Narrow(ru, true, std::ios_base::boolalpha) == "yes" &&
+                  Narrow(ru, false, std::ios_base::boolalpha) == "no",
+              "phase222 (6) boolalpha prints the facet's WORDS, not the literals "
+              "that used to be in <ostream>");
+        Check(Narrow(classic, 1234567) == "1234567",
+              "phase222 (7) ... and the classic locale still groups nothing");
+    }
+
+    // ── (8) grouping is read RIGHT to left, and the last element repeats ──
+    {
+        const locale odd(classic, new OddGroups);
+        // 1234567890: 0 | 89 | 567 | 234 | 1  — one, two, three, three, rest.
+        Check(Narrow(odd, 1234567890) == "1.234.567.89.0",
+              "phase222 (8) a non-uniform grouping applies right to left");
+
+        const locale stop(classic, new StopGroups);
+        Check(Narrow(stop, 1234567) == "1234'567",
+              "phase222 (9) a zero in the grouping string stops it: only the low "
+              "group is separated");
+    }
+
+    // ── (10) grouping and the fraction do not mix ────────────────────────
+    // The separators belong to the integer part only. A grouping that leaked
+    // into the digits after the point would show up here and nowhere else.
+    {
+        const locale      ru(classic, new RuPunct);
+        const std::string got = Narrow(ru, 1234.5678);
+        printf("[CXX] note phase222: 1234.5678 under a grouping locale reads %s\n",
+               got.c_str());
+        // Default precision is 6 significant digits, so the value renders as
+        // 1234.57 before punctuation: three grouped digits, the facet's comma,
+        // and a fraction with no separators in it.
+        Check(got == "1 234,57",
+              "phase222 (10) grouping stops at the decimal point");
+    }
+
+    // ── (11) width, fill and alignment still apply around a grouped number ─
+    {
+        const locale       ru(classic, new RuPunct);
+        std::ostringstream os;
+        os.imbue(ru);
+        os << std::setw(12) << std::setfill('.') << 1234567;
+        // "1 234 567" is nine characters, so setw(12) leaves three. The
+        // separators COUNT toward the width — the padding is computed after
+        // grouping, which is the only order that makes setw mean anything.
+        Check(os.str() == "...1 234 567",
+              "phase222 (11) the field is padded to the GROUPED length, separators "
+              "included");
+    }
+
+    // ── (12) a replaced num_put replaces the rendering ───────────────────
+    {
+        const locale shouty(classic, new Shouty);
+        Check(Narrow(shouty, 42) == "number",
+              "phase222 (12) an installed num_put renders the number itself");
+        Check(Narrow(shouty, 42.0) == "42",
+              "phase222 (13) ... and only the overload it overrode: the double "
+              "path is untouched");
+    }
+
+    // ── (14) the wide stream punctuates too ─────────────────────────────
+    {
+        const locale        wide(classic, new WidePunct);
+        std::wostringstream wos;
+        wos.imbue(wide);
+        wos << 1234567;
+        const std::wstring got = wos.str();
+        Check(got == L"1 234 567",
+              "phase222 (14) a wide stream groups with a separator no byte can hold");
+    }
+
+    // ── (15) numpunct_byname ─────────────────────────────────────────────
+    {
+        bool threw = false;
+        try {
+            (void)new std::numpunct_byname<char>("fr_FR.UTF-8");
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase222 (15) numpunct_byname refuses a name this system is not");
+        const locale byname(classic, new std::numpunct_byname<char>("C"));
+        Check(Narrow(byname, 1234567) == "1234567",
+              "phase222 (16) ... and the one it is groups nothing, like \"C\"");
+    }
+
+    // ── (17) the failure paths survived the move into the facet ──────────
+    // A precision no buffer can hold is failbit, not badbit and not a crash;
+    // the state bit has to come from the INSERTER, because a facet has no
+    // stream to set it on.
+    {
+        std::ostringstream os;
+        os.precision(100000);
+        os << std::fixed << 1.5;
+        Check(os.fail() && !os.bad(),
+              "phase222 (17) a conversion that cannot fit its buffer is failbit");
+    }
+
+    // ── (18) PIN for Ф43-c-2, asserting the WRONG answer on purpose ──────
+    // Extraction does NOT go through num_get yet: the grammar in <istream>
+    // reads its own digits and knows nothing about numpunct, so a stream
+    // imbued with a comma decimal point still stops at the comma. When
+    // num_get lands, THIS MUST FAIL and be rewritten to expect 3.5.
+    {
+        const locale       ru(classic, new RuPunct);
+        std::istringstream is("3,5");
+        is.imbue(ru);
+        double d = 0;
+        is >> d;
+        Check(d == 3.0,
+              "phase222 (18) PIN: extraction ignores numpunct -- num_get must "
+              "break this line");
+    }
+
+    printf("[CXX] PASS phase222: numpunct and num_put - the punctuation a locale "
+           "with one locale never had anywhere to put\n");
+}
+
 
 
 
@@ -51118,6 +51343,7 @@ int main()
     Phase219();
     Phase220();
     Phase221();
+    Phase222();
 
     if (CxxTraitsTortureCompiled() == 1) {
         printf("[CXX] PASS phase2: freestanding headers (compile-time torture)\n");

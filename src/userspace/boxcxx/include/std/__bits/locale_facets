@@ -1,0 +1,452 @@
+// boxcxx — <__bits/locale_facets>
+//
+// numpunct, numpunct_byname, num_put — the facets that take an `ios_base&` and
+// therefore cannot live anywhere <ios> can reach. <locale> includes this leaf
+// after <ios> is complete; nothing includes it directly.
+//
+// ── what changes because these exist ────────────────────────────────────
+// Until Ф43-c a stream formatted a number by calling to_chars and writing the
+// result, and the comment on that path said widening was "a cast and not a
+// facet call ... exactly what a ctype facet's widen() would return, without a
+// facet to consult". That was true when there was no facet. Ф43-b built one a
+// program can install, and [facet.num.put.virtuals] is explicit that the
+// digits go through it — so the sentence became false the moment it became
+// possible to disprove, and Phase221 (25) was left asserting the wrong answer
+// on purpose so that this subphase would be forced to fix it rather than
+// remember to.
+//
+// Three things a stream could not do before and can now:
+//   * a program can install a numpunct and change the decimal point, the
+//     thousands separator, the grouping, or the words `true` and `false`;
+//   * it can install a num_put and replace the whole rendering;
+//   * grouping is applied at all. The "C" locale groups nothing (its
+//     grouping() is empty), so this is invisible until someone asks for it —
+//     which is exactly why it had never been written.
+#ifndef BOXCXX_BITS_LOCALE_FACETS
+#define BOXCXX_BITS_LOCALE_FACETS
+
+#include <__bits/field_engine>
+#include <__bits/locale_core>
+#include <__bits/locale_ctype>
+#include <charconv>
+#include <ios>
+#include <iterator>
+#include <streambuf>   // ostreambuf_iterator needs a COMPLETE basic_streambuf
+#include <string>
+
+namespace std {
+
+// ── numpunct [locale.numpunct] ──────────────────────────────────────────
+// The "C" locale's answers: '.' for the point, no grouping at all, and the
+// two words spelled out. thousands_sep() still has to return something —
+// [locale.numpunct.virtuals] gives it no "not applicable" — and ',' is what
+// both reference implementations answer for "C". It is never USED here,
+// because grouping() is empty and grouping is what consults it.
+template <class charT>
+class numpunct : public locale::facet {
+public:
+    using char_type   = charT;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit numpunct(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    charT       decimal_point() const { return do_decimal_point(); }
+    charT       thousands_sep() const { return do_thousands_sep(); }
+    string      grouping() const { return do_grouping(); }
+    string_type truename() const { return do_truename(); }
+    string_type falsename() const { return do_falsename(); }
+
+protected:
+    ~numpunct() = default;
+
+    virtual charT  do_decimal_point() const { return static_cast<charT>('.'); }
+    virtual charT  do_thousands_sep() const { return static_cast<charT>(','); }
+    virtual string do_grouping() const { return string(); }
+    virtual string_type do_truename() const
+    {
+        const charT t[] = {charT('t'), charT('r'), charT('u'), charT('e'), charT()};
+        return string_type(t);
+    }
+    virtual string_type do_falsename() const
+    {
+        const charT f[] = {charT('f'), charT('a'), charT('l'), charT('s'), charT('e'),
+                           charT()};
+        return string_type(f);
+    }
+};
+
+template <class charT>
+locale::id numpunct<charT>::id{};
+
+template <>
+inline locale::id numpunct<char>::id{__cvt::kIdNumpunctChar};
+template <>
+inline locale::id numpunct<wchar_t>::id{__cvt::kIdNumpunctWchar};
+
+template <class charT>
+class numpunct_byname : public numpunct<charT> {
+public:
+    using char_type   = charT;
+    using string_type = basic_string<charT>;
+
+    explicit numpunct_byname(const char *name, size_t refs = 0) : numpunct<charT>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit numpunct_byname(const string &name, size_t refs = 0)
+        : numpunct_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~numpunct_byname() = default;
+};
+
+// ── num_put [locale.nm.put] ─────────────────────────────────────────────
+// The rendering the stream inserters used to do themselves. Every number is
+// still produced by to_chars as ASCII — that has not changed and is not a
+// shortcut: a digit IS ASCII, and [facet.num.put.virtuals] describes exactly
+// this, conversion followed by widening through ctype.
+template <class charT, class OutputIterator = ostreambuf_iterator<charT>>
+class num_put : public locale::facet {
+public:
+    using char_type = charT;
+    using iter_type = OutputIterator;
+
+    constexpr explicit num_put(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    iter_type put(iter_type s, ios_base &f, char_type fill, bool v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, long v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, long long v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, unsigned long v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, unsigned long long v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, double v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, long double v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+    iter_type put(iter_type s, ios_base &f, char_type fill, const void *v) const
+    {
+        return do_put(s, f, fill, v);
+    }
+
+protected:
+    ~num_put() = default;
+
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, bool v) const
+    {
+        if ((f.flags() & ios_base::boolalpha) == ios_base::fmtflags{})
+            return PutInteger(s, f, fill, static_cast<long>(v), true);
+
+        // [facet.num.put.virtuals]: the WORDS come from numpunct, already in
+        // charT — they are the one part of a number that is not ASCII by
+        // construction, and the one part a locale could genuinely translate.
+        // The locale is held by value for the whole call: use_facet returns a
+        // reference INTO the table it names, and f.getloc() is a temporary.
+        // The locale is held by value for the whole call: use_facet returns a
+        // reference INTO the table it names, and f.getloc() is a temporary.
+        const locale              loc = f.getloc();
+        const numpunct<charT>    &np  = use_facet<numpunct<charT>>(loc);
+        const basic_string<charT> w   = v ? np.truename() : np.falsename();
+
+        // The words are already charT — they are the one part of a number
+        // that is not ASCII by construction, and the one part a locale could
+        // genuinely translate — so they are written untouched rather than
+        // widened.
+        auto writeWord = [&w](auto &sk) -> bool {
+            for (charT c : w) sk.Fill(c, 1);
+            return true;
+        };
+        __ios::IterSink<charT, iter_type> sink{s, &use_facet<ctype<charT>>(loc)};
+        __ios::EmitFieldWith(sink, f, fill, nullptr, streamsize(0), nullptr, streamsize(0),
+                             writeWord, static_cast<streamsize>(w.size()),
+                             __ios::Align::Right);
+        return sink.out;
+    }
+
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, long v) const
+    {
+        return PutInteger(s, f, fill, v, true);
+    }
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, long long v) const
+    {
+        return PutInteger(s, f, fill, v, true);
+    }
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, unsigned long v) const
+    {
+        return PutInteger(s, f, fill, v, false);
+    }
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill,
+                             unsigned long long v) const
+    {
+        return PutInteger(s, f, fill, v, false);
+    }
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, double v) const
+    {
+        return PutFloat(s, f, fill, v);
+    }
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, long double v) const
+    {
+        return PutFloat(s, f, fill, v);
+    }
+
+    // [facet.num.put.virtuals]: "as if" %p. boxcxx renders "0x" plus
+    // lowercase hex, unaffected by basefield/showbase/uppercase — those are
+    // properties of the INTEGER conversions, not of %p — while still honouring
+    // width, fill and adjustfield like every other field.
+    virtual iter_type do_put(iter_type s, ios_base &f, char_type fill, const void *v) const
+    {
+        char digits[20];
+        auto r = to_chars(digits, digits + sizeof(digits), reinterpret_cast<uintptr_t>(v),
+                          16);
+        const char   prefix[2] = {'0', 'x'};
+        const locale loc       = f.getloc();
+        __ios::IterSink<charT, iter_type> sink{s, &use_facet<ctype<charT>>(loc)};
+        __ios::EmitFieldTo(sink, f, fill, nullptr, streamsize(0), prefix, streamsize(2),
+                           digits, static_cast<streamsize>(r.ptr - digits),
+                           __ios::Align::Right);
+        return sink.out;
+    }
+
+private:
+    // ── integers ─────────────────────────────────────────────────────────
+    template <class T>
+    iter_type PutInteger(iter_type s, ios_base &f, char_type fill, T value, bool signedT) const
+    {
+        using U = make_unsigned_t<T>;
+
+        const auto basefield = f.flags() & ios_base::basefield;
+        const int  base       = basefield == ios_base::hex   ? 16
+                                : basefield == ios_base::oct ? 8
+                                                             : 10;
+        const bool upper    = (f.flags() & ios_base::uppercase) != ios_base::fmtflags{};
+        const bool showbase = (f.flags() & ios_base::showbase) != ios_base::fmtflags{};
+
+        // Only base 10 reads a sign: oct and hex show the raw bit pattern,
+        // which is why -1 prints as ffffffffffffffff and not as -1.
+        const bool neg = signedT && base == 10 && value < T(0);
+        U          mag;
+        if (neg) {
+            // Negating the most negative value in the signed type is UB;
+            // doing it in the unsigned one is defined and gives the same bits.
+            mag = static_cast<U>(0) - static_cast<U>(value);
+        } else {
+            mag = static_cast<U>(value);
+        }
+
+        char digits[80];
+        auto r        = to_chars(digits + 1, digits + sizeof(digits) - 1, mag, base);
+        auto digitLen = static_cast<streamsize>(r.ptr - (digits + 1));
+        char *body    = digits + 1;
+
+        if (upper && base == 16)
+            for (streamsize i = 0; i < digitLen; ++i)
+                if (body[i] >= 'a' && body[i] <= 'f') body[i] = static_cast<char>(body[i] - 32);
+
+        // Octal's showbase '0' is an ordinary leading digit and belongs in the
+        // BODY — an `internal` fill lands before it, same as before any other
+        // digit. Suppressed for zero, as printf's %#o is.
+        if (base == 8 && showbase && mag != U(0)) {
+            --body;
+            body[0] = '0';
+            ++digitLen;
+        }
+
+        char       sign[1] = {};
+        streamsize signLen = 0;
+        if (neg) sign[signLen++] = '-';
+        else if (base == 10 && signedT &&
+                 (f.flags() & ios_base::showpos) != ios_base::fmtflags{})
+            sign[signLen++] = '+';
+
+        // Hex's "0x" IS a separately-padded base indicator — an `internal`
+        // fill lands AFTER it — and is likewise suppressed for zero.
+        char       prefix[2];
+        streamsize prefixLen = 0;
+        if (base == 16 && showbase && mag != U(0)) {
+            prefix[prefixLen++] = '0';
+            prefix[prefixLen++] = upper ? 'X' : 'x';
+        }
+
+        return Grouped(s, f, fill, sign, signLen, prefix, prefixLen, body, digitLen,
+                       digitLen);
+    }
+
+    // ── floating point ───────────────────────────────────────────────────
+    template <class F>
+    iter_type PutFloat(iter_type s, ios_base &f, char_type fill, F value) const
+    {
+        const bool neg = __builtin_signbit(value);
+        const F    mag = neg ? -value : value;
+
+        const auto floatFlag = f.flags() & ios_base::floatfield;
+        const bool hasFixed  = (floatFlag & ios_base::fixed) != ios_base::fmtflags{};
+        const bool hasSci    = (floatFlag & ios_base::scientific) != ios_base::fmtflags{};
+        const bool isHex     = hasFixed && hasSci;   // hexfloat is both bits
+        const bool upper = (f.flags() & ios_base::uppercase) != ios_base::fmtflags{};
+
+        constexpr streamsize kBufSize = 8192;
+        char                 buf[kBufSize + 2];
+        to_chars_result      r;
+
+        if (isHex)
+            r = to_chars(buf + 2, buf + kBufSize, mag, chars_format::hex);
+        else if (hasFixed)
+            r = to_chars(buf + 2, buf + kBufSize, mag, chars_format::fixed,
+                         static_cast<int>(f.precision()));
+        else if (hasSci)
+            r = to_chars(buf + 2, buf + kBufSize, mag, chars_format::scientific,
+                         static_cast<int>(f.precision()));
+        else
+            r = to_chars(buf + 2, buf + kBufSize, mag, chars_format::general,
+                         static_cast<int>(f.precision()));
+
+        if (r.ec != errc{}) {
+            // The caller sets failbit: [ostream.formatted.reqmts] makes that
+            // the inserter's job, and a facet has no stream to set it on.
+            __ios::ThrowGenerationFailure();
+        }
+
+        char      *body = buf + 2;
+        streamsize len  = static_cast<streamsize>(r.ptr - body);
+        const bool finite = !(len > 0 && (body[0] == 'i' || body[0] == 'n'));
+
+        if (finite && (f.flags() & ios_base::showpoint) != ios_base::fmtflags{}) {
+            const bool isGeneral = !hasFixed && !hasSci;
+            len = isGeneral
+                      ? __ios::ShowPointGeneral(body, len, kBufSize - 2,
+                                                static_cast<int>(f.precision()))
+                      : __ios::EnsureDecimalPoint(body, len, kBufSize - 2);
+        }
+        if (upper)
+            for (streamsize i = 0; i < len; ++i) body[i] = __ios::ToUpperAscii(body[i]);
+
+        char       sign[1] = {};
+        streamsize signLen = 0;
+        if (neg) sign[signLen++] = '-';
+        else if ((f.flags() & ios_base::showpos) != ios_base::fmtflags{})
+            sign[signLen++] = '+';
+
+        // hexfloat's "0x" goes in the BODY, not the prefix slot: unlike
+        // integer hex, an `internal` fill must land BEFORE it (between the
+        // sign and "0x1p+0"). Finite values only — hexfloat infinity is
+        // "inf", never "0xinf".
+        if (isHex && finite) {
+            body -= 2;
+            body[0] = '0';
+            body[1] = upper ? 'X' : 'x';
+            len += 2;
+        }
+
+        // Grouping applies to the INTEGER part only, and the decimal point is
+        // the facet's character rather than to_chars' '.'.
+        streamsize intLen = 0;
+        while (intLen < len && body[intLen] >= '0' && body[intLen] <= '9') ++intLen;
+
+        return Grouped(s, f, fill, sign, signLen, nullptr, 0, body, len, intLen);
+    }
+
+    // ── the shared tail: widen, group, punctuate, pad ────────────────────
+    // The body arrives as ASCII and leaves as charT, and the three things a
+    // numpunct can change happen on the way through. `intLen` is how much of
+    // the body is groupable digits — all of it for an integer, the part before
+    // the point for a float.
+    //
+    // Nothing is buffered. The first version of this materialized the widened,
+    // grouped body in a charT array, which for wchar_t was 64 KiB of stack on
+    // top of the conversion's own 8 KiB — and Phase215 faulted one page below
+    // the stack pointer. Only the LENGTH is computed ahead of time, which is
+    // all the padding needs; the characters go straight out.
+    iter_type Grouped(iter_type s, ios_base &f, char_type fill, const char *sign,
+                      streamsize signLen, const char *prefix, streamsize prefixLen,
+                      const char *body, streamsize bodyLen, streamsize intLen) const
+    {
+        const locale           loc = f.getloc();
+        const ctype<charT>    &ct  = use_facet<ctype<charT>>(loc);
+        const numpunct<charT> &np  = use_facet<numpunct<charT>>(loc);
+        const string           grouping = np.grouping();
+        const charT            point    = np.decimal_point();
+        const charT            sep      = np.thousands_sep();
+
+        // How many separators go in, and how long the leftmost group is. A
+        // grouping string's last element repeats; 0 or a value >= CHAR_MAX
+        // means "stop grouping here", which is how a program says "group the
+        // low digits and leave the rest alone".
+        const auto GroupAt = [&grouping](size_t k) -> size_t {
+            const char g = grouping[k < grouping.size() ? k : grouping.size() - 1];
+            return (g <= 0 || static_cast<unsigned char>(g) >= 127) ? 0u
+                                                                    : static_cast<size_t>(g);
+        };
+
+        size_t seps = 0, taken = 0;
+        if (!grouping.empty() && intLen > 0) {
+            for (;;) {
+                const size_t step = GroupAt(seps);
+                if (step == 0 || taken + step >= static_cast<size_t>(intLen)) break;
+                taken += step;
+                ++seps;
+            }
+        }
+        const streamsize firstLen = intLen - static_cast<streamsize>(taken);
+
+        auto writeBody = [&](auto &sk) -> bool {
+            streamsize i = 0;
+            // The leftmost group, then the rest right-to-left: group k counts
+            // from the RIGHT, so walking left to right means counting down.
+            for (streamsize n = 0; n < firstLen; ++n) sk.Run(&body[i++], 1);
+            for (size_t k = seps; k-- > 0;) {
+                sk.Fill(sep, 1);
+                const streamsize step = static_cast<streamsize>(GroupAt(k));
+                for (streamsize n = 0; n < step; ++n) sk.Run(&body[i++], 1);
+            }
+            // Whatever follows the digits — the point and the fraction, or an
+            // exponent — with to_chars' '.' replaced by the facet's.
+            for (; i < bodyLen; ++i) {
+                if (body[i] == '.')
+                    sk.Fill(point, 1);
+                else
+                    sk.Run(&body[i], 1);
+            }
+            return true;
+        };
+
+        __ios::IterSink<charT, iter_type> sink{s, &ct};
+        __ios::EmitFieldWith(sink, f, fill, sign, signLen, prefix, prefixLen, writeBody,
+                             bodyLen + static_cast<streamsize>(seps), __ios::Align::Right);
+        return sink.out;
+    }
+};
+
+template <class charT, class OutputIterator>
+locale::id num_put<charT, OutputIterator>::id{};
+
+template <>
+inline locale::id num_put<char, ostreambuf_iterator<char>>::id{__cvt::kIdNumPutChar};
+template <>
+inline locale::id num_put<wchar_t, ostreambuf_iterator<wchar_t>>::id{__cvt::kIdNumPutWchar};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_FACETS

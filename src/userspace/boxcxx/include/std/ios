@@ -246,13 +246,14 @@ public:
     }
     locale getloc() const { return __loc; }
 
-protected:
     // The locale itself, not the copy getloc() returns. use_facet hands back a
     // reference INTO the table a locale names, so binding one to a temporary
-    // is the shape basic_streambuf::__loc_ref() exists to avoid.
+    // is the shape basic_streambuf::__loc_ref() exists to avoid. Public rather
+    // than protected because the formatted inserters are FREE functions in
+    // __ios — the standard's own model, where operator<< is not a member — and
+    // they are the ones that need the locale without paying for a copy of it
+    // on every number. The name is not part of any public interface.
     const locale &__loc_ref() const noexcept { return __loc; }
-
-public:
 
     // ── extensible storage [ios.base.storage] ─────────────────────────
     // xalloc() hands out a fresh, process-wide-unique, monotonically

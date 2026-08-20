@@ -21,6 +21,9 @@
 
 #include <ios>
 #include <streambuf>
+#include <__bits/field_engine>   // the shared width/fill engine and its two sinks
+#include <__bits/locale_facets>  // num_put — every arithmetic inserter goes through it
+#include <iterator>              // ostreambuf_iterator, which num_put writes through
 #include <__bits/syncbuf_base>  // the type the three sync manipulators recognise
 #include <charconv>
 #include <exception>
@@ -42,7 +45,6 @@ namespace std {
 // Traits argument) by <iosfwd>, transitively included via <ios> above.
 namespace __ios {
 
-enum class Align { Left, Right, Internal };
 
 // Forward declarations only -- basic_ostream is still incomplete here.
 // basic_ostream<CharT,Traits>'s formatted-inserter bodies call these by
@@ -524,101 +526,28 @@ basic_ostream<CharT, Traits> &flush_emit(basic_ostream<CharT, Traits> &os)
 // ════════════════════════════════════════════════════════════════════════
 namespace __ios {
 
-inline char ToUpperAscii(char c)
-{
-    return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
-}
 
-// Both report whether the sink took EVERYTHING, and every caller is obliged
-// to look. That obligation is new in Ф38 and the reason is that until
-// <spanstream> no sink in this tree could refuse: a stringbuf grows, a
-// filebuf grows, the screen Current always accepts. A spanbuf cannot -- its
-// buffer belongs to the caller and is a fixed size -- so it is the first
-// thing that can say "no room", and a formatted inserter that did not ask
-// reported success while dropping the tail. The unformatted path
-// (basic_ostream::write) had always asked; only this one had not.
-//
-// Ф42-d made both generic in the stream's character type, and the run they
-// write generic in ITS character type, because the two are not always the
-// same. Every numeric conversion is produced by to_chars as ASCII `char` —
-// digits, a sign, `0x`, `inf` — and a wide stream has to widen it. A run that
-// is already the stream's own type (a string inserter's argument) goes out in
-// one sputn, as it always did.
-//
-// Widening is a cast and not a facet call. There is one locale here, its
-// encoding is UTF-8 (§2 <cwctype>), and the source bytes are ASCII, whose
-// values are their own code points — so `CharT(unsigned char(c))` is exactly
-// what a ctype facet's widen() would return, without a facet to consult.
-template <class CharT, class Traits, class SrcT>
-[[nodiscard]] inline bool WriteRun(basic_streambuf<CharT, Traits> *buf, const SrcT *s,
-                                   streamsize n)
-{
-    if (n <= 0) return true;
-    if constexpr (is_same_v<CharT, SrcT>) {
-        return buf->sputn(s, n) == n;
-    } else {
-        for (streamsize i = 0; i < n; ++i) {
-            const CharT c = static_cast<CharT>(static_cast<unsigned char>(s[i]));
-            if (Traits::eq_int_type(buf->sputc(c), Traits::eof())) return false;
-        }
-        return true;
-    }
-}
-template <class CharT, class Traits>
-[[nodiscard]] inline bool WriteFill(basic_streambuf<CharT, Traits> *buf, CharT fillCh,
-                                    streamsize n)
-{
-    for (streamsize i = 0; i < n; ++i)
-        if (Traits::eq_int_type(buf->sputc(fillCh), Traits::eof())) return false;
-    return true;
-}
 
-// The shared width/fill/adjustfield/sign/prefix engine -- backs EVERY
-// formatted inserter (integer, float, bool, pointer, char, string)
-// identically. `dflt` is the alignment used when no adjustfield bit is set:
-// always Right -- there is no separate per-kind default; iostream is
-// right-justified unless `left` is explicitly set, for every kind alike.
-// `internal` degrades to `right` automatically whenever sign/prefix are
-// both empty (nothing to pad "between"), which is exactly the generic
-// [ostream.formatted.reqmts] left-vs-not-left rule non-numeric callers
-// need -- no separate code path required.
+// The width/fill/adjustfield engine moved to <__bits/field_engine> in Ф43-c,
+// because num_put needs the same one and writes through an output iterator
+// rather than into a streambuf. What is left here is the binding for the
+// inserters that are NOT the locale's business — characters and strings,
+// which [ostream.inserters.character] describes without mentioning a facet,
+// and which still go out in the one sputn they always were.
 template <class CharT, class Traits, class BodyT>
 inline void EmitField(basic_ostream<CharT, Traits> &os, const char *sign, streamsize signLen,
-                       const char *prefix, streamsize prefixLen, const BodyT *body,
-                       streamsize bodyLen, Align dflt)
+                      const char *prefix, streamsize prefixLen, const BodyT *body,
+                      streamsize bodyLen, Align dflt)
 {
-    auto      *buf  = os.rdbuf();
-    streamsize core = signLen + prefixLen + bodyLen;
-    streamsize w    = os.width();
-    bool       ok;
-    if (w <= core) {
-        ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
-             WriteRun(buf, body, bodyLen);
-    } else {
-        streamsize pad = w - core;
-        auto       adj = os.flags() & ios_base::adjustfield;
-        Align      align = adj == ios_base::left       ? Align::Left
-                          : adj == ios_base::internal   ? Align::Internal
-                          : adj == ios_base::right      ? Align::Right
-                                                         : dflt;
-        CharT fillCh = os.fill();
-        if (align == Align::Left) {
-            ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
-                 WriteRun(buf, body, bodyLen) && WriteFill(buf, fillCh, pad);
-        } else if (align == Align::Right) {
-            ok = WriteFill(buf, fillCh, pad) && WriteRun(buf, sign, signLen) &&
-                 WriteRun(buf, prefix, prefixLen) && WriteRun(buf, body, bodyLen);
-        } else { // Internal: fill sits BETWEEN the sign/prefix and the digits
-            ok = WriteRun(buf, sign, signLen) && WriteRun(buf, prefix, prefixLen) &&
-                 WriteFill(buf, fillCh, pad) && WriteRun(buf, body, bodyLen);
-        }
-    }
-    // [ostream.formatted.reqmts]: "If the generation fails, then the
-    // formatted output function calls setstate(badbit)". The && chains
-    // above stop pushing at the first refusal -- there is no point filling
-    // a buffer that has already said it is full. setstate may throw, and
-    // that throw belongs to the caller: it lands in the inserter's catch,
-    // where HandleException rethrows it if badbit is armed.
+    BufSink<CharT, Traits> sink{os.rdbuf()};
+    const bool ok = EmitFieldTo(sink, os, os.fill(), sign, signLen, prefix, prefixLen,
+                                body, bodyLen, dflt);
+    // [ostream.formatted.reqmts]: "If the generation fails, then the formatted
+    // output function calls setstate(badbit)". The && chains inside the engine
+    // stop at the first refusal — there is no point filling a buffer that has
+    // already said it is full. setstate may throw, and that throw belongs to
+    // the caller: it lands in the inserter's catch, where HandleException
+    // rethrows it if badbit is armed.
     if (!ok) os.setstate(ios_base::badbit);
 }
 
@@ -640,306 +569,96 @@ void HandleException(StreamT &s)
     if ((s.exceptions() & ios_base::badbit) != ios_base::goodbit) rethrow_exception(caught);
 }
 
-// Core digit generation (no sentry/width-reset/exception handling -- callers
-// wrap those). Shared by InsertInteger and InsertBool's non-boolalpha path
-// (bool formats "as if" static_cast to unsigned, so showbase/showpos/width/
-// fill/uppercase all apply consistently to the 0/1 form).
+
+// ── the numeric inserters, which are num_put's callers now ──────────────
+// [ostream.inserters.arithmetic] defines every one of these as
+// use_facet<num_put<charT, ostreambuf_iterator<charT, traits>>>(getloc()).put(...),
+// and until Ф43-c they did the rendering themselves. The visible difference is
+// that an installed num_put, numpunct or ctype is consulted now; the invisible
+// one is that the failure paths had to survive the move unchanged, because a
+// facet has no stream to set a bit on.
 template <class CharT, class Traits, class T>
-void WriteIntegerCore(basic_ostream<CharT, Traits> &os, T value)
+basic_ostream<CharT, Traits> &InsertNumber(basic_ostream<CharT, Traits> &os, T value)
 {
-    using U = make_unsigned_t<T>;
-    ios_base::fmtflags baseFlag = os.flags() & ios_base::basefield;
-    int  base  = baseFlag == ios_base::oct ? 8 : baseFlag == ios_base::hex ? 16 : 10;
-    bool upper = (os.flags() & ios_base::uppercase) != ios_base::fmtflags{};
+    using Iter  = ostreambuf_iterator<CharT, Traits>;
+    using Facet = num_put<CharT, Iter>;
 
-    // Computing the magnitude directly in U = make_unsigned_t<T> (rather than
-    // widening to a fixed-width type first) is what makes negative short/int
-    // hex/oct come out the CORRECT width automatically: os<<hex<<short(-1)
-    // must print "ffff" (16 bits), not the 64-bit-sign-extended
-    // "ffffffffffffffff" a naive static_cast<long>(shortVal) would produce.
-    // The real standard only special-cases short/int this way because its
-    // num_put facet has no direct short/int overload and must widen to
-    // long first; boxcxx has no such facet, so every width (not just short)
-    // gets the correct, narrow result uniformly for free.
-    //
-    // base 10 vs base 8/16 are genuinely DIFFERENT representations, not just
-    // a shared magnitude with an optional sign: decimal shows a separate
-    // '-' plus the digits of the ABSOLUTE VALUE (os<<dec<<-1 -> "-1", mag=1);
-    // octal/hex show NO sign at all, just the value's raw bit pattern
-    // reinterpreted as unsigned (os<<hex<<-1 -> "ffffffff", never "-1" or
-    // "-ffffffff" -- there is no separate "magnitude" to negate, the sign
-    // bit is already baked into the unsigned reinterpretation).
-    bool neg;
-    U    mag;
-    if constexpr (is_signed_v<T>) {
-        if (base == 10) {
-            neg = value < 0;
-            // U(0)-U(value), not a bare negation of `value` -- for U
-            // narrower than int, arithmetic on U operands promotes to int
-            // first, so doing this entirely in U's own domain (then letting
-            // the final narrowing conversion to `mag` fold it back into U)
-            // is what keeps the result correct at every width.
-            mag = neg ? static_cast<U>(0) - static_cast<U>(value) : static_cast<U>(value);
-        } else {
-            neg = false; // oct/hex: never signed, regardless of value's sign
-            mag = static_cast<U>(value); // raw bit pattern, not a magnitude
-        }
-    } else {
-        neg = false;
-        mag = static_cast<U>(value);
+    bool generationFailed = false;
+    try {
+        Iter it = use_facet<Facet>(os.__loc_ref()).put(Iter(os), os, os.fill(), value);
+        if (it.failed()) os.setstate(ios_base::badbit);
+    } catch (const __ios::GenerationFailure &) {
+        // A conversion that could not fit its buffer: failbit, not badbit.
+        // Set OUTSIDE this try — were it set here and failbit happened to be
+        // armed in exceptions(), the resulting ios_base::failure would be
+        // caught below and misreported as an unexpected exception.
+        generationFailed = true;
+    } catch (...) {
+        HandleException(os);
     }
-
-    char digits[66];
-    auto r        = to_chars(digits, digits + sizeof(digits), mag, base);
-    streamsize digitLen = r.ptr - digits;
-    if (upper)
-        for (streamsize i = 0; i < digitLen; ++i) digits[i] = ToUpperAscii(digits[i]);
-
-    bool showbase = (os.flags() & ios_base::showbase) != ios_base::fmtflags{};
-    // Octal's leading "0" is NOT a real base-indicator like hex's "0x" -- it
-    // is just an ordinary digit that happens to force the number to start
-    // with zero, so it belongs in the BODY (an `internal` fill lands before
-    // it, same as before any other leading digit), never in the separately
-    // padded `prefix` slot. Suppressed for value 0 itself, same as hex below.
-    if (base == 8 && showbase && mag != U(0)) {
-        for (streamsize i = digitLen; i > 0; --i) digits[i] = digits[i - 1];
-        digits[0] = '0';
-        ++digitLen;
-    }
-
-    // showpos applies ONLY to signed decimal -- unsigned decimal never gets a
-    // '+' (there is no sign to force), and oct/hex never carry a sign at all
-    // (they show the raw bit pattern, not a signed magnitude).
-    char sign[1];
-    streamsize signLen = 0;
-    if (neg) sign[signLen++] = '-';
-    else if (base == 10 && is_signed_v<T> && (os.flags() & ios_base::showpos) != ios_base::fmtflags{})
-        sign[signLen++] = '+';
-
-    // Hex's "0x"/"0X" IS a real, separately-padded base-indicator (an
-    // `internal` fill lands AFTER it, before the digits) -- but like
-    // octal's "0", it is suppressed for value 0 itself: printf's "%#x" and
-    // "%#o" both omit the indicator when the result is zero.
-    char prefix[2];
-    streamsize prefixLen = 0;
-    if (base == 16 && showbase && mag != U(0)) {
-        prefix[prefixLen++] = '0';
-        prefix[prefixLen++] = upper ? 'X' : 'x';
-    }
-
-    EmitField(os, sign, signLen, prefix, prefixLen, digits, digitLen, Align::Right);
+    if (generationFailed) os.setstate(ios_base::failbit);
+    os.width(0);
+    return os;
 }
 
+// [ostream.inserters.arithmetic]/2 spells the conversions out, and the detail
+// that matters is not the widening but WHICH widening: for a signed type
+// narrower than long, oct and hex convert through the UNSIGNED type of the
+// same width first, so `hex << short(-1)` is "ffff" and not a 64-bit
+// sign-extension. Decimal keeps the sign, so `showpos` still yields "+1".
+//
+// This is the rule the old WriteIntegerCore got for free by working in T; the
+// first version of this function routed everything through long long and
+// Phase117 caught all three cases in one run.
 template <class CharT, class Traits, class T>
 basic_ostream<CharT, Traits> &InsertInteger(basic_ostream<CharT, Traits> &os, T value)
 {
     typename basic_ostream<CharT, Traits>::sentry ok(os);
-    if (ok) {
-        try {
-            WriteIntegerCore(os, value);
-        } catch (...) {
-            HandleException(os);
+    if (!ok) return os;
+
+    if constexpr (is_signed_v<T>) {
+        if constexpr (sizeof(T) < sizeof(long)) {
+            const auto base = os.flags() & ios_base::basefield;
+            if (base == ios_base::oct || base == ios_base::hex)
+                return InsertNumber(os,
+                                    static_cast<long>(static_cast<make_unsigned_t<T>>(value)));
+            return InsertNumber(os, static_cast<long>(value));
+        } else if constexpr (sizeof(T) <= sizeof(long)) {
+            return InsertNumber(os, static_cast<long>(value));
+        } else {
+            return InsertNumber(os, static_cast<long long>(value));
         }
-        os.width(0);
+    } else if constexpr (sizeof(T) <= sizeof(unsigned long)) {
+        return InsertNumber(os, static_cast<unsigned long>(value));
+    } else {
+        return InsertNumber(os, static_cast<unsigned long long>(value));
     }
-    return os;
 }
 
+// bool goes to num_put's own bool overload rather than being decided here:
+// boolalpha, and the WORDS it prints, are the facet's business — a numpunct
+// can change them, and until Ф43-c "true" and "false" were literals here.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &InsertBool(basic_ostream<CharT, Traits> &os, bool value)
 {
     typename basic_ostream<CharT, Traits>::sentry ok(os);
-    if (ok) {
-        try {
-            if ((os.flags() & ios_base::boolalpha) != ios_base::fmtflags{}) {
-                const char *word    = value ? "true" : "false";
-                streamsize  wordLen = value ? 4 : 5;
-                EmitField(os, nullptr, 0, nullptr, 0, word, wordLen, Align::Right);
-            } else {
-                // Routed through the SIGNED path (not unsigned) so showpos
-                // still yields "+1"/"+0" -- num_put's real bool overload
-                // converts to `long`, never `unsigned long`.
-                WriteIntegerCore(os, static_cast<int>(value));
-            }
-        } catch (...) {
-            HandleException(os);
-        }
-        os.width(0);
-    }
-    return os;
+    if (!ok) return os;
+    return InsertNumber(os, value);
 }
 
-// fixed/scientific/hexfloat + showpoint, precision()==0 case: to_chars omits
-// the point entirely when there are no fractional digits to show; force a
-// lone trailing '.' in.
-inline streamsize EnsureDecimalPoint(char *buf, streamsize len, streamsize cap)
-{
-    streamsize marker = len;
-    for (streamsize i = 0; i < len; ++i) {
-        if (buf[i] == '.') return len; // already has one
-        if (buf[i] == 'e' || buf[i] == 'p') {
-            marker = i;
-            break;
-        }
-    }
-    if (len >= cap) return len;
-    for (streamsize i = len; i > marker; --i) buf[i] = buf[i - 1];
-    buf[marker] = '.';
-    return len + 1;
-}
 
-// defaultfloat + showpoint: re-expand a trimmed general-format token to
-// exactly `sigWant` significant digits (trailing zeros restored) and force a
-// decimal point. Same algorithm <format>'s FmtGeneralAlt uses for the
-// identical post-processing job -- reimplemented here (not included from
-// <format>) since it is pure post-hoc surgery on an already-generated digit
-// string with no ios-vs-format semantic divergence to worry about.
-inline streamsize ShowPointGeneral(char *buf, streamsize len, streamsize cap, int sigWant)
-{
-    if (sigWant < 1) sigWant = 1;
-    streamsize epos = len;
-    for (streamsize i = 0; i < len; ++i)
-        if (buf[i] == 'e') {
-            epos = i;
-            break;
-        }
-    streamsize dot = -1;
-    for (streamsize i = 0; i < epos; ++i)
-        if (buf[i] == '.') {
-            dot = i;
-            break;
-        }
-    streamsize sig          = 0;
-    bool       seenNonzero = false;
-    for (streamsize i = 0; i < epos; ++i) {
-        if (buf[i] == '.') continue;
-        if (buf[i] != '0') seenNonzero = true;
-        if (seenNonzero) ++sig;
-    }
-    if (sig == 0) sig = 1;
-    streamsize add = static_cast<streamsize>(sigWant) - sig;
-    if (add <= 0) {
-        if (dot < 0 && len < cap) {
-            for (streamsize i = len; i > epos; --i) buf[i] = buf[i - 1];
-            buf[epos] = '.';
-            ++len;
-        }
-        return len;
-    }
-    streamsize extra = add + (dot < 0 ? 1 : 0);
-    if (len + extra > cap) extra = cap - len;
-    for (streamsize i = len + extra - 1; i >= epos + extra; --i) buf[i] = buf[i - extra];
-    streamsize w = epos;
-    if (dot < 0) buf[w++] = '.';
-    for (streamsize i = 0; i < add && w < epos + extra; ++i) buf[w++] = '0';
-    return len + extra;
-}
 
+// float promotes to double, as [ostream.inserters.arithmetic] says: num_put
+// has no overload narrower than double.
 template <class CharT, class Traits, class F>
 basic_ostream<CharT, Traits> &InsertFloat(basic_ostream<CharT, Traits> &os, F value)
 {
     typename basic_ostream<CharT, Traits>::sentry ok(os);
-    if (ok) {
-        // Set OUTSIDE the try below (see comment there) rather than calling
-        // setstate(failbit) directly from inside it.
-        bool generationFailed = false;
-        try {
-            bool neg = __builtin_signbit(value);
-            F    mag = neg ? -value : value;
-
-            auto floatFlag = os.flags() & ios_base::floatfield;
-            bool hasFixed  = (floatFlag & ios_base::fixed) != ios_base::fmtflags{};
-            bool hasSci    = (floatFlag & ios_base::scientific) != ios_base::fmtflags{};
-            bool isHex     = hasFixed && hasSci; // hexfloat == both bits set
-            bool upper     = (os.flags() & ios_base::uppercase) != ios_base::fmtflags{};
-
-            // Generous fixed bound (not a container-style unbounded buffer,
-            // matching <format>'s own FormatFloatCore stack-buffer strategy):
-            // comfortably covers any realistic precision/exponent. A
-            // precision so extreme that even this overflows is treated as a
-            // generation failure (failbit) per [ostream.formatted.reqmts] --
-            // graceful, not a crash, and needs no <string>/<memory> heap
-            // dependency this phase deliberately avoids.
-            constexpr streamsize kBufSize = 8192;
-            char                 buf[kBufSize];
-            to_chars_result      r;
-
-            if (isHex) {
-                // hexfloat ALWAYS ignores precision() -- exact/minimal form
-                // regardless of what the user set (unlike format's {:.3a}).
-                r = to_chars(buf, buf + kBufSize, mag, chars_format::hex);
-            } else if (hasFixed) {
-                r = to_chars(buf, buf + kBufSize, mag, chars_format::fixed,
-                             static_cast<int>(os.precision()));
-            } else if (hasSci) {
-                r = to_chars(buf, buf + kBufSize, mag, chars_format::scientific,
-                             static_cast<int>(os.precision()));
-            } else {
-                // defaultfloat: ALWAYS the 5-arg precision-bearing overload
-                // (P significant digits, %g-style) -- never the shortest-
-                // round-trip no-format overload, which is <format>'s "{}"
-                // special case only.
-                r = to_chars(buf, buf + kBufSize, mag, chars_format::general,
-                             static_cast<int>(os.precision()));
-            }
-
-            if (r.ec != errc{}) {
-                generationFailed = true;
-            } else {
-                streamsize len    = r.ptr - buf;
-                bool       finite = !(len > 0 && (buf[0] == 'i' || buf[0] == 'n'));
-
-                if (finite && (os.flags() & ios_base::showpoint) != ios_base::fmtflags{}) {
-                    // hexfloat sets BOTH the fixed and scientific bits, so
-                    // "neither bit set" (defaultfloat/general) and isHex are
-                    // mutually exclusive -- general gets the full re-expand-
-                    // to-P-significant-digits treatment, hexfloat/fixed/
-                    // scientific just need a lone '.' forced in when absent.
-                    bool isGeneral = !hasFixed && !hasSci;
-                    len = isGeneral ? ShowPointGeneral(buf, len, kBufSize, static_cast<int>(os.precision()))
-                                    : EnsureDecimalPoint(buf, len, kBufSize);
-                }
-                if (upper)
-                    for (streamsize i = 0; i < len; ++i) buf[i] = ToUpperAscii(buf[i]);
-
-                char sign[1];
-                streamsize signLen = 0;
-                if (neg) sign[signLen++] = '-';
-                else if ((os.flags() & ios_base::showpos) != ios_base::fmtflags{}) sign[signLen++] = '+';
-
-                // hexfloat carries a "0x"/"0X" prefix for FINITE values only
-                // (cout<<hexfloat<<1.0 -> "0x1p+0"; cout<<hexfloat<<infinity
-                // stays plain "inf", never "0xinf") -- unlike <format>'s
-                // {:a}, which the standard specifies without one; to_chars
-                // (hex) itself never emits it either way. It is folded into
-                // the BODY rather than passed as EmitField's separately-
-                // padded `prefix`: unlike integer hex's "0x" (a real
-                // pad-after base-indicator), float's "0x" must sit AFTER any
-                // `internal` fill (fill goes between the sign and
-                // "0x1p+0"), so it has to be part of what internal treats
-                // as the body.
-                if (isHex && finite) {
-                    for (streamsize i = len; i > 0; --i) buf[i + 1] = buf[i - 1];
-                    buf[0] = '0';
-                    buf[1] = upper ? 'X' : 'x';
-                    len += 2;
-                }
-
-                EmitField(os, sign, signLen, nullptr, 0, buf, len, Align::Right);
-            }
-        } catch (...) {
-            HandleException(os);
-        }
-        // setstate(failbit) is called OUTSIDE the try -- were it inside, and
-        // failbit happens to be armed in exceptions(), the resulting
-        // ios_base::failure would be caught by the catch(...) above and
-        // misreported as an unexpected exception (badbit) instead of
-        // propagating as the plain generation failure [ostream.formatted.
-        // reqmts] describes.
-        if (generationFailed) os.setstate(ios_base::failbit);
-        os.width(0);
-    }
-    return os;
+    if (!ok) return os;
+    if constexpr (is_same_v<F, long double>)
+        return InsertNumber(os, value);
+    else
+        return InsertNumber(os, static_cast<double>(value));
 }
 
 
@@ -972,31 +691,15 @@ inline void VPrintTo(basic_ostream<char> &os, string_view fmt, format_args args)
     }
 }
 
-// [ostream.inserters.arithmetic]: "as if" the %p conversion specifier -- the
-// standard mandates only this much, leaving the exact rendering
-// implementation-defined. boxcxx renders a fixed "0x" + lowercase hex of the
-// address, unaffected by basefield/showbase/uppercase (which are properties
-// of the INTEGER inserters, not %p) but still honoring width/fill/
-// adjustfield like every other formatted inserter. nullptr_t inserts
-// identically (as if via static_cast<const void*>(nullptr)), giving "0x0".
+// [ostream.inserters.arithmetic]: "as if" the %p conversion specifier, which
+// is all the standard mandates — the rendering itself is num_put's and is
+// described there.
 template <class CharT, class Traits>
 basic_ostream<CharT, Traits> &InsertPointer(basic_ostream<CharT, Traits> &os, const void *value)
 {
     typename basic_ostream<CharT, Traits>::sentry ok(os);
-    if (ok) {
-        try {
-            char digits[20];
-            auto r = to_chars(digits, digits + sizeof(digits),
-                              reinterpret_cast<uintptr_t>(value), 16);
-            streamsize  digitLen  = r.ptr - digits;
-            const char  prefix[2] = {'0', 'x'};
-            EmitField(os, nullptr, 0, prefix, 2, digits, digitLen, Align::Right);
-        } catch (...) {
-            HandleException(os);
-        }
-        os.width(0);
-    }
-    return os;
+    if (!ok) return os;
+    return InsertNumber(os, value);
 }
 
 } // namespace __ios

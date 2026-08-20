@@ -1,0 +1,267 @@
+// boxcxx — <__bits/field_engine>
+//
+// The width/fill/adjustfield engine that backs every formatted field, and the
+// two sinks it writes through.
+//
+// ── why it moved out of <ostream> ───────────────────────────────────────
+// It backs two callers now with different requirements, and neither is a
+// special case of the other:
+//
+//   * the string and character inserters, which write the stream's OWN
+//     characters straight into its streambuf. Nothing about them is the
+//     locale's business — [ostream.inserters.character] does not mention a
+//     facet — and going through an output iterator would cost them the one
+//     sputn they have always been.
+//
+//   * num_put, whose signature hands it an OutputIterator and whose
+//     [facet.num.put.virtuals] wording says the characters are produced by
+//     to_chars in ASCII and then WIDENED THROUGH THE CTYPE FACET. That is a
+//     real difference and not a formality: a program can install a ctype
+//     that widens differently, and Ф43-b built the machinery for it.
+//
+// So the engine is parameterized on a SINK, which owns both questions —
+// where a character goes, and how a `char` becomes a `CharT` on the way.
+// Everything else about a field (the sign, the base prefix, which of the
+// three alignments applies, where `internal` puts the fill) is identical for
+// both and is written once, here.
+#ifndef BOXCXX_BITS_FIELD_ENGINE
+#define BOXCXX_BITS_FIELD_ENGINE
+
+#include <ios>
+
+namespace std {
+namespace __ios {
+
+enum class Align { Left, Right, Internal };
+
+// A conversion that could not fit its buffer. [ostream.formatted.reqmts]
+// makes that failbit and not an exception — but a facet has no stream to set
+// a bit on, so num_put says so this way and the inserter that called it turns
+// it back into failbit. It is not derived from std::exception on purpose:
+// nothing but the inserter should ever catch it.
+struct GenerationFailure {};
+
+[[noreturn]] inline void ThrowGenerationFailure() { throw GenerationFailure{}; }
+
+// ── ASCII surgery on a to_chars result ──────────────────────────────────
+// These three moved here from <ostream> in Ф43-c, along with the formatting
+// that used them: they belong to whoever renders a number, and that is
+// num_put now.
+
+inline char ToUpperAscii(char c)
+{
+    return (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+}
+
+// fixed/scientific/hexfloat + showpoint, precision()==0 case: to_chars omits
+// the point entirely when there are no fractional digits to show; force a
+// lone trailing '.' in.
+inline streamsize EnsureDecimalPoint(char *buf, streamsize len, streamsize cap)
+{
+    streamsize marker = len;
+    for (streamsize i = 0; i < len; ++i) {
+        if (buf[i] == '.') return len; // already has one
+        if (buf[i] == 'e' || buf[i] == 'p') {
+            marker = i;
+            break;
+        }
+    }
+    if (len >= cap) return len;
+    for (streamsize i = len; i > marker; --i) buf[i] = buf[i - 1];
+    buf[marker] = '.';
+    return len + 1;
+}
+
+// defaultfloat + showpoint: re-expand a trimmed general-format token to
+// exactly `sigWant` significant digits (trailing zeros restored) and force a
+// decimal point. Same algorithm <format>'s FmtGeneralAlt uses for the
+// identical post-processing job -- reimplemented here (not included from
+// <format>) since it is pure post-hoc surgery on an already-generated digit
+// string with no ios-vs-format semantic divergence to worry about.
+inline streamsize ShowPointGeneral(char *buf, streamsize len, streamsize cap, int sigWant)
+{
+    if (sigWant < 1) sigWant = 1;
+    streamsize epos = len;
+    for (streamsize i = 0; i < len; ++i)
+        if (buf[i] == 'e') {
+            epos = i;
+            break;
+        }
+    streamsize dot = -1;
+    for (streamsize i = 0; i < epos; ++i)
+        if (buf[i] == '.') {
+            dot = i;
+            break;
+        }
+    streamsize sig          = 0;
+    bool       seenNonzero = false;
+    for (streamsize i = 0; i < epos; ++i) {
+        if (buf[i] == '.') continue;
+        if (buf[i] != '0') seenNonzero = true;
+        if (seenNonzero) ++sig;
+    }
+    if (sig == 0) sig = 1;
+    streamsize add = static_cast<streamsize>(sigWant) - sig;
+    if (add <= 0) {
+        if (dot < 0 && len < cap) {
+            for (streamsize i = len; i > epos; --i) buf[i] = buf[i - 1];
+            buf[epos] = '.';
+            ++len;
+        }
+        return len;
+    }
+    streamsize extra = add + (dot < 0 ? 1 : 0);
+    if (len + extra > cap) extra = cap - len;
+    for (streamsize i = len + extra - 1; i >= epos + extra; --i) buf[i] = buf[i - extra];
+    streamsize w = epos;
+    if (dot < 0) buf[w++] = '.';
+    for (streamsize i = 0; i < add && w < epos + extra; ++i) buf[w++] = '0';
+    return len + extra;
+}
+
+
+// ── the two sinks ───────────────────────────────────────────────────────
+
+// Straight into a streambuf, widening by cast. Used by the inserters whose
+// characters are already the stream's own, and by the runs of ASCII that
+// belong to no facet.
+template <class CharT, class Traits>
+struct BufSink {
+    basic_streambuf<CharT, Traits> *buf;
+
+    template <class SrcT>
+    bool Run(const SrcT *s, streamsize n)
+    {
+        if (n <= 0) return true;
+        if constexpr (is_same_v<CharT, SrcT>) {
+            return buf->sputn(s, n) == n;
+        } else {
+            for (streamsize i = 0; i < n; ++i) {
+                const CharT c = static_cast<CharT>(static_cast<unsigned char>(s[i]));
+                if (Traits::eq_int_type(buf->sputc(c), Traits::eof())) return false;
+            }
+            return true;
+        }
+    }
+
+    bool Fill(CharT c, streamsize n)
+    {
+        for (streamsize i = 0; i < n; ++i)
+            if (Traits::eq_int_type(buf->sputc(c), Traits::eof())) return false;
+        return true;
+    }
+};
+
+// Through an OutputIterator, widening through a ctype facet. This is the one
+// num_put uses, and the facet is what makes it different from the other:
+// [facet.num.put.virtuals] says the digits are widened by ct.widen(), so an
+// installed ctype is consulted for every character of every number.
+//
+// It never reports failure — an output iterator has no way to refuse — which
+// is why num_put's callers ask the iterator itself afterwards.
+template <class CharT, class Iter>
+struct IterSink {
+    Iter                out;
+    const ctype<CharT> *ct;
+
+    // Everything that reaches here is ASCII from to_chars — digits, a sign,
+    // "0x", "inf" — so it is ALWAYS widened through the facet. The first
+    // version skipped widening when CharT happened to be char, on the
+    // reasoning that the cast would be the identity; that made a narrow
+    // stream stop consulting an installed ctype altogether, and Phase221's
+    // pin caught it by NOT failing when it was supposed to.
+    //
+    // Characters that are already the stream's own — numpunct's truename and
+    // falsename — go through Fill instead, which writes them untouched.
+    bool Run(const char *s, streamsize n)
+    {
+        for (streamsize i = 0; i < n; ++i) *out++ = ct->widen(s[i]);
+        return true;
+    }
+
+    bool Fill(CharT c, streamsize n)
+    {
+        for (streamsize i = 0; i < n; ++i) *out++ = c;
+        return true;
+    }
+};
+
+// The same engine, for a body that is PRODUCED rather than stored. num_put
+// needs this: its body is the to_chars digits with grouping separators woven
+// in and the decimal point replaced, and materializing that meant a second
+// buffer in the stream's character type. For wchar_t that buffer was 64 KiB
+// of stack on top of the 8 KiB the conversion already uses, and it faulted —
+// measured, in Phase215, as a #PF one page below the stack pointer. So the
+// body is written by a callback instead, and only its LENGTH is computed
+// ahead of time, which is all the padding needs.
+template <class CharT, class Sink, class BodyFn>
+inline bool EmitFieldWith(Sink &sink, ios_base &str, CharT fillCh, const char *sign,
+                          streamsize signLen, const char *prefix, streamsize prefixLen,
+                          BodyFn &&writeBody, streamsize bodyLen, Align dflt)
+{
+    const streamsize core = signLen + prefixLen + bodyLen;
+    const streamsize w    = str.width();
+
+    if (w <= core)
+        return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) && writeBody(sink);
+
+    const streamsize pad   = w - core;
+    const auto       adj   = str.flags() & ios_base::adjustfield;
+    const Align      align = adj == ios_base::left       ? Align::Left
+                             : adj == ios_base::internal ? Align::Internal
+                             : adj == ios_base::right    ? Align::Right
+                                                         : dflt;
+
+    if (align == Align::Left)
+        return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) && writeBody(sink) &&
+               sink.Fill(fillCh, pad);
+    if (align == Align::Right)
+        return sink.Fill(fillCh, pad) && sink.Run(sign, signLen) &&
+               sink.Run(prefix, prefixLen) && writeBody(sink);
+    return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) &&
+           sink.Fill(fillCh, pad) && writeBody(sink);
+}
+
+// ── the engine ──────────────────────────────────────────────────────────
+// `dflt` is the alignment used when no adjustfield bit is set: always Right —
+// there is no separate per-kind default; iostream is right-justified unless
+// `left` is explicitly set, for every kind alike. `internal` degrades to
+// `right` automatically whenever sign and prefix are both empty (nothing to
+// pad "between"), which is exactly the generic [ostream.formatted.reqmts]
+// left-vs-not-left rule non-numeric callers need — no separate code path.
+//
+// Returns false if the sink refused a character, which only a BufSink can do.
+template <class CharT, class Sink, class BodyT>
+inline bool EmitFieldTo(Sink &sink, ios_base &str, CharT fillCh, const char *sign,
+                        streamsize signLen, const char *prefix, streamsize prefixLen,
+                        const BodyT *body, streamsize bodyLen, Align dflt)
+{
+    const streamsize core = signLen + prefixLen + bodyLen;
+    const streamsize w    = str.width();
+
+    if (w <= core)
+        return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) &&
+               sink.Run(body, bodyLen);
+
+    const streamsize pad = w - core;
+    const auto       adj = str.flags() & ios_base::adjustfield;
+    const Align      align = adj == ios_base::left     ? Align::Left
+                             : adj == ios_base::internal ? Align::Internal
+                             : adj == ios_base::right    ? Align::Right
+                                                         : dflt;
+
+    if (align == Align::Left)
+        return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) &&
+               sink.Run(body, bodyLen) && sink.Fill(fillCh, pad);
+    if (align == Align::Right)
+        return sink.Fill(fillCh, pad) && sink.Run(sign, signLen) &&
+               sink.Run(prefix, prefixLen) && sink.Run(body, bodyLen);
+    // Internal: the fill sits BETWEEN the sign/prefix and the digits.
+    return sink.Run(sign, signLen) && sink.Run(prefix, prefixLen) &&
+           sink.Fill(fillCh, pad) && sink.Run(body, bodyLen);
+}
+
+} // namespace __ios
+} // namespace std
+
+#endif // BOXCXX_BITS_FIELD_ENGINE
