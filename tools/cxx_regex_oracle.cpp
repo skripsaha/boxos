@@ -15,6 +15,8 @@
 //
 // Modes:
 //   gen  FROM TO [DEPTH] [FAN]   generated sweep over case ids [FROM,TO)
+//   parse FROM TO [DEPTH] [FAN]  the same cases, verdict only: accepted with
+//                                how many groups, or which error
 //   file PATH                    replay explicit `pattern<TAB>subject` cases
 //   adv  PATTERN N               time ONE search of PATTERN against 'a'*N
 //
@@ -32,6 +34,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+
+#include "cxx_regex_oracle_gen.h"
 
 static const char *kLib =
 #ifdef _LIBCPP_VERSION
@@ -63,103 +67,14 @@ static const char *ErrName(std::regex_constants::error_type e)
     return "other";
 }
 
-// ── deterministic PRNG ─────────────────────────────────────────────────────
-// Not std::mt19937: its stream is specified, but the distributions layered on
-// top of it are not, and a case sequence that drifts between two libraries
-// compares nothing. splitmix64 by hand cannot drift.
-struct Rng {
-    std::uint64_t s;
-    explicit Rng(std::uint64_t seed) : s(seed) {}
-    std::uint64_t Next()
-    {
-        std::uint64_t z = (s += 0x9E3779B97F4A7C15ull);
-        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
-        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
-        return z ^ (z >> 31);
-    }
-    unsigned Below(unsigned n) { return (unsigned)(Next() % n); }
-};
-
-// ── pattern generator ──────────────────────────────────────────────────────
-// A recursive descent over the shapes of [re.grammar], bounded by depth so it
-// terminates, and by fan so the result stays small enough to READ. A 400-char
-// pattern proves a disagreement exists and explains nothing; the reduced cases
-// live in the replay file instead.
-struct Gen {
-    Rng &r;
-    int groups = 0;
-    int fan;
-    Gen(Rng &rng, int fanout) : r(rng), fan(fanout) {}
-
-    std::string Atom(int depth)
-    {
-        unsigned pick = r.Below(depth > 0 ? 10u : 7u);
-        switch (pick) {
-        case 0: case 1: case 2: {
-            static const char kAlpha[] = "abc";
-            return std::string(1, kAlpha[r.Below(3)]);
-        }
-        case 3: return ".";
-        case 4: {
-            static const char *kClass[] = {"[ab]", "[^a]", "[a-c]", "[^b-c]", "[abc]"};
-            return kClass[r.Below(5)];
-        }
-        case 5: {
-            static const char *kEsc[] = {"\\d", "\\w", "\\s", "\\D", "\\W"};
-            return kEsc[r.Below(5)];
-        }
-        case 6:
-            if (groups > 0 && r.Below(2)) {
-                char buf[8];
-                std::snprintf(buf, sizeof buf, "\\%d", 1 + (int)r.Below((unsigned)groups));
-                return buf;
-            }
-            return r.Below(2) ? "^" : "$";
-        case 7: { ++groups; return "(" + Alt(depth - 1) + ")"; }
-        case 8: return "(?:" + Alt(depth - 1) + ")";
-        default: return r.Below(2) ? "(?=" + Alt(depth - 1) + ")" : "(?!" + Alt(depth - 1) + ")";
-        }
-    }
-
-    std::string Quantified(int depth)
-    {
-        std::string a = Atom(depth);
-        // A quantified anchor or lookahead is legal in the grammar and is a
-        // separate argument between the two libraries; keeping it out of the
-        // generator keeps this sweep about the ENGINE.
-        if (a == "^" || a == "$" || a.compare(0, 3, "(?=") == 0 || a.compare(0, 3, "(?!") == 0)
-            return a;
-        unsigned q = r.Below(10);
-        if (q >= 6) return a;
-        static const char *kQ[] = {"*", "+", "?", "{1,2}", "{0,2}", "{2}"};
-        std::string s = a + kQ[q];
-        if (r.Below(4) == 0 && kQ[q][0] != '{') s += "?";   // lazy
-        return s;
-    }
-
-    std::string Seq(int depth)
-    {
-        std::string s;
-        unsigned n = 1 + r.Below((unsigned)fan);
-        for (unsigned i = 0; i < n; ++i) s += Quantified(depth);
-        return s;
-    }
-
-    std::string Alt(int depth)
-    {
-        std::string s = Seq(depth);
-        unsigned n = r.Below((unsigned)fan);
-        for (unsigned i = 0; i < n; ++i) s += "|" + Seq(depth);
-        return s;
-    }
-};
-
 // ── one case, rendered so two libraries produce byte-identical text ────────
-static void Report(const char *id, const std::string &pattern, const std::string &subject)
+static void Report(const char *id, const std::string &pattern, const std::string &subject,
+                   std::regex_constants::syntax_option_type gram
+                       = std::regex_constants::ECMAScript)
 {
     std::printf("%s |%s| |%s| -> ", id, pattern.c_str(), subject.c_str());
     try {
-        std::regex re(pattern, std::regex_constants::ECMAScript);
+        std::regex re(pattern, gram);
         std::smatch m;
         if (!std::regex_search(subject, m, re)) {
             std::printf("nomatch\n");
@@ -182,18 +97,64 @@ static void Report(const char *id, const std::string &pattern, const std::string
 
 static void GenCase(std::uint64_t seed, int depth, int fan)
 {
-    Rng r(seed);
-    Gen g(r, fan);
-    std::string pattern = g.Alt(depth);
-    unsigned len = r.Below(9);
-    std::string subject;
-    for (unsigned i = 0; i < len; ++i) {
-        static const char kIn[] = "aabbc 1";
-        subject += kIn[r.Below(7)];
+    const Case c = MakeCase(seed, depth, fan);
+    Report(c.id, c.pattern, c.subject);
+}
+
+// Parse-only verdict. Until the machine exists there is nothing to match with,
+// but whether a pattern is ACCEPTED, and with how many groups, is already a
+// complete differential question — and it is the one Ф44-a has to answer.
+static std::regex_constants::syntax_option_type GrammarOf(const char *name)
+{
+    using namespace std::regex_constants;
+    if (!name || !*name || std::strcmp(name, "ECMAScript") == 0) return ECMAScript;
+    if (std::strcmp(name, "basic") == 0) return basic;
+    if (std::strcmp(name, "extended") == 0) return extended;
+    if (std::strcmp(name, "awk") == 0) return awk;
+    if (std::strcmp(name, "grep") == 0) return grep;
+    if (std::strcmp(name, "egrep") == 0) return egrep;
+    std::fprintf(stderr, "unknown grammar %s\n", name);
+    std::exit(2);
+}
+
+static void ParseCase(std::uint64_t seed, int depth, int fan,
+                      std::regex_constants::syntax_option_type gram)
+{
+    const Case c = MakeCase(seed, depth, fan);
+    std::printf("%s |%s| -> ", c.id, c.pattern.c_str());
+    try {
+        std::regex re(c.pattern, gram);
+        std::printf("ok marks=%u\n", (unsigned)re.mark_count());
+    } catch (const std::regex_error &e) {
+        std::printf("throw %s\n", ErrName(e.code()));
     }
-    char id[16];
-    std::snprintf(id, sizeof id, "%08llx", (unsigned long long)seed);
-    Report(id, pattern, subject);
+}
+
+// Parse verdict only, for a curated list. The POSIX grammars cannot be swept
+// with a generator that emits ECMAScript shapes — the patterns mean different
+// things there, and the noise buries the signal — so they are checked against
+// lists written by hand.
+static int ReplayParse(const char *path, std::regex_constants::syntax_option_type gram)
+{
+    std::ifstream in(path);
+    if (!in) { std::fprintf(stderr, "cannot open %s\n", path); return 2; }
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::string::size_type tab = line.find('\t');
+        const std::string pat = tab == std::string::npos ? line : line.substr(0, tab);
+        char id[16];
+        std::snprintf(id, sizeof id, "case%04d", ++n);
+        std::printf("%s |%s| -> ", id, pat.c_str());
+        try {
+            std::regex re(pat, gram);
+            std::printf("ok marks=%u\n", (unsigned)re.mark_count());
+        } catch (const std::regex_error &e) {
+            std::printf("throw %s\n", ErrName(e.code()));
+        }
+    }
+    return 0;
 }
 
 static int Replay(const char *path)
@@ -238,17 +199,27 @@ int main(int argc, char **argv)
 {
     if (argc > 3 && std::strcmp(argv[1], "adv") == 0)
         return Adversarial(argv[2], std::atoi(argv[3]));
+    if (argc > 2 && std::strcmp(argv[1], "pfile") == 0) {
+        const auto g = GrammarOf(argc > 3 ? argv[3] : nullptr);
+        std::fprintf(stderr, "# regex oracle: %s, parse %s\n", kLib, argv[2]);
+        return ReplayParse(argv[2], g);
+    }
     if (argc > 2 && std::strcmp(argv[1], "file") == 0) {
         std::fprintf(stderr, "# regex oracle: %s, replay %s\n", kLib, argv[2]);
         return Replay(argv[2]);
     }
-    int a = (argc > 1 && std::strcmp(argv[1], "gen") == 0) ? 1 : 0;
+    const bool parseOnly = argc > 1 && std::strcmp(argv[1], "parse") == 0;
+    int a = (argc > 1 && (std::strcmp(argv[1], "gen") == 0 || parseOnly)) ? 1 : 0;
     std::uint64_t from = argc > a + 1 ? std::strtoull(argv[a + 1], nullptr, 0) : 1;
     std::uint64_t to   = argc > a + 2 ? std::strtoull(argv[a + 2], nullptr, 0) : 4000;
     int depth = argc > a + 3 ? std::atoi(argv[a + 3]) : 1;
     int fan   = argc > a + 4 ? std::atoi(argv[a + 4]) : 2;
+    const auto gram = GrammarOf(argc > a + 5 ? argv[a + 5] : nullptr);
     std::fprintf(stderr, "# regex oracle: %s, cases [%llu,%llu) depth=%d fan=%d\n", kLib,
                  (unsigned long long)from, (unsigned long long)to, depth, fan);
-    for (std::uint64_t i = from; i < to; ++i) GenCase(i, depth, fan);
+    for (std::uint64_t i = from; i < to; ++i) {
+        if (parseOnly) ParseCase(i, depth, fan, gram);
+        else GenCase(i, depth, fan);
+    }
     return 0;
 }

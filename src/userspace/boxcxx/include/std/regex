@@ -1,0 +1,385 @@
+// boxcxx — <regex>
+//
+// regex_traits, the object [re.grammar]/2 makes the sole route from the engine
+// to a locale, and basic_regex, which is a compiled program plus the flags it
+// was compiled under.
+//
+// The engine itself is two leaves below this one and knows nothing about
+// locales: <__bits/regex_program> defines what a compiled expression is, and
+// <__bits/regex_parse> turns pattern text into one. That split is not tidiness.
+// It is what lets the parser and the machine be built against a stub traits on
+// a host compiler and fuzzed against libstdc++ and libc++ in a second, which
+// is how every rule this implementation follows was checked — see
+// tools/cxx_regex_oracle.sh.
+#ifndef BOXCXX_REGEX
+#define BOXCXX_REGEX
+
+#include <__bits/regex_parse>
+#include <__bits/regex_program>
+#include <__bits/regex_syntax>
+#include <cstddef>
+#include <initializer_list>
+#include <new>
+#include <iterator>
+#include <locale>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+// ── regex_traits [re.traits] ────────────────────────────────────────────
+// char_class_type is implementation-defined and must be a bitmask, because
+// [re.grammar]/9 lets the translator or together the answers of several
+// lookup_classname calls and hand the result to isctype. ctype_base::mask is
+// ten bits wide and answers eleven of the twelve POSIX class names; the
+// twelfth thing a class can require is not a ctype question at all — it is the
+// underscore of \w, which [re.grammar]/7 defines as [_[:alnum:]] — so it gets
+// a bit of its own above the mask.
+template <class charT>
+class regex_traits {
+public:
+    using char_type = charT;
+    using string_type = basic_string<charT>;
+    using locale_type = locale;
+    using char_class_type = unsigned int;
+
+    static constexpr char_class_type __underscore = 1u << 16;
+
+    regex_traits() = default;
+
+    static size_t length(const char_type *p) { return char_traits<charT>::length(p); }
+
+    charT translate(charT c) const { return c; }
+
+    charT translate_nocase(charT c) const
+    {
+        return use_facet<ctype<charT>>(loc_).tolower(c);
+    }
+
+    template <class ForwardIterator>
+    string_type transform(ForwardIterator first, ForwardIterator last) const
+    {
+        string_type s(first, last);
+        return use_facet<collate<charT>>(loc_).transform(s.data(), s.data() + s.size());
+    }
+
+    // [re.traits]: a key such that two elements of the same primary
+    // equivalence class compare equal. Case is the one distinction the classic
+    // locale can drop and still be answering the same question, so this is a
+    // fold followed by the ordinary transform rather than a second table.
+    template <class ForwardIterator>
+    string_type transform_primary(ForwardIterator first, ForwardIterator last) const
+    {
+        string_type s(first, last);
+        if (s.empty()) return s;
+        const ctype<charT> &ct = use_facet<ctype<charT>>(loc_);
+        for (auto &c : s) c = ct.tolower(c);
+        return use_facet<collate<charT>>(loc_).transform(s.data(), s.data() + s.size());
+    }
+
+    template <class ForwardIterator>
+    string_type lookup_collatename(ForwardIterator first, ForwardIterator last) const
+    {
+        const string_type name(first, last);
+        if (name.size() == 1) return name;
+        for (const CollateName &e : kCollateNames) {
+            if (Same(name, e.name)) return string_type(1, (charT)(unsigned char)e.value);
+        }
+        return string_type();
+    }
+
+    // [re.grammar]/7 fixes the fifteen names that must be recognised. The
+    // icase argument is not decoration: with it set, `[[:upper:]]` has to
+    // accept a lowercase letter, because the class is being asked about a
+    // character the matcher has already agreed not to distinguish.
+    template <class ForwardIterator>
+    char_class_type lookup_classname(ForwardIterator first, ForwardIterator last,
+                                     bool icase = false) const
+    {
+        const string_type name(first, last);
+        for (const ClassName &e : kClassNames) {
+            if (!Same(name, e.name)) continue;
+            char_class_type m = e.value;
+            if (icase && (m & (ctype_base::upper | ctype_base::lower)))
+                m = (m & ~(char_class_type)(ctype_base::upper | ctype_base::lower))
+                    | ctype_base::alpha;
+            return m;
+        }
+        return 0;
+    }
+
+    bool isctype(charT c, char_class_type f) const
+    {
+        const ctype_base::mask m = (ctype_base::mask)(f & 0xFFFFu);
+        if (m && use_facet<ctype<charT>>(loc_).is(m, c)) return true;
+        if ((f & __underscore) && c == (charT)(unsigned char)'_') return true;
+        return false;
+    }
+
+    int value(charT ch, int radix) const
+    {
+        const ctype<charT> &ct = use_facet<ctype<charT>>(loc_);
+        const char n = ct.narrow(ch, '\0');
+        int v;
+        if (n >= '0' && n <= '9') v = n - '0';
+        else if (n >= 'a' && n <= 'f') v = n - 'a' + 10;
+        else if (n >= 'A' && n <= 'F') v = n - 'A' + 10;
+        else return -1;
+        return v < radix ? v : -1;
+    }
+
+    locale_type imbue(locale_type l)
+    {
+        locale_type prev = loc_;
+        loc_ = l;
+        return prev;
+    }
+
+    locale_type getloc() const { return loc_; }
+
+private:
+    struct ClassName { const char *name; char_class_type value; };
+    struct CollateName { const char *name; char value; };
+
+    static constexpr ClassName kClassNames[] = {
+        {"alnum",  ctype_base::alnum},
+        {"alpha",  ctype_base::alpha},
+        {"blank",  ctype_base::blank},
+        {"cntrl",  ctype_base::cntrl},
+        {"digit",  ctype_base::digit},
+        {"graph",  ctype_base::graph},
+        {"lower",  ctype_base::lower},
+        {"print",  ctype_base::print},
+        {"punct",  ctype_base::punct},
+        {"space",  ctype_base::space},
+        {"upper",  ctype_base::upper},
+        {"xdigit", ctype_base::xdigit},
+        {"d",      ctype_base::digit},
+        {"s",      ctype_base::space},
+        {"w",      ctype_base::alnum | __underscore},
+    };
+
+    // The POSIX portable character names, which is what a `[.name.]` can be
+    // asking for in a locale that defines no collating element of its own.
+    static constexpr CollateName kCollateNames[] = {
+        {"NUL", '\0'},      {"alert", '\a'},        {"backspace", '\b'},
+        {"tab", '\t'},      {"newline", '\n'},      {"vertical-tab", '\v'},
+        {"form-feed", '\f'},{"carriage-return", '\r'},
+        {"space", ' '},     {"exclamation-mark", '!'},
+        {"quotation-mark", '"'}, {"number-sign", '#'},
+        {"dollar-sign", '$'},    {"percent-sign", '%'},
+        {"ampersand", '&'},      {"apostrophe", '\''},
+        {"left-parenthesis", '('}, {"right-parenthesis", ')'},
+        {"asterisk", '*'},       {"plus-sign", '+'},
+        {"comma", ','},          {"hyphen", '-'},
+        {"hyphen-minus", '-'},   {"period", '.'},
+        {"full-stop", '.'},      {"slash", '/'},
+        {"solidus", '/'},        {"colon", ':'},
+        {"semicolon", ';'},      {"less-than-sign", '<'},
+        {"equals-sign", '='},    {"greater-than-sign", '>'},
+        {"question-mark", '?'},  {"commercial-at", '@'},
+        {"left-square-bracket", '['}, {"backslash", '\\'},
+        {"reverse-solidus", '\\'},    {"right-square-bracket", ']'},
+        {"circumflex", '^'},     {"circumflex-accent", '^'},
+        {"underscore", '_'},     {"low-line", '_'},
+        {"grave-accent", '`'},   {"left-curly-bracket", '{'},
+        {"left-brace", '{'},     {"vertical-line", '|'},
+        {"right-curly-bracket", '}'}, {"right-brace", '}'},
+        {"tilde", '~'},          {"DEL", '\x7F'},
+    };
+
+    // The names are narrow literals and the pattern is charT; comparing them
+    // through the ctype facet is the only conversion available that a user's
+    // ctype could redefine, and it is the one [re.grammar]/2 asks for.
+    bool Same(const string_type &s, const char *name) const
+    {
+        const ctype<charT> &ct = use_facet<ctype<charT>>(loc_);
+        size_t i = 0;
+        for (; name[i]; ++i) {
+            if (i >= s.size()) return false;
+            if (ct.narrow(s[i], '\0') != name[i]) return false;
+        }
+        return i == s.size();
+    }
+
+    locale_type loc_;
+};
+
+// ── basic_regex [re.regex] ──────────────────────────────────────────────
+template <class charT, class traits = regex_traits<charT>>
+class basic_regex {
+public:
+    using value_type = charT;
+    using traits_type = traits;
+    using string_type = typename traits::string_type;
+    using flag_type = regex_constants::syntax_option_type;
+    using locale_type = typename traits::locale_type;
+
+    static constexpr flag_type icase = regex_constants::icase;
+    static constexpr flag_type nosubs = regex_constants::nosubs;
+    static constexpr flag_type optimize = regex_constants::optimize;
+    static constexpr flag_type collate = regex_constants::collate;
+    static constexpr flag_type ECMAScript = regex_constants::ECMAScript;
+    static constexpr flag_type basic = regex_constants::basic;
+    static constexpr flag_type extended = regex_constants::extended;
+    static constexpr flag_type awk = regex_constants::awk;
+    static constexpr flag_type grep = regex_constants::grep;
+    static constexpr flag_type egrep = regex_constants::egrep;
+    static constexpr flag_type multiline = regex_constants::multiline;
+
+    using __program_type = boxcxx::re::Program<charT, typename traits::char_class_type>;
+
+    basic_regex() : flags_(regex_constants::ECMAScript) {}
+
+    explicit basic_regex(const charT *p, flag_type f = regex_constants::ECMAScript)
+    {
+        Compile(p, p + traits::length(p), f);
+    }
+
+    basic_regex(const charT *p, size_t len, flag_type f = regex_constants::ECMAScript)
+    {
+        Compile(p, p + len, f);
+    }
+
+    basic_regex(const basic_regex &) = default;
+    basic_regex(basic_regex &&) noexcept = default;
+
+    template <class ST, class SA>
+    explicit basic_regex(const basic_string<charT, ST, SA> &s,
+                         flag_type f = regex_constants::ECMAScript)
+    {
+        Compile(s.data(), s.data() + s.size(), f);
+    }
+
+    template <class ForwardIterator>
+    basic_regex(ForwardIterator first, ForwardIterator last,
+                flag_type f = regex_constants::ECMAScript)
+    {
+        const basic_string<charT> s(first, last);
+        Compile(s.data(), s.data() + s.size(), f);
+    }
+
+    basic_regex(initializer_list<charT> il, flag_type f = regex_constants::ECMAScript)
+    {
+        const basic_string<charT> s(il.begin(), il.end());
+        Compile(s.data(), s.data() + s.size(), f);
+    }
+
+    ~basic_regex() = default;
+
+    basic_regex &operator=(const basic_regex &) = default;
+    basic_regex &operator=(basic_regex &&) noexcept = default;
+    basic_regex &operator=(const charT *p) { return assign(p); }
+    basic_regex &operator=(initializer_list<charT> il) { return assign(il); }
+    template <class ST, class SA>
+    basic_regex &operator=(const basic_string<charT, ST, SA> &s) { return assign(s); }
+
+    basic_regex &assign(const basic_regex &that) { return *this = that; }
+    basic_regex &assign(basic_regex &&that) noexcept { return *this = std::move(that); }
+
+    basic_regex &assign(const charT *p, flag_type f = regex_constants::ECMAScript)
+    {
+        return assign(p, traits::length(p), f);
+    }
+
+    basic_regex &assign(const charT *p, size_t len,
+                        flag_type f = regex_constants::ECMAScript)
+    {
+        Compile(p, p + len, f);
+        return *this;
+    }
+
+    template <class ST, class SA>
+    basic_regex &assign(const basic_string<charT, ST, SA> &s,
+                        flag_type f = regex_constants::ECMAScript)
+    {
+        Compile(s.data(), s.data() + s.size(), f);
+        return *this;
+    }
+
+    template <class InputIterator>
+    basic_regex &assign(InputIterator first, InputIterator last,
+                        flag_type f = regex_constants::ECMAScript)
+    {
+        const basic_string<charT> s(first, last);
+        Compile(s.data(), s.data() + s.size(), f);
+        return *this;
+    }
+
+    basic_regex &assign(initializer_list<charT> il,
+                        flag_type f = regex_constants::ECMAScript)
+    {
+        const basic_string<charT> s(il.begin(), il.end());
+        Compile(s.data(), s.data() + s.size(), f);
+        return *this;
+    }
+
+    // [re.synopt] Table 118: with nosubs "no sub-expression matches shall be
+    // stored". The groups still exist — a backreference to one still has to
+    // resolve — so what nosubs changes is what is REPORTED, and that is
+    // exactly what mark_count answers.
+    unsigned mark_count() const
+    {
+        return (flags_ & regex_constants::nosubs) != flag_type{} ? 0u : prog_.groups;
+    }
+
+    flag_type flags() const { return flags_; }
+
+    locale_type imbue(locale_type loc)
+    {
+        // [re.regex.locale]: the object is reset as if by assign("").
+        locale_type prev = traits_.imbue(loc);
+        prog_ = __program_type();
+        flags_ = regex_constants::ECMAScript;
+        return prev;
+    }
+
+    locale_type getloc() const { return traits_.getloc(); }
+
+    void swap(basic_regex &that)
+    {
+        std::swap(traits_, that.traits_);
+        std::swap(flags_, that.flags_);
+        std::swap(prog_, that.prog_);
+    }
+
+    const __program_type &__prog() const noexcept { return prog_; }
+    const traits &__traits() const noexcept { return traits_; }
+
+private:
+    void Compile(const charT *first, const charT *last, flag_type f)
+    {
+        boxcxx::re::Compiler<traits> c(traits_, f);
+        // A counted repetition is compiled by expansion, so `a{4000000000}` is
+        // a request for four billion instructions. There is no cap on it here
+        // — the bound is the machine's memory, not a number someone picked —
+        // but [re.err] has a name for reaching that bound, and running out of
+        // memory while building a finite state machine is exactly what
+        // error_space means. It should arrive as a regex_error, not as a
+        // bad_alloc the caller has no reason to expect from a regex.
+        try {
+            prog_ = c.Run(first, last);
+        } catch (const bad_alloc &) {
+            boxcxx::ThrowRegex(regex_constants::error_space);
+        }
+        flags_ = f;
+    }
+
+    traits traits_;
+    flag_type flags_ = regex_constants::ECMAScript;
+    __program_type prog_;
+};
+
+template <class charT, class traits>
+void swap(basic_regex<charT, traits> &a, basic_regex<charT, traits> &b)
+{
+    a.swap(b);
+}
+
+using regex = basic_regex<char>;
+using wregex = basic_regex<wchar_t>;
+
+} // namespace std
+
+#endif // BOXCXX_REGEX

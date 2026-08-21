@@ -1,0 +1,193 @@
+// boxcxx — <__bits/regex_syntax>
+//
+// regex_constants — the option, match and error enumerations of [re.const] —
+// and regex_error, the exception every one of them can end up inside.
+//
+// ── why this is a leaf and not the top of <regex> ───────────────────────
+// The program representation and the parser below it both have to name
+// syntax_option_type and both have to throw regex_error, and neither may
+// include <regex> itself: <regex> is where regex_traits lives, and
+// regex_traits reaches into <locale>. Keeping the constants here is what lets
+// the engine be compiled and tested against a stub traits on a host compiler,
+// with no locale anywhere in sight.
+#ifndef BOXCXX_BITS_REGEX_SYNTAX
+#define BOXCXX_BITS_REGEX_SYNTAX
+
+#include <stdexcept>
+
+namespace std {
+
+namespace regex_constants {
+
+// ── syntax_option_type [re.synopt] ──────────────────────────────────────
+// A bitmask type. The six grammar selectors are values, not independent bits
+// in spirit — [re.synopt] says at most one may be set — but they are separate
+// bits so that "which grammar is this" is one mask test rather than a switch
+// over an encoding that would then need validating.
+enum syntax_option_type : unsigned {
+    icase      = 1u << 0,
+    nosubs     = 1u << 1,
+    optimize   = 1u << 2,
+    collate    = 1u << 3,
+    ECMAScript = 1u << 4,
+    basic      = 1u << 5,
+    extended   = 1u << 6,
+    awk        = 1u << 7,
+    grep       = 1u << 8,
+    egrep      = 1u << 9,
+    multiline  = 1u << 10
+};
+
+constexpr syntax_option_type operator&(syntax_option_type a, syntax_option_type b) noexcept
+{
+    return syntax_option_type(unsigned(a) & unsigned(b));
+}
+constexpr syntax_option_type operator|(syntax_option_type a, syntax_option_type b) noexcept
+{
+    return syntax_option_type(unsigned(a) | unsigned(b));
+}
+constexpr syntax_option_type operator^(syntax_option_type a, syntax_option_type b) noexcept
+{
+    return syntax_option_type(unsigned(a) ^ unsigned(b));
+}
+constexpr syntax_option_type operator~(syntax_option_type a) noexcept
+{
+    return syntax_option_type(~unsigned(a));
+}
+constexpr syntax_option_type &operator&=(syntax_option_type &a, syntax_option_type b) noexcept
+{
+    return a = a & b;
+}
+constexpr syntax_option_type &operator|=(syntax_option_type &a, syntax_option_type b) noexcept
+{
+    return a = a | b;
+}
+constexpr syntax_option_type &operator^=(syntax_option_type &a, syntax_option_type b) noexcept
+{
+    return a = a ^ b;
+}
+
+// ── match_flag_type [re.matchflag] ──────────────────────────────────────
+enum match_flag_type : unsigned {
+    match_default     = 0,
+    match_not_bol     = 1u << 0,
+    match_not_eol     = 1u << 1,
+    match_not_bow     = 1u << 2,
+    match_not_eow     = 1u << 3,
+    match_any         = 1u << 4,
+    match_not_null    = 1u << 5,
+    match_continuous  = 1u << 6,
+    match_prev_avail  = 1u << 7,
+    format_default    = 0,
+    format_sed        = 1u << 8,
+    format_no_copy    = 1u << 9,
+    format_first_only = 1u << 10
+};
+
+constexpr match_flag_type operator&(match_flag_type a, match_flag_type b) noexcept
+{
+    return match_flag_type(unsigned(a) & unsigned(b));
+}
+constexpr match_flag_type operator|(match_flag_type a, match_flag_type b) noexcept
+{
+    return match_flag_type(unsigned(a) | unsigned(b));
+}
+constexpr match_flag_type operator^(match_flag_type a, match_flag_type b) noexcept
+{
+    return match_flag_type(unsigned(a) ^ unsigned(b));
+}
+constexpr match_flag_type operator~(match_flag_type a) noexcept
+{
+    return match_flag_type(~unsigned(a));
+}
+constexpr match_flag_type &operator&=(match_flag_type &a, match_flag_type b) noexcept
+{
+    return a = a & b;
+}
+constexpr match_flag_type &operator|=(match_flag_type &a, match_flag_type b) noexcept
+{
+    return a = a | b;
+}
+constexpr match_flag_type &operator^=(match_flag_type &a, match_flag_type b) noexcept
+{
+    return a = a ^ b;
+}
+
+// ── error_type [re.err] ─────────────────────────────────────────────────
+// [re.err] fixes these NAMES and leaves the values to the implementation, and
+// the two reference implementations took different ones — libstdc++ numbers
+// from 0, libc++ from 1. Ф44-0's differential stand found this the hard way,
+// by comparing raw ints and manufacturing a disagreement on every throw.
+//
+// boxcxx numbers from 1. error_type is an unscoped enumeration, so
+// `if (e.code())` compiles, and with a zero-valued enumerator it would be
+// false for a real error. Nothing in the standard rewards that.
+enum error_type : unsigned {
+    error_collate = 1,
+    error_ctype,
+    error_escape,
+    error_backref,
+    error_brack,
+    error_paren,
+    error_brace,
+    error_badbrace,
+    error_range,
+    error_space,
+    error_badrepeat,
+    error_complexity,
+    error_stack
+};
+
+} // namespace regex_constants
+
+// ── regex_error [re.badexp] ─────────────────────────────────────────────
+// The what() strings are ours: [re.badexp] specifies only that the object
+// carries the code. They name the rule that was broken rather than repeating
+// the enumerator, because the enumerator is already reachable through code().
+class regex_error : public runtime_error {
+public:
+    explicit regex_error(regex_constants::error_type ecode)
+        : runtime_error(Describe(ecode)), code_(ecode) {}
+
+    regex_constants::error_type code() const { return code_; }
+
+private:
+    static const char *Describe(regex_constants::error_type e)
+    {
+        using namespace regex_constants;
+        switch (e) {
+        case error_collate:    return "regex: unknown collating element name";
+        case error_ctype:      return "regex: unknown character class name";
+        case error_escape:     return "regex: invalid escape or trailing backslash";
+        case error_backref:    return "regex: invalid back reference";
+        case error_brack:      return "regex: unbalanced [ ]";
+        case error_paren:      return "regex: unbalanced ( )";
+        case error_brace:      return "regex: unbalanced { }";
+        case error_badbrace:   return "regex: invalid repeat count in { }";
+        case error_range:      return "regex: invalid character range";
+        case error_space:      return "regex: out of memory converting to a state machine";
+        case error_badrepeat:  return "regex: a repeat operator had nothing to repeat";
+        case error_complexity: return "regex: match complexity exceeded the bound";
+        case error_stack:      return "regex: out of memory during matching";
+        }
+        return "regex: error";
+    }
+
+    regex_constants::error_type code_;
+};
+
+} // namespace std
+
+namespace boxcxx {
+
+// The engine leaves throw through this rather than naming std::regex_error at
+// every site; it is also the single place a future no-exceptions build would
+// have to divert.
+[[noreturn]] inline void ThrowRegex(std::regex_constants::error_type e)
+{
+    throw std::regex_error(e);
+}
+
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_REGEX_SYNTAX

@@ -1,0 +1,680 @@
+// boxcxx — <__bits/regex_parse>
+//
+// Pattern text in, a program for <__bits/regex_program>'s machine out, for all
+// six grammars [re.synopt] names. The compiler is a template over the traits
+// type and never mentions a locale: every question about what a character IS
+// goes through the traits object, which is what [re.grammar]/2 requires and
+// what lets this file be fuzzed against a stub on a host compiler.
+//
+// ── the normative text this follows, and where it parts from both refs ──
+// [re.grammar]/3 replaces ECMA-262's IdentityEscape with "SourceCharacter but
+// not c" — so C++ is WIDER than ECMAScript here and `\q` is a plain `q`.
+// Measured 2026-08-21: libstdc++ accepts it, libc++ throws error_escape. The
+// text is on libstdc++'s side.
+//
+// ECMA-262's DecimalEscape is not modified, so a backreference is valid when
+// its number does not exceed the count of capture groups in the WHOLE pattern
+// — forward references included. Measured: both references reject `\1(a)`.
+// The text does not. This compiler accepts it and checks every reference once,
+// at the end, against the final count.
+//
+// ECMA-262's RepeatMatcher clears the captures inside a quantified subject at
+// the head of every iteration, which is why /(?:(a)|b)* /  leaves group 1
+// unset on "ab". Measured: libc++ does this, libstdc++ does not. That is the
+// Reset instruction, and it is emitted for every quantified atom that could
+// contain a group.
+#ifndef BOXCXX_BITS_REGEX_PARSE
+#define BOXCXX_BITS_REGEX_PARSE
+
+#include <__bits/regex_program>
+#include <__bits/regex_scan>
+#include <__bits/regex_syntax>
+#include <cstddef>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+namespace boxcxx {
+namespace re {
+
+template <class Traits>
+class Compiler : public Scanner<Traits> {
+    using Base = Scanner<Traits>;
+    using Base::More; using Base::Peek; using Base::PeekAt; using Base::Left;
+    using Base::Get; using Base::Is; using Base::IsAt; using Base::Eat;
+    using Base::Widen; using Base::Digit; using Base::ReadInt; using Base::Translate;
+    using Base::IsBasicSpecial; using Base::ClassEscape; using Base::CharacterEscape;
+    using Base::PosixEscapeChar;
+    using Base::traits_; using Base::grammar_; using Base::awkEscapes_;
+    using Base::icase_; using Base::collate_; using Base::p_; using Base::end_;
+
+public:
+    using typename Base::char_type;
+    using typename Base::class_type;
+    using typename Base::string_type;
+    using typename Base::program_type;
+    using typename Base::uchar_type;
+
+    Compiler(const Traits &traits, std::regex_constants::syntax_option_type f)
+        : Compiler(traits, f, Decide(f)) {}
+
+    program_type Run(const char_type *first, const char_type *last)
+    {
+        p_ = first;
+        end_ = last;
+        prog_ = program_type();
+        prog_.icase = icase_;
+        prog_.collate = collate_;
+        prog_.multiline = (flags_ & std::regex_constants::multiline) != std::regex_constants::syntax_option_type{}
+                          && grammar_ == Grammar::ECMAScript;
+
+        prog_.Emit(Op::Save, 0);
+        Disjunction();
+        // Anything left over is a delimiter that never opened: `a)` in
+        // ECMAScript, `a\)` in a basic expression.
+        if (p_ != end_) ThrowRegex(std::regex_constants::error_paren);
+        prog_.Emit(Op::Save, 1);
+        prog_.Emit(Op::Accept);
+
+        // Checked by NUMBER and not by instruction index: a quantifier moves
+        // code — MakeStar inserts a Split ahead of the body, and `{n,m}`
+        // copies the body outright — so an index recorded when the reference
+        // was emitted names a different instruction by the time parsing ends.
+        // The stand caught this on the first sweep it ever ran, as boxcxx
+        // rejecting `(\s{2}|b)?\1*`, which has exactly one group.
+        if (maxBackref_ > prog_.groups)
+            ThrowRegex(std::regex_constants::error_backref);
+        return static_cast<program_type &&>(prog_);
+    }
+
+private:
+    // [re.synopt]/1: at most one grammar element may be set, and none means
+    // ECMAScript. "At most one" is a precondition on the caller, not something
+    // the library is asked to diagnose; what it must not do is pick two.
+    struct Setup { Grammar grammar; bool awkEscapes; bool lineIsAlt; };
+
+    static Setup Decide(std::regex_constants::syntax_option_type f)
+    {
+        using namespace std::regex_constants;
+        const syntax_option_type g = f & (ECMAScript | basic | extended | awk | grep | egrep);
+        if (g & basic)    return {Grammar::Basic, false, false};
+        if (g & grep)     return {Grammar::Basic, false, true};
+        if (g & extended) return {Grammar::Extended, false, false};
+        if (g & egrep)    return {Grammar::Extended, false, true};
+        if (g & awk)      return {Grammar::Extended, true, false};
+        return {Grammar::ECMAScript, false, false};
+    }
+
+    Compiler(const Traits &traits, std::regex_constants::syntax_option_type f, Setup s)
+        : Base(traits, s.grammar, s.awkEscapes,
+               (f & std::regex_constants::icase) != std::regex_constants::syntax_option_type{},
+               (f & std::regex_constants::collate) != std::regex_constants::syntax_option_type{}),
+          flags_(f), lineIsAlt_(s.lineIsAlt) {}
+
+    // ── emission ────────────────────────────────────────────────────────
+    unsigned Emit(Op op, unsigned x = 0, unsigned y = 0, char_type ch = char_type())
+    {
+        return prog_.Emit(op, x, y, ch);
+    }
+    unsigned Here() const noexcept { return (unsigned)prog_.code.size(); }
+
+    // Copy code[from, to) to the end, moving every branch target that pointed
+    // inside the copied span — the fallthrough target `to` included, since a
+    // repeated atom's exit is the head of the next copy.
+    void CopyRange(unsigned from, unsigned to)
+    {
+        const unsigned delta = Here() - from;
+        for (unsigned i = from; i < to; ++i) {
+            Inst<char_type> in = prog_.code[i];
+            switch (in.op) {
+            case Op::Split:
+                if (in.x >= from && in.x <= to) in.x += delta;
+                if (in.y >= from && in.y <= to) in.y += delta;
+                break;
+            case Op::Jmp:
+            case Op::Look:
+                if (in.x >= from && in.x <= to) in.x += delta;
+                if (in.y >= from && in.y <= to) in.y += delta;
+                break;
+            default:
+                break;   // every other operand is a slot, a class or a group
+            }
+            prog_.code.push_back(in);
+        }
+    }
+
+    // ── ECMAScript: Disjunction :: Alternative | Alternative '|' Disjunction
+    // Compiled right-nested so that the leftmost alternative is the preferred
+    // branch of the outermost Split, which is what makes alternation
+    // leftmost-FIRST rather than leftmost-longest.
+    void Disjunction()
+    {
+        std::vector<unsigned> jumps;
+        for (;;) {
+            const unsigned split = Emit(Op::Split);
+            Alternative();
+            if (!AtAlternation()) {
+                // No further branch: the Split that was reserved is not needed.
+                // Nothing can be pointing at it — it is the first instruction
+                // of this disjunction and every branch target emitted since is
+                // above it — so it can go rather than linger as a no-op.
+                RemoveAt(split);
+                for (unsigned &j : jumps)
+                    if (j > split) --j;
+                break;
+            }
+            EatAlternation();
+            jumps.push_back(Emit(Op::Jmp));
+            prog_.code[split].x = split + 1;
+            prog_.code[split].y = Here();
+        }
+        for (unsigned j : jumps) prog_.code[j].x = Here();
+    }
+
+    bool AtAlternation() const
+    {
+        if (!More()) return false;
+        if (lineIsAlt_ && Peek() == Widen('\n')) return true;
+        if (grammar_ == Grammar::Basic) return Left() >= 2 && Peek() == Widen('\\')
+                                               && PeekAt(1) == Widen('|');
+        return Peek() == Widen('|');
+    }
+    void EatAlternation()
+    {
+        if (lineIsAlt_ && Peek() == Widen('\n')) { ++p_; return; }
+        if (grammar_ == Grammar::Basic) { p_ += 2; return; }
+        ++p_;
+    }
+
+    bool AtGroupClose() const
+    {
+        if (!More()) return false;
+        if (grammar_ == Grammar::Basic)
+            return Left() >= 2 && Peek() == Widen('\\') && PeekAt(1) == Widen(')');
+        return Peek() == Widen(')');
+    }
+
+    void Alternative()
+    {
+        const char_type *outer = altStart_;
+        altStart_ = p_;
+        while (More() && !AtAlternation() && !AtGroupClose())
+            Term();
+        altStart_ = outer;
+    }
+
+    bool AtAlternativeEnd() const
+    {
+        return !More() || AtAlternation() || AtGroupClose();
+    }
+
+    // POSIX BRE: `^` is an anchor only where an expression begins, and `$` only
+    // where one ends. Anywhere else they are ordinary characters — which is why
+    // `a^b` and `a$b` are patterns that can match, not patterns that cannot.
+    bool BasicAnchorHere() const
+    {
+        if (Peek() == Widen('^')) return p_ == altStart_;
+        const char_type *save = p_;
+        const_cast<Compiler *>(this)->p_ = save + 1;
+        const bool end = AtAlternativeEnd();
+        const_cast<Compiler *>(this)->p_ = save;
+        return end;
+    }
+
+    // How many times, and which way the machine should lean when it has a
+    // choice. `greedy` is not an optimisation: it is the priority order of a
+    // Split, and priority order is what ECMAScript semantics ARE.
+    struct Quant {
+        unsigned long long lo = 0;
+        unsigned long long hi = 0;
+        bool unbounded = false;
+        bool greedy = true;
+    };
+
+    // ── Term :: Assertion | Atom Quantifier? ────────────────────────────
+    void Term()
+    {
+        const unsigned groupsBefore = prog_.groups;
+        const bool assertion = AtAssertion();
+        // POSIX: `*` right after `^` is a literal asterisk, not a repetition of
+        // the anchor, because an anchor is not something a duplication symbol
+        // can take as its subject.
+        const bool anchorTerm = grammar_ != Grammar::ECMAScript && assertion;
+        const bool couldCapture = Is('(');   // the only way a group is born
+        const unsigned start = Here();
+
+        // A Reset has to stand at the head of the repeated body, and the body's
+        // group range is not known until the body has been read. Reserving the
+        // instruction is cheaper than inserting one later and re-targeting
+        // every branch that has already been emitted.
+        const unsigned reset = couldCapture ? Emit(Op::Reset, 0, 0) : 0u;
+
+        Atom();
+        const unsigned end = Here();
+
+        Quant q;
+        if (anchorTerm) return;
+        if (!ReadQuantifier(q)) {
+            if (couldCapture) RemoveAt(reset);
+            return;
+        }
+        // ECMA-262 has no production for a quantified assertion, and none for a
+        // quantified quantifier. Measured: libc++ rejects both, libstdc++ takes
+        // `a**`. POSIX leaves a repeated duplication symbol undefined rather
+        // than ill-formed, so it is only refused for ECMAScript.
+        if (assertion && grammar_ == Grammar::ECMAScript)
+            ThrowRegex(std::regex_constants::error_badrepeat);
+        if (couldCapture) {
+            if (prog_.groups > groupsBefore) {
+                prog_.code[reset].x = groupsBefore + 1;
+                prog_.code[reset].y = prog_.groups;
+            } else {
+                // A non-capturing group with nothing capturing inside it has no
+                // captures to forget.
+                RemoveAt(reset);
+                return ApplyQuantifierAndTail(start, q);
+            }
+        }
+        ApplyQuantifier(start, end, q);
+
+        // ECMA-262 has no production for a quantified quantifier, so `a**` is
+        // ill-formed there. POSIX writes both grammars left-recursively —
+        // "ERE_expression ERE_dupl_symbol", where ERE_expression may itself be
+        // one — so `a**` and `a+?` are grammatical, and both mean "repeat what
+        // is already repeated". Measured: libstdc++ takes them, libc++ throws.
+        // The grammar is on libstdc++'s side and this follows it.
+        if (grammar_ == Grammar::ECMAScript) {
+            Quant extra;
+            const char_type *save = p_;
+            if (ReadQuantifier(extra)) {
+                p_ = save;
+                ThrowRegex(std::regex_constants::error_badrepeat);
+            }
+            return;
+        }
+        StackedQuantifiers(start);
+    }
+
+    // The tail shared by both exits of Term(): POSIX allows a duplication
+    // symbol to take an already-duplicated expression as its subject.
+    void ApplyQuantifierAndTail(unsigned start, const Quant &q)
+    {
+        ApplyQuantifier(start, Here(), q);
+        if (grammar_ == Grammar::ECMAScript) {
+            Quant extra;
+            const char_type *save = p_;
+            if (ReadQuantifier(extra)) {
+                p_ = save;
+                ThrowRegex(std::regex_constants::error_badrepeat);
+            }
+            return;
+        }
+        StackedQuantifiers(start);
+    }
+
+    void StackedQuantifiers(unsigned start)
+    {
+        for (;;) {
+            Quant extra;
+            if (!ReadQuantifier(extra)) break;
+            ApplyQuantifier(start, Here(), extra);
+        }
+    }
+
+    bool AtAssertion() const
+    {
+        if (!More()) return false;
+        const char_type c = Peek();
+        if (c == Widen('^') || c == Widen('$'))
+            return grammar_ == Grammar::Basic ? BasicAnchorHere() : true;
+        if (grammar_ != Grammar::ECMAScript) return false;
+        if (c == Widen('\\') && Left() >= 2)
+            return PeekAt(1) == Widen('b') || PeekAt(1) == Widen('B');
+        return c == Widen('(') && Left() >= 3 && PeekAt(1) == Widen('?')
+               && (PeekAt(2) == Widen('=') || PeekAt(2) == Widen('!'));
+    }
+
+    // ── quantifiers ─────────────────────────────────────────────────────
+    bool ReadQuantifier(Quant &q)
+    {
+        if (!More()) return false;
+        const char_type c = Peek();
+        if (c == Widen('*')) { ++p_; q.lo = 0; q.unbounded = true; }
+        else if (grammar_ != Grammar::Basic && c == Widen('+')) { ++p_; q.lo = 1; q.unbounded = true; }
+        else if (grammar_ != Grammar::Basic && c == Widen('?')) { ++p_; q.lo = 0; q.hi = 1; }
+        else if (AtBraceOpen()) { if (!ReadBrace(q)) return false; }
+        else return false;
+
+        if (grammar_ == Grammar::ECMAScript && Eat('?')) q.greedy = false;
+        return true;
+    }
+
+    bool AtBraceOpen() const
+    {
+        if (grammar_ == Grammar::Basic)
+            return Left() >= 2 && Peek() == Widen('\\') && PeekAt(1) == Widen('{');
+        return Is('{');
+    }
+
+    // `{` that does not open a valid interval is a literal `{` in ECMAScript
+    // and in awk, and an error in the POSIX grammars. That is why this reports
+    // failure by rewinding rather than by throwing.
+    bool ReadBrace(Quant &q)
+    {
+        const char_type *save = p_;
+        p_ += (grammar_ == Grammar::Basic) ? 2 : 1;
+        unsigned long long lo = 0;
+        if (!ReadInt(lo, 10, 10)) {
+            if (grammar_ == Grammar::ECMAScript) { p_ = save; return false; }
+            ThrowRegex(std::regex_constants::error_badbrace);
+        }
+        q.lo = lo;
+        q.hi = lo;
+        if (Eat(',')) {
+            unsigned long long hi = 0;
+            if (ReadInt(hi, 10, 10)) q.hi = hi;
+            else q.unbounded = true;
+        }
+        if (!AtBraceClose()) {
+            if (grammar_ == Grammar::ECMAScript) { p_ = save; return false; }
+            ThrowRegex(std::regex_constants::error_brace);
+        }
+        p_ += (grammar_ == Grammar::Basic) ? 2 : 1;
+        if (!q.unbounded && q.hi < q.lo) ThrowRegex(std::regex_constants::error_badbrace);
+        return true;
+    }
+
+    bool AtBraceClose() const
+    {
+        if (grammar_ == Grammar::Basic)
+            return Left() >= 2 && Peek() == Widen('\\') && PeekAt(1) == Widen('}');
+        return Is('}');
+    }
+
+    // Repetition is expansion: `A{2,4}` becomes `A A (A (A)?)?`. A counter in
+    // the machine would be smaller in the program and wrong in the semantics,
+    // because each iteration of a quantifier is a fresh subject for the capture
+    // reset rule and for thread priority both.
+    void ApplyQuantifier(unsigned start, unsigned end, const Quant &q)
+    {
+        // The body as written is one copy, already sitting in code.
+        if (q.lo == 0 && q.unbounded) { MakeStar(start, end, q.greedy); return; }
+        if (q.lo == 1 && q.unbounded) { MakePlus(start, end, q.greedy); return; }
+        if (!q.unbounded && q.hi == 0) { Erase(start); return; }
+        if (q.lo == 0 && !q.unbounded && q.hi == 1) { MakeOptional(start, end, q.greedy); return; }
+
+        // With a lower bound of zero the copy already emitted is not mandatory;
+        // it becomes the outermost optional at the end. Counting it as
+        // mandatory is what would give `a{0,2}` three copies instead of two.
+        const unsigned long long mandatory = q.lo == 0 ? 1ull : q.lo;
+        for (unsigned long long i = 1; i < mandatory; ++i) CopyRange(start, end);
+
+        if (q.unbounded) {
+            const unsigned from = Here();
+            CopyRange(start, end);
+            MakeStar(from, Here(), q.greedy);
+            return;
+        }
+
+        // The optional tail nests, so that giving up on the k-th copy gives up
+        // on every copy after it: `A{0,3}` is `(A(A(A)?)?)?`, not `A?A?A?`,
+        // which would let a gap open in the middle.
+        const unsigned long long optional = q.hi - mandatory;
+        std::vector<unsigned> splits;
+        splits.reserve((std::size_t)optional);
+        for (unsigned long long i = 0; i < optional; ++i) {
+            const unsigned sp = Emit(Op::Split);
+            splits.push_back(sp);
+            if (q.greedy) prog_.code[sp].x = sp + 1;
+            else prog_.code[sp].y = sp + 1;
+            CopyRange(start, end);
+        }
+        for (unsigned sp : splits) {
+            if (q.greedy) prog_.code[sp].y = Here();
+            else prog_.code[sp].x = Here();
+        }
+        if (q.lo == 0) MakeOptional(start, Here(), q.greedy);
+    }
+
+    void Erase(unsigned start) { prog_.code.resize(start); }
+
+    // L: Split body, out ;  body: <A> ; Jmp L ; out:
+    void MakeStar(unsigned start, unsigned end, bool greedy)
+    {
+        const unsigned jmp = Emit(Op::Jmp);
+        InsertSplitBefore(start, end + 1, greedy);
+        prog_.code[jmp + 1].x = start;   // the Jmp moved by the insertion
+    }
+
+    // body: <A> ; Split body, out ; out:
+    void MakePlus(unsigned start, unsigned end, bool greedy)
+    {
+        const unsigned sp = Emit(Op::Split);
+        if (greedy) { prog_.code[sp].x = start; prog_.code[sp].y = sp + 1; }
+        else { prog_.code[sp].x = sp + 1; prog_.code[sp].y = start; }
+        (void)end;
+    }
+
+    void MakeOptional(unsigned start, unsigned end, bool greedy)
+    {
+        InsertSplitBefore(start, end, greedy);
+    }
+
+    // The mirror of InsertSplitBefore. A reserved instruction that turned out
+    // not to be needed is worth removing rather than leaving as a no-op,
+    // because the machine's cost is instructions TIMES subject length: a no-op
+    // per group is a tax on every character of every match.
+    void RemoveAt(unsigned at)
+    {
+        prog_.code.erase(prog_.code.begin() + (std::ptrdiff_t)at);
+        for (Inst<char_type> &in : prog_.code) {
+            if (in.op != Op::Split && in.op != Op::Jmp && in.op != Op::Look) continue;
+            if (in.x > at) --in.x;
+            if ((in.op == Op::Split || in.op == Op::Look) && in.y > at) --in.y;
+        }
+    }
+
+    // Put a Split at `start` whose preferred branch is the body and whose other
+    // branch is `end`, moving everything from `start` up by one and repairing
+    // every branch target that pointed at or past it.
+    void InsertSplitBefore(unsigned start, unsigned end, bool greedy)
+    {
+        Inst<char_type> sp;
+        sp.op = Op::Split;
+        prog_.code.insert(prog_.code.begin() + (std::ptrdiff_t)start, sp);
+        for (unsigned i = 0; i < prog_.code.size(); ++i) {
+            Inst<char_type> &in = prog_.code[i];
+            if (in.op != Op::Split && in.op != Op::Jmp && in.op != Op::Look) continue;
+            if (i == start) continue;
+            if (in.x >= start) ++in.x;
+            if ((in.op == Op::Split || in.op == Op::Look) && in.y >= start) ++in.y;
+        }
+        const unsigned out = end + 1;
+        if (greedy) { prog_.code[start].x = start + 1; prog_.code[start].y = out; }
+        else { prog_.code[start].x = out; prog_.code[start].y = start + 1; }
+    }
+
+    // ── Atom ────────────────────────────────────────────────────────────
+    void Atom()
+    {
+        if (!More()) ThrowRegex(std::regex_constants::error_escape);
+        const char_type c = Peek();
+
+        if (c == Widen('^') || c == Widen('$')) {
+            const bool anchor = grammar_ == Grammar::Basic ? BasicAnchorHere() : true;
+            ++p_;
+            if (!anchor) { Literal(c); return; }
+            Emit(c == Widen('^') ? Op::Bol : Op::Eol);
+            return;
+        }
+        if (c == Widen('.')) {
+            ++p_;
+            Emit(grammar_ == Grammar::ECMAScript ? Op::Any : Op::AnyAll);
+            return;
+        }
+        if (c == Widen('[')) { Bracket(); return; }
+
+        if (grammar_ == Grammar::Basic) {
+            if (c == Widen('\\')) { BasicBackslash(); return; }
+            // A duplication symbol with nothing to repeat is a literal in a
+            // basic expression when it stands first, and this compiler has
+            // already refused to enter Atom() in that case only for ECMAScript.
+            Literal(Get());
+            return;
+        }
+
+        if (c == Widen('(')) { Group(); return; }
+        if (c == Widen(')')) ThrowRegex(std::regex_constants::error_paren);
+        if (c == Widen('\\')) {
+            if (grammar_ == Grammar::ECMAScript) AtomEscape();
+            else Literal(PosixEscapeChar());
+            return;
+        }
+        if (c == Widen('*') || c == Widen('+') || c == Widen('?'))
+            ThrowRegex(std::regex_constants::error_badrepeat);
+        if (c == Widen(']') && grammar_ != Grammar::ECMAScript)
+            ThrowRegex(std::regex_constants::error_brack);
+        if (c == Widen('{') && grammar_ == Grammar::Extended)
+            ThrowRegex(std::regex_constants::error_badbrace);
+        Literal(Get());
+    }
+
+    void Literal(char_type c) { Emit(Op::Char, 0, 0, Translate(c)); }
+
+    void Group()
+    {
+        ++p_;   // '('
+        bool capturing = true;
+        bool look = false;
+        bool negLook = false;
+        if (grammar_ == Grammar::ECMAScript && Is('?')) {
+            if (Left() < 2) ThrowRegex(std::regex_constants::error_paren);
+            const char_type k = PeekAt(1);
+            if (k == Widen(':')) { p_ += 2; capturing = false; }
+            else if (k == Widen('=')) { p_ += 2; capturing = false; look = true; }
+            else if (k == Widen('!')) { p_ += 2; capturing = false; look = true; negLook = true; }
+            else ThrowRegex(std::regex_constants::error_paren);
+        }
+
+        if (look) {
+            prog_.looks = true;
+            const unsigned at = Emit(Op::Look, 0, 0);
+            prog_.code[at].neg = negLook;
+            prog_.code[at].x = Here();
+            Disjunction();
+            Emit(Op::LookEnd);
+            prog_.code[at].y = Here();
+            if (!EatGroupClose()) ThrowRegex(std::regex_constants::error_paren);
+            return;
+        }
+
+        unsigned g = 0;
+        if (capturing) {
+            g = ++prog_.groups;
+            Emit(Op::Save, 2u * g);
+        }
+        Disjunction();
+        if (!EatGroupClose()) ThrowRegex(std::regex_constants::error_paren);
+        if (capturing) Emit(Op::Save, 2u * g + 1u);
+    }
+
+    bool EatGroupClose()
+    {
+        if (grammar_ == Grammar::Basic) {
+            if (Left() >= 2 && Peek() == Widen('\\') && PeekAt(1) == Widen(')')) { p_ += 2; return true; }
+            return false;
+        }
+        return Eat(')');
+    }
+
+    // ── escapes ─────────────────────────────────────────────────────────
+    void BasicBackslash()
+    {
+        if (Left() < 2) ThrowRegex(std::regex_constants::error_escape);
+        const char_type k = PeekAt(1);
+        if (k == Widen('(')) { Group(); return; }
+        if (k == Widen(')')) ThrowRegex(std::regex_constants::error_paren);
+        if (k == Widen('{')) ThrowRegex(std::regex_constants::error_badrepeat);
+        if (k == Widen('}')) ThrowRegex(std::regex_constants::error_brace);
+        // A basic expression is the ONE POSIX grammar that has back references;
+        // an extended one does not, which is why \1 is an error there.
+        const int d = Digit(k, 10);
+        if (d >= 1 && d <= 9) {
+            p_ += 2;
+            prog_.backrefs = true;
+            if ((unsigned)d > maxBackref_) maxBackref_ = (unsigned)d;
+            Emit(Op::Backref, (unsigned)d);
+            return;
+        }
+        if (!IsBasicSpecial(k)) ThrowRegex(std::regex_constants::error_escape);
+        p_ += 2;
+        Literal(k);
+    }
+
+    void AtomEscape()
+    {
+        ++p_;   // '\'
+        if (!More()) ThrowRegex(std::regex_constants::error_escape);
+        const char_type c = Peek();
+
+        if (c == Widen('b')) { ++p_; Emit(Op::WordB); return; }
+        if (c == Widen('B')) { ++p_; Emit(Op::NotWordB); return; }
+
+        class_type m{};
+        if (ClassEscape(m)) {
+            typename program_type::class_type cc;
+            ApplyClassEscape(cc, c, m);
+            EmitClass(static_cast<typename program_type::class_type &&>(cc));
+            return;
+        }
+
+        const int d = Digit(c, 10);
+        if (d >= 1 && d <= 9) {
+            unsigned long long n = 0;
+            ReadInt(n, 10, 10);
+            prog_.backrefs = true;
+            if ((unsigned)n > maxBackref_) maxBackref_ = (unsigned)n;
+            Emit(Op::Backref, (unsigned)n);
+            return;
+        }
+        Literal(CharacterEscape());
+    }
+
+    // \d in an atom position is a whole class of its own; the negated spellings
+    // invert the class rather than adding a "not" to it, because [re.grammar]/7
+    // defines \D as [^[:digit:]] and not as a second kind of membership.
+    void ApplyClassEscape(typename program_type::class_type &cc, char_type which, class_type m)
+    {
+        const bool negated = which == Widen('D') || which == Widen('S') || which == Widen('W');
+        if (negated) cc.negate = !cc.negate;
+        cc.masks = (class_type)(cc.masks | m);
+    }
+
+    // One bracket expression, read by <__bits/regex_scan>'s parser and emitted
+    // here. The cursor is handed over and taken back, because the two share a
+    // pattern but not a job: that one reads members, this one writes code.
+    void Bracket()
+    {
+        typename program_type::class_type cc;
+        BracketParser<Traits> bp(traits_, grammar_, awkEscapes_, icase_, collate_);
+        bp.Run(p_, end_, cc);
+        EmitClass(static_cast<typename program_type::class_type &&>(cc));
+    }
+
+    void EmitClass(typename program_type::class_type &&cc)
+    {
+        prog_.classes.push_back(static_cast<typename program_type::class_type &&>(cc));
+        Emit(Op::Class, (unsigned)(prog_.classes.size() - 1));
+    }
+
+    std::regex_constants::syntax_option_type flags_;
+    bool lineIsAlt_ = false;
+    const char_type *altStart_ = nullptr;
+    program_type prog_;
+    unsigned maxBackref_ = 0;
+};
+
+} // namespace re
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_REGEX_PARSE

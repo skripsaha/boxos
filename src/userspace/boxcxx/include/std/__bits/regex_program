@@ -1,0 +1,162 @@
+// boxcxx — <__bits/regex_program>
+//
+// What a compiled regular expression IS in boxcxx: a flat array of
+// instructions for a virtual machine, plus a table of character classes.
+//
+// ── why a program and not a tree ────────────────────────────────────────
+// Both reference implementations walk a parse tree and backtrack. Measured on
+// 2026-08-21 with tools/cxx_regex_oracle.sh: /(a+)+b/ against 26 a's costs
+// libstdc++ 5.0 seconds and doubles with every further character, with no
+// bound of any kind; /(a*)*b/ it does not answer at all at eighteen. libc++
+// does not hang — it refuses, from thirteen characters, with error_complexity,
+// on a question whose answer is a trivial "no match". Both are wrong in
+// opposite directions for the same reason: they backtrack.
+//
+// A program is what makes the other answer possible. Threads of a Pike VM
+// advance together over the subject, one character at a time, and two threads
+// that reach the same instruction at the same position are the same thread —
+// so the work is bounded by (instructions x subject length) instead of by the
+// number of ways the pattern could have been carved up. `(a*)*b` terminates
+// for the same reason it would loop in a backtracker: the second visit to an
+// instruction at a position is recognised as a repeat.
+//
+// ── what is deliberately NOT here ───────────────────────────────────────
+// Not one line of this file knows what a locale is. Character classification
+// arrives as the traits object the caller hands the matcher, which is what
+// lets the parser and the machine be compiled and fuzzed against a stub on a
+// host compiler in a second, instead of only inside QEMU.
+#ifndef BOXCXX_BITS_REGEX_PROGRAM
+#define BOXCXX_BITS_REGEX_PROGRAM
+
+#include <__bits/regex_syntax>
+#include <cstddef>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace boxcxx {
+namespace re {
+
+// ── the instruction set ─────────────────────────────────────────────────
+enum class Op : unsigned char {
+    Char,       // consume one character equal to `ch`
+    Any,        // consume one character that is not a line terminator
+    AnyAll,     // consume one character, line terminators included
+    Class,      // consume one character accepted by classes[x]
+    Split,      // try x first, then y — priority order IS the semantics
+    Jmp,        // continue at x
+    Save,       // record the current position in slot x
+    Reset,      // forget slots x..y  (ECMA-262 clears a quantifier's captures
+                // at the head of every iteration; that rule is observable)
+    Bol,        // ^
+    Eol,        // $
+    WordB,      // \b
+    NotWordB,   // \B
+    Backref,    // the text group x captured, again
+    Look,       // run instructions [x, ...] as a sub-match here; `neg` inverts
+                // the sense; on success continue at y
+    LookEnd,    // end of a Look body
+    Accept      // the whole pattern matched
+};
+
+template <class CharT>
+struct Inst {
+    Op op = Op::Accept;
+    bool neg = false;
+    unsigned x = 0;
+    unsigned y = 0;
+    CharT ch = CharT();
+};
+
+// ── a bracket expression ────────────────────────────────────────────────
+// Four ways to belong, because [re.grammar] gives a bracket expression four
+// kinds of member and they do not reduce to one another:
+//
+//   a bitmap      for the characters that fit in one byte, which is every
+//                 member of every ASCII pattern and the whole of `char`
+//   ranges        for the rest, and for `collate`, where a range is defined
+//                 by the collation order rather than by the code values
+//   class masks   for [[:alpha:]] and for \d \w \s, which are questions for
+//                 the traits object and cannot be answered until it is known
+//   equivalents   for [[=a=]], which is a question about primary sort keys
+//
+// A negated class inverts the whole answer, once, at the end — not each part.
+template <class CharT, class ClassMask>
+struct CharClass {
+    using string_type = std::basic_string<CharT>;
+
+    bool negate = false;
+    bool collated = false;                      // ranges compare by sort key
+    unsigned char narrow[32] = {};              // one bit per value 0..255
+    std::vector<std::pair<CharT, CharT>> ranges;
+    std::vector<std::pair<string_type, string_type>> collatedRanges;
+    ClassMask masks{};                          // must be one of these
+    ClassMask negMasks{};                       // must NOT be one of these
+    std::vector<string_type> equiv;             // primary sort keys of [[=x=]]
+
+    void AddChar(CharT c) noexcept
+    {
+        const auto v = static_cast<unsigned long long>(
+            static_cast<typename std::make_unsigned<CharT>::type>(c));
+        if (v < 256) narrow[v >> 3] |= (unsigned char)(1u << (v & 7));
+        else ranges.emplace_back(c, c);
+    }
+
+    bool InNarrow(unsigned v) const noexcept
+    {
+        return (narrow[v >> 3] & (unsigned char)(1u << (v & 7))) != 0;
+    }
+
+    bool Empty() const noexcept
+    {
+        if (!ranges.empty() || !collatedRanges.empty() || !equiv.empty()) return false;
+        if (masks != ClassMask{} || negMasks != ClassMask{}) return false;
+        for (unsigned char b : narrow)
+            if (b) return false;
+        return true;
+    }
+};
+
+// ── the whole compiled expression ───────────────────────────────────────
+// `groups` counts capture groups, so slot 2k and 2k+1 hold group k's ends and
+// slots 0 and 1 hold the whole match. `backrefs` and `looks` are not
+// statistics: they decide which machine may run this program at all. A program
+// with neither is regular, and the Pike VM answers it in linear time. One with
+// either is not regular, and takes the bounded path — see <__bits/regex_vm>.
+template <class CharT, class ClassMask>
+struct Program {
+    using inst_type = Inst<CharT>;
+    using class_type = CharClass<CharT, ClassMask>;
+
+    std::vector<inst_type> code;
+    std::vector<class_type> classes;
+    unsigned groups = 0;
+    bool backrefs = false;
+    bool looks = false;
+    bool icase = false;
+    bool collate = false;
+    bool multiline = false;
+
+    unsigned slots() const noexcept { return 2u * (groups + 1u); }
+    bool regular() const noexcept { return !backrefs && !looks; }
+
+    unsigned Emit(Op op, unsigned x = 0, unsigned y = 0, CharT ch = CharT())
+    {
+        const unsigned at = (unsigned)code.size();
+        // A pattern is bounded by memory, not by a constant of ours — but a
+        // program whose instruction index would not fit in the field that
+        // holds it cannot be represented at all, and [re.err] has a name for
+        // exactly that: error_space, "not enough memory to convert the regular
+        // expression into a finite state machine".
+        if (at == 0xFFFFFFFFu) ThrowRegex(std::regex_constants::error_space);
+        inst_type i;
+        i.op = op; i.x = x; i.y = y; i.ch = ch;
+        code.push_back(i);
+        return at;
+    }
+};
+
+} // namespace re
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_REGEX_PROGRAM

@@ -1,0 +1,455 @@
+// boxcxx — <__bits/regex_scan>
+//
+// Reading a pattern: the cursor, the escape vocabulary of each of the six
+// grammars, and the whole of the bracket expression.
+//
+// ── why this is a leaf and not part of the compiler ─────────────────────
+// A bracket expression is the one construct in [re.grammar] that does not
+// recurse back into the grammar around it — it contains members, never
+// sub-expressions — so it lifts out whole. It is also the only place with a
+// vocabulary of its own ([:class:], [.collating.], [=equivalence=], and ranges
+// that may be defined by collation order rather than by code values), and the
+// only place that reaches for the traits members the rest of the compiler
+// never touches: transform, transform_primary, lookup_collatename.
+//
+// What it shares with the compiler is the cursor and the escapes, because a
+// backslash inside [ ] means one thing to ECMAScript, another to awk, and
+// nothing at all to a plain POSIX expression. That shared part is Scanner, and
+// both the compiler and the bracket parser are built on it.
+//
+// ── the normative text ──────────────────────────────────────────────────
+// [re.grammar]/4 adds ClassAtomExClass, ClassAtomCollatingElement and
+// ClassAtomEquivalence to ECMA-262 outright. /14.2 spells the collated range
+// comparison as an algorithm rather than as a rule, and it is implemented here
+// in the shape the text gives it.
+#ifndef BOXCXX_BITS_REGEX_SCAN
+#define BOXCXX_BITS_REGEX_SCAN
+
+#include <__bits/regex_program>
+#include <__bits/regex_syntax>
+#include <cstddef>
+#include <string>
+#include <type_traits>
+
+namespace boxcxx {
+namespace re {
+
+// Which of the six grammars is in force, reduced to the three shapes that
+// actually differ. grep and egrep are basic and extended with newline read as
+// an alternation operator; awk is extended with an escape vocabulary POSIX
+// otherwise leaves out.
+enum class Grammar : unsigned char { ECMAScript, Basic, Extended };
+
+// ── Scanner: a cursor over the pattern, and what a backslash means ──────
+template <class Traits>
+class Scanner {
+public:
+    using char_type = typename Traits::char_type;
+    using class_type = typename Traits::char_class_type;
+    using string_type = std::basic_string<char_type>;
+    using program_type = Program<char_type, class_type>;
+    using uchar_type = typename std::make_unsigned<char_type>::type;
+
+protected:
+    Scanner(const Traits &traits, Grammar g, bool awkEscapes, bool icase, bool collate)
+        : traits_(traits), grammar_(g), awkEscapes_(awkEscapes), icase_(icase),
+          collate_(collate) {}
+
+    bool More() const noexcept { return p_ != end_; }
+    char_type Peek() const noexcept { return *p_; }
+    char_type PeekAt(std::size_t n) const noexcept { return p_[n]; }
+    std::size_t Left() const noexcept { return (std::size_t)(end_ - p_); }
+    char_type Get() noexcept { return *p_++; }
+    bool Is(char c) const noexcept { return More() && Peek() == Widen(c); }
+    bool IsAt(std::size_t n, char c) const noexcept
+    {
+        return Left() > n && PeekAt(n) == Widen(c);
+    }
+    bool Eat(char c) noexcept
+    {
+        if (!Is(c)) return false;
+        ++p_;
+        return true;
+    }
+    // The pattern is charT; the grammar's own punctuation is not. regex_traits
+    // has no widen member, so this is the ordinary conversion the standard's
+    // own grammar assumes when it writes `(` in a production.
+    static constexpr char_type Widen(char c) noexcept { return (char_type)(unsigned char)c; }
+
+    // [re.grammar]/13: "Where the regular expression grammar requires the
+    // conversion of a sequence of characters to an integral value, this is
+    // accomplished by calling traits_inst.value."
+    int Digit(char_type c, int radix) const { return traits_.value(c, radix); }
+
+    bool ReadInt(unsigned long long &out, int radix, unsigned maxDigits)
+    {
+        unsigned n = 0;
+        unsigned long long v = 0;
+        while (More() && n < maxDigits) {
+            const int d = Digit(Peek(), radix);
+            if (d < 0) break;
+            v = v * (unsigned)radix + (unsigned)d;
+            if (v > 0xFFFFFFFFull) ThrowRegex(std::regex_constants::error_badbrace);
+            ++p_;
+            ++n;
+        }
+        out = v;
+        return n != 0;
+    }
+
+    // [re.grammar]/14.1
+    char_type Translate(char_type c) const
+    {
+        if (icase_) return traits_.translate_nocase(c);
+        if (collate_) return traits_.translate(c);
+        return c;
+    }
+
+    // The specials of each POSIX grammar. A backslash before one of these
+    // strips its meaning; before anything else POSIX says the result is
+    // undefined, and this refuses rather than inventing one — which is what
+    // both references do too, and the only thing they agree on here.
+    static bool IsBasicSpecial(char_type c) noexcept
+    {
+        return c == Widen('.') || c == Widen('[') || c == Widen(']')
+            || c == Widen('*') || c == Widen('^') || c == Widen('$')
+            || c == Widen('\\');
+    }
+    static bool IsExtendedSpecial(char_type c) noexcept
+    {
+        return c == Widen('.') || c == Widen('[') || c == Widen(']')
+            || c == Widen('(') || c == Widen(')') || c == Widen('*')
+            || c == Widen('+') || c == Widen('?') || c == Widen('{')
+            || c == Widen('}') || c == Widen('|') || c == Widen('^')
+            || c == Widen('$') || c == Widen('\\');
+    }
+
+    // \d \D \s \S \w \W, and the class names behind them per [re.grammar]/7.
+    // POSIX has none of them: measured, both references reject \d under every
+    // one of the five POSIX grammars, awk included.
+    bool ClassEscape(class_type &m)
+    {
+        if (!More()) return false;
+        if (grammar_ != Grammar::ECMAScript) return false;
+        const char_type c = Peek();
+        char name = 0;
+        if (c == Widen('d') || c == Widen('D')) name = 'd';
+        else if (c == Widen('s') || c == Widen('S')) name = 's';
+        else if (c == Widen('w') || c == Widen('W')) name = 'w';
+        else return false;
+        const char_type n[1] = { Widen(name) };
+        m = traits_.lookup_classname(n, n + 1, icase_);
+        if (m == class_type{}) ThrowRegex(std::regex_constants::error_ctype);
+        ++p_;
+        return true;
+    }
+
+    // ECMAScript's CharacterEscape, less the class escapes handled above. The
+    // cursor stands ON the escaped character, not on the backslash.
+    // [re.grammar]/3 widens IdentityEscape to any source character but `c`, so
+    // the default case is not an error — measured, libc++ throws here and the
+    // text does not agree with it.
+    char_type CharacterEscape()
+    {
+        const char_type c = Get();
+        if (c == Widen('f')) return (char_type)0x0C;
+        if (c == Widen('n')) return (char_type)0x0A;
+        if (c == Widen('r')) return (char_type)0x0D;
+        if (c == Widen('t')) return (char_type)0x09;
+        if (c == Widen('v')) return (char_type)0x0B;
+        if (c == Widen('0')) {
+            // ECMA-262: `\0` is NUL and may not be followed by a digit.
+            if (More() && Digit(Peek(), 10) >= 0)
+                ThrowRegex(std::regex_constants::error_escape);
+            return (char_type)0;
+        }
+        if (c == Widen('c')) {
+            if (!More()) ThrowRegex(std::regex_constants::error_escape);
+            const char_type l = Peek();
+            const bool letter = (l >= Widen('a') && l <= Widen('z'))
+                                || (l >= Widen('A') && l <= Widen('Z'));
+            if (!letter) ThrowRegex(std::regex_constants::error_escape);
+            ++p_;
+            return (char_type)((uchar_type)l % 32u);
+        }
+        if (c == Widen('x')) return HexEscape(2);
+        if (c == Widen('u')) return HexEscape(4);
+        return c;
+    }
+
+    char_type HexEscape(unsigned digits)
+    {
+        unsigned long long v = 0;
+        for (unsigned i = 0; i < digits; ++i) {
+            if (!More()) ThrowRegex(std::regex_constants::error_escape);
+            const int d = Digit(Peek(), 16);
+            if (d < 0) ThrowRegex(std::regex_constants::error_escape);
+            v = v * 16u + (unsigned)d;
+            ++p_;
+        }
+        // [re.grammar]/12: a value that does not fit in charT is an error, not
+        // a truncation.
+        if (v > (unsigned long long)(uchar_type)~uchar_type(0))
+            ThrowRegex(std::regex_constants::error_escape);
+        return (char_type)v;
+    }
+
+    // The POSIX and awk vocabulary. The cursor stands on the backslash, and
+    // this returns the CHARACTER — an escape that emitted an instruction
+    // instead could not be reused inside a bracket expression, which is where
+    // the same vocabulary is needed and where nothing is emitted at all.
+    char_type PosixEscapeChar()
+    {
+        ++p_;   // '\'
+        if (!More()) ThrowRegex(std::regex_constants::error_escape);
+        const char_type k = Peek();
+        if (IsExtendedSpecial(k)) { ++p_; return k; }
+        if (!awkEscapes_) ThrowRegex(std::regex_constants::error_escape);
+
+        // POSIX awk is the one extended grammar with escapes of its own, and
+        // they are the awk utility's, not ECMAScript's.
+        ++p_;
+        if (k == Widen('a')) return (char_type)0x07;
+        if (k == Widen('b')) return (char_type)0x08;
+        if (k == Widen('f')) return (char_type)0x0C;
+        if (k == Widen('n')) return (char_type)0x0A;
+        if (k == Widen('r')) return (char_type)0x0D;
+        if (k == Widen('t')) return (char_type)0x09;
+        if (k == Widen('v')) return (char_type)0x0B;
+        if (k == Widen('/')) return Widen('/');
+        if (k == Widen('"')) return Widen('"');
+        const int d = Digit(k, 8);
+        if (d >= 0) {
+            unsigned long long v = (unsigned)d;
+            for (unsigned n = 1; n < 3 && More(); ++n) {
+                const int e = Digit(Peek(), 8);
+                if (e < 0) break;
+                v = v * 8u + (unsigned)e;
+                ++p_;
+            }
+            if (v > (unsigned long long)(uchar_type)~uchar_type(0))
+                ThrowRegex(std::regex_constants::error_escape);
+            return (char_type)v;
+        }
+        ThrowRegex(std::regex_constants::error_escape);
+    }
+
+    const Traits &traits_;
+    Grammar grammar_;
+    bool awkEscapes_;
+    bool icase_;
+    bool collate_;
+    const char_type *p_ = nullptr;
+    const char_type *end_ = nullptr;
+};
+
+// ── BracketParser: one [ ... ], filled into a CharClass ─────────────────
+template <class Traits>
+class BracketParser : public Scanner<Traits> {
+    using Base = Scanner<Traits>;
+    using Base::More; using Base::Peek; using Base::PeekAt; using Base::Left;
+    using Base::Get; using Base::Is; using Base::IsAt; using Base::Eat;
+    using Base::Widen; using Base::Digit; using Base::Translate;
+    using Base::ClassEscape; using Base::CharacterEscape; using Base::PosixEscapeChar;
+    using Base::traits_; using Base::grammar_; using Base::awkEscapes_;
+    using Base::icase_; using Base::collate_; using Base::p_; using Base::end_;
+
+public:
+    using typename Base::char_type;
+    using typename Base::class_type;
+    using typename Base::string_type;
+    using typename Base::program_type;
+    using typename Base::uchar_type;
+    using class_data = typename program_type::class_type;
+
+    BracketParser(const Traits &traits, Grammar g, bool awkEscapes, bool icase, bool collate)
+        : Base(traits, g, awkEscapes, icase, collate) {}
+
+    // Reads one bracket expression, cursor on the `[`, and leaves it past the
+    // closing `]`.
+    void Run(const char_type *&p, const char_type *end, class_data &cc)
+    {
+        p_ = p;
+        end_ = end;
+        Parse(cc);
+        p = p_;
+    }
+
+private:
+    void Parse(class_data &cc)
+    {
+        ++p_;   // '['
+        cc.collated = collate_;
+        if (Eat('^')) cc.negate = true;
+
+        // POSIX makes a `]` in first position a member; ECMAScript does not,
+        // and closes an empty class instead. Measured: both references agree
+        // that `[]a` is an empty class in ECMAScript, and libstdc++ reads
+        // `[]]` the same way while libc++ fails to parse it at all.
+        if (grammar_ != Grammar::ECMAScript && Is(']')) cc.AddChar(Translate(Get()));
+
+        bool first = true;
+        for (;;) {
+            if (!More()) ThrowRegex(std::regex_constants::error_brack);
+            if (Is(']')) { ++p_; break; }
+            Member(cc, first);
+            first = false;
+        }
+    }
+
+    // One member: a named class, a collating element, an equivalence class, a
+    // single character, or a range between two of the last two kinds.
+    void Member(class_data &cc, bool first)
+    {
+        if (Is('[') && Left() >= 2) {
+            const char_type k = PeekAt(1);
+            if (k == Widen(':')) { NamedClass(cc); return; }
+            if (k == Widen('=')) { Equivalence(cc); return; }
+            if (k == Widen('.')) { RangeOrSingle(cc, CollatingElement()); return; }
+        }
+
+        // A `-` is a literal when it opens the class or closes it.
+        if (Is('-') && (first || IsAt(1, ']'))) {
+            ++p_;
+            cc.AddChar(Translate(Widen('-')));
+            return;
+        }
+
+        if (Is('\\') && (grammar_ == Grammar::ECMAScript || awkEscapes_)) {
+            const char_type *save = p_;
+            ++p_;
+            class_type m{};
+            if (More() && ClassEscape(m)) {
+                const char_type which = *(p_ - 1);
+                const bool negated = which == Widen('D') || which == Widen('S')
+                                     || which == Widen('W');
+                if (negated) cc.negMasks = (class_type)(cc.negMasks | m);
+                else cc.masks = (class_type)(cc.masks | m);
+                // A class escape is not a range endpoint: `[\d-a]` is an error
+                // in both references and in the grammar.
+                if (Is('-') && !IsAt(1, ']')) ThrowRegex(std::regex_constants::error_range);
+                return;
+            }
+            p_ = save;
+            RangeOrSingle(cc, EscapedChar());
+            return;
+        }
+
+        RangeOrSingle(cc, Get());
+    }
+
+    // The cursor is on the backslash. Inside a bracket expression ECMA-262
+    // reads `\b` as a backspace rather than as the word boundary it is outside
+    // one; awk reads its own vocabulary; no other grammar gets here at all.
+    char_type EscapedChar()
+    {
+        if (grammar_ != Grammar::ECMAScript) return PosixEscapeChar();
+        ++p_;
+        if (Is('b')) { ++p_; return (char_type)0x08; }
+        return CharacterEscape();
+    }
+
+    void RangeOrSingle(class_data &cc, char_type lo)
+    {
+        if (!Is('-') || IsAt(1, ']') || Left() < 2) { cc.AddChar(Translate(lo)); return; }
+        ++p_;   // '-'
+        char_type hi;
+        if (Is('[') && Left() >= 2 && PeekAt(1) == Widen('.')) hi = CollatingElement();
+        else if (Is('[') && Left() >= 2
+                 && (PeekAt(1) == Widen(':') || PeekAt(1) == Widen('=')))
+            ThrowRegex(std::regex_constants::error_range);
+        else if (Is('\\') && (grammar_ == Grammar::ECMAScript || awkEscapes_)) {
+            const char_type *save = p_;
+            ++p_;
+            class_type m{};
+            if (More() && ClassEscape(m)) ThrowRegex(std::regex_constants::error_range);
+            p_ = save;
+            hi = EscapedChar();
+        } else hi = Get();
+
+        AddRange(cc, lo, hi);
+    }
+
+    // [re.grammar]/14.2 verbatim: without `collate` a range is a comparison of
+    // values, with it a comparison of sort keys.
+    void AddRange(class_data &cc, char_type lo, char_type hi)
+    {
+        if (!collate_) {
+            const unsigned long long a = (uchar_type)Translate(lo);
+            const unsigned long long b = (uchar_type)Translate(hi);
+            if (b < a) ThrowRegex(std::regex_constants::error_range);
+            // Below 256 a range is set in the bitmap, one bit per value. Above
+            // it the range is KEPT as a range: [\u0100-\uFFFF] is one pair
+            // here and sixty-five thousand entries if expanded, which for
+            // wchar_t is the difference between a class and a table.
+            for (unsigned long long v = a; v < 256 && v <= b; ++v)
+                cc.AddChar((char_type)v);
+            if (b >= 256)
+                cc.ranges.emplace_back((char_type)(a < 256 ? 256ull : a), (char_type)b);
+            return;
+        }
+        const char_type a = icase_ ? traits_.translate_nocase(lo) : traits_.translate(lo);
+        const char_type b = icase_ ? traits_.translate_nocase(hi) : traits_.translate(hi);
+        string_type s1(1, a), s2(1, b);
+        string_type k1 = traits_.transform(s1.begin(), s1.end());
+        string_type k2 = traits_.transform(s2.begin(), s2.end());
+        if (k2 < k1) ThrowRegex(std::regex_constants::error_range);
+        cc.collatedRanges.emplace_back(static_cast<string_type &&>(k1),
+                                       static_cast<string_type &&>(k2));
+    }
+
+    void NamedClass(class_data &cc)
+    {
+        p_ += 2;   // '[:'
+        const char_type *nameFirst = p_;
+        while (More() && !(Is(':') && IsAt(1, ']'))) ++p_;
+        if (!More()) ThrowRegex(std::regex_constants::error_brack);
+        const char_type *nameLast = p_;
+        p_ += 2;   // ':]'
+        const class_type m = traits_.lookup_classname(nameFirst, nameLast, icase_);
+        // [re.grammar]/7: a ClassName lookup_classname answers zero for is not
+        // a valid class name, and /11 says the translator throws for it.
+        if (m == class_type{}) ThrowRegex(std::regex_constants::error_ctype);
+        cc.masks = (class_type)(cc.masks | m);
+    }
+
+    void Equivalence(class_data &cc)
+    {
+        p_ += 2;   // '[='
+        const char_type *nameFirst = p_;
+        while (More() && !(Is('=') && IsAt(1, ']'))) ++p_;
+        if (!More()) ThrowRegex(std::regex_constants::error_brack);
+        const char_type *nameLast = p_;
+        p_ += 2;   // '=]'
+        string_type elem = traits_.lookup_collatename(nameFirst, nameLast);
+        if (elem.empty()) ThrowRegex(std::regex_constants::error_collate);
+        string_type key = traits_.transform_primary(elem.begin(), elem.end());
+        // [re.grammar]/10 makes an empty primary key invalid too.
+        if (key.empty()) ThrowRegex(std::regex_constants::error_collate);
+        cc.equiv.push_back(static_cast<string_type &&>(key));
+    }
+
+    char_type CollatingElement()
+    {
+        p_ += 2;   // '[.'
+        const char_type *nameFirst = p_;
+        while (More() && !(Is('.') && IsAt(1, ']'))) ++p_;
+        if (!More()) ThrowRegex(std::regex_constants::error_brack);
+        const char_type *nameLast = p_;
+        p_ += 2;   // '.]'
+        string_type elem = traits_.lookup_collatename(nameFirst, nameLast);
+        // [re.grammar]/8: an empty answer means the name is not valid.
+        if (elem.empty()) ThrowRegex(std::regex_constants::error_collate);
+        // A multi-character collating element cannot stand where one character
+        // is expected. BoxOS has one locale and it defines none, so this is
+        // unreachable here rather than unimplemented — and it is still checked,
+        // because a traits class the user wrote may define one.
+        if (elem.size() != 1) ThrowRegex(std::regex_constants::error_collate);
+        return elem[0];
+    }
+};
+
+} // namespace re
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_REGEX_SCAN
