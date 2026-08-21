@@ -599,6 +599,7 @@
 #include <cfenv>
 #include <cstdlib>
 #include <cstring>
+#include <regex>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
@@ -52998,6 +52999,329 @@ struct PhaseRow {
     void      (*run)();
 };
 
+
+// ── Phase230: <regex> — the grammar, before the machine ────────────────────
+// Ф44-a compiles a pattern into a program for a Pike VM; the VM itself is
+// Ф44-b. What can be pinned today is everything the COMPILER decides: which
+// patterns are legal, how many groups they have, which error each illegal one
+// names, and whether the program that came out is one the linear machine may
+// run at all.
+//
+// Every expectation here was measured against libstdc++ 16.1 and libc++ 22.1.6
+// with tools/cxx_regex_oracle.sh before it was written down. Where boxcxx
+// deliberately parts from one or both, the reason is [re.grammar] and it is
+// stated at the case.
+namespace phase230 {
+
+// A pattern that must compile, and the number of groups it must report.
+void Accepts(const char *pat, unsigned marks, std::regex::flag_type f, const char *what)
+{
+    try {
+        std::regex re(pat, f);
+        Check(re.mark_count() == marks, what);
+    } catch (const std::regex_error &) {
+        Check(false, what);
+    }
+}
+
+// A pattern that must be refused, and the error [re.err] name it must carry.
+void Refuses(const char *pat, std::regex_constants::error_type code,
+             std::regex::flag_type f, const char *what)
+{
+    try {
+        std::regex re(pat, f);
+        Check(false, what);
+    } catch (const std::regex_error &e) {
+        Check(e.code() == code, what);
+    }
+}
+
+} // namespace phase230
+
+void Phase230()
+{
+    using namespace std::regex_constants;
+    const std::regex::flag_type ecma = std::regex::ECMAScript;
+
+    // ── 1. error_type is a bitmask-free enumeration whose VALUES are ours ─
+    // [re.err] fixes the names and leaves the values open; libstdc++ numbers
+    // from 0 and libc++ from 1. boxcxx numbers from 1, so that `if (e.code())`
+    // — which compiles, error_type being unscoped — is never false for a real
+    // error. Pinned because it is a choice, not an accident.
+    static_assert((unsigned)error_collate == 1u, "phase230 error_collate");
+    static_assert((unsigned)error_stack == 13u, "phase230 error_stack");
+    Check((unsigned)error_complexity == 12u, "phase230 (1) error_type numbers from one");
+
+    // ── 2. what the grammar accepts, and with how many groups ────────────
+    phase230::Accepts("", 0, ecma, "phase230 (2) the empty pattern is a pattern");
+    phase230::Accepts("a(b|c)*d", 1, ecma, "phase230 (2) one group");
+    phase230::Accepts("(a)(b)(c)", 3, ecma, "phase230 (2) three groups");
+    phase230::Accepts("(?:a)(b)", 1, ecma, "phase230 (2) (?: does not capture");
+    phase230::Accepts("(?=a)(b)", 1, ecma, "phase230 (2) lookahead does not capture");
+    phase230::Accepts("(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)\\10", 10, ecma,
+                      "phase230 (2) a backreference number may have two digits");
+    phase230::Accepts("a{2,4}", 0, ecma, "phase230 (2) an interval");
+    phase230::Accepts("a{,2}b", 0, ecma,
+                      "phase230 (2) `{` that opens no interval is a literal `{`");
+    phase230::Accepts("[]a", 0, ecma,
+                      "phase230 (2) `[]` is an empty class in ECMAScript, not a "
+                      "member `]` — measured: libstdc++ agrees, libc++ fails to "
+                      "parse `[]]` at all");
+    phase230::Accepts("[]]", 0, ecma, "phase230 (2) and `[]]` is that class then a literal");
+    phase230::Accepts("[^]a", 0, ecma, "phase230 (2) `[^]` is every character");
+    phase230::Accepts("\\x61\\u0062", 0, ecma, "phase230 (2) hex escapes");
+    phase230::Accepts("[[:alpha:][:digit:]]", 0, ecma, "phase230 (2) named classes");
+    phase230::Accepts("[[.tab.][=a=]]", 0, ecma,
+                      "phase230 (2) collating element and equivalence class");
+
+    // ── 3. what it refuses, and by which name ────────────────────────────
+    phase230::Refuses("(a", error_paren, ecma, "phase230 (3) unbalanced (");
+    phase230::Refuses("a)", error_paren, ecma, "phase230 (3) unbalanced )");
+    phase230::Refuses("[a", error_brack, ecma, "phase230 (3) unbalanced [");
+    phase230::Refuses("a{2,1}", error_badbrace, ecma, "phase230 (3) an inverted interval");
+    phase230::Refuses("[b-a]", error_range, ecma, "phase230 (3) an inverted range");
+    phase230::Refuses("[a-\\d]", error_range, ecma,
+                      "phase230 (3) a class escape is not a range endpoint");
+    phase230::Refuses("*a", error_badrepeat, ecma, "phase230 (3) nothing to repeat");
+    phase230::Refuses("a**", error_badrepeat, ecma,
+                      "phase230 (3) ECMA-262 has no production for a quantified "
+                      "quantifier — measured: libc++ agrees, libstdc++ takes it");
+    phase230::Refuses("(?=a)*", error_badrepeat, ecma,
+                      "phase230 (3) nor for a quantified assertion");
+    phase230::Refuses("\\8", error_backref, ecma,
+                      "phase230 (3) a backreference past the group count");
+    phase230::Refuses("(?:a)\\1", error_backref, ecma,
+                      "phase230 (3) a non-capturing group is not a group to refer to");
+    phase230::Refuses("(?<=a)b", error_paren, ecma,
+                      "phase230 (3) there is no lookbehind in this grammar");
+    phase230::Refuses("[[:nosuch:]]", error_ctype, ecma,
+                      "phase230 (3) [re.grammar]/7: an unknown class name");
+    phase230::Refuses("[[.nosuch.]]", error_collate, ecma,
+                      "phase230 (3) [re.grammar]/8: an unknown collating name");
+    phase230::Refuses("\\", error_escape, ecma, "phase230 (3) a trailing backslash");
+    phase230::Refuses("\\08", error_escape, ecma,
+                      "phase230 (3) ECMA-262: `\\0` may not be followed by a digit");
+
+    // ── 4. the two places boxcxx parts from BOTH references ──────────────
+    // [re.grammar]/3 replaces ECMA-262's IdentityEscape with "SourceCharacter
+    // but not c", which is WIDER than ECMAScript. Measured: libstdc++ accepts
+    // `\q`, libc++ throws error_escape. The text is on libstdc++'s side.
+    phase230::Accepts("\\q", 0, ecma, "phase230 (4) [re.grammar]/3 identity escape");
+    phase230::Accepts("\\-\\}\\/", 0, ecma, "phase230 (4) and any other character but c");
+
+    // ECMA-262's DecimalEscape is NOT modified by [re.grammar], so a
+    // backreference is valid when its number does not exceed the count of
+    // capture groups in the WHOLE pattern — forward references included, and a
+    // reference to a group that has not participated matches the empty string
+    // rather than making the pattern ill-formed. Measured: libstdc++ throws on
+    // all three of these and libc++ on the first two. Neither is following the
+    // text, and this is the deviation CONFORMANCE.md records.
+    phase230::Accepts("\\1(a)", 1, ecma, "phase230 (4) a forward backreference is legal");
+    phase230::Accepts("(a)\\2(b)", 2, ecma, "phase230 (4) and so is one to a later group");
+    phase230::Accepts("(\\1a)", 1, ecma, "phase230 (4) and one to its own group");
+    phase230::Accepts("(\\s{2}|b)?\\1*", 1, ecma,
+                      "phase230 (4) a quantified backreference — the case that "
+                      "found the compiler validating references by INSTRUCTION "
+                      "INDEX, which a quantifier moves");
+
+    // ── 5. the POSIX grammars are grammars, not aliases ──────────────────
+    phase230::Accepts("*a", 0, std::regex::basic,
+                      "phase230 (5) BRE: a leading `*` is a literal asterisk");
+    phase230::Accepts("a\\{2,3\\}", 0, std::regex::basic, "phase230 (5) BRE: \\{ is the interval");
+    phase230::Accepts("\\(a\\)\\1", 1, std::regex::basic,
+                      "phase230 (5) BRE is the one POSIX grammar with backreferences");
+    phase230::Accepts("a^b", 0, std::regex::basic,
+                      "phase230 (5) BRE: `^` away from the front is an ordinary character");
+    phase230::Refuses("\\d", error_escape, std::regex::basic,
+                      "phase230 (5) BRE has no \\d");
+    phase230::Accepts("a**", 0, std::regex::extended,
+                      "phase230 (5) ERE is left-recursive: a duplication symbol "
+                      "may take a duplicated expression — measured: libstdc++ "
+                      "agrees, libc++ throws");
+    phase230::Accepts("a\\{2,3\\}", 0, std::regex::extended,
+                      "phase230 (5) ERE: `{` is special, so `\\{` is a literal one");
+    phase230::Refuses("(a)\\1", error_escape, std::regex::extended,
+                      "phase230 (5) ERE has no backreferences");
+    phase230::Refuses("\\d", error_escape, std::regex::extended, "phase230 (5) nor \\d");
+    phase230::Accepts("\\t\\n\\057", 0, std::regex::awk,
+                      "phase230 (5) awk has its own escapes, including octal");
+    phase230::Refuses("\\d", error_escape, std::regex::awk, "phase230 (5) but not \\d");
+    phase230::Accepts("a\nb", 0, std::regex::egrep,
+                      "phase230 (5) egrep reads a newline as alternation");
+
+    // ── 6. which machine may run the program ─────────────────────────────
+    // Not bookkeeping: a program with a backreference or a lookahead is not
+    // regular, and the linear machine of Ф44-b may not be handed one. The flag
+    // and the instructions have to agree, in both directions.
+    {
+        const std::regex plain("a(b|c)*[d-f]{2,3}");
+        Check(plain.__prog().regular(), "phase230 (6) a regular program says so");
+        Check(!plain.__prog().backrefs && !plain.__prog().looks,
+              "phase230 (6) and carries neither kind of instruction");
+
+        const std::regex withRef("(a)\\1");
+        Check(!withRef.__prog().regular() && withRef.__prog().backrefs,
+              "phase230 (6) a backreference makes it irregular");
+
+        const std::regex withLook("(?=a)b");
+        Check(!withLook.__prog().regular() && withLook.__prog().looks,
+              "phase230 (6) so does a lookahead");
+
+        unsigned refs = 0, looks = 0;
+        for (const auto &in : withRef.__prog().code)
+            if (in.op == boxcxx::re::Op::Backref) ++refs;
+        for (const auto &in : withLook.__prog().code)
+            if (in.op == boxcxx::re::Op::Look) ++looks;
+        Check(refs == 1 && looks == 1, "phase230 (6) one instruction each, as counted");
+    }
+
+    // ── 7. the quantifier produces the SHAPE it promises ─────────────────
+    // `a{0,2}` must hold two Char instructions. Three would still parse, still
+    // report zero groups, and match "aaa" — a defect no accept/reject sweep can
+    // see, and the reason the host stand grew a program dump.
+    {
+        auto chars = [](const std::regex &re) {
+            unsigned n = 0;
+            for (const auto &in : re.__prog().code)
+                if (in.op == boxcxx::re::Op::Char) ++n;
+            return n;
+        };
+        Check(chars(std::regex("a{0,2}")) == 2, "phase230 (7) a{0,2} is two copies");
+        Check(chars(std::regex("a{2,4}")) == 4, "phase230 (7) a{2,4} is four");
+        Check(chars(std::regex("a{3}")) == 3, "phase230 (7) a{3} is three");
+        Check(chars(std::regex("a{0}")) == 0, "phase230 (7) a{0} is none");
+        Check(std::regex("(a){0}").mark_count() == 1,
+              "phase230 (7) and the group it erased still exists to be reported");
+    }
+
+    // ── 7b. a wide range is a RANGE ──────────────────────────────────────
+    // Below 256 a class member is one bit in a bitmap; above it, expanding
+    // [\u0100-\uFFFF] into members would be sixty-five thousand entries for
+    // a class that is one pair. For char the distinction never shows, which is
+    // why it is pinned here on wchar_t.
+    {
+        const std::wregex w(L"[\u0100-\uFFFF]");
+        Check(w.__prog().classes.size() == 1, "phase230 (7b) one class");
+        Check(w.__prog().classes[0].ranges.size() == 1,
+              "phase230 (7b) held as a single range, not expanded");
+        const std::wregex narrow(L"[a-z]");
+        Check(narrow.__prog().classes[0].ranges.empty()
+              && narrow.__prog().classes[0].InNarrow((unsigned)L'q'),
+              "phase230 (7b) while a range under 256 is still the bitmap");
+        Check(std::wregex(L"(a)(b)").mark_count() == 2,
+              "phase230 (7b) and wregex is a regex");
+    }
+
+    // ── 8. ECMA-262's capture reset is an instruction, not an afterthought ─
+    // RepeatMatcher clears the captures inside a quantified subject at the head
+    // of every iteration, which is why /(?:(a)|b)*/ leaves group 1 unset on
+    // "ab". Measured: libc++ does this, libstdc++ does not. Ф44-b will make it
+    // observable through match_results; today it is observable as an emitted
+    // Reset covering exactly the groups inside the quantifier.
+    {
+        const std::regex re("(?:(a)|b)*");
+        unsigned resets = 0, lo = 0, hi = 0;
+        for (const auto &in : re.__prog().code)
+            if (in.op == boxcxx::re::Op::Reset) { ++resets; lo = in.x; hi = in.y; }
+        Check(resets == 1 && lo == 1 && hi == 1,
+              "phase230 (8) one Reset, covering group 1");
+        unsigned unquantified = 0;
+        for (const auto &in : std::regex("(a)(b)").__prog().code)
+            if (in.op == boxcxx::re::Op::Reset) ++unquantified;
+        Check(unquantified == 0,
+              "phase230 (8) and none where no quantifier can repeat a group");
+    }
+
+    // ── 9. regex_traits answers what [re.grammar] asks it ────────────────
+    {
+        std::regex_traits<char> t;
+        const char alpha[] = "alpha";
+        const char w[] = "w";
+        const char nosuch[] = "nosuch";
+        const auto ma = t.lookup_classname(alpha, alpha + 5);
+        const auto mw = t.lookup_classname(w, w + 1);
+        Check(ma != 0 && mw != 0, "phase230 (9) the required class names resolve");
+        Check(t.lookup_classname(nosuch, nosuch + 6) == 0,
+              "phase230 (9) and an unknown one answers zero");
+        Check(t.isctype('x', ma) && !t.isctype('1', ma),
+              "phase230 (9) isctype: alpha");
+        Check(t.isctype('_', mw) && t.isctype('7', mw) && !t.isctype('-', mw),
+              "phase230 (9) [re.grammar]/7: \\w is [_[:alnum:]], underscore included");
+        // /9: several lookups may be or'ed together and passed as one.
+        const char d[] = "digit";
+        Check(t.isctype('7', (unsigned)(ma | t.lookup_classname(d, d + 5))),
+              "phase230 (9) [re.grammar]/9: masks combine");
+        const char up[] = "upper";
+        Check(!t.isctype('a', t.lookup_classname(up, up + 5, false))
+              && t.isctype('a', t.lookup_classname(up, up + 5, true)),
+              "phase230 (9) the icase argument is not decoration");
+        Check(t.value('7', 10) == 7 && t.value('f', 16) == 15
+              && t.value('8', 8) == -1 && t.value('z', 16) == -1,
+              "phase230 (9) [re.grammar]/13: value() by radix");
+        Check(t.translate_nocase('A') == t.translate_nocase('a'),
+              "phase230 (9) translate_nocase folds case");
+        const char tab[] = "tab";
+        Check(t.lookup_collatename(tab, tab + 3) == std::string(1, '\t'),
+              "phase230 (9) the POSIX portable character names");
+        const char one[] = "q";
+        Check(t.lookup_collatename(one, one + 1) == std::string("q"),
+              "phase230 (9) and a single character is its own element");
+        const char A[] = "A";
+        const char a[] = "a";
+        Check(t.transform_primary(A, A + 1) == t.transform_primary(a, a + 1),
+              "phase230 (9) primary equivalence ignores case");
+        Check(std::regex_traits<char>::length("abc") == 3, "phase230 (9) length");
+    }
+
+    // ── 10. basic_regex is a value ───────────────────────────────────────
+    {
+        std::regex a("(x)(y)", std::regex::icase);
+        Check(a.mark_count() == 2 && (a.flags() & std::regex::icase),
+              "phase230 (10) flags survive construction");
+
+        std::regex b(a);
+        Check(b.mark_count() == 2, "phase230 (10) copy");
+
+        std::regex c(std::string("(p)|(q)|(r)"));
+        Check(c.mark_count() == 3, "phase230 (10) from a string");
+
+        const std::string pat = "(z)+";
+        std::regex d(pat.begin(), pat.end());
+        Check(d.mark_count() == 1, "phase230 (10) from a range");
+
+        std::regex e({'(', 'k', ')'});
+        Check(e.mark_count() == 1, "phase230 (10) from an initializer_list");
+
+        std::regex f;
+        Check(f.mark_count() == 0, "phase230 (10) default construction is empty");
+        f.assign("(a)(b)(c)");
+        Check(f.mark_count() == 3, "phase230 (10) assign");
+        f = "(a)";
+        Check(f.mark_count() == 1, "phase230 (10) operator=");
+
+        std::regex g("(1)(2)"), h("(3)");
+        g.swap(h);
+        Check(g.mark_count() == 1 && h.mark_count() == 2, "phase230 (10) swap");
+        swap(g, h);
+        Check(g.mark_count() == 2 && h.mark_count() == 1, "phase230 (10) and the free one");
+
+        // [re.synopt] Table 118: nosubs stops sub-expression matches being
+        // STORED. The groups themselves still exist — a backreference to one
+        // still has to resolve — so what changes is what mark_count reports.
+        std::regex n("(a)(b)", std::regex::nosubs);
+        Check(n.mark_count() == 0, "phase230 (10) nosubs reports no marks");
+        phase230::Accepts("(a)\\1", 0, std::regex::ECMAScript | std::regex::nosubs,
+                          "phase230 (10) and a backreference still resolves under it");
+
+        // [re.regex.locale]: imbue resets the object as if by assign("").
+        std::regex i("(a)(b)(c)");
+        i.imbue(std::locale());
+        Check(i.mark_count() == 0, "phase230 (10) imbue empties the expression");
+    }
+
+    Check(true, "phase230 (11) <regex> compiles a pattern into a program");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -53243,6 +53567,7 @@ const PhaseRow kPhases[] = {
     {"227", Phase227},
     {"228", Phase228},
     {"229", Phase229},
+    {"230", Phase230},
     {"2", Phase2},
 };
 

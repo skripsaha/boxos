@@ -12,6 +12,12 @@
 #   tools/cxx_regex_oracle.sh                 sweep the pinned range, diff vs pin
 #   tools/cxx_regex_oracle.sh 1 20000 2 3     sweep FROM TO DEPTH FAN
 #   tools/cxx_regex_oracle.sh --cases         replay tools/regex_oracle_cases.txt
+#   tools/cxx_regex_oracle.sh --parse [G]     THREE columns — boxcxx's own
+#                                             parser beside both references —
+#                                             reporting only the cases where
+#                                             boxcxx stands alone
+#   tools/cxx_regex_oracle.sh --posix         --parse over every grammar, on
+#                                             tools/regex_oracle_posix.txt
 #   tools/cxx_regex_oracle.sh --adversarial   time the blowup shapes, one
 #                                             process per case under a clock
 #   tools/cxx_regex_oracle.sh --repin         overwrite the pin with today's set
@@ -47,11 +53,59 @@ build or_llvm "$LLVM" -stdlib=libc++
 MODE=gen
 case "${1:-}" in
     --cases) MODE=cases ;;
+    --parse) MODE=parse ;;
+    --posix) MODE=posix ;;
     --adversarial) MODE=adv ;;
     --repin) MODE=repin ;;
 esac
 
 ADV="$TOOLS/regex_oracle_adversarial.txt"
+POSIX="$TOOLS/regex_oracle_posix.txt"
+STAND_SRC="$TOOLS/cxx_regex_stand.cpp"
+LEAVES="$ROOT/src/userspace/boxcxx/include/std/__bits"
+
+# The stand is the third column: boxcxx's own regex_parse, built by the host
+# compiler. The leaves are reached through symlinks in a private directory so
+# that boxcxx's <string> and <vector> cannot shadow the host's.
+build_stand() {
+    mkdir -p "$OUT/inc/__bits"
+    for leaf in regex_syntax regex_program regex_scan regex_parse; do
+        ln -sf "$LEAVES/$leaf" "$OUT/inc/__bits/$leaf"
+    done
+    _newest=$(ls -t "$LEAVES"/regex_syntax "$LEAVES"/regex_program "$LEAVES"/regex_scan "$LEAVES"/regex_parse "$STAND_SRC" 2>/dev/null | head -1)
+    [ -x "$OUT/stand" ] && [ "$OUT/stand" -nt "$_newest" ] && return 0
+    "$GNU" -O2 -std=c++20 -I"$OUT/inc" -I"$TOOLS" "$STAND_SRC" -o "$OUT/stand" || exit 2
+}
+
+# One grammar, three columns, printing only the rows where boxcxx agrees with
+# NEITHER reference. Where the two references disagree with each other, siding
+# with one of them is a decision, not a defect — and standing alone is the
+# thing that has to be explained.
+three_way() {
+    _label=$1; _gram=$2; _bfile=$3; _gfile=$4; _lfile=$5
+    paste -d"$(printf '\t')" "$_bfile" "$_gfile" "$_lfile" | awk -F"$(printf '\t')" -v L="$_label" '
+        function verdict(s,  a) { split(s, a, " -> "); return a[2] }
+        function accepted(v) { return v ~ /^ok/ }
+        {
+            b = verdict($1); g = verdict($2); c = verdict($3)
+            total++
+            if (accepted(b) != accepted(g)) dg++
+            if (accepted(b) != accepted(c)) dc++
+            if (accepted(g) != accepted(c)) gc++
+            if (accepted(b) != accepted(g) && accepted(b) != accepted(c)) {
+                alone++
+                if (alone <= 8) {
+                    split($1, A, " -> ")
+                    printf "    ALONE %s\n      boxcxx=%s  gnu=%s  llvm=%s\n", A[1], b, g, c
+                }
+            }
+        }
+        END {
+            printf "  %-11s cases=%-6d vs-gnu=%-5d vs-llvm=%-5d (gnu-vs-llvm=%-5d)  ALONE=%d\n",
+                   L, total, dg, dc, gc, alone
+            if (alone) exit 1
+        }'
+}
 BUDGET=${BUDGET:-15}
 
 if [ "$MODE" = adv ]; then
@@ -66,6 +120,32 @@ if [ "$MODE" = adv ]; then
         done
     done < "$ADV"
     exit 0
+fi
+
+if [ "$MODE" = posix ]; then
+    build_stand
+    [ -f "$POSIX" ] || { echo "no $POSIX" >&2; exit 2; }
+    echo "--- POSIX grammars, curated cases (accept/reject)"
+    rc=0
+    for g in basic extended awk grep egrep ECMAScript; do
+        "$OUT/or_gnu"  pfile "$POSIX" "$g" > "$OUT/x_gnu.txt"  2>/dev/null
+        "$OUT/or_llvm" pfile "$POSIX" "$g" > "$OUT/x_llvm.txt" 2>/dev/null
+        "$OUT/stand"   file  "$POSIX" "$g" > "$OUT/x_box.txt"  2>/dev/null
+        three_way "$g" "$g" "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt" || rc=1
+    done
+    exit $rc
+fi
+
+if [ "$MODE" = parse ]; then
+    build_stand
+    shift
+    GRAM=${1:-ECMAScript}; FROM=${2:-1}; TO=${3:-4000}; DEPTH=${4:-1}; FAN=${5:-2}
+    echo "--- parse verdicts, three columns"
+    "$OUT/or_gnu"  parse "$FROM" "$TO" "$DEPTH" "$FAN" "$GRAM" > "$OUT/x_gnu.txt"  2>/dev/null
+    "$OUT/or_llvm" parse "$FROM" "$TO" "$DEPTH" "$FAN" "$GRAM" > "$OUT/x_llvm.txt" 2>/dev/null
+    "$OUT/stand"   gen   "$FROM" "$TO" "$DEPTH" "$FAN" "$GRAM" > "$OUT/x_box.txt"  2>/dev/null
+    three_way "$GRAM" "$GRAM" "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt"
+    exit $?
 fi
 
 if [ "$MODE" = cases ]; then

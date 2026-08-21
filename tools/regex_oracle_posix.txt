@@ -1,0 +1,38 @@
+# POSIX-grammar cases for the <regex> stand — one pattern per line.
+#
+# The generated sweep cannot test these grammars: it emits ECMAScript shapes,
+# which mean different things under basic/extended/awk, and the noise buries
+# the signal — measured, 2524 of 4000 cases disagreeing for reasons that were
+# about the generator and not about anyone's parser. So the POSIX grammars are
+# checked against a list written by hand, run under each grammar in turn.
+#
+# What matters in the comparison is ACCEPT versus REJECT. Which [re.err] name
+# an implementation picks for a construct POSIX calls undefined is not
+# something the standard fixes, and the two references pick differently.
+a^b
+a$b
+^a
+a$
+*a
+a**
+a+*
+\(a\)\1
+\(a\)*
+a\{2,3\}
+a{2,3}
+[[:alpha:]]
+\d
+\D
+\w
+\b
+\n
+\.
+\a
+(a)
+(a)\1
+a|b
+a?
+.+?
+[a-]
+[]a]
+\<a\>
