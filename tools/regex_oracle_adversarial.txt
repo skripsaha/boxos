@@ -1,0 +1,13 @@
+# Blowup shapes for the <regex> stand — `pattern<TAB>n`, subject is 'a'*n.
+# Run under tools/cxx_regex_oracle.sh --adversarial, one process per case with
+# a clock on it, because the whole point is that some of these do not return.
+# The correct answer to every line here is "no match".
+(a+)+b	12
+(a+)+b	18
+(a+)+b	22
+(a+)+b	26
+(a|a)*b	18
+(a|a)*b	26
+(a*)*b	18
+(a*)*b	26
+(a|ab)*c	26

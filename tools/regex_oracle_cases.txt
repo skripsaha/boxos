@@ -1,0 +1,40 @@
+# Reduced cases for the <regex> differential stand — `pattern<TAB>subject`.
+#
+# Each line got here by being cut down from a generated case the two reference
+# implementations answered differently. They are kept because a 300-character
+# random pattern proves a disagreement exists and explains nothing, and because
+# once boxcxx has an engine these are the first cases it must face.
+#
+# ── `^` inside a lookahead ────────────────────────────────────────────────
+# MEASURED 2026-08-21, libstdc++ 16.1 vs libc++ 22.1.6: libstdc++ answers all
+# four wrongly. Inside a lookahead its `^` succeeds wherever it is asked,
+# instead of asserting position 0 — so the assertion is not an assertion at
+# all. libc++ answers all four as the standard requires. Every one of the six
+# non-backreference disagreements in the first 4000-case sweep reduced to this.
+a(?=^)	ab
+a(?!^)	ab
+.{0,2}(?=^)	ab
+ab(?=^)	ab
+([abc])*(?=^|\db)	aaaa1
+.+(?!^)|\s(?:b.)+	bbabac
+#
+# ── forward and self backreferences ───────────────────────────────────────
+# MEASURED: the two libraries do not agree with each other, and by ECMA-262 —
+# which [re.grammar] adopts — a backreference whose group has not participated
+# matches the empty string rather than making the pattern ill-formed. That
+# reading makes BOTH of them wrong here, so this block is marked to be settled
+# against the normative text in Ф44-c, not against either library.
+\1(a)	a
+(a)\2(b)	ab
+(\1a)	a
+(\s\1{0,2}){0,2}a{2}	baa
+(\1+b{0,2})+|c{0,2}(\w{2}.)*	cb
+#
+# ── the shape the engine exists for ───────────────────────────────────────
+# At n=12 both references still answer, and the answer is "no match" — so
+# these belong here, where every case must be fast enough to replay. What
+# happens as n grows is a separate measurement with a clock on it:
+# tools/cxx_regex_oracle.sh --adversarial.
+(a+)+b	aaaaaaaaaaaa
+(a|a)*b	aaaaaaaaaaaa
+(a*)*b	aaaaaaaaaaaa
