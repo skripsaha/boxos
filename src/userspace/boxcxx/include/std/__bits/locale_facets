@@ -390,14 +390,11 @@ private:
         const charT            point    = np.decimal_point();
         const charT            sep      = np.thousands_sep();
 
-        // How many separators go in, and how long the leftmost group is. A
-        // grouping string's last element repeats; 0 or a value >= CHAR_MAX
-        // means "stop grouping here", which is how a program says "group the
-        // low digits and leave the rest alone".
+        // How many separators go in, and how long the leftmost group is. What
+        // a grouping string MEANS is stated once, in <__bits/field_engine>,
+        // because the extraction side has to read it the same way.
         const auto GroupAt = [&grouping](size_t k) -> size_t {
-            const char g = grouping[k < grouping.size() ? k : grouping.size() - 1];
-            return (g <= 0 || static_cast<unsigned char>(g) >= 127) ? 0u
-                                                                    : static_cast<size_t>(g);
+            return __ios::__grouping::At(grouping, k);
         };
 
         size_t seps = 0, taken = 0;

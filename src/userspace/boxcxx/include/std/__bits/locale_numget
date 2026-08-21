@@ -238,6 +238,12 @@ private:
         char                      buf[80];
         __numget::Gatherer<charT> g{buf, sizeof(buf)};
 
+        // Stage 3 needs to know WHERE the separators stood, not just that they
+        // were there. Until Ф43-d-2 they were discarded unexamined, so "12,34"
+        // parsed as 1234 with the stream still good — both reference
+        // implementations set failbit and store the value, and so does this.
+        __ios::__grouping::SepMarks<sizeof(buf)> marks;
+
         const auto basefield = str.flags() & ios_base::basefield;
         g.base = basefield == ios_base::hex   ? 16
                  : basefield == ios_base::oct ? 8
@@ -283,7 +289,8 @@ private:
             }
             const charT wide = *in;
             if (grouped && wide == sep) {
-                ++in;   // separators are read and discarded
+                marks.Mark(g.n);   // read, discarded, and remembered
+                ++in;
                 continue;
             }
             const char c = ct.narrow(wide, '\0');
@@ -296,6 +303,11 @@ private:
         }
 
         if (hitEnd) err |= ios_base::eofbit;
+
+        // Checked here, reported after the value is stored: [facet.num.get.
+        // virtuals] stage 3 sets failbit for a misplaced separator WITHOUT
+        // discarding the digits that were read.
+        const bool groupingBad = !marks.Consistent(np.grouping(), g.n);
 
         if (!g.sawDigit) {
             err |= ios_base::failbit;
@@ -327,6 +339,7 @@ private:
             return in;
         }
         v = neg ? static_cast<T>(0ULL - magnitude) : static_cast<T>(magnitude);
+        if (groupingBad) err |= ios_base::failbit;
         return in;
     }
 
@@ -343,6 +356,11 @@ private:
 
         char                      buf[2048];
         __numget::Gatherer<charT> g{buf, sizeof(buf)};
+
+        // Grouping is a property of the INTEGER part alone, so the marks stop
+        // at the radix point and a separator after it ends the number.
+        __ios::__grouping::SepMarks<sizeof(buf)> marks;
+        size_t                                   intDigits = 0;
 
         bool neg = false;
         if (in != end) {
@@ -383,6 +401,8 @@ private:
             }
             const charT wide = *in;
             if (grouped && wide == sep) {
+                if (g.sawPoint || g.sawExp) break;   // no groups past the point
+                marks.Mark(g.n);
                 ++in;
                 continue;
             }
@@ -390,6 +410,7 @@ private:
                 // One point, and not after an exponent. from_chars wants the
                 // ASCII '.' whatever the facet spells it as.
                 if (g.sawPoint || g.sawExp) break;
+                intDigits = g.n;
                 if (!g.Push('.')) break;
                 g.sawPoint = true;
                 ++in;
@@ -404,6 +425,10 @@ private:
         }
 
         if (hitEnd) err |= ios_base::eofbit;
+
+        // No radix point seen means every digit was an integer digit.
+        if (!g.sawPoint) intDigits = g.n;
+        const bool groupingBad = !marks.Consistent(np.grouping(), intDigits);
 
         if (!g.sawDigit) {
             err |= ios_base::failbit;
@@ -426,6 +451,7 @@ private:
             return in;
         }
         v = neg ? -parsed : parsed;
+        if (groupingBad) err |= ios_base::failbit;
         return in;
     }
 

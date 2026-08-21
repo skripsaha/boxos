@@ -1,0 +1,700 @@
+// boxcxx — <__bits/locale_money>
+//
+// money_base, moneypunct, moneypunct_byname, money_get, money_put — the
+// monetary category, which is the one category whose facets describe a
+// CONVENTION rather than a character property. A ctype answers what a
+// character is; a numpunct answers how a number is punctuated; a moneypunct
+// answers how a place writes down an amount of money, and every one of its
+// nine questions can be answered differently without any of them being wrong.
+//
+// Both engines take an `ios_base&`, so this leaf sits in the tier that needs a
+// COMPLETE <ios> — beside <__bits/locale_facets>, not beside <__bits/
+// locale_ctype>.
+//
+// ── what the "C" locale answers, and the one place it was a decision ────
+// Eight of the nine answers are the ones both reference implementations give
+// and the ones the C locale's `lconv` already gives in <clocale>: no currency
+// symbol, no positive sign, no grouping, zero fractional digits, and the
+// default pattern { symbol, sign, none, value } that [locale.moneypunct.
+// virtuals] states normatively.
+//
+// The ninth is negative_sign(), and there the two reference implementations
+// disagree — measured, not assumed: libstdc++ answers "" and prints
+// put_money(-123456) as "123456", while libc++ answers "-" and prints
+// "-123456". The C++ standard specifies nothing about the "C" locale here;
+// the C standard DOES pin lconv, and pins it to "".
+//
+// boxcxx answers "-", and leaves localeconv() at "". That is not an
+// inconsistency, it is two different questions: C fixed its answer, C++ left
+// its own open, and an amount whose sign silently disappears on the way to the
+// screen is the kind of quiet wrong this system does not ship. get_money can
+// read back what put_money wrote, which under "" it could not do at all.
+#ifndef BOXCXX_BITS_LOCALE_MONEY
+#define BOXCXX_BITS_LOCALE_MONEY
+
+#include <__bits/field_engine>
+#include <__bits/locale_core>
+#include <__bits/locale_ctype>
+#include <charconv>
+#include <ios>
+#include <iterator>
+#include <limits>
+#include <streambuf>
+#include <string>
+#include <vector>
+
+namespace std {
+
+// ── money_base [category.monetary] ──────────────────────────────────────
+// The four-element pattern is the whole grammar of a monetary field: where the
+// symbol goes, where the sign goes, where the amount goes, and the one slot
+// that is either optional whitespace (`none`) or required whitespace
+// (`space`). [locale.moneypunct] constrains it — `none` may not come first and
+// `space` may come neither first nor last — because a pattern that broke those
+// could not be parsed back.
+class money_base {
+public:
+    enum part { none, space, symbol, sign, value };
+    struct pattern {
+        char field[4];
+    };
+};
+
+// ── moneypunct [locale.moneypunct] ──────────────────────────────────────
+template <class charT, bool International = false>
+class moneypunct : public locale::facet, public money_base {
+public:
+    using char_type   = charT;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit moneypunct(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    // [locale.moneypunct]/1 declares this a `static const bool`; constexpr is
+    // a const bool that also needs no out-of-line definition to be odr-used.
+    static constexpr bool intl = International;
+
+    charT       decimal_point() const { return do_decimal_point(); }
+    charT       thousands_sep() const { return do_thousands_sep(); }
+    string      grouping() const { return do_grouping(); }
+    string_type curr_symbol() const { return do_curr_symbol(); }
+    string_type positive_sign() const { return do_positive_sign(); }
+    string_type negative_sign() const { return do_negative_sign(); }
+    int         frac_digits() const { return do_frac_digits(); }
+    pattern     pos_format() const { return do_pos_format(); }
+    pattern     neg_format() const { return do_neg_format(); }
+
+protected:
+    ~moneypunct() = default;
+
+    // The radix separator is only consulted when do_frac_digits() is greater
+    // than zero, which in "C" it never is — but a facet has to answer, and
+    // answering with charT() would hand a user-written money_put a NUL to
+    // print. '.' and ',' are what numpunct answers to the same two questions.
+    virtual charT       do_decimal_point() const { return charT('.'); }
+    virtual charT       do_thousands_sep() const { return charT(','); }
+    virtual string      do_grouping() const { return string(); }
+    virtual string_type do_curr_symbol() const { return string_type(); }
+    virtual string_type do_positive_sign() const { return string_type(); }
+    virtual string_type do_negative_sign() const
+    {
+        const charT m[] = {charT('-'), charT()};
+        return string_type(m);
+    }
+    virtual int     do_frac_digits() const { return 0; }
+    virtual pattern do_pos_format() const { return __Default(); }
+    virtual pattern do_neg_format() const { return __Default(); }
+
+private:
+    static constexpr pattern __Default()
+    {
+        return pattern{{symbol, sign, none, value}};
+    }
+};
+
+template <class charT, bool International>
+locale::id moneypunct<charT, International>::id{};
+
+template <>
+inline locale::id moneypunct<char, false>::id{__cvt::kIdMoneypunctChar};
+template <>
+inline locale::id moneypunct<char, true>::id{__cvt::kIdMoneypunctCharIntl};
+template <>
+inline locale::id moneypunct<wchar_t, false>::id{__cvt::kIdMoneypunctWchar};
+template <>
+inline locale::id moneypunct<wchar_t, true>::id{__cvt::kIdMoneypunctWcharIntl};
+
+template <class charT, bool International = false>
+class moneypunct_byname : public moneypunct<charT, International> {
+public:
+    using pattern     = money_base::pattern;
+    using string_type = basic_string<charT>;
+
+    explicit moneypunct_byname(const char *name, size_t refs = 0)
+        : moneypunct<charT, International>(refs)
+    {
+        if (!__loc::IsClassicName(name)) __loc::ThrowUnknownLocale(name);
+    }
+    explicit moneypunct_byname(const string &name, size_t refs = 0)
+        : moneypunct_byname(name.c_str(), refs)
+    {
+    }
+
+protected:
+    ~moneypunct_byname() = default;
+};
+
+namespace __money {
+
+// The digits to render, wherever they came from. The `units` overload converts
+// through to_chars and its characters arrive as ASCII that ctype must widen;
+// the string overload's characters are already the stream's own and are
+// written untouched. Keeping BOTH as a source instead of materializing one
+// charT buffer is deliberate: the fixed form of a long double runs to 4933
+// digits, and 4933 wchar_t is twenty kilobytes of stack — on a path where
+// exactly that mistake has already been made once and cost a page fault
+// (Ф43-c-1, Phase215).
+template <class charT>
+struct Digits {
+    const char  *ascii = nullptr;
+    const charT *wide  = nullptr;
+    size_t       n     = 0;
+
+    charT At(size_t i, const ctype<charT> &ct) const
+    {
+        return ascii != nullptr ? ct.widen(ascii[i]) : wide[i];
+    }
+};
+
+// How the amount is laid out once frac_digits() has claimed its share of the
+// digits. When there are not enough digits to fill the fraction, the integer
+// part is a single zero: "0.05" and not ".05", because a number missing its
+// integer part is not a number anyone writes. (libstdc++ prints ".05" here,
+// libc++ prints "0.05"; the standard describes neither.)
+struct Layout {
+    size_t intCount  = 0;   // digits taken from the source for the integer part
+    bool   intIsZero = false;
+    size_t fracZeros = 0;   // leading zeros the fraction needs
+    size_t fracCount = 0;   // digits taken from the source for the fraction
+    size_t seps      = 0;   // thousands separators inside the integer part
+    size_t firstLen  = 0;   // digits before the first separator
+    size_t width     = 0;   // total charT the value occupies
+
+    size_t IntLen() const { return intIsZero ? 1 : intCount; }
+};
+
+inline Layout Plan(size_t n, int frac, const string &grouping)
+{
+    Layout L;
+    if (frac <= 0) {
+        L.intCount = n;
+    } else if (n > static_cast<size_t>(frac)) {
+        L.intCount  = n - static_cast<size_t>(frac);
+        L.fracCount = static_cast<size_t>(frac);
+    } else {
+        L.intIsZero = true;
+        L.fracCount = n;
+        L.fracZeros = static_cast<size_t>(frac) - n;
+    }
+    if (L.intCount == 0) L.intIsZero = true;
+
+    const size_t digits = L.IntLen();
+    if (!grouping.empty() && digits > 0) {
+        size_t taken = 0;
+        for (;;) {
+            const size_t step = __ios::__grouping::At(grouping, L.seps);
+            if (step == 0 || taken + step >= digits) break;
+            taken += step;
+            ++L.seps;
+        }
+        L.firstLen = digits - taken;
+    } else {
+        L.firstLen = digits;
+    }
+
+    L.width = digits + L.seps;
+    if (frac > 0) L.width += 1 + static_cast<size_t>(frac);
+    return L;
+}
+
+} // namespace __money
+
+// ── money_put [locale.money.put] ────────────────────────────────────────
+template <class charT, class OutputIterator = ostreambuf_iterator<charT>>
+class money_put : public locale::facet {
+public:
+    using char_type   = charT;
+    using iter_type   = OutputIterator;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit money_put(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    iter_type put(iter_type s, bool intl, ios_base &f, char_type fill, long double units) const
+    {
+        return do_put(s, intl, f, fill, units);
+    }
+    iter_type put(iter_type s, bool intl, ios_base &f, char_type fill,
+                  const string_type &digits) const
+    {
+        return do_put(s, intl, f, fill, digits);
+    }
+
+protected:
+    ~money_put() = default;
+
+    virtual iter_type do_put(iter_type s, bool intl, ios_base &f, char_type fill,
+                             long double units) const
+    {
+        // [locale.money.put.virtuals] says "as if by %.0Lf", which is what
+        // to_chars produces in fixed form with a precision of zero — the same
+        // conversion num_put uses, rather than a second one that could round
+        // differently at a tie.
+        char buf[8192];
+        auto r = to_chars(buf, buf + sizeof(buf), units, chars_format::fixed, 0);
+        if (r.ec != errc{}) __ios::ThrowGenerationFailure();
+
+        const char  *p   = buf;
+        size_t       n   = static_cast<size_t>(r.ptr - buf);
+        bool         neg = false;
+        if (n > 0 && *p == '-') {
+            neg = true;
+            ++p;
+            --n;
+        }
+        // "inf" and "nan" have no digits; there is nothing monetary to say
+        // about them, and printing the letters through a monetary pattern
+        // would be inventing a convention.
+        for (size_t i = 0; i < n; ++i)
+            if (p[i] < '0' || p[i] > '9') __ios::ThrowGenerationFailure();
+
+        __money::Digits<charT> d;
+        d.ascii = p;
+        d.n     = n;
+        return intl ? Emit<true>(s, f, fill, d, neg) : Emit<false>(s, f, fill, d, neg);
+    }
+
+    virtual iter_type do_put(iter_type s, bool intl, ios_base &f, char_type fill,
+                             const string_type &digits) const
+    {
+        const locale        loc = f.getloc();
+        const ctype<charT> &ct  = use_facet<ctype<charT>>(loc);
+
+        // [locale.money.put.virtuals]: only the optional leading minus and the
+        // digits immediately after it are used; anything past the first
+        // non-digit is ignored, including further digits.
+        const charT *p   = digits.data();
+        size_t       len = digits.size();
+        bool         neg = false;
+        if (len > 0 && *p == ct.widen('-')) {
+            neg = true;
+            ++p;
+            --len;
+        }
+        size_t n = 0;
+        while (n < len && ct.is(ctype_base::digit, p[n])) ++n;
+
+        __money::Digits<charT> d;
+        d.wide = p;
+        d.n    = n;
+        return intl ? Emit<true>(s, f, fill, d, neg) : Emit<false>(s, f, fill, d, neg);
+    }
+
+private:
+    template <bool Intl>
+    iter_type Emit(iter_type s, ios_base &f, char_type fill,
+                   const __money::Digits<charT> &d, bool neg) const
+    {
+        const locale                       loc = f.getloc();
+        const ctype<charT>                &ct  = use_facet<ctype<charT>>(loc);
+        const moneypunct<charT, Intl>     &mp  = use_facet<moneypunct<charT, Intl>>(loc);
+
+        const money_base::pattern pat  = neg ? mp.neg_format() : mp.pos_format();
+        const basic_string<charT> signs = neg ? mp.negative_sign() : mp.positive_sign();
+        const basic_string<charT> sym   = mp.curr_symbol();
+        const string              grp   = mp.grouping();
+        const int                 frac  = mp.frac_digits();
+        const bool showbase = (f.flags() & ios_base::showbase) != ios_base::fmtflags{};
+
+        const __money::Layout L = __money::Plan(d.n, frac, grp);
+
+        // The first character of the sign string stands where the pattern puts
+        // it; everything after it goes at the very end of the field. That is
+        // how "()" makes a negative amount read (12.34) — measured identically
+        // on both reference implementations.
+        const size_t signHead = signs.empty() ? 0 : 1;
+        const size_t signTail = signs.empty() ? 0 : signs.size() - 1;
+
+        size_t core = signHead + signTail + L.width;
+        if (showbase) core += sym.size();
+        for (int k = 0; k < 4; ++k)
+            if (pat.field[k] == money_base::space) ++core;
+
+        const streamsize w   = f.width();
+        const size_t     pad = (w > 0 && static_cast<size_t>(w) > core)
+                                   ? static_cast<size_t>(w) - core
+                                   : 0;
+
+        const auto adj = f.flags() & ios_base::adjustfield;
+        const bool internalFill = adj == ios_base::internal;
+        const bool leftFill     = adj == ios_base::left;
+
+        __ios::IterSink<charT, iter_type> sink{s, &ct};
+
+        if (pad > 0 && !internalFill && !leftFill) sink.Fill(fill, streamsize(pad));
+
+        for (int k = 0; k < 4; ++k) {
+            switch (pat.field[k]) {
+                case money_base::none:
+                    if (pad > 0 && internalFill) sink.Fill(fill, streamsize(pad));
+                    break;
+                case money_base::space:
+                    // [locale.moneypunct]: at least one space is required at
+                    // this position. The fill goes in beside it, not instead
+                    // of it — a fill character that is not a space would leave
+                    // the required space missing.
+                    if (pad > 0 && internalFill) sink.Fill(fill, streamsize(pad));
+                    sink.Run(" ", 1);
+                    break;
+                case money_base::symbol:
+                    if (showbase)
+                        for (charT c : sym) sink.Fill(c, 1);
+                    break;
+                case money_base::sign:
+                    if (signHead != 0) sink.Fill(signs[0], 1);
+                    break;
+                case money_base::value:
+                    EmitValue(sink, ct, d, L, mp);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        for (size_t i = 1; i < signs.size(); ++i) sink.Fill(signs[i], 1);
+        if (pad > 0 && leftFill) sink.Fill(fill, streamsize(pad));
+
+        f.width(0);
+        return sink.out;
+    }
+
+    template <bool Intl, class Sink>
+    void EmitValue(Sink &sink, const ctype<charT> &ct, const __money::Digits<charT> &d,
+                   const __money::Layout &L, const moneypunct<charT, Intl> &mp) const
+    {
+        const string grp   = mp.grouping();
+        const charT  sep   = mp.thousands_sep();
+        const charT  point = mp.decimal_point();
+
+        size_t i = 0;
+        if (L.intIsZero) {
+            sink.Run("0", 1);
+        } else {
+            // The leftmost group, then the rest right to left: group k counts
+            // from the RIGHT, so walking forward means counting down.
+            for (size_t g = 0; g < L.firstLen; ++g) sink.Fill(d.At(i++, ct), 1);
+            for (size_t k = L.seps; k-- > 0;) {
+                sink.Fill(sep, 1);
+                const size_t step = __ios::__grouping::At(grp, k);
+                for (size_t g = 0; g < step; ++g) sink.Fill(d.At(i++, ct), 1);
+            }
+        }
+
+        if (mp.frac_digits() > 0) {
+            sink.Fill(point, 1);
+            for (size_t z = 0; z < L.fracZeros; ++z) sink.Run("0", 1);
+            for (size_t g = 0; g < L.fracCount; ++g) sink.Fill(d.At(i++, ct), 1);
+        }
+    }
+};
+
+template <class charT, class OutputIterator>
+locale::id money_put<charT, OutputIterator>::id{};
+
+template <>
+inline locale::id money_put<char, ostreambuf_iterator<char>>::id{__cvt::kIdMoneyPutChar};
+template <>
+inline locale::id money_put<wchar_t, ostreambuf_iterator<wchar_t>>::id{__cvt::kIdMoneyPutWchar};
+
+// ── money_get [locale.money.get] ────────────────────────────────────────
+// The parse follows mp.neg_format() for BOTH signs — [locale.money.get.
+// virtuals] says so, and it is why a locale whose two patterns differ can
+// write something it cannot read back.
+//
+// Nothing is ever put back. A single-pass iterator cannot, so a multi-character
+// string (the currency symbol, a sign like "()") is only entered when its FIRST
+// character matches, and a mismatch after that is a failure rather than a
+// retreat. That is the same discipline num_get's stage 2 arrived at in Ф43-c-2.
+template <class charT, class InputIterator = istreambuf_iterator<charT>>
+class money_get : public locale::facet {
+public:
+    using char_type   = charT;
+    using iter_type   = InputIterator;
+    using string_type = basic_string<charT>;
+
+    constexpr explicit money_get(size_t refs = 0) noexcept : locale::facet(refs) {}
+
+    static locale::id id;
+
+    iter_type get(iter_type s, iter_type end, bool intl, ios_base &f,
+                  ios_base::iostate &err, long double &units) const
+    {
+        return do_get(s, end, intl, f, err, units);
+    }
+    iter_type get(iter_type s, iter_type end, bool intl, ios_base &f,
+                  ios_base::iostate &err, string_type &digits) const
+    {
+        return do_get(s, end, intl, f, err, digits);
+    }
+
+protected:
+    ~money_get() = default;
+
+    virtual iter_type do_get(iter_type s, iter_type end, bool intl, ios_base &f,
+                             ios_base::iostate &err, long double &units) const
+    {
+        string      ascii;
+        string_type wide;
+        bool        neg = false;
+        const bool  ok  = intl ? Parse<true>(s, end, f, err, ascii, wide, neg)
+                               : Parse<false>(s, end, f, err, ascii, wide, neg);
+        if (!ok) return s;
+
+        long double v = 0;
+        auto        r = from_chars(ascii.data(), ascii.data() + ascii.size(), v,
+                                   chars_format::fixed);
+        if (r.ec == errc::result_out_of_range) {
+            // The clamped extreme carrying the parsed sign, which is the
+            // convention num_get already uses for a number too large to hold.
+            units = neg ? -numeric_limits<long double>::max()
+                        : numeric_limits<long double>::max();
+            err |= ios_base::failbit;
+            return s;
+        }
+        if (r.ec != errc{}) {
+            err |= ios_base::failbit;
+            return s;
+        }
+        units = neg ? -v : v;
+        return s;
+    }
+
+    virtual iter_type do_get(iter_type s, iter_type end, bool intl, ios_base &f,
+                             ios_base::iostate &err, string_type &digits) const
+    {
+        string      ascii;
+        string_type wide;
+        bool        neg = false;
+        const bool  ok  = intl ? Parse<true>(s, end, f, err, ascii, wide, neg)
+                               : Parse<false>(s, end, f, err, ascii, wide, neg);
+        if (!ok) return s;
+
+        // The stored string carries the minus and no plus, which is exactly
+        // the form the other do_put overload accepts back. The locale is held
+        // by value: use_facet returns a reference INTO the table it names, and
+        // getloc() hands back a temporary.
+        const locale        loc = f.getloc();
+        const ctype<charT> &ct  = use_facet<ctype<charT>>(loc);
+        digits.clear();
+        if (neg) digits.push_back(ct.widen('-'));
+        digits.append(wide);
+        return s;
+    }
+
+private:
+    template <bool Intl>
+    bool Parse(iter_type &in, iter_type end, ios_base &str, ios_base::iostate &err,
+               string &ascii, string_type &wide, bool &neg) const
+    {
+        const locale                   loc = str.getloc();
+        const ctype<charT>            &ct  = use_facet<ctype<charT>>(loc);
+        const moneypunct<charT, Intl> &mp  = use_facet<moneypunct<charT, Intl>>(loc);
+
+        const money_base::pattern pat  = mp.neg_format();
+        const basic_string<charT> ps   = mp.positive_sign();
+        const basic_string<charT> ns   = mp.negative_sign();
+        const basic_string<charT> sym  = mp.curr_symbol();
+        const string              grp  = mp.grouping();
+        const int                 frac = mp.frac_digits();
+        const bool showbase = (str.flags() & ios_base::showbase) != ios_base::fmtflags{};
+
+        bool                hitEnd = false;
+        basic_string<charT> tail;      // what is left of a matched sign string
+        bool                sawValue = false;
+        neg                          = false;
+
+        const auto Fail = [&]() {
+            if (hitEnd) err |= ios_base::eofbit;
+            err |= ios_base::failbit;
+            return false;
+        };
+        const auto Peek = [&](charT &c) {
+            if (in == end) {
+                hitEnd = true;
+                return false;
+            }
+            c = *in;
+            return true;
+        };
+
+        for (int k = 0; k < 4; ++k) {
+            switch (pat.field[k]) {
+                case money_base::none: {
+                    // Whitespace is permitted here — unless `none` ends the
+                    // pattern, in which case the field is over and trailing
+                    // whitespace belongs to whatever reads next.
+                    if (k == 3) break;
+                    charT c;
+                    while (Peek(c) && ct.is(ctype_base::space, c)) ++in;
+                    break;
+                }
+                case money_base::space: {
+                    charT c;
+                    if (!Peek(c) || !ct.is(ctype_base::space, c)) return Fail();
+                    while (Peek(c) && ct.is(ctype_base::space, c)) ++in;
+                    break;
+                }
+                case money_base::symbol: {
+                    if (sym.empty()) break;
+                    charT c;
+                    if (!Peek(c)) {
+                        if (showbase) return Fail();
+                        break;
+                    }
+                    if (c != sym[0]) {
+                        // Optional means optional: a symbol that is not there
+                        // is only an error when showbase demanded it.
+                        if (showbase) return Fail();
+                        break;
+                    }
+                    for (size_t i = 0; i < sym.size(); ++i) {
+                        if (!Peek(c) || c != sym[i]) return Fail();
+                        ++in;
+                    }
+                    break;
+                }
+                case money_base::sign: {
+                    charT c;
+                    const bool have = Peek(c);
+                    if (!ps.empty() && have && c == ps[0]) {
+                        neg  = false;
+                        tail = ps.substr(1);
+                        ++in;
+                    } else if (!ns.empty() && have && c == ns[0]) {
+                        neg  = true;
+                        tail = ns.substr(1);
+                        ++in;
+                    } else if (ps.empty()) {
+                        // An empty sign string matches the empty string, and
+                        // when both are empty [locale.money.get.virtuals] makes
+                        // the result positive.
+                        neg = false;
+                    } else if (ns.empty()) {
+                        neg = true;
+                    } else {
+                        return Fail();
+                    }
+                    break;
+                }
+                case money_base::value: {
+                    if (!Value(in, end, ct, grp, mp, frac, ascii, wide, hitEnd))
+                        return Fail();
+                    sawValue = true;
+                    break;
+                }
+                default:
+                    break;
+            }
+        }
+
+        if (!sawValue) return Fail();
+
+        // Whatever is left of a multi-character sign is required after every
+        // other component, which is what makes "(12.34)" one field.
+        for (size_t i = 0; i < tail.size(); ++i) {
+            charT c;
+            if (!Peek(c) || c != tail[i]) return Fail();
+            ++in;
+        }
+
+        if (in == end) hitEnd = true;
+        if (hitEnd) err |= ios_base::eofbit;
+        return true;
+    }
+
+    template <bool Intl>
+    bool Value(iter_type &in, iter_type end, const ctype<charT> &ct, const string &grp,
+               const moneypunct<charT, Intl> &mp, int frac, string &ascii,
+               string_type &wide, bool &hitEnd) const
+    {
+        const charT sep     = mp.thousands_sep();
+        const charT point   = mp.decimal_point();
+        const bool  grouped = !grp.empty();
+
+        // Separator positions grow with the input, like the digits themselves:
+        // put_money can write 4933 digits from a long double, so a fixed mark
+        // buffer here would refuse amounts this same facet can produce.
+        vector<size_t> seps;
+
+        size_t n = 0;
+        for (;;) {
+            if (in == end) {
+                hitEnd = true;
+                break;
+            }
+            const charT c = *in;
+            if (grouped && c == sep) {
+                seps.push_back(n);
+                ++in;
+                continue;
+            }
+            if (!ct.is(ctype_base::digit, c)) break;
+            ascii.push_back(ct.narrow(c, '0'));
+            wide.push_back(c);
+            ++n;
+            ++in;
+        }
+        if (n == 0) return false;
+        if (!__ios::__grouping::ConsistentAt(grp, seps.data(), seps.size(), n)) return false;
+
+        if (frac <= 0) return true;
+
+        // The fraction is not optional when the facet says an amount has one.
+        // libstdc++ accepts an amount without it and reads "1234" as 12.34;
+        // libc++ requires it. Requiring is the only rule under which no input
+        // is silently reinterpreted as a different amount.
+        if (in == end) {
+            hitEnd = true;
+            return false;
+        }
+        if (*in != point) return false;
+        ++in;
+        for (int i = 0; i < frac; ++i) {
+            if (in == end) {
+                hitEnd = true;
+                return false;
+            }
+            const charT c = *in;
+            if (!ct.is(ctype_base::digit, c)) return false;
+            ascii.push_back(ct.narrow(c, '0'));
+            wide.push_back(c);
+            ++in;
+        }
+        return true;
+    }
+};
+
+template <class charT, class InputIterator>
+locale::id money_get<charT, InputIterator>::id{};
+
+template <>
+inline locale::id money_get<char, istreambuf_iterator<char>>::id{__cvt::kIdMoneyGetChar};
+template <>
+inline locale::id money_get<wchar_t, istreambuf_iterator<wchar_t>>::id{
+    __cvt::kIdMoneyGetWchar};
+
+} // namespace std
+
+#endif // BOXCXX_BITS_LOCALE_MONEY

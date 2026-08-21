@@ -28,11 +28,113 @@
 #define BOXCXX_BITS_FIELD_ENGINE
 
 #include <ios>
+#include <string>   // grouping() is a string, and the rule that reads it lives here
 
 namespace std {
 namespace __ios {
 
 enum class Align { Left, Right, Internal };
+
+// ── what a grouping string means, said once ─────────────────────────────
+// A grouping() is read RIGHT to left: element 0 sizes the rightmost group,
+// and the LAST element repeats for every group beyond it. An element that is
+// 0 or >= CHAR_MAX means "group no further" — the way a program says "group
+// the low digits and leave the rest alone".
+//
+// Both directions need this rule and they used to state it separately:
+// num_put's writer carried it as a lambda, and num_get did not carry it at
+// all — it discarded separators without ever asking whether they stood in
+// legal places. One statement, two callers, so the two cannot drift.
+namespace __grouping {
+
+inline size_t At(const string &pattern, size_t k)
+{
+    if (pattern.empty()) return 0;
+    const char g = pattern[k < pattern.size() ? k : pattern.size() - 1];
+    return (g <= 0 || static_cast<unsigned char>(g) >= 127) ? size_t(0)
+                                                            : static_cast<size_t>(g);
+}
+
+// Stage 3 of [facet.num.get.virtuals]: the positions of the separators that
+// were read and discarded are examined for consistency with grouping().
+//
+// This is the rule for ONE group. `j` counts from the RIGHT, `size` is how
+// many digits the group holds, and `leftmost` says whether anything stands to
+// its left: the leftmost group may be SHORTER than its pattern element — a
+// number does not have to fill its highest group — but may not be empty,
+// which is what makes a leading separator wrong. Every other group must match
+// exactly.
+inline bool GroupOk(const string &pattern, size_t j, size_t size, bool leftmost)
+{
+    const size_t want = At(pattern, j);
+    if (want == 0) return false;   // grouping stopped short of this position
+    return leftmost ? (size >= 1 && size <= want) : (size == want);
+}
+
+// The same rule for a caller whose digits are NOT bounded by a stack buffer:
+// `seps` holds, in increasing order, how many digits stood before each
+// separator. money_get needs this — the fixed form of a long double runs to
+// 4933 digits, so a fixed mark buffer there would refuse amounts money_put can
+// write.
+inline bool ConsistentAt(const string &pattern, const size_t *seps, size_t count,
+                         size_t digits)
+{
+    if (count == 0) return true;   // grouping permits separators, never demands them
+    if (pattern.empty()) return false;
+
+    size_t j = 0, right = digits;
+    for (size_t i = count; i-- > 0;) {
+        if (seps[i] > right) return false;
+        if (!GroupOk(pattern, j, right - seps[i], false)) return false;
+        right = seps[i];
+        ++j;
+    }
+    return GroupOk(pattern, j, right, true);
+}
+
+// Where the discarded separators stood, one bit per digit: bit k is set when a
+// separator was read after exactly k digits. That is everything stage 3 needs,
+// and it costs an eighth of a byte per digit instead of an array of group
+// sizes — the float grammar accumulates 2048 digits, and a size_t per possible
+// group there would be sixteen kilobytes of stack. That mistake has been made
+// once in this subsystem already.
+template <size_t Digits>
+struct SepMarks {
+    unsigned char bits[Digits / 8 + 1] = {};
+    bool          any                  = false;
+
+    void Mark(size_t k)
+    {
+        if (k > Digits) return;
+        bits[k >> 3] |= static_cast<unsigned char>(1u << (k & 7));
+        any = true;
+    }
+    bool Has(size_t k) const
+    {
+        return k <= Digits && (bits[k >> 3] & (1u << (k & 7))) != 0;
+    }
+
+    // Walks the digits right to left, which is the only direction in which a
+    // group's index is known before its size is.
+    bool Consistent(const string &pattern, size_t digits) const
+    {
+        if (!any) return true;         // grouping permits separators, never demands them
+        if (pattern.empty()) return false;
+
+        size_t j = 0, run = 0;
+        for (size_t i = digits; i > 0; --i) {
+            ++run;
+            if (Has(i - 1)) {
+                if (!GroupOk(pattern, j, run, false)) return false;
+                ++j;
+                run = 0;
+            }
+        }
+        return GroupOk(pattern, j, run, true);
+    }
+};
+
+} // namespace __grouping
 
 // A conversion that could not fit its buffer. [ostream.formatted.reqmts]
 // makes that failbit and not an exception — but a facet has no stream to set
