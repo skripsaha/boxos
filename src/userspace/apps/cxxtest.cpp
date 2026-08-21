@@ -51296,6 +51296,51 @@ void Phase223()
               "numpunct changes nothing for it");
     }
 
+    // ── (21)-(26) stage 3: WHERE the separators stood (Ф43-d-2) ─────────
+    // Until the monetary category needed the same rule stated properly, the
+    // separators num_get discarded were never examined: "12_34" parsed as 1234
+    // with the stream still good. [facet.num.get.virtuals] stage 3 says their
+    // positions are checked against grouping() and failbit set when they are
+    // wrong — and that the digits are STILL stored, which is what makes the
+    // check observable rather than merely destructive. Both reference
+    // implementations do exactly that; it was measured before this was written.
+    {
+        const locale grouped(classic, new CommaPunct);
+
+        const auto Read = [&grouped](const char *text, long &out) {
+            std::istringstream is(text);
+            is.imbue(grouped);
+            out = -1;
+            is >> out;
+            return is.fail();
+        };
+
+        long v = 0;
+        Check(!Read("1_234", v) && v == 1234, "phase223 (21) a correctly grouped number");
+        Check(!Read("1234", v) && v == 1234,
+              "phase223 (22) no separators at all is always consistent");
+        Check(Read("12_34", v) && v == 1234,
+              "phase223 (23) a group of the wrong size fails - and still stores the digits");
+        Check(Read("1_2_3", v) && v == 123, "phase223 (24) ... every group, not just one");
+        Check(Read("1_23456", v) && v == 123456,
+              "phase223 (25) ... the rightmost group is the one that must be exact");
+        Check(Read("_123", v), "phase223 (26) a leading separator groups nothing");
+
+        // The same rule reaches the integer part of a float, and stops there.
+        std::istringstream fs("1_234,5");
+        fs.imbue(grouped);
+        double d = 0;
+        fs >> d;
+        Check(!fs.fail() && d == 1234.5,
+              "phase223 (27) a grouped float parses, point and all");
+        std::istringstream bad("12_34,5");
+        bad.imbue(grouped);
+        double d2 = 0;
+        bad >> d2;
+        Check(bad.fail() && d2 == 1234.5,
+              "phase223 (28) ... and its integer part is checked like any other");
+    }
+
     printf("[CXX] PASS phase223: num_get - the grammar that stopped needing to put "
            "characters back\n");
 }
@@ -51445,6 +51490,443 @@ void Phase224()
 
 
 
+
+// ── phase225: the monetary category (Ф43-d-2) ───────────────────────────
+// The oracle for every expected string below is not a table of what I thought
+// the answer should be — it is what two independent implementations produce
+// for the same facet and the same amount. Where they AGREE, the string here is
+// theirs. Where they disagree, the comment says so and names the decision.
+//
+// A failing check prints the string it actually got. A check that only says
+// "expected X" costs a second boot to learn what happened instead, and this
+// suite is the one that measured that boot at seven minutes.
+namespace {
+
+void CheckMoney(const std::string &got, const char *want, const char *what)
+{
+    if (got != want) {
+        printf("[CXX] FAIL %s: got \"%s\" want \"%s\"\n", what, got.c_str(), want);
+        g_failures++;
+    }
+}
+
+void CheckMoneyW(const std::wstring &got, const char *want, const char *what)
+{
+    std::string narrow;
+    for (wchar_t c : got) narrow.push_back(c < 128 ? static_cast<char>(c) : '?');
+    CheckMoney(narrow, want, what);
+}
+
+using MB = std::money_base;
+
+MB::pattern MoneyPat(MB::part a, MB::part b, MB::part c, MB::part d)
+{
+    MB::pattern p;
+    p.field[0] = static_cast<char>(a);
+    p.field[1] = static_cast<char>(b);
+    p.field[2] = static_cast<char>(c);
+    p.field[3] = static_cast<char>(d);
+    return p;
+}
+
+// A facet that answers differently in every field, so that a rule which is
+// invisible in "C" (grouping, a fraction, a symbol, a two-character sign) has
+// something to be visible against.
+template <bool Intl>
+struct Krona : std::moneypunct<char, Intl> {
+    MB::pattern pos_, neg_;
+    std::string cur_, ps_, ns_, grp_;
+    int         frac_;
+
+    Krona(MB::pattern p, MB::pattern n, const char *cur, const char *ps, const char *ns,
+          const std::string &grp, int frac)
+        : pos_(p), neg_(n), cur_(cur), ps_(ps), ns_(ns), grp_(grp), frac_(frac)
+    {
+    }
+
+protected:
+    char        do_decimal_point() const override { return '.'; }
+    char        do_thousands_sep() const override { return '\''; }
+    std::string do_grouping() const override { return grp_; }
+    std::string do_curr_symbol() const override { return cur_; }
+    std::string do_positive_sign() const override { return ps_; }
+    std::string do_negative_sign() const override { return ns_; }
+    int         do_frac_digits() const override { return frac_; }
+    MB::pattern do_pos_format() const override { return pos_; }
+    MB::pattern do_neg_format() const override { return neg_; }
+};
+
+// One rendering, with the facet and the stream state the caller asks for.
+template <class Amount>
+std::string MoneyOut(const std::locale &loc, const Amount &v, bool intl, bool showbase,
+                     int width, std::ios_base::fmtflags adjust, char fill)
+{
+    std::ostringstream os;
+    os.imbue(loc);
+    if (showbase) os.setf(std::ios_base::showbase);
+    if (adjust != std::ios_base::fmtflags{})
+        os.setf(adjust, std::ios_base::adjustfield);
+    os.width(width);
+    os.fill(fill);
+    os << std::put_money(v, intl);
+    return os.str();
+}
+
+std::string MoneyIn(const std::locale &loc, const char *text, bool showbase, bool &failed,
+                    int &next)
+{
+    std::istringstream is(text);
+    is.imbue(loc);
+    if (showbase) is.setf(std::ios_base::showbase);
+    std::string got;
+    is >> std::get_money(got);
+    failed = is.fail();
+    next   = (failed || is.eof()) ? -1 : is.peek();
+    return got;
+}
+
+} // namespace
+
+void Phase225()
+{
+    using std::ios_base;
+    using std::locale;
+    using std::string;
+
+    const locale classic = locale::classic();
+
+    // ── 1. what "C" answers ─────────────────────────────────────────────
+    {
+        const auto &mp = std::use_facet<std::moneypunct<char>>(classic);
+        Check(mp.curr_symbol().empty(), "phase225 (1) \"C\" has no currency symbol");
+        Check(mp.positive_sign().empty(), "phase225 (2) \"C\" has no positive sign");
+        Check(mp.negative_sign() == "-", "phase225 (3) \"C\" writes a negative amount with a minus");
+        Check(mp.frac_digits() == 0, "phase225 (4) \"C\" has no fractional digits");
+        Check(mp.grouping().empty(), "phase225 (5) \"C\" groups nothing");
+        Check(mp.decimal_point() == '.' && mp.thousands_sep() == ',',
+              "phase225 (6) ... and still answers the two separator questions");
+
+        const MB::pattern p = mp.pos_format(), n = mp.neg_format();
+        Check(p.field[0] == MB::symbol && p.field[1] == MB::sign && p.field[2] == MB::none &&
+                  p.field[3] == MB::value,
+              "phase225 (7) the default pattern is {symbol, sign, none, value}");
+        Check(n.field[0] == p.field[0] && n.field[3] == p.field[3],
+              "phase225 (8) and both signs use it");
+
+        static_assert(std::moneypunct<char, true>::intl);
+        static_assert(!std::moneypunct<char, false>::intl);
+        static_assert(std::is_same_v<decltype(std::moneypunct<char>::intl), const bool>);
+        Check(&std::moneypunct<char, false>::id != &std::moneypunct<char, true>::id,
+              "phase225 (9) the two instantiations are two different facets");
+        Check(std::has_facet<std::moneypunct<wchar_t, true>>(classic),
+              "phase225 (10) all four moneypunct instantiations are in the classic locale");
+    }
+
+    // ── 2. "C" put: the sign survives ───────────────────────────────────
+    {
+        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
+                   "123456", "phase225 (11) a plain amount");
+        CheckMoney(MoneyOut(classic, -123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
+                   "-123456", "phase225 (12) a negative amount keeps its sign");
+        CheckMoney(MoneyOut(classic, 0.0L, false, false, 0, ios_base::fmtflags{}, ' '), "0",
+                   "phase225 (13) zero");
+        CheckMoney(MoneyOut(classic, 1234.56L, false, false, 0, ios_base::fmtflags{}, ' '),
+                   "1235", "phase225 (14) units are whole: 1234.56 rounds as %.0Lf does");
+        CheckMoney(MoneyOut(classic, 123456.0L, true, true, 0, ios_base::fmtflags{}, ' '),
+                   "123456", "phase225 (15) showbase adds nothing when there is no symbol");
+
+        CheckMoney(MoneyOut(classic, string("123456"), false, false, 0, ios_base::fmtflags{}, ' '),
+                   "123456", "phase225 (16) the digits overload");
+        CheckMoney(MoneyOut(classic, string("-123456"), false, false, 0, ios_base::fmtflags{}, ' '),
+                   "-123456", "phase225 (17) ... with a leading minus");
+        CheckMoney(MoneyOut(classic, string("12a34"), false, false, 0, ios_base::fmtflags{}, ' '),
+                   "12", "phase225 (18) ... stopping at the first non-digit, digits after it ignored");
+        CheckMoney(MoneyOut(classic, string(""), false, false, 0, ios_base::fmtflags{}, ' '),
+                   "0", "phase225 (19) ... and no digits at all is zero, not nothing");
+    }
+
+    // ── 3. "C" width and adjustfield ────────────────────────────────────
+    {
+        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::fmtflags{}, '*'),
+                   "********123456", "phase225 (20) width pads on the left by default");
+        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::left, '*'),
+                   "123456********", "phase225 (21) left");
+        CheckMoney(MoneyOut(classic, -123456.0L, false, false, 14, ios_base::internal, '*'),
+                   "-*******123456",
+                   "phase225 (22) internal puts the fill where `none` stands, after the sign");
+        std::ostringstream os;
+        os.imbue(classic);
+        os.width(14);
+        os << std::put_money(1.0L);
+        Check(os.width() == 0, "phase225 (23) do_put resets the width");
+    }
+
+    // ── 4. "C" get ──────────────────────────────────────────────────────
+    {
+        bool failed = false;
+        int  next   = 0;
+        CheckMoney(MoneyIn(classic, "123456", false, failed, next), "123456",
+                   "phase225 (24) a plain amount reads back");
+        Check(!failed, "phase225 (25) ... without failing");
+        CheckMoney(MoneyIn(classic, "-123456", false, failed, next), "-123456",
+                   "phase225 (26) and so does a negative one, which \"\" could not do");
+        Check(!failed, "phase225 (27) ... without failing");
+
+        (void)MoneyIn(classic, "", false, failed, next);
+        Check(failed, "phase225 (28) nothing at all fails");
+        (void)MoneyIn(classic, "abc", false, failed, next);
+        Check(failed, "phase225 (29) letters fail");
+        (void)MoneyIn(classic, "+123", false, failed, next);
+        Check(failed, "phase225 (30) a plus fails: \"C\" has no positive sign to spend it on");
+        CheckMoney(MoneyIn(classic, "12.34", false, failed, next), "12",
+                   "phase225 (31) with no fractional digits the point ends the amount");
+        Check(!failed && next == '.', "phase225 (32) ... and is left in the stream");
+        CheckMoney(MoneyIn(classic, "123abc", false, failed, next), "123",
+                   "phase225 (33) trailing text is left alone");
+        Check(!failed && next == 'a', "phase225 (34) ... at the character that stopped it");
+
+        std::istringstream is("789");
+        is.imbue(classic);
+        long double ld = 0;
+        is >> std::get_money(ld);
+        Check(!is.fail() && ld == 789.0L, "phase225 (35) the long double overload");
+
+        // Round trip through both engines, which is the property "" forbade.
+        std::ostringstream os;
+        os.imbue(classic);
+        os << std::put_money(-4242.0L);
+        std::istringstream back(os.str());
+        back.imbue(classic);
+        long double got = 0;
+        back >> std::get_money(got);
+        Check(!back.fail() && got == -4242.0L,
+              "phase225 (36) put_money then get_money is the identity, sign included");
+    }
+
+    // ── 5. a facet that answers differently in every field ──────────────
+    {
+        const MB::pattern ssnv = MoneyPat(MB::symbol, MB::sign, MB::none, MB::value);
+        const MB::pattern vsns = MoneyPat(MB::value, MB::space, MB::sign, MB::symbol);
+        const MB::pattern vnss = MoneyPat(MB::value, MB::none, MB::sign, MB::symbol);
+
+        const locale k(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "()", "\3", 2));
+        CheckMoney(MoneyOut(k, -123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "USD(1'234.56)",
+                   "phase225 (37) a two-character sign: head in place, tail at the very end");
+        CheckMoney(MoneyOut(k, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "USD+1'234.56", "phase225 (38) grouping, fraction and symbol together");
+        CheckMoney(MoneyOut(k, 123456.0L, false, false, 0, ios_base::fmtflags{}, '.'),
+                   "+1'234.56", "phase225 (39) the symbol appears only under showbase");
+        CheckMoney(MoneyOut(k, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.05",
+                   "phase225 (40) too few digits for the fraction gets a zero integer part");
+        CheckMoney(MoneyOut(k, 0.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.00",
+                   "phase225 (41) ... zero included");
+        CheckMoney(MoneyOut(k, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "USD+123'456.78", "phase225 (42) grouping runs over the integer part only");
+
+        const locale k4(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\3", 4));
+        CheckMoney(MoneyOut(k4, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.0005",
+                   "phase225 (43) four fractional digits");
+
+        const locale k12(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\1\2", 2));
+        CheckMoney(MoneyOut(k12, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "USD+1'23'45'6.78", "phase225 (44) a two-element grouping repeats its last");
+
+        const locale k0(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\3", 0));
+        CheckMoney(MoneyOut(k0, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "USD+123'456", "phase225 (45) no fraction, no point");
+
+        const locale ksp(classic, new Krona<false>(vsns, vsns, "USD", "+", "-", "\3", 2));
+        CheckMoney(MoneyOut(ksp, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "12.34 +USD",
+                   "phase225 (46) `space` generates a space, not the fill character");
+        const locale kno(classic, new Krona<false>(vnss, vnss, "USD", "+", "-", "\3", 2));
+        CheckMoney(MoneyOut(kno, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+                   "12.34+USD", "phase225 (47) `none` generates nothing");
+
+        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::internal, '.'),
+                   "USD+...........12.34",
+                   "phase225 (48) internal fill lands on the `none` slot");
+        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::left, '.'),
+                   "USD+12.34...........", "phase225 (49) left");
+        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::right, '.'),
+                   "...........USD+12.34", "phase225 (50) right");
+        CheckMoney(MoneyOut(ksp, 1234.0L, false, true, 20, ios_base::internal, '.'),
+                   "12.34.......... +USD",
+                   "phase225 (51) internal fill precedes the required space, never replaces it");
+        CheckMoney(MoneyOut(k, -1234.0L, false, true, 20, ios_base::internal, '.'),
+                   "USD(..........12.34)",
+                   "phase225 (52) the sign's tail stays last, past the fill");
+    }
+
+    // ── 6. the same facet, read back ────────────────────────────────────
+    {
+        const MB::pattern ssnv = MoneyPat(MB::symbol, MB::sign, MB::none, MB::value);
+        const MB::pattern vsns = MoneyPat(MB::value, MB::space, MB::sign, MB::symbol);
+        const locale k(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "()", "\3", 2));
+        const locale kp(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\3", 2));
+
+        bool failed = false;
+        int  next   = 0;
+        CheckMoney(MoneyIn(k, "USD+1'234.56", false, failed, next), "123456",
+                   "phase225 (53) symbol, sign, groups and fraction all parsed");
+        Check(!failed, "phase225 (54) ... without failing");
+        CheckMoney(MoneyIn(k, "USD+1'234.56", true, failed, next), "123456",
+                   "phase225 (55) showbase makes the symbol required and it is there");
+        (void)MoneyIn(k, "+1'234.56", true, failed, next);
+        Check(failed, "phase225 (56) ... and required means required");
+        CheckMoney(MoneyIn(k, "+1'234.56", false, failed, next), "123456",
+                   "phase225 (57) without showbase the symbol is optional");
+        CheckMoney(MoneyIn(k, "USD(1'234.56)", false, failed, next), "-123456",
+                   "phase225 (58) a two-character sign is closed at the end of the field");
+        Check(!failed, "phase225 (59) ... without failing");
+        (void)MoneyIn(k, "USD()1'234.56", false, failed, next);
+        Check(failed, "phase225 (60) ... and not in the middle of it");
+        (void)MoneyIn(k, "USD1'234.56", false, failed, next);
+        Check(failed, "phase225 (61) a sign this facet requires cannot be omitted");
+        (void)MoneyIn(kp, "USD+12'34.56", false, failed, next);
+        Check(failed, "phase225 (62) a separator in the wrong place fails");
+        (void)MoneyIn(kp, "USD+1'234", false, failed, next);
+        Check(failed, "phase225 (63) a facet with a fraction requires the fraction");
+        (void)MoneyIn(kp, "USD+1'234.5", false, failed, next);
+        Check(failed, "phase225 (64) ... all of it");
+        CheckMoney(MoneyIn(kp, "USD+1'234.567", false, failed, next), "123456",
+                   "phase225 (65) ... and exactly it, leaving the rest");
+        Check(!failed && next == '7', "phase225 (66) ... in the stream");
+
+        const locale ksp(classic, new Krona<false>(vsns, vsns, "USD", "+", "-", "\3", 2));
+        CheckMoney(MoneyIn(ksp, "1'234.56 +USD", false, failed, next), "123456",
+                   "phase225 (67) a pattern that ends with the symbol");
+        (void)MoneyIn(ksp, "1'234.56+USD", false, failed, next);
+        Check(failed, "phase225 (68) ... whose required space is required");
+
+        std::istringstream is("USD(1'234.56)");
+        is.imbue(k);
+        long double ld = 0;
+        is >> std::get_money(ld);
+        Check(!is.fail() && ld == -123456.0L,
+              "phase225 (69) the long double overload counts in the smallest unit");
+    }
+
+    // ── 7. the wide side answers the same questions ─────────────────────
+    {
+        std::wostringstream wos;
+        wos.imbue(classic);
+        wos << std::put_money(-4242.0L);
+        CheckMoneyW(wos.str(), "-4242", "phase225 (70) wchar_t put_money");
+
+        std::wistringstream wis(L"-4242");
+        wis.imbue(classic);
+        std::wstring wd;
+        wis >> std::get_money(wd);
+        CheckMoneyW(wd, "-4242", "phase225 (71) wchar_t get_money");
+
+        const auto &wmp = std::use_facet<std::moneypunct<wchar_t, true>>(classic);
+        Check(wmp.negative_sign() == L"-" && wmp.frac_digits() == 0,
+              "phase225 (72) and the wide facet answers as the narrow one does");
+    }
+
+    // ── 8. _byname, and the names this system is not ────────────────────
+    {
+        bool threw = false;
+        try {
+            (void)new std::moneypunct_byname<char>("de_DE.UTF-8");
+        } catch (const std::runtime_error &) {
+            threw = true;
+        }
+        Check(threw, "phase225 (73) moneypunct_byname refuses a name this system is not");
+
+        const locale byname(classic, new std::moneypunct_byname<char, true>("C"));
+        Check(std::use_facet<std::moneypunct<char, true>>(byname).negative_sign() == "-",
+              "phase225 (74) ... and the one it is answers like \"C\"");
+    }
+
+    // ── 9. an installed money_put replaces the rendering entirely ───────
+    {
+        struct Shouty : std::money_put<char> {
+        protected:
+            iter_type do_put(iter_type s, bool, std::ios_base &, char_type, long double) const override
+            {
+                const char *t = "LOTS";
+                for (const char *p = t; *p; ++p) *s++ = *p;
+                return s;
+            }
+        };
+        const locale sh(classic, new Shouty);
+        CheckMoney(MoneyOut(sh, 1.0L, false, false, 0, ios_base::fmtflags{}, ' '), "LOTS",
+                   "phase225 (75) put_money goes through the facet, whatever it decides");
+    }
+
+    // ── 10. PIN for d-3 ─────────────────────────────────────────────────
+    // A structural pin rather than a behavioural one, and only because the
+    // behaviour cannot be named yet: `time_put` is not a type, so no check can
+    // ask what it answers. What CAN be asked is where the built-in facet table
+    // stops, and d-3 is obliged to move it — the time category needs four more
+    // slots. This line has to fail then, and be rewritten, not remembered.
+    {
+        Check(std::__cvt::kBuiltinFacets == 24,
+              "phase225 (76) PIN: the facet table ends at the monetary category "
+              "- d-3 must extend it");
+    }
+
+    // ── 11. `intl` picks a DIFFERENT FACET, not a different mode ────────
+    // moneypunct<charT,true> and moneypunct<charT,false> are two facets with
+    // two locale::ids, and the bool says which one answers. A check whose two
+    // facets gave the same answer would pass whether or not that were true —
+    // which is exactly the empty check Ф43-b caught itself writing.
+    {
+        const MB::pattern ssnv = MoneyPat(MB::symbol, MB::sign, MB::none, MB::value);
+        locale both(classic, new Krona<false>(ssnv, ssnv, "NAR", "", "-", "", 0));
+        both = locale(both, new Krona<true>(ssnv, ssnv, "INT", "", "-", "", 0));
+        CheckMoney(MoneyOut(both, 5.0L, false, true, 0, ios_base::fmtflags{}, ' '), "NAR5",
+                   "phase225 (77) intl=false asks moneypunct<charT,false>");
+        CheckMoney(MoneyOut(both, 5.0L, true, true, 0, ios_base::fmtflags{}, ' '), "INT5",
+                   "phase225 (78) intl=true asks the other facet entirely");
+    }
+
+    // ── 12. an installed money_get replaces the parse ───────────────────
+    {
+        struct SevenMoney : std::money_get<char> {
+        protected:
+            iter_type do_get(iter_type in, iter_type, bool, std::ios_base &,
+                             std::ios_base::iostate &, long double &v) const override
+            {
+                v = 7;
+                return in;
+            }
+        };
+        std::istringstream is("123");
+        is.imbue(locale(classic, new SevenMoney));
+        long double ld = 0;
+        is >> std::get_money(ld);
+        Check(!is.fail() && ld == 7.0L,
+              "phase225 (79) get_money goes through the facet, whatever it decides");
+    }
+
+    // ── 13. an amount that is not one ───────────────────────────────────
+    // Measured on both reference implementations, because the first guess at
+    // what they do was wrong: libstdc++ writes an EMPTY string for infinity and
+    // leaves the stream good; libc++ writes "0", and "0" for a NaN too, and
+    // also leaves the stream good. Both hand back a number that is not the one
+    // they were given, silently. There is no amount of money that is infinity,
+    // so this writes nothing and says so.
+    {
+        const auto Bad = [&classic](long double v) {
+            std::ostringstream os;
+            os.imbue(classic);
+            os << std::put_money(v);
+            return os.fail() && os.str().empty();
+        };
+        Check(Bad(std::numeric_limits<long double>::infinity()) &&
+                  Bad(-std::numeric_limits<long double>::infinity()) &&
+                  Bad(std::numeric_limits<long double>::quiet_NaN()),
+              "phase225 (80) infinity and NaN are not amounts: failbit, and nothing "
+              "written");
+    }
+
+    printf("[CXX] PASS phase225: the monetary category - a sign that survives the "
+           "trip to the screen and back\n");
+}
 
 // ── phase2: the compile-time half of the suite ─────────────────────────
 // cxxtest_traits.cpp is a translation unit that only has to COMPILE; this
@@ -51713,6 +52195,7 @@ const PhaseRow kPhases[] = {
     {"222", Phase222},
     {"223", Phase223},
     {"224", Phase224},
+    {"225", Phase225},
     {"2", Phase2},
 };
 

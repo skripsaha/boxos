@@ -1,24 +1,35 @@
 // boxcxx — <locale>
 //
 // A locale is a container of facets, and this is the header that hands you
-// both. The types themselves are split across two leaves, and the split is
-// forced by a cycle rather than chosen for tidiness:
+// both. The types are split across leaves, and the split is forced by a cycle
+// rather than chosen for tidiness. The line that decides where a facet lives
+// is one question: does it take an `ios_base&`?
+//
+// Free of ios_base, and so safe for <ios> itself to include:
 //
 //   <__bits/locale_core>    locale, locale::id, locale::facet, the four
-//                           codecvt facets and codecvt_byname. <ios> includes
-//                           this leaf, because ios_base holds a locale by
-//                           value.
+//                           codecvt facets and codecvt_byname. <ios> DOES
+//                           include this one, because ios_base holds a locale
+//                           by value.
+//   <__bits/locale_ctype>   ctype_base, ctype, ctype_byname. <ios> includes
+//                           this one too — [basic.ios.members] defines
+//                           widen/narrow as calls into it, so a stream that
+//                           could not see it would have to answer for itself.
+//   <__bits/locale_text>    collate, messages and locale::operator(). Free of
+//                           ios_base as well, but <ios> has no use for it, so
+//                           only <locale> pulls it in.
 //
-//   <__bits/locale_facets>  the category facets — ctype, num_get, num_put,
-//                           numpunct, collate, time_get, time_put, the
-//                           monetary family and messages. Every one of them
-//                           takes an `ios_base&` and reads flags(), width()
-//                           and precision() out of it, so they need a
-//                           COMPLETE ios_base and cannot live where <ios>
-//                           reaches them.
+// Needing a COMPLETE ios_base — each reads flags(), width() or precision() out
+// of one — and therefore out of <ios>'s reach:
 //
-// Include <locale> and you get all of it; <ios> takes only the first leaf, and
-// neither leaf includes the other.
+//   <__bits/locale_facets>  numpunct, numpunct_byname, num_put
+//   <__bits/locale_numget>  num_get
+//   <__bits/locale_money>   money_base, moneypunct, moneypunct_byname,
+//                           money_get, money_put
+//
+// Include <locale> and you get all six. Every leaf in the second group
+// includes leaves from the first; none in the first includes any of the
+// second, which is the acyclicity the whole split exists to preserve.
 //
 // ── the one locale, and what it now contains ────────────────────────────
 // There is still exactly one locale on this system: locale("C"), locale("")
@@ -37,6 +48,7 @@
 #include <__bits/locale_core>
 #include <__bits/locale_ctype>
 #include <__bits/locale_facets>
+#include <__bits/locale_money>
 #include <__bits/locale_numget>
 #include <__bits/locale_text>
 

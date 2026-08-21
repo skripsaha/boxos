@@ -8,17 +8,23 @@
 // <ios>/<ostream>/<istream> instead, per the real synopsis -- this header
 // is only the parameterized ones, the actual sole content of <iomanip>.
 //
-// get_money/put_money/get_time/put_time are also nominally part of
-// <iomanip>'s synopsis but are OUT OF SCOPE: monetary formatting needs a
-// real moneypunct/money_get/money_put facet (already-excluded, matches the
-// epic-wide "C"-locale-only posture), and get_time/put_time need a real
-// time_get/time_put facet keyed to <chrono> calendar types (a separate,
-// already-tracked future item). Deliberately not provided here.
+// get_money/put_money joined the header in Ф43-d-2, when moneypunct,
+// money_get and money_put came to exist; the comment that used to stand here
+// said they were out of scope because those facets did not. get_time/put_time
+// wait on time_get/time_put in the same way and are still absent.
+//
+// Unlike setw and its neighbours, these two need COMPLETE stream types and the
+// facet lookup, so this header includes <istream> for them. setw only ever
+// touches a member of a type the caller already had.
 #ifndef BOXCXX_IOMANIP
 #define BOXCXX_IOMANIP
 
+#include <__bits/locale_money>
 #include <ios>
 #include <iosfwd>
+#include <istream>
+#include <iterator>
+#include <ostream>
 #include <string>
 #include <string_view>
 
@@ -49,6 +55,20 @@ struct SetFlags {
 };
 struct ResetFlags {
     ios_base::fmtflags mask;
+};
+
+// The two monetary manipulators. `intl` is carried, not applied: which of the
+// two moneypunct instantiations answers is the facet's business, and the
+// manipulator's only job is to remember which one the caller asked for.
+template <class MoneyT>
+struct GetMoney {
+    MoneyT &value;
+    bool    intl;
+};
+template <class MoneyT>
+struct PutMoney {
+    const MoneyT &value;
+    bool          intl;
 };
 
 // Output-only source for quoted(const charT*, ...)/quoted(const
@@ -285,6 +305,67 @@ basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits> &is,
     }
     if (hadSkipws) is.setf(ios_base::skipws);
     return is;
+}
+
+// ── get_money / put_money [ext.manip] ───────────────────────────────────
+// moneyT is long double or a basic_string; anything else fails to compile,
+// because money_get and money_put have exactly those two overloads and no
+// generic one. That is the diagnosis the standard's Mandates asks for, arrived
+// at by overload resolution rather than by a static_assert repeating it.
+template <class MoneyT>
+__iomanip::GetMoney<MoneyT> get_money(MoneyT &mon, bool intl = false)
+{
+    return {mon, intl};
+}
+template <class MoneyT>
+__iomanip::PutMoney<MoneyT> put_money(const MoneyT &mon, bool intl = false)
+{
+    return {mon, intl};
+}
+
+template <class CharT, class Traits, class MoneyT>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits>    &is,
+                                         const __iomanip::GetMoney<MoneyT> &m)
+{
+    using Iter = istreambuf_iterator<CharT, Traits>;
+
+    typename basic_istream<CharT, Traits>::sentry ok(is);
+    if (!ok) return is;
+
+    ios_base::iostate err = ios_base::goodbit;
+    try {
+        use_facet<money_get<CharT, Iter>>(is.__loc_ref())
+            .get(Iter(is), Iter(), m.intl, is, err, m.value);
+    } catch (...) {
+        __ios::HandleException(is);
+        return is;
+    }
+    // Outside the try, for the same reason every other extractor does it:
+    // setstate may throw ios_base::failure, and that throw belongs to the
+    // caller rather than to the handler above.
+    if (err != ios_base::goodbit) is.setstate(err);
+    return is;
+}
+
+template <class CharT, class Traits, class MoneyT>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits>    &os,
+                                         const __iomanip::PutMoney<MoneyT> &m)
+{
+    using Iter = ostreambuf_iterator<CharT, Traits>;
+
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (!ok) return os;
+
+    try {
+        Iter it = use_facet<money_put<CharT, Iter>>(os.__loc_ref())
+                      .put(Iter(os), m.intl, os, os.fill(), m.value);
+        if (it.failed()) os.setstate(ios_base::badbit);
+    } catch (const __ios::GenerationFailure &) {
+        os.setstate(ios_base::failbit);
+    } catch (...) {
+        __ios::HandleException(os);
+    }
+    return os;
 }
 
 } // namespace std

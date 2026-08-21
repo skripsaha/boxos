@@ -74,6 +74,24 @@ using NumGetWchar = std::num_get<wchar_t>;
 constinit FacetCell<NumGetChar>  gNumGetChar{};
 constinit FacetCell<NumGetWchar> gNumGetWchar{};
 
+using MpCharF  = std::moneypunct<char, false>;
+using MpCharI  = std::moneypunct<char, true>;
+using MpWcharF = std::moneypunct<wchar_t, false>;
+using MpWcharI = std::moneypunct<wchar_t, true>;
+using MoneyGetChar  = std::money_get<char>;
+using MoneyGetWchar = std::money_get<wchar_t>;
+using MoneyPutChar  = std::money_put<char>;
+using MoneyPutWchar = std::money_put<wchar_t>;
+
+constinit FacetCell<MpCharF>  gMpCharF{};
+constinit FacetCell<MpCharI>  gMpCharI{};
+constinit FacetCell<MpWcharF> gMpWcharF{};
+constinit FacetCell<MpWcharI> gMpWcharI{};
+constinit FacetCell<MoneyGetChar>  gMoneyGetChar{};
+constinit FacetCell<MoneyGetWchar> gMoneyGetWchar{};
+constinit FacetCell<MoneyPutChar>  gMoneyPutChar{};
+constinit FacetCell<MoneyPutWchar> gMoneyPutWchar{};
+
 constinit FacetCell<std::collate<char>>     gCollateChar{};
 constinit FacetCell<std::collate<wchar_t>>  gCollateWchar{};
 constinit FacetCell<std::messages<char>>    gMessagesChar{};
@@ -98,6 +116,14 @@ constinit const std::__loc::Slot kClassicSlots[std::__cvt::kBuiltinFacets] = {
     {&gCollateWchar.obj,  std::locale::collate},
     {&gMessagesChar.obj,  std::locale::messages},
     {&gMessagesWchar.obj, std::locale::messages},
+    {&gMpCharF.obj,  std::locale::monetary},
+    {&gMpCharI.obj,  std::locale::monetary},
+    {&gMpWcharF.obj, std::locale::monetary},
+    {&gMpWcharI.obj, std::locale::monetary},
+    {&gMoneyGetChar.obj,  std::locale::monetary},
+    {&gMoneyGetWchar.obj, std::locale::monetary},
+    {&gMoneyPutChar.obj,  std::locale::monetary},
+    {&gMoneyPutWchar.obj, std::locale::monetary},
 };
 
 constinit const std::locale::__Table kClassicTable{kClassicSlots,

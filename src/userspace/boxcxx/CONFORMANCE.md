@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 146 |
-| Header source | ~99 000 lines |
+| Internal implementation leaves (`include/std/__bits/`) | 147 |
+| Header source | ~101 200 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 239 phases (220 of them the numbered `PhaseN` series), 6 148 runtime checks, 2 011 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 241 phases (222 of them the numbered `PhaseN` series), 6 239 runtime checks, 2 014 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -51,8 +51,9 @@ here it is: headers and leaves are the *regular files* in `include/std` and
 count, because `__bits` is an entry too — the rule used to say plain `ls -1`,
 and Ф38 re-derived every row and found that one off by exactly that
 directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
-translation unit containing only `#include <version>`; phases are `Phase*();`
-call sites in `main`; checks are occurrences of `Check(` in `cxxtest.cpp` and
+translation unit containing only `#include <version>`; phases are ROWS OF THE
+`kPhases` TABLE in `cxxtest.cpp` (see the drift note below); checks are
+occurrences of `Check(`, `CheckMoney(` and `CheckMoneyW(` in `cxxtest.cpp` and
 `static_assert`s are occurrences of the bare token `static_assert` (which is 24
 more than `static_assert(`, the difference being the times the keyword is
 named in a comment — the two rows were never counted the same way, and saying
@@ -60,12 +61,19 @@ so is cheaper than renumbering both). `tools/cxx_ftm_audit.sh` re-derives the
 macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
-with the rule that produces it: `Phase*();` call sites in `main`, of which
-there are exactly as many as there are phase definitions. That is **239** —
-220 purely numbered, 18 suffixed (`Phase4a`, `Phase7b`, `Phase9a2` and the
-rest) and `PhaseCurrent`. The 166 recorded at Ф33 was the numbered series
-alone, which is why both numbers are given above: neither can drift without
-the other contradicting it.
+with the rule that produces it — and as of Ф43 the rule stopped being a grep.
+`main` is a TABLE now: one `{name, function}` row per phase, walked in order,
+with the launch args selecting which rows run. The count is therefore
+`sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
+ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
+can be checked against a boot log instead of against a grep that has to be
+maintained. That is **241** — 222 purely numbered, 18 suffixed (`Phase4a`,
+`Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by two at Ф43
+rather than one: `Phase225` is new, and `phase2` — the compile-time header
+torture, which used to be an unnumbered tail call after the loop — became an
+ordinary row. The 166 recorded at Ф33 was the numbered series alone, which is
+why both numbers are given above: neither can drift without the other
+contradicting it.
 
 **The third drift was this paragraph against the table two rows up.** Ф41
 raised the table to 221 and left the sentence here saying 217, so the document
@@ -411,13 +419,14 @@ and line — is recorded there.
 - **Locales beyond `"C"`.** There is one locale, and now there is a way to
   build variants of it: Ф43-a made `locale` a container, so a program can
   install its own facet with `locale(loc, new my_facet)`, combine two locales
-  by category, and imbue a stream with the result. What is still absent is a
-  second locale to *name* — `locale("de_DE")` throws rather than answering as
-  `"C"` — and the category facets themselves: no ctype, num_get/num_put,
-  numpunct, collate, moneypunct, time_get/time_put or messages, so the only
-  facets there are to install are `codecvt` and `codecvt_byname`. The `L`
-  format specifier is still accepted and ignored, and will stay that way until
-  `numpunct` exists for it to ask. Details and reasoning are in §2 `<locale>`.
+  by category, and imbue a stream with the result. Five of the six categories
+  are populated as of Ф43-d-2 — `ctype`, the numeric family, `collate`,
+  `messages` and the monetary family, each with its `_byname` form. What is
+  still absent is a second locale to *name* (`locale("de_DE")` throws rather
+  than answering as `"C"`) and the TIME category: no `time_get`, no `time_put`,
+  and so no `get_time`/`put_time` in `<iomanip>`. The `L` format specifier is
+  still accepted and ignored, and will stay that way until `<format>` is
+  pointed at `numpunct`. Details and reasoning are in §2 `<locale>`.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
   `zoned_time`, and no leap-second table.
 
@@ -2192,6 +2201,27 @@ combinations the table leaves out.
   an element of the same vector stays valid because nothing moves under it.
   The cost is about three moves per element where a shift costs one.
 
+## `<iomanip>`
+
+- `~` **`get_time`/`put_time` are the only two names missing**, and they are
+  missing for one reason: `time_get` and `time_put` do not exist yet. The other
+  six parameterized manipulators — `setw`, `setprecision`, `setfill`,
+  `setbase`, `setiosflags`, `resetiosflags` — plus `quoted` have been here
+  since the epic's early phases, and Ф43-d-2 added `get_money`/`put_money` on
+  top of the monetary facets it built. Until Ф43-d-2 the header's own comment
+  said all four were "out of scope"; half of that sentence is now false and has
+  been rewritten rather than left standing.
+- `✓` The two monetary manipulators are the only things in this header that
+  need a COMPLETE stream type and a facet lookup, so it includes `<istream>`
+  for them where `setw` needs nothing but a member call. That is a real
+  dependency and not tidiness: `operator>>` for `get_money` constructs a
+  sentry, and a sentry cannot be built from a forward declaration.
+- `~` `moneyT` is constrained by overload resolution rather than by a
+  `static_assert`: `money_get` and `money_put` have exactly the `long double`
+  and `basic_string` overloads and no generic one, so anything else fails to
+  find a match. The diagnosis names the overloads instead of repeating the
+  Mandates in prose.
+
 ## `<ios>`
 
 - `✓` Closed in Ф42-f: **`widen` sign-extended and `narrow` truncated**, and
@@ -2313,6 +2343,16 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   implementations do it — the old putback was an undocumented deviation, and
   it is recorded here because it is the one visible behaviour change the move
   brought.
+- `✓` Closed in Ф43-d-2: **stage 3 never checked where the separators
+  stood.** `num_get` read thousands separators and discarded them without
+  asking whether grouping() allowed them there, so `"12_34"` under a
+  three-digit grouping parsed as `1234` with the stream still good.
+  [facet.num.get.virtuals] stage 3 checks their positions and sets `failbit`
+  while STILL storing the digits, which is what both reference implementations
+  do and what makes the check observable rather than merely destructive. The
+  rule itself now lives in one place, `__bits/field_engine`, because the
+  monetary parser needed the same one and a second copy is a second chance to
+  drift.
 - `✓` **Whitespace is the `ctype` facet's answer** as of Ф43-b: the sentry's
   skip, the character-array extractor, `operator>>(istream&, string&)` and
   `std::ws` all ask `ctype<charT>::is(space, c)`, where they used to call an
@@ -2432,7 +2472,7 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   what `locale()` returns, so a stream constructed afterwards is imbued with
   the new one, and it calls `setlocale(LC_ALL, name)` for a named locale as
   [locale.statics] requires.
-- `~` **`ctype`, `numpunct` and `num_put` are here; the rest are not yet.**
+- `~` **Five categories of six; time is the one left.**
   Ф43-b built `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization
   with its table, `ctype<wchar_t>`, `ctype_byname` and the fourteen
   [classification] functions; Ф43-c added `numpunct`, `numpunct_byname`,
@@ -2440,9 +2480,42 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   at the last two; Ф43-d-1 added `collate`, `messages` and their `_byname`
   forms, and with `collate` came `locale::operator()` — a locale can be passed
   as a comparator now, which it could not be while nothing knew how to order
-  text. Still
-  absent: `moneypunct`, `money_get`, `money_put`, `time_get`, `time_put` — a program needing those fails to
-  compile rather than silently behaving as `"C"`.
+  text; Ф43-d-2 added `money_base`, all four `moneypunct` instantiations,
+  `moneypunct_byname`, `money_get` and `money_put`, and gave `<iomanip>` the
+  `get_money`/`put_money` its own comment had been apologising for. Still
+  absent: `time_get`, `time_put` — a program needing those fails to compile
+  rather than silently behaving as `"C"`.
+
+  **The `"C"` locale's negative sign is `"-"`, and that was a decision.** The
+  two reference implementations disagree here — measured, not assumed:
+  libstdc++ answers `""` and prints `put_money(-123456)` as `123456`, libc++
+  answers `"-"` and prints `-123456`. The C++ standard specifies nothing about
+  the `"C"` locale for `moneypunct`; the C standard DOES pin `lconv`, and pins
+  it to `""`. boxcxx answers `"-"` in the facet and leaves `localeconv()` at
+  `""`: two standards asking two different questions, one of which left its
+  answer open. An amount whose sign disappears between `put_money` and the
+  screen is not something this library ships, and under `""` `get_money` could
+  not read a negative amount back at all — the round trip is a test now
+  (phase225 (36)), not a hope.
+
+  `put_money` on an infinity or a NaN sets `failbit` and writes nothing.
+  Measured, because the first draft of this paragraph guessed and was wrong:
+  libstdc++ writes an EMPTY string and leaves the stream good, libc++ writes
+  `0` (and `-0` for negative infinity) and leaves the stream good. Both hand
+  back a number that is not the one they were given, with no flag raised —
+  which is the quiet kind of wrong this library exists not to ship. There is no
+  amount of money that is infinity, and [ostream.formatted.reqmts]' `failbit`
+  is the signal for a value that could not be generated. This one is boxcxx's
+  own and is pinned by phase225 (80).
+
+  Three smaller places where the two references differ and boxcxx had to
+  choose, all recorded because a reader will otherwise assume the other one:
+  an amount with fewer digits than `frac_digits()` prints `0.05`, not `.05`;
+  `money_base::space` generates a real space, with any `internal` fill placed
+  BESIDE it rather than instead of it (a fill character that is not a space
+  would leave the required space missing); and `money_get` REQUIRES the
+  fractional digits when the facet declares them, because the alternative
+  silently reads `1234` as `12.34`.
 
   **Grouping exists as of Ф43-c, and had never been written before it.** The
   `"C"` locale groups nothing — its `grouping()` is empty — so there had been
@@ -4444,10 +4517,11 @@ asserted here on that basis. It is pinned instead by the in-tree suite —
 `src/userspace/apps/cxxtest.cpp` — which runs on BIOS and UEFI × 1 and 16 cores
 with `-cpu max` before every commit. Its size is quoted in §"What the library is,
 in numbers" and counted this way, so the figures are reproducible rather than
-recalled: **phases** are the `Phase*()` entry points `main` invokes, plus phase 2,
-which is proven by its translation unit linking at all rather than by a call;
-**runtime checks** are `Check(` call sites; **`static_assert`s** are occurrences
-of the keyword. Two of the three figures had drifted before Ф31e-d and were
+recalled: **phases** are the rows of the `kPhases` table `main` walks — phase 2,
+which is proven by its translation unit linking at all rather than by anything
+it does at run time, is an ordinary row of it as of Ф43 and no longer an
+exception to the rule; **runtime checks** are `Check(`, `CheckMoney(` and
+`CheckMoneyW(` call sites; **`static_assert`s** are occurrences of the keyword. Two of the three figures had drifted before Ф31e-d and were
 re-measured there; the phase figure had drifted again by Ф32-a — the rule above
 yields 170, not the 166 that incrementing the recorded 165 would have given — so
 it is stated here as measured rather than as carried forward. The other two
