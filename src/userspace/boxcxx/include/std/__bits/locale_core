@@ -376,7 +376,11 @@ inline constexpr size_t kIdMoneyGetChar        = 20;
 inline constexpr size_t kIdMoneyGetWchar       = 21;
 inline constexpr size_t kIdMoneyPutChar        = 22;
 inline constexpr size_t kIdMoneyPutWchar       = 23;
-inline constexpr size_t kBuiltinFacets     = 24;
+inline constexpr size_t kIdTimeGetChar         = 24;
+inline constexpr size_t kIdTimeGetWchar        = 25;
+inline constexpr size_t kIdTimePutChar         = 26;
+inline constexpr size_t kIdTimePutWchar        = 27;
+inline constexpr size_t kBuiltinFacets     = 28;
 
 // The public half of every codecvt: seven members that do nothing but call
 // the virtual half. Written once because it IS once — [locale.codecvt] gives

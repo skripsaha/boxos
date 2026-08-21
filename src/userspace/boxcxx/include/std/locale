@@ -26,8 +26,10 @@
 //   <__bits/locale_numget>  num_get
 //   <__bits/locale_money>   money_base, moneypunct, moneypunct_byname,
 //                           money_get, money_put
+//   <__bits/locale_time>    time_base, time_get, time_get_byname, time_put,
+//                           time_put_byname
 //
-// Include <locale> and you get all six. Every leaf in the second group
+// Include <locale> and you get all seven. Every leaf in the second group
 // includes leaves from the first; none in the first includes any of the
 // second, which is the acyclicity the whole split exists to preserve.
 //
@@ -50,6 +52,7 @@
 #include <__bits/locale_facets>
 #include <__bits/locale_money>
 #include <__bits/locale_numget>
+#include <__bits/locale_time>
 #include <__bits/locale_text>
 
 #endif // BOXCXX_LOCALE

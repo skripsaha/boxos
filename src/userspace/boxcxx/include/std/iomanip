@@ -8,10 +8,10 @@
 // <ios>/<ostream>/<istream> instead, per the real synopsis -- this header
 // is only the parameterized ones, the actual sole content of <iomanip>.
 //
-// get_money/put_money joined the header in Ф43-d-2, when moneypunct,
-// money_get and money_put came to exist; the comment that used to stand here
-// said they were out of scope because those facets did not. get_time/put_time
-// wait on time_get/time_put in the same way and are still absent.
+// All four of get_money/put_money/get_time/put_time joined the header in Ф43-d,
+// when the facets they call came to exist; the comment that used to stand here
+// said they were out of scope because those facets did not. [iomanip.syn] is
+// complete now.
 //
 // Unlike setw and its neighbours, these two need COMPLETE stream types and the
 // facet lookup, so this header includes <istream> for them. setw only ever
@@ -20,6 +20,7 @@
 #define BOXCXX_IOMANIP
 
 #include <__bits/locale_money>
+#include <__bits/locale_time>
 #include <ios>
 #include <iosfwd>
 #include <istream>
@@ -69,6 +70,20 @@ template <class MoneyT>
 struct PutMoney {
     const MoneyT &value;
     bool          intl;
+};
+
+// The two time manipulators. The format string is held as a pointer, not
+// copied: `os << put_time(&t, "%F")` is one full-expression and the literal
+// outlives it.
+template <class CharT>
+struct GetTimeFmt {
+    tm          *value;
+    const CharT *fmt;
+};
+template <class CharT>
+struct PutTimeFmt {
+    const tm    *value;
+    const CharT *fmt;
 };
 
 // Output-only source for quoted(const charT*, ...)/quoted(const
@@ -362,6 +377,60 @@ basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits>    &os,
         if (it.failed()) os.setstate(ios_base::badbit);
     } catch (const __ios::GenerationFailure &) {
         os.setstate(ios_base::failbit);
+    } catch (...) {
+        __ios::HandleException(os);
+    }
+    return os;
+}
+
+// ── get_time / put_time [ext.manip] ─────────────────────────────────────
+template <class CharT>
+__iomanip::GetTimeFmt<CharT> get_time(tm *tmb, const CharT *fmt)
+{
+    return {tmb, fmt};
+}
+template <class CharT>
+__iomanip::PutTimeFmt<CharT> put_time(const tm *tmb, const CharT *fmt)
+{
+    return {tmb, fmt};
+}
+
+template <class CharT, class Traits>
+basic_istream<CharT, Traits> &operator>>(basic_istream<CharT, Traits>      &is,
+                                         const __iomanip::GetTimeFmt<CharT> &m)
+{
+    using Iter = istreambuf_iterator<CharT, Traits>;
+
+    typename basic_istream<CharT, Traits>::sentry ok(is);
+    if (!ok) return is;
+
+    ios_base::iostate err = ios_base::goodbit;
+    try {
+        const CharT *last = m.fmt + Traits::length(m.fmt);
+        use_facet<time_get<CharT, Iter>>(is.__loc_ref())
+            .get(Iter(is), Iter(), is, err, m.value, m.fmt, last);
+    } catch (...) {
+        __ios::HandleException(is);
+        return is;
+    }
+    if (err != ios_base::goodbit) is.setstate(err);
+    return is;
+}
+
+template <class CharT, class Traits>
+basic_ostream<CharT, Traits> &operator<<(basic_ostream<CharT, Traits>      &os,
+                                         const __iomanip::PutTimeFmt<CharT> &m)
+{
+    using Iter = ostreambuf_iterator<CharT, Traits>;
+
+    typename basic_ostream<CharT, Traits>::sentry ok(os);
+    if (!ok) return os;
+
+    try {
+        const CharT *last = m.fmt + Traits::length(m.fmt);
+        Iter         it   = use_facet<time_put<CharT, Iter>>(os.__loc_ref())
+                      .put(Iter(os), os, os.fill(), m.value, m.fmt, last);
+        if (it.failed()) os.setstate(ios_base::badbit);
     } catch (...) {
         __ios::HandleException(os);
     }

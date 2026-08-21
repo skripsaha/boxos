@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 147 |
-| Header source | ~101 200 lines |
+| Internal implementation leaves (`include/std/__bits/`) | 149 |
+| Header source | ~102 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 241 phases (222 of them the numbered `PhaseN` series), 6 239 runtime checks, 2 014 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 242 phases (223 of them the numbered `PhaseN` series), 6 287 runtime checks, 2 014 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -53,7 +53,7 @@ and Ф38 re-derived every row and found that one off by exactly that
 directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are ROWS OF THE
 `kPhases` TABLE in `cxxtest.cpp` (see the drift note below); checks are
-occurrences of `Check(`, `CheckMoney(` and `CheckMoneyW(` in `cxxtest.cpp` and
+occurrences of `Check(`, `CheckMoney(`, `CheckMoneyW(` and `CheckTime(` in `cxxtest.cpp` and
 `static_assert`s are occurrences of the bare token `static_assert` (which is 24
 more than `static_assert(`, the difference being the times the keyword is
 named in a comment — the two rows were never counted the same way, and saying
@@ -67,9 +67,9 @@ with the launch args selecting which rows run. The count is therefore
 `sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
 ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
 can be checked against a boot log instead of against a grep that has to be
-maintained. That is **241** — 222 purely numbered, 18 suffixed (`Phase4a`,
-`Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by two at Ф43
-rather than one: `Phase225` is new, and `phase2` — the compile-time header
+maintained. That is **242** — 223 purely numbered, 18 suffixed (`Phase4a`,
+`Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by three across
+Ф43: `Phase225` and `Phase226` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
 ordinary row. The 166 recorded at Ф33 was the numbered series alone, which is
 why both numbers are given above: neither can drift without the other
@@ -419,14 +419,14 @@ and line — is recorded there.
 - **Locales beyond `"C"`.** There is one locale, and now there is a way to
   build variants of it: Ф43-a made `locale` a container, so a program can
   install its own facet with `locale(loc, new my_facet)`, combine two locales
-  by category, and imbue a stream with the result. Five of the six categories
-  are populated as of Ф43-d-2 — `ctype`, the numeric family, `collate`,
-  `messages` and the monetary family, each with its `_byname` form. What is
-  still absent is a second locale to *name* (`locale("de_DE")` throws rather
-  than answering as `"C"`) and the TIME category: no `time_get`, no `time_put`,
-  and so no `get_time`/`put_time` in `<iomanip>`. The `L` format specifier is
-  still accepted and ignored, and will stay that way until `<format>` is
-  pointed at `numpunct`. Details and reasoning are in §2 `<locale>`.
+  by category, and imbue a stream with the result. **All six categories are
+  populated as of Ф43-d-3** — `ctype`, the numeric family, `collate`,
+  `messages`, the monetary family and the time family, each with its `_byname`
+  form. What is still absent is a second locale to *name*: `locale("de_DE")`
+  throws rather than answering as `"C"`, because there is one locale here and
+  saying otherwise would be the lie. The `L` format specifier is still accepted
+  and ignored, and will stay that way until `<format>` is pointed at
+  `numpunct`. Details and reasoning are in §2 `<locale>`.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
   `zoned_time`, and no leap-second table.
 
@@ -1406,6 +1406,12 @@ the rename stops the build rather than quietly restoring the old dodge.
   (`%I`/`%r`/`%p` beyond twelve hours) deviate identically here. An unknown
   conversion is undefined in C: the engine throws, `strftime` catches, and 0 is
   returned — no exception crosses into a C caller.
+
+  As of Ф43-d-3 there is a third caller of the same engine, `std::time_put`,
+  and the `tm`-to-field conversion this entry describes is now written once and
+  used by both. It had been about to be written twice: the facet's first draft
+  carried its own copy, which is exactly how two spellings of "the ninth of
+  March" start to disagree.
 - `?` `asctime` reproduces C's format exactly, including the two details an
   implementation gets wrong by eye: the day is `%3d`, so it carries its own
   leading space and there is none between the month and it; and the year is
@@ -2203,14 +2209,13 @@ combinations the table leaves out.
 
 ## `<iomanip>`
 
-- `~` **`get_time`/`put_time` are the only two names missing**, and they are
-  missing for one reason: `time_get` and `time_put` do not exist yet. The other
-  six parameterized manipulators — `setw`, `setprecision`, `setfill`,
-  `setbase`, `setiosflags`, `resetiosflags` — plus `quoted` have been here
-  since the epic's early phases, and Ф43-d-2 added `get_money`/`put_money` on
-  top of the monetary facets it built. Until Ф43-d-2 the header's own comment
-  said all four were "out of scope"; half of that sentence is now false and has
-  been rewritten rather than left standing.
+- `✓` **[iomanip.syn] is complete as of Ф43-d-3.** The six parameterized
+  manipulators — `setw`, `setprecision`, `setfill`, `setbase`, `setiosflags`,
+  `resetiosflags` — plus `quoted` have been here since the epic's early phases;
+  Ф43-d-2 added `get_money`/`put_money` and Ф43-d-3 `get_time`/`put_time`, each
+  on top of the facets it had just built. The header's own comment used to say
+  all four were "out of scope" because those facets did not exist; that
+  sentence is gone rather than left standing next to the functions it denies.
 - `✓` The two monetary manipulators are the only things in this header that
   need a COMPLETE stream type and a facet lookup, so it includes `<istream>`
   for them where `setw` needs nothing but a member call. That is a real
@@ -2472,7 +2477,7 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   what `locale()` returns, so a stream constructed afterwards is imbued with
   the new one, and it calls `setlocale(LC_ALL, name)` for a named locale as
   [locale.statics] requires.
-- `~` **Five categories of six; time is the one left.**
+- `✓` **All six categories.**
   Ф43-b built `ctype_base`, `ctype<charT>`, the `ctype<char>` specialization
   with its table, `ctype<wchar_t>`, `ctype_byname` and the fourteen
   [classification] functions; Ф43-c added `numpunct`, `numpunct_byname`,
@@ -2482,9 +2487,47 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   as a comparator now, which it could not be while nothing knew how to order
   text; Ф43-d-2 added `money_base`, all four `moneypunct` instantiations,
   `moneypunct_byname`, `money_get` and `money_put`, and gave `<iomanip>` the
-  `get_money`/`put_money` its own comment had been apologising for. Still
-  absent: `time_get`, `time_put` — a program needing those fails to compile
-  rather than silently behaving as `"C"`.
+  `get_money`/`put_money` its own comment had been apologising for; Ф43-d-3
+  finished the set with `time_base`, `time_get`, `time_put` and both `_byname`
+  forms, and `<iomanip>` gained `get_time`/`put_time`. Nothing in
+  [locale.category]'s Table 104 is missing now.
+
+  **`time_put` contains no renderer.** `<chrono>` has had a complete
+  `%`-conversion engine since Ф30, and `strftime` has been its second caller
+  since Ф41; the facet is the third, through the one declaration in
+  `__bits/time_render`. The indirection is forced, not stylistic:
+  `__bits/chrono_format` includes `<format>`, `<format>` includes `<locale>`,
+  so a `<locale>` leaf that included the engine would include itself. What the
+  sharing buys is that `%U`, `%W`, `%V`, `%G` and `%g` come out of the ISO 8601
+  week calendar `<chrono>` already had to get right, and that the `tm`-to-field
+  conversion `strftime` carried is now used by both rather than copied — the
+  facet's first draft did copy it, and that copy is what the review removed.
+
+  **A conversion with no answer writes itself.** `%s` is a POSIX extension the
+  C standard's `strftime` does not define and the engine does not implement;
+  `put_time(&t, "%s")` produces `"%s"`. So does a conversion whose field cannot
+  be rendered — `%b` with `tm_mon` of 99. That is what `strftime` does with a
+  specifier it does not know, and it names the problem instead of printing a
+  month that was invented.
+
+  **`%Z` is `"UTC"` and `%z` is `"+0000"`.** Not a placeholder: `<ctime>` makes
+  `localtime()` BE `gmtime()`, so this system's offset is known exactly and is
+  zero. A facet answering `""` or refusing would be describing a system less
+  certain of itself than this one is.
+
+  **Four decisions where the two references part**, all measured before being
+  chosen: `date_order()` is `mdy` (libstdc++ says `no_order`) because `%x` here
+  IS month/day/year, and a facet that could not name the order of its own
+  output would be refusing to read what it writes; `get_date` stores
+  `tm_mday`/`tm_mon`/`tm_year` and does NOT derive `tm_wday`/`tm_yday`
+  (libstdc++ derives them), because [locale.time.get.virtuals] names three
+  fields and `mktime()` already exists to compute the rest — a facet filling
+  neighbours makes it impossible to tell what was read from what was guessed;
+  month and weekday names are matched WITHOUT regard to case (libstdc++ refuses
+  `"march"`); and a name match must END where the parse stops, so `"Marbles"`
+  is March with `"bles"` left in the stream while `"Marc"` fails — the `'c'`
+  continued `"March"`, so it was consumed, and a single-pass iterator cannot
+  give it back. Both references agree on that last one, failure included.
 
   **The `"C"` locale's negative sign is `"-"`, and that was a decision.** The
   two reference implementations disagree here — measured, not assumed:
@@ -4520,8 +4563,8 @@ in numbers" and counted this way, so the figures are reproducible rather than
 recalled: **phases** are the rows of the `kPhases` table `main` walks — phase 2,
 which is proven by its translation unit linking at all rather than by anything
 it does at run time, is an ordinary row of it as of Ф43 and no longer an
-exception to the rule; **runtime checks** are `Check(`, `CheckMoney(` and
-`CheckMoneyW(` call sites; **`static_assert`s** are occurrences of the keyword. Two of the three figures had drifted before Ф31e-d and were
+exception to the rule; **runtime checks** are `Check(`, `CheckMoney(`,
+`CheckMoneyW(` and `CheckTime(` call sites; **`static_assert`s** are occurrences of the keyword. Two of the three figures had drifted before Ф31e-d and were
 re-measured there; the phase figure had drifted again by Ф32-a — the rule above
 yields 170, not the 166 that incrementing the recorded 165 would have given — so
 it is stated here as measured rather than as carried forward. The other two

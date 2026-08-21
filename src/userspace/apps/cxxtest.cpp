@@ -51857,16 +51857,18 @@ void Phase225()
                    "phase225 (75) put_money goes through the facet, whatever it decides");
     }
 
-    // ── 10. PIN for d-3 ─────────────────────────────────────────────────
-    // A structural pin rather than a behavioural one, and only because the
-    // behaviour cannot be named yet: `time_put` is not a type, so no check can
-    // ask what it answers. What CAN be asked is where the built-in facet table
-    // stops, and d-3 is obliged to move it — the time category needs four more
-    // slots. This line has to fail then, and be rewritten, not remembered.
+    // ── 10. the pin d-3 was obliged to break ────────────────────────────
+    // This asserted 24 — the facet table ending at the monetary category —
+    // precisely so that adding the time category could not be done without
+    // coming back here. It could not be a behavioural pin at the time:
+    // `time_put` was not a type, so nothing could ask what it answered. It is
+    // one now, and it says the opposite.
     {
-        Check(std::__cvt::kBuiltinFacets == 24,
-              "phase225 (76) PIN: the facet table ends at the monetary category "
-              "- d-3 must extend it");
+        Check(std::__cvt::kBuiltinFacets == 28,
+              "phase225 (76) the facet table reaches the time category");
+        Check(std::has_facet<std::time_put<char>>(classic) &&
+                  std::has_facet<std::time_get<wchar_t>>(classic),
+              "phase225 (76b) ... and the classic locale carries those facets");
     }
 
     // ── 11. `intl` picks a DIFFERENT FACET, not a different mode ────────
@@ -51926,6 +51928,360 @@ void Phase225()
 
     printf("[CXX] PASS phase225: the monetary category - a sign that survives the "
            "trip to the screen and back\n");
+}
+
+// ── phase226: the time category (Ф43-d-3) ───────────────────────────────
+// The expected strings are what BOTH g++-16 and clang produce for the same tm
+// in the "C" locale — 84 of 91 probed lines agreed, and those 84 are the ones
+// asserted here. The seven that differed are named in the checks that cover
+// them, with the reason for the side taken.
+namespace {
+
+std::tm Phase226Tm()
+{
+    std::tm t{};
+    t.tm_sec  = 7;
+    t.tm_min  = 5;
+    t.tm_hour = 14;
+    t.tm_mday = 9;
+    t.tm_mon  = 2;      // March
+    t.tm_year = 126;    // 2026
+    t.tm_wday = 1;      // Monday
+    t.tm_yday = 67;     // 0-based; 2026-03-09 is the 68th day
+    return t;
+}
+
+std::string TimeOut(const std::locale &loc, const std::tm &t, const char *fmt)
+{
+    std::ostringstream os;
+    os.imbue(loc);
+    os << std::put_time(&t, fmt);
+    return os.str();
+}
+
+void CheckTime(const std::string &got, const char *want, const char *what)
+{
+    if (got != want) {
+        printf("[CXX] FAIL %s: got \"%s\" want \"%s\"\n", what, got.c_str(), want);
+        g_failures++;
+    }
+}
+
+} // namespace
+
+void Phase226()
+{
+    using std::locale;
+    using std::string;
+
+    const locale  classic = locale::classic();
+    const std::tm ref     = Phase226Tm();
+
+    // ── 1. every conversion both references agree on ────────────────────
+    {
+        struct Row {
+            const char *fmt;
+            const char *want;
+            const char *what;
+        };
+        const Row rows[] = {
+            {"%Y-%m-%d", "2026-03-09", "phase226 (1) %Y %m %d"},
+            {"%H:%M:%S", "14:05:07", "phase226 (2) %H %M %S"},
+            {"%c", "Mon Mar  9 14:05:07 2026", "phase226 (3) %c is the \"C\" date and time"},
+            {"%x", "03/09/26", "phase226 (4) %x is month/day/two-digit year"},
+            {"%X", "14:05:07", "phase226 (5) %X"},
+            {"%A %B", "Monday March", "phase226 (6) full names"},
+            {"%a %b", "Mon Mar", "phase226 (7) abbreviations"},
+            {"%j", "068", "phase226 (8) %j is three digits and one-based"},
+            {"%U", "10", "phase226 (9) %U counts weeks from Sunday"},
+            {"%W", "10", "phase226 (10) %W counts them from Monday"},
+            {"%p", "PM", "phase226 (11) %p"},
+            {"%I", "02", "phase226 (12) %I is the twelve-hour clock"},
+            {"%y", "26", "phase226 (13) %y"},
+            {"%C", "20", "phase226 (14) %C"},
+            {"%D", "03/09/26", "phase226 (15) %D"},
+            {"%F", "2026-03-09", "phase226 (16) %F"},
+            {"%T", "14:05:07", "phase226 (17) %T"},
+            {"%R", "14:05", "phase226 (18) %R"},
+            {"%r", "02:05:07 PM", "phase226 (19) %r"},
+            {"%e", " 9", "phase226 (20) %e pads the day with a space"},
+            {"%G-%V-%u", "2026-11-1", "phase226 (21) the ISO week calendar"},
+            {"%%", "%", "phase226 (22) %%"},
+            {"%n%t", "\n\t", "phase226 (23) %n and %t"},
+            {"literal %Y here", "literal 2026 here",
+             "phase226 (24) text around a conversion is copied through"},
+            {"%Ec %EY %Oy %Od", "Mon Mar  9 14:05:07 2026 2026 26 09",
+             "phase226 (25) E and O select representations \"C\" does not have"},
+        };
+        for (const Row &r : rows) CheckTime(TimeOut(classic, ref, r.fmt), r.want, r.what);
+    }
+
+    // ── 2. the zone this system actually has ────────────────────────────
+    // Not a stub and not a refusal: <ctime> makes localtime() BE gmtime(), so
+    // the offset is known exactly and it is zero. The host oracle printed its
+    // own zone here (MSK/+0300), which is a fact about the host.
+    {
+        CheckTime(TimeOut(classic, ref, "%Z %z"), "UTC +0000",
+                  "phase226 (26) the one zone BoxOS has, stated");
+    }
+
+    // ── 3. a conversion with no answer names itself ─────────────────────
+    // %s is a POSIX extension that C's strftime does not define and <chrono>'s
+    // renderer does not implement. Writing "%s" back is what strftime does with
+    // a specifier it does not know; the alternative is inventing a number.
+    {
+        CheckTime(TimeOut(classic, ref, "%s"), "%s",
+                  "phase226 (27) an unimplemented conversion is written literally");
+        std::tm bad = ref;
+        bad.tm_mon  = 99;
+        CheckTime(TimeOut(classic, bad, "%b"), "%b",
+                  "phase226 (28) ... and so is one whose field cannot be rendered");
+    }
+
+    // ── 4. reading it back ──────────────────────────────────────────────
+    {
+        const auto Read = [&classic](const char *text, const char *fmt, std::tm &out) {
+            out = std::tm{};
+            out.tm_year = -1;
+            out.tm_mon  = -1;
+            out.tm_mday = -1;
+            out.tm_hour = -1;
+            out.tm_wday = -1;
+            std::istringstream is(text);
+            is.imbue(classic);
+            is >> std::get_time(&out, fmt);
+            return !is.fail();
+        };
+
+        std::tm t{};
+        Check(Read("2026-03-09", "%Y-%m-%d", t) && t.tm_year == 126 && t.tm_mon == 2 &&
+                  t.tm_mday == 9,
+              "phase226 (29) an ISO date");
+        Check(Read("14:05:07", "%H:%M:%S", t) && t.tm_hour == 14 && t.tm_min == 5 &&
+                  t.tm_sec == 7,
+              "phase226 (30) a time");
+        Check(Read("Monday March", "%A %B", t) && t.tm_wday == 1 && t.tm_mon == 2,
+              "phase226 (31) full names");
+        Check(Read("Mon Mar", "%a %b", t) && t.tm_wday == 1 && t.tm_mon == 2,
+              "phase226 (32) abbreviations - and \"Mar\" is complete without \"ch\"");
+        Check(Read("March", "%b", t) && t.tm_mon == 2,
+              "phase226 (33) ... while \"March\" is the longer match of the same name");
+        Check(Read("02:05:07 PM", "%I:%M:%S %p", t) && t.tm_hour == 14,
+              "phase226 (34) %p corrects the hour %I read");
+        Check(Read("02:05:07 AM", "%I:%M:%S %p", t) && t.tm_hour == 2,
+              "phase226 (35) ... in the other direction too");
+        Check(Read("12:00:00 AM", "%I:%M:%S %p", t) && t.tm_hour == 0,
+              "phase226 (36) ... and midnight is hour zero");
+        Check(Read("26", "%y", t) && t.tm_year == 126,
+              "phase226 (37) %y reads two digits as a year in this century");
+        Check(Read("20", "%Y", t) && t.tm_year == -1880,
+              "phase226 (38) %Y does NOT: twenty is the year twenty");
+        Check(Read("x2026", "x%Y", t) && t.tm_year == 126,
+              "phase226 (39) a literal in the format must be in the input");
+        Check(!Read("y2026", "x%Y", t), "phase226 (40) ... and fails when it is not");
+        Check(Read("  2026", "%Y", t) && t.tm_year == 126,
+              "phase226 (41) whitespace before a number is skipped");
+        Check(Read("2026", " %Y", t) && t.tm_year == 126,
+              "phase226 (42) whitespace in the format matches none at all");
+        Check(Read("Mon Mar  9 14:05:07 2026", "%c", t) && t.tm_year == 126 &&
+                  t.tm_mon == 2 && t.tm_mday == 9 && t.tm_hour == 14 && t.tm_wday == 1,
+              "phase226 (43) %c reads back what %c wrote");
+        Check(Read("03/09/26", "%x", t) && t.tm_year == 126 && t.tm_mon == 2 &&
+                  t.tm_mday == 9,
+              "phase226 (44) and so does %x");
+        Check(!Read("2026-13-09", "%Y-%m-%dZ", t),
+              "phase226 (45) a format longer than the input fails");
+    }
+
+    // ── 5. what get_date does NOT fill ──────────────────────────────────
+    // The two references disagree: libstdc++ derives tm_wday and tm_yday from
+    // the date it just parsed, libc++ leaves them untouched.
+    // [locale.time.get.virtuals] names tm_mday, tm_mon and tm_year and no
+    // others, and mktime() already exists to derive the rest. A facet that
+    // quietly filled neighbouring fields would make it impossible to tell what
+    // was read from what was computed.
+    {
+        std::tm t{};
+        t.tm_wday = 5;
+        t.tm_yday = 200;
+        std::istringstream is("03/09/26");
+        is.imbue(classic);
+        std::ios_base::iostate err = std::ios_base::goodbit;
+        const auto &tg = std::use_facet<std::time_get<char>>(classic);
+        tg.get_date(std::istreambuf_iterator<char>(is), std::istreambuf_iterator<char>(),
+                    is, err, &t);
+        Check(t.tm_year == 126 && t.tm_mon == 2 && t.tm_mday == 9,
+              "phase226 (46) get_date stores the three fields it is asked for");
+        Check(t.tm_wday == 5 && t.tm_yday == 200,
+              "phase226 (47) ... and does not touch the two it is not");
+    }
+
+    // ── 6. the five named getters, called directly ──────────────────────
+    {
+        const auto &tg = std::use_facet<std::time_get<char>>(classic);
+        Check(tg.date_order() == std::time_base::mdy,
+              "phase226 (48) date_order is mdy, because %x IS month/day/year");
+
+        const auto Direct = [&classic, &tg](const char *text, int which, std::tm &out) {
+            out = std::tm{};
+            out.tm_year = -1;
+            out.tm_mon  = -1;
+            out.tm_hour = -1;
+            out.tm_wday = -1;
+            std::istringstream is(text);
+            is.imbue(classic);
+            std::ios_base::iostate err = std::ios_base::goodbit;
+            std::istreambuf_iterator<char> b(is), e;
+            switch (which) {
+                case 0: tg.get_time(b, e, is, err, &out); break;
+                case 1: tg.get_date(b, e, is, err, &out); break;
+                case 2: tg.get_weekday(b, e, is, err, &out); break;
+                case 3: tg.get_monthname(b, e, is, err, &out); break;
+                default: tg.get_year(b, e, is, err, &out); break;
+            }
+            return (err & std::ios_base::failbit) == std::ios_base::goodbit;
+        };
+
+        std::tm t{};
+        Check(Direct("14:05:07", 0, t) && t.tm_hour == 14 && t.tm_sec == 7,
+              "phase226 (49) get_time");
+        Check(Direct("03/09/26", 1, t) && t.tm_mday == 9, "phase226 (50) get_date");
+        Check(Direct("Monday", 2, t) && t.tm_wday == 1, "phase226 (51) get_weekday");
+        Check(Direct("Mon", 2, t) && t.tm_wday == 1, "phase226 (52) ... abbreviated");
+        Check(Direct("March", 3, t) && t.tm_mon == 2, "phase226 (53) get_monthname");
+        Check(Direct("Mar", 3, t) && t.tm_mon == 2, "phase226 (54) ... abbreviated");
+        Check(Direct("2026", 4, t) && t.tm_year == 126, "phase226 (55) get_year");
+        Check(Direct("26", 4, t) && t.tm_year == 126,
+              "phase226 (56) ... which DOES apply the two-digit rule, unlike %Y");
+        // Both references agree on all three of these, and the middle one is
+        // the interesting case: "Mar" ended where the walk stopped, so it is
+        // March and the "bles" is left in the stream. "Marc" is not: the 'c'
+        // continued "March", so it was consumed, and no name ends at four
+        // characters. A single-pass iterator cannot give the 'c' back.
+        Check(Direct("Marbles", 3, t) && t.tm_mon == 2,
+              "phase226 (57) \"Mar\" ends where the walk stops, so Marbles is March");
+        Check(!Direct("Marc", 3, t),
+              "phase226 (57b) ... and \"Marc\" is not, because nothing ends at four");
+        Check(!Direct("Xyz", 3, t),
+              "phase226 (57c) ... and a name no month begins with is refused unread");
+        Check(Direct("march", 3, t) && t.tm_mon == 2,
+              "phase226 (57d) case is not significant - libstdc++ refuses this, "
+              "libc++ accepts it, and a month is the same month either way");
+    }
+
+    // ── 7. the round trip ───────────────────────────────────────────────
+    {
+        const string wrote = TimeOut(classic, ref, "%Y-%m-%d %H:%M:%S");
+        std::tm      back{};
+        std::istringstream is(wrote);
+        is.imbue(classic);
+        is >> std::get_time(&back, "%Y-%m-%d %H:%M:%S");
+        Check(!is.fail() && back.tm_year == ref.tm_year && back.tm_mon == ref.tm_mon &&
+                  back.tm_mday == ref.tm_mday && back.tm_hour == ref.tm_hour &&
+                  back.tm_min == ref.tm_min && back.tm_sec == ref.tm_sec,
+              "phase226 (58) put_time then get_time is the identity");
+    }
+
+    // ── 8. both manipulators go through the facet ───────────────────────
+    // Each installed facet answers DIFFERENTLY from the built-in one. A spy
+    // that agreed would pass whether or not it was ever consulted, which is
+    // the empty check Ф43-b caught itself writing.
+    {
+        struct ShoutPut : std::time_put<char> {
+        protected:
+            iter_type do_put(iter_type s, std::ios_base &, char_type, const std::tm *, char,
+                             char) const override
+            {
+                for (const char *p = "LATE"; *p; ++p) *s++ = *p;
+                return s;
+            }
+        };
+        // Two conversions and a literal between them: the facet is asked twice
+        // and the '-' is copied straight through, which is what makes this a
+        // check of the WALK and not only of the facet call.
+        CheckTime(TimeOut(locale(classic, new ShoutPut), ref, "%Y-%m"), "LATE-LATE",
+                  "phase226 (59) put_time asks the facet once per conversion");
+
+        struct SevenGet : std::time_get<char> {
+        protected:
+            iter_type do_get(iter_type s, iter_type, std::ios_base &,
+                             std::ios_base::iostate &, std::tm *t, char, char) const override
+            {
+                t->tm_year = 7;
+                return s;
+            }
+        };
+        std::tm t{};
+        std::istringstream is("2026");
+        is.imbue(locale(classic, new SevenGet));
+        is >> std::get_time(&t, "%Y");
+        Check(!is.fail() && t.tm_year == 7,
+              "phase226 (60) get_time goes through the facet, whatever it decides");
+    }
+
+    // ── 9. the wide side asks the same questions ────────────────────────
+    {
+        std::wostringstream wos;
+        wos.imbue(classic);
+        wos << std::put_time(&ref, L"%F %T");
+        std::string narrow;
+        for (wchar_t c : wos.str()) narrow.push_back(c < 128 ? static_cast<char>(c) : '?');
+        CheckTime(narrow, "2026-03-09 14:05:07", "phase226 (61) wchar_t put_time");
+
+        std::wistringstream wis(L"2026-03-09");
+        wis.imbue(classic);
+        std::tm wt{};
+        wis >> std::get_time(&wt, L"%Y-%m-%d");
+        Check(!wis.fail() && wt.tm_year == 126 && wt.tm_mday == 9,
+              "phase226 (62) wchar_t get_time");
+        Check(std::use_facet<std::time_get<wchar_t>>(classic).date_order() ==
+                  std::time_base::mdy,
+              "phase226 (63) and the wide facet orders dates as the narrow one does");
+    }
+
+    // ── 10. _byname, and the names this system is not ───────────────────
+    {
+        bool threwPut = false, threwGet = false;
+        try {
+            (void)new std::time_put_byname<char>("ja_JP.UTF-8");
+        } catch (const std::runtime_error &) {
+            threwPut = true;
+        }
+        try {
+            (void)new std::time_get_byname<char>("ja_JP.UTF-8");
+        } catch (const std::runtime_error &) {
+            threwGet = true;
+        }
+        Check(threwPut && threwGet,
+              "phase226 (64) both _byname facets refuse a name this system is not");
+
+        const locale byname(classic, new std::time_put_byname<char>("C"));
+        CheckTime(TimeOut(byname, ref, "%F"), "2026-03-09",
+                  "phase226 (65) ... and the one it is renders like \"C\"");
+    }
+
+    // ── 11. the six categories are complete ─────────────────────────────
+    {
+        Check(std::has_facet<std::ctype<char>>(classic) &&
+                  std::has_facet<std::numpunct<char>>(classic) &&
+                  std::has_facet<std::collate<char>>(classic) &&
+                  std::has_facet<std::moneypunct<char>>(classic) &&
+                  std::has_facet<std::messages<char>>(classic) &&
+                  std::has_facet<std::time_put<char>>(classic),
+              "phase226 (66) every one of the six locale categories is populated");
+
+        // An installed facet belongs to the category its locale::id names, and
+        // the category constructors select on that. A time facet installed into
+        // a locale must survive a combine that asks for the time category and
+        // vanish from one that asks for anything else.
+        const locale spy(classic, new std::time_put_byname<char>("C"));
+        const locale onlyTime(classic, spy, std::locale::time);
+        Check(std::has_facet<std::time_put<char>>(onlyTime),
+              "phase226 (67) a time facet travels with the time category");
+    }
+
+    printf("[CXX] PASS phase226: the time category - the last of the six, and not one "
+           "line of a second renderer\n");
 }
 
 // ── phase2: the compile-time half of the suite ─────────────────────────
@@ -52196,6 +52552,7 @@ const PhaseRow kPhases[] = {
     {"223", Phase223},
     {"224", Phase224},
     {"225", Phase225},
+    {"226", Phase226},
     {"2", Phase2},
 };
 

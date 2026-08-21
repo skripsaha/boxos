@@ -92,6 +92,16 @@ constinit FacetCell<MoneyGetWchar> gMoneyGetWchar{};
 constinit FacetCell<MoneyPutChar>  gMoneyPutChar{};
 constinit FacetCell<MoneyPutWchar> gMoneyPutWchar{};
 
+using TimeGetChar  = std::time_get<char>;
+using TimeGetWchar = std::time_get<wchar_t>;
+using TimePutChar  = std::time_put<char>;
+using TimePutWchar = std::time_put<wchar_t>;
+
+constinit FacetCell<TimeGetChar>  gTimeGetChar{};
+constinit FacetCell<TimeGetWchar> gTimeGetWchar{};
+constinit FacetCell<TimePutChar>  gTimePutChar{};
+constinit FacetCell<TimePutWchar> gTimePutWchar{};
+
 constinit FacetCell<std::collate<char>>     gCollateChar{};
 constinit FacetCell<std::collate<wchar_t>>  gCollateWchar{};
 constinit FacetCell<std::messages<char>>    gMessagesChar{};
@@ -124,6 +134,10 @@ constinit const std::__loc::Slot kClassicSlots[std::__cvt::kBuiltinFacets] = {
     {&gMoneyGetWchar.obj, std::locale::monetary},
     {&gMoneyPutChar.obj,  std::locale::monetary},
     {&gMoneyPutWchar.obj, std::locale::monetary},
+    {&gTimeGetChar.obj,  std::locale::time},
+    {&gTimeGetWchar.obj, std::locale::time},
+    {&gTimePutChar.obj,  std::locale::time},
+    {&gTimePutWchar.obj, std::locale::time},
 };
 
 constinit const std::locale::__Table kClassicTable{kClassicSlots,
