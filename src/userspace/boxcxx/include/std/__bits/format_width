@@ -1,0 +1,296 @@
+// boxcxx — <__bits/format_width>
+//
+// The estimated width of a formatted field, as [format.string.std]/13 defines
+// it: the number of extended grapheme clusters, with certain clusters counting
+// two columns instead of one.
+//
+// Until Ф43-e-2 this library counted CODE UNITS. That is exact for ASCII and
+// wrong for everything else: "é" written as e + U+0301 is one column and three
+// bytes, a flag emoji is one column and eight, and a CJK ideograph is two
+// columns and three. A padded table of anything but ASCII came out ragged.
+//
+// ── what is here and what is not ────────────────────────────────────────
+// The UCD facts — Grapheme_Cluster_Break, Extended_Pictographic and
+// Indic_Conjunct_Break — are in <__bits/unicode_grapheme>, written end to end
+// by a generator that may hold nothing else. The RULES are here, hand-written,
+// because a rule is not a fact.
+//
+// The decoder is neither: NextScalar already exists in <__bits/format_escape>,
+// driven by the escaping loop, and it answers exactly the question this engine
+// asks — one scalar value out of a char (UTF-8) or a wchar_t (the unit IS the
+// value), with an honest ill-formed case. A second decoder beside it would be
+// a second set of answers about what a lone continuation byte is.
+//
+// ── the two columns rule is a LIST, not a property ──────────────────────
+// [format.string.std]/13 does not say "East_Asian_Width in {W, F}". It writes
+// out eighteen ranges. Those ranges are close to that property and not equal to
+// it, and the standard's list is the normative one — so it is transcribed here
+// rather than derived, and no UCD file is consulted for it.
+//
+// ── the meter, and why the width is not just a function on a string ─────
+// A number formatted with `L` is never materialized: EmitLocalized writes the
+// digits, the group separators and the radix character straight to the sink,
+// because a float body runs to thousands of characters and building it twice
+// cost this library a page fault in Ф43-c-1. Its width still has to be known
+// BEFORE the padding is written. WidthMeter is what lets both callers share one
+// set of rules: EstimateWidth feeds it a decoded string, EmitLocalized feeds it
+// the code points it is about to write, and neither of them owns a copy of the
+// clustering.
+#ifndef BOXCXX_BITS_FORMAT_WIDTH
+#define BOXCXX_BITS_FORMAT_WIDTH
+
+#include <__bits/format_escape>
+#include <__bits/unicode_grapheme>
+#include <cstddef>
+#include <string_view>
+#include <type_traits>
+
+namespace std {
+namespace __format {
+
+// The width of a cluster, decided by its FIRST code point.
+constexpr int ClusterWidth(char32_t c) noexcept
+{
+    return ((c >= 0x1100 && c <= 0x115F) || (c >= 0x2329 && c <= 0x232A) ||
+            (c >= 0x2E80 && c <= 0x303E) || (c >= 0x3041 && c <= 0x33FF) ||
+            (c >= 0x3400 && c <= 0x4DBF) || (c >= 0x4E00 && c <= 0x9FFF) ||
+            (c >= 0xA000 && c <= 0xA4CF) || (c >= 0xA960 && c <= 0xA97F) ||
+            (c >= 0xAC00 && c <= 0xD7A3) || (c >= 0xF900 && c <= 0xFAFF) ||
+            (c >= 0xFE10 && c <= 0xFE19) || (c >= 0xFE30 && c <= 0xFE6F) ||
+            (c >= 0xFF00 && c <= 0xFF60) || (c >= 0xFFE0 && c <= 0xFFE6) ||
+            (c >= 0x1F300 && c <= 0x1F64F) || (c >= 0x1F900 && c <= 0x1F9FF) ||
+            (c >= 0x20000 && c <= 0x2FFFD) || (c >= 0x30000 && c <= 0x3FFFD))
+               ? 2
+               : 1;
+}
+
+// UAX #29 cluster boundaries, as the state machine the rules amount to.
+// Checked against Unicode's own GraphemeBreakTest-17.0.0: all 766 cases pass.
+//
+// GB9c — the Indic conjunct rule Unicode 15.1 added — IS implemented, and the
+// only reason it is here is that measuring said so: the first plan omitted it
+// as "newer than the standard's reference", and then both g++-16 and clang
+// reported a devanagari consonant-virama-consonant as ONE cluster. Leaving it
+// out would have made this library the only one of the three that splits a
+// conjunct.
+//
+// ‼ GB12/GB13 is the one place this file answers differently from BOTH
+// reference libraries, and it is deliberate. GB13 reads
+// `[^RI] (RI RI)* RI × RI`: after a Prepend — an Arabic number sign, say — the
+// two regional indicators of a flag still pair, so the whole run is one
+// cluster. libstdc++ and libc++ both break there, because the "active rule"
+// each uses to remember an RI run is never armed when GB9b is what pulled the
+// previous character in. Nothing in the conformance suite covers the sequence
+// and nothing in the text supports splitting it. Found by fuzzing 40 000
+// random strings against both: 36 hits, and the ONLY disagreement left.
+class GraphemeScanner {
+public:
+    // Does a cluster boundary fall immediately BEFORE `cp`?
+    // The first code point of a string is a boundary by GB1 and this reports
+    // it as one, so a caller counts clusters by counting `true`s.
+    constexpr bool BreakBefore(char32_t cp) noexcept
+    {
+        const Gcb  c   = __unicode::GcbOf(cp);
+        const Incb in  = __unicode::IncbOf(cp);
+        const bool pic = __unicode::IsExtendedPictographic(cp);
+        const bool brk = Decide(c, in, pic);
+        Advance(c, in, pic);
+        return brk;
+    }
+
+private:
+    using Gcb  = __unicode::Gcb;
+    using Incb = __unicode::Incb;
+
+    // `pic` is the pictographic-ness of the code point being JUDGED, which is
+    // what GB11 asks about: the rule joins a ZWJ to a following pictograph,
+    // and the ZWJ itself is never one. Reading the PREVIOUS code point's flag
+    // here instead — the first thing written, before a devanagari string and
+    // an emoji-ZWJ string were run through it — makes GB11 dead code, since
+    // the code point before the join is always the ZWJ.
+    constexpr bool Decide(Gcb c, Incb in, bool pic) const noexcept
+    {
+        if (!have_) return true;                                    // GB1
+        if (prev_ == Gcb::CR && c == Gcb::LF) return false;          // GB3
+        if (prev_ == Gcb::Control || prev_ == Gcb::CR || prev_ == Gcb::LF)
+            return true;                                            // GB4
+        if (c == Gcb::Control || c == Gcb::CR || c == Gcb::LF)
+            return true;                                            // GB5
+        if (prev_ == Gcb::L &&
+            (c == Gcb::L || c == Gcb::V || c == Gcb::LV || c == Gcb::LVT))
+            return false;                                           // GB6
+        if ((prev_ == Gcb::LV || prev_ == Gcb::V) && (c == Gcb::V || c == Gcb::T))
+            return false;                                           // GB7
+        if ((prev_ == Gcb::LVT || prev_ == Gcb::T) && c == Gcb::T)
+            return false;                                           // GB8
+        if (c == Gcb::Extend || c == Gcb::ZWJ) return false;         // GB9
+        if (c == Gcb::SpacingMark) return false;                     // GB9a
+        if (prev_ == Gcb::Prepend) return false;                     // GB9b
+        if (conj_ == 2 && in == Incb::Consonant) return false;       // GB9c
+        if (pic_ == 2 && pic) return false;                          // GB11
+        if (prev_ == Gcb::Regional_Indicator && c == Gcb::Regional_Indicator &&
+            (ri_ & 1) != 0)
+            return false;                                           // GB12/13
+        return true;                                                // GB999
+    }
+
+    constexpr void Advance(Gcb c, Incb in, bool pic) noexcept
+    {
+        // The conjunct state: a consonant, then any run of Extend and Linker,
+        // of which at least one must be a Linker for GB9c to join.
+        if (in == Incb::Consonant) conj_ = 1;
+        else if (conj_ != 0 && in == Incb::Linker) conj_ = 2;
+        else if (conj_ != 0 && in == Incb::Extend) { /* run continues */ }
+        else conj_ = 0;
+
+        // The emoji-ZWJ state: an Extended_Pictographic, then any number of
+        // Extend, then one ZWJ. Anything else drops it.
+        if (pic) pic_ = 1;
+        else if (pic_ == 1 && c == Gcb::Extend) pic_ = 1;
+        else if (pic_ == 1 && c == Gcb::ZWJ) pic_ = 2;
+        else pic_ = 0;
+
+        ri_ = (c == Gcb::Regional_Indicator)
+                  ? (have_ && prev_ == Gcb::Regional_Indicator ? ri_ + 1 : 1)
+                  : 0;
+
+        prev_ = c;
+        have_ = true;
+    }
+
+    Gcb  prev_ = Gcb::Other;
+    bool have_ = false;
+    int  pic_  = 0;
+    int  ri_   = 0;
+    int  conj_ = 0;
+};
+
+// The running estimated width of a sequence of code points fed one at a time.
+//
+// A cluster's width is decided by its first code point, but a cluster is only
+// known to have ENDED when the next boundary shows up — so the count trails the
+// input by one cluster and Finish() settles it.
+class WidthMeter {
+public:
+    constexpr void Add(char32_t cp) noexcept
+    {
+        if (scan_.BreakBefore(cp)) {
+            Close();
+            first_ = cp;
+            open_  = true;
+        }
+    }
+
+    constexpr size_t Finish() noexcept
+    {
+        Close();
+        return width_;
+    }
+
+private:
+    constexpr void Close() noexcept
+    {
+        if (open_) {
+            width_ += size_t(ClusterWidth(first_));
+            open_ = false;
+        }
+    }
+
+    GraphemeScanner scan_;
+    size_t          width_ = 0;
+    char32_t        first_ = 0;
+    bool            open_  = false;
+};
+
+// Every printable ASCII code point is Grapheme_Cluster_Break=Other, is one
+// column wide, and is one code unit in both alphabets — so a run of them is
+// its own width, and the tables never have to be opened. Every number, every
+// "true", every "0x7ffe…" this library formats takes this path; the control
+// characters are excluded because CR LF is ONE cluster and 0x7F is Control.
+template <class CharT>
+constexpr bool AllPrintableAscii(basic_string_view<CharT> s) noexcept
+{
+    for (CharT c : s) {
+        const auto u = static_cast<make_unsigned_t<CharT>>(c);
+        if (u < 0x20u || u > 0x7Eu) return false;
+    }
+    return true;
+}
+
+// What an ill-formed code unit counts as.
+//
+// It is NOT skipped and NOT thrown on: a formatter that threw here would make
+// a diagnostic message impossible to print at the moment it is most needed.
+// It is not the raw unit's value either, and that is measured, not assumed --
+// both reference libraries give `0x8D` followed by a combining acute a width
+// of ONE, so the bad unit is a cluster the mark can join. Reading it as the
+// code point U+008D would make it Grapheme_Cluster_Break=Control, GB4 would
+// split the pair, and the answer would be two. U+FFFD is Other, is one column,
+// and is not pictographic, so it reproduces every row both libraries agree on.
+inline constexpr char32_t kIllFormed = 0xFFFD;
+
+// The estimated width of a string, in columns.
+template <class CharT>
+constexpr size_t EstimateWidth(basic_string_view<CharT> s) noexcept
+{
+    if (AllPrintableAscii(s)) return s.size();
+
+    const CharT *p = s.data();
+    const CharT *e = p + s.size();
+    WidthMeter   m;
+    while (p != e) {
+        char32_t cp = 0;
+        if (!NextScalar(p, e, cp)) cp = kIllFormed;
+        m.Add(cp);
+    }
+    return m.Finish();
+}
+
+// How many CODE UNITS of `s` fit in `maxWidth` columns, cutting only at
+// cluster boundaries. This is what a string's precision means
+// ([format.string.std]/14): the longest prefix of the formatted output whose
+// estimated width is at most the precision — so a truncation can never split a
+// cluster and can never leave half of a two-column character.
+template <class CharT>
+constexpr size_t PrefixForWidth(basic_string_view<CharT> s, size_t maxWidth) noexcept
+{
+    if (AllPrintableAscii(s)) return s.size() < maxWidth ? s.size() : maxWidth;
+
+    const CharT *const b = s.data();
+    const CharT       *p = b;
+    const CharT *const e = p + s.size();
+
+    GraphemeScanner scan;
+    size_t          width = 0;
+    char32_t        first = 0;
+    bool            open  = false;
+    const CharT    *start = p;   // first unit of the open cluster
+    const CharT    *fit   = p;   // end of the last prefix that fitted
+
+    while (p != e) {
+        const CharT *at = p;
+        char32_t     cp = 0;
+        if (!NextScalar(p, e, cp)) cp = kIllFormed;
+        if (scan.BreakBefore(cp)) {
+            if (open) {
+                width += size_t(ClusterWidth(first));
+                if (width > maxWidth) return size_t(start - b);
+                fit = at;
+            }
+            first = cp;
+            start = at;
+            open  = true;
+        }
+    }
+    if (open) {
+        width += size_t(ClusterWidth(first));
+        if (width > maxWidth) return size_t(start - b);
+        fit = e;
+    }
+    return size_t(fit - b);
+}
+
+} // namespace __format
+} // namespace std
+
+#endif // BOXCXX_BITS_FORMAT_WIDTH

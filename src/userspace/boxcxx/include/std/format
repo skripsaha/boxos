@@ -45,18 +45,20 @@
 //     radix character and the two words a bool is spelt with. The string and
 //     pointer formatters have no `L` position at all and reject it, as both
 //     reference libraries do.
-//   * field width is measured in code units; no Unicode grapheme /
-//     East-Asian-width estimation — this also governs the escaped ('?')
-//     text: precision truncates it in code units and can split an escape
-//     sequence, exactly like every other string precision clamp here.
-//     For wchar_t a code unit IS a code point, so the wide side of that
-//     measurement is exact where the narrow side is an approximation.
+//   * field width is the ESTIMATED WIDTH of [format.string.std]/13 as of
+//     Ф43-e-2: extended grapheme clusters by UAX #29, of which the eighteen
+//     ranges the standard writes out count two columns. The rules are in
+//     <__bits/format_width>, the UCD facts they read in
+//     <__bits/unicode_grapheme>. Precision measures the same way, on the
+//     escaped ('?') text too, so a truncation lands between clusters and
+//     never inside a UTF-8 sequence.
 #ifndef BOXCXX_FORMAT
 #define BOXCXX_FORMAT
 
 #include <__bits/core_traits>     // __bits::IsAnyOf
 #include <__bits/unicode_escape>  // Utf8Decode + the escape category tables
 #include <__bits/format_escape>   // EscapeInto / EscapeChar
+#include <__bits/format_width>    // EstimateWidth / PrefixForWidth ([format.string.std]/13)
 #include <__bits/ranges_core>     // ranges::input_range &c., for [format.range]
 #include <charconv>
 #include <cstddef>
@@ -223,20 +225,20 @@ constexpr size_t ParseNumber(const CharT *&p, const CharT *e)
     return v;
 }
 
-// The PER-FIELD limit on width and precision, applied on BOTH the literal and
-// the dynamic path. The standard sets no upper bound; libstdc++ rejects a
-// literal above 65535 but lets a dynamic {:{}} through, libc++ bounds neither
-// and really will emit a two-gigabyte field from a single spec. Bounding both
-// paths means a format string alone can no longer ask for gigabytes of heap or
-// billions of fill iterations.
+// ── there is no invented ceiling on a field ────────────────────────────
+// Ф9B-1 through Ф43-e-1 capped width and precision at 65535 on both the
+// literal and the dynamic path, so that a hostile format string could not ask
+// for gigabytes. Ф43-e-2 removes it, by decision: the number was this
+// library's own, no document mentions it, and a program that legitimately lays
+// out a hundred-thousand-column report was told "width exceeds the field
+// limit" — a wrong answer given confidently. What bounds a field now is the
+// memory the machine has: the sink grows until the allocator refuses and
+// throws bad_alloc, the same answer every other oversized request gets. The
+// grammar still stops at INT_MAX, in ParseNumber, because a width is an int.
 //
-// It bounds a FIELD, not a whole format() call, and cannot bound more than
-// that: a range or tuple spec applies its underlying width to every element, so
-// "{::65535}" still amplifies its argument 16384-fold. That is inherent to the
-// standard's design — libstdc++ and libc++ produce byte-for-byte the same
-// output size there — and the argument's size is chosen by the program, not by
-// the format string.
-inline constexpr int kMaxFieldWidth = 65535;
+// Measured on the references before removing it: libstdc++ rejects the literal
+// "{:70000}" and lets the dynamic "{:{}}" through with the same 70000; libc++
+// bounds neither path and really does emit a two-gigabyte field.
 
 // width is a positive-integer ([format.string.std]): nonzero-digit
 // digit-seq_opt. A leading '0' is not a width at all — in the std-format-spec
@@ -247,10 +249,7 @@ constexpr int ParseWidth(const CharT *&p, const CharT *e)
 {
     if (*p == CharT('0'))
         throw format_error("format: width must not start with a zero digit");
-    const size_t v = ParseNumber(p, e);
-    if (v > size_t(kMaxFieldWidth))
-        throw format_error("format: width exceeds the field limit");
-    return int(v);
+    return int(ParseNumber(p, e));
 }
 
 // precision is a nonnegative-integer — unlike width, leading zeros are legal
@@ -258,10 +257,7 @@ constexpr int ParseWidth(const CharT *&p, const CharT *e)
 template <class CharT>
 constexpr int ParsePrecision(const CharT *&p, const CharT *e)
 {
-    const size_t v = ParseNumber(p, e);
-    if (v > size_t(kMaxFieldWidth))
-        throw format_error("format: precision exceeds the field limit");
-    return int(v);
+    return int(ParseNumber(p, e));
 }
 
 // Which types get the integer formatter (not bool / char, which have their own
@@ -805,15 +801,23 @@ inline void EmitField(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
                       Align dflt, bool numeric)
 {
     auto out = ctx.out();
+    // The size of a field is its ESTIMATED WIDTH ([format.string.std]/13) —
+    // extended grapheme clusters, some of them two columns — and not its
+    // length in code units. This is the one seam every formatted body passes
+    // through, which is why the measurement belongs here and nowhere else: it
+    // is what makes a padded column of CJK, of combining marks or of emoji
+    // line up. A number's body is ASCII and takes EstimateWidth's fast path,
+    // where the width IS the count and no table is opened.
+    //
     // core is a size_t, never an int. For a width-bearing range or tuple field
     // the body IS the whole scratch string, which can exceed INT_MAX: narrowing
     // it wrapped negative, so `width <= core` failed even for width 1 and pad
     // became ~2^31 fill characters. Measured before the fix:
     // format("{:1:65535}", vector<int>(32769)) — a ten-character format string —
     // emitted 4294967297 characters where both reference libraries emit
-    // 2147581953. width is bounded by kMaxFieldWidth on every path, so the
-    // subtraction below cannot overflow.
-    const size_t core = sign_prefix.size() + body.size();
+    // 2147581953. `width` is an int on every path, so the subtraction below
+    // cannot overflow.
+    const size_t core = sign_prefix.size() + EstimateWidth(body);
 
     if (width <= 0 || size_t(width) <= core) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
@@ -997,26 +1001,54 @@ inline void EmitLocalized(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width
     }
     const size_t firstLen = intLen - taken;
 
-    auto         out  = ctx.out();
-    const size_t core = sign_prefix.size() + bodyLen + seps;
+    auto out = ctx.out();
 
-    // The leftmost group, then the rest right to left: group k counts from the
-    // RIGHT, so walking forward means counting down.
-    const auto writeBody = [&] {
+    // ONE walk over the characters the body will consist of, so that what is
+    // measured and what is written cannot drift apart. The leftmost group
+    // first, then the rest right to left: group k counts from the RIGHT, so
+    // walking forward means counting down.
+    const auto walk = [&](auto &&emit) {
         size_t i = 0;
         for (size_t n = 0; n < firstLen; ++n)
-            out.__sink()->Append(CharT(static_cast<unsigned char>(body[i++])));
+            emit(CharT(static_cast<unsigned char>(body[i++])));
         for (size_t k = seps; k-- > 0;) {
-            out.__sink()->Append(sep);
+            emit(sep);
             const size_t step = __ios::__grouping::At(grp, k);
             for (size_t n = 0; n < step; ++n)
-                out.__sink()->Append(CharT(static_cast<unsigned char>(body[i++])));
+                emit(CharT(static_cast<unsigned char>(body[i++])));
         }
         for (; i < bodyLen; ++i)
-            out.__sink()->Append(body[i] == '.'
-                                     ? pt
-                                     : CharT(static_cast<unsigned char>(body[i])));
+            emit(body[i] == '.' ? pt
+                                : CharT(static_cast<unsigned char>(body[i])));
     };
+    const auto writeBody = [&] {
+        walk([&](CharT c) { out.__sink()->Append(c); });
+    };
+
+    // Every character of the body proper is a digit or a decoration to_chars
+    // wrote, so it is ASCII and one column. Only the two characters the FACET
+    // supplies can be anything else, and when they are ordinary ASCII — which
+    // they are in every locale this library ships — the width is the count and
+    // the Unicode tables are never opened. When they are not, the same walk
+    // feeds the meter, so a two-column separator widens the field and a
+    // COMBINING one joins the digit before it instead of adding a column.
+    const auto plainAscii = [](CharT c) {
+        const auto u = static_cast<make_unsigned_t<CharT>>(c);
+        return u >= 0x20u && u < 0x7Fu;
+    };
+    size_t bodyWidth = bodyLen + seps;
+    if (!plainAscii(sep) || !plainAscii(pt)) {
+        WidthMeter meter;
+        walk([&](CharT c) {
+            const auto u = static_cast<make_unsigned_t<CharT>>(c);
+            if constexpr (is_same_v<CharT, char>)
+                meter.Add(u < 0x80u ? char32_t(u) : kIllFormed);
+            else
+                meter.Add(char32_t(u));
+        });
+        bodyWidth = meter.Finish();
+    }
+    const size_t core = sign_prefix.size() + bodyWidth;
 
     if (width <= 0 || size_t(width) <= core) {
         WriteRun(out, sign_prefix.data(), sign_prefix.size());
@@ -1067,14 +1099,18 @@ inline void FormatCharCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec,
 
 // BodyC is free here because the string this formats is sometimes the
 // argument's own text (CharT) and sometimes a literal this file owns —
-// "true", "false", a rendered date. Precision clamps in code units of
-// whichever it is, which is the measurement [format.string.std] asks for.
+// "true", "false", a rendered date.
+//
+// [format.string.std]/14: a string's precision names the longest prefix whose
+// ESTIMATED WIDTH is at most that value. So the cut lands on a cluster
+// boundary, never inside one, and never leaves half of a two-column character
+// or half of a UTF-8 sequence behind — which a clamp in code units did, and
+// this was one for the whole epic before Ф43-e-2.
 template <class CharT, class BodyC>
 inline void FormatString(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
                          int precision, basic_string_view<BodyC> s)
 {
-    if (precision >= 0 && size_t(precision) < s.size())
-        s = s.substr(0, size_t(precision));
+    if (precision >= 0) s = s.substr(0, PrefixForWidth(s, size_t(precision)));
     EmitField(ctx, spec, width, string_view(), s, Align::Left,
               /*numeric=*/false);
 }
@@ -1265,8 +1301,7 @@ template <class CharT> inline int ResolveDynamic(Ctx<CharT> &ctx, size_t id)
 {
     const long long v = ctx.arg(id).__as_integer();
     if (v < 0) throw format_error("format: negative width/precision");
-    if (v > kMaxFieldWidth)
-        throw format_error("format: width/precision exceeds the field limit");
+    if (v > kIntMax) throw format_error("format: width/precision out of range");
     return int(v);
 }
 template <class CharT>
@@ -2471,6 +2506,7 @@ size_t formatted_size(const locale &loc, wformat_string<Args...> fmt, Args &&...
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_format
 #define BOXCXX_OWNS_format_ranges
 #define BOXCXX_OWNS_format_uchar
 #include <__bits/version_format>

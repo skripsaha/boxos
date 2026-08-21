@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 149 |
-| Header source | ~102 000 lines |
-| Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Internal implementation leaves (`include/std/__bits/`) | 151 |
+| Header source | ~103 000 lines |
+| Feature-test macros defined | 211 — 165 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 243 phases (224 of them the numbered `PhaseN` series), 6 333 runtime checks, 2 014 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 244 phases (225 of them the numbered `PhaseN` series), 6 379 runtime checks, 2 016 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -67,7 +67,7 @@ with the launch args selecting which rows run. The count is therefore
 `sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
 ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
 can be checked against a boot log instead of against a grep that has to be
-maintained. That is **243** — 224 purely numbered, 18 suffixed (`Phase4a`,
+maintained. That is **244** — 225 purely numbered, 18 suffixed (`Phase4a`,
 `Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by four across
 Ф43: `Phase225`, `Phase226` and `Phase227` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
@@ -116,7 +116,6 @@ the library itself; there is no "no-exceptions" configuration.
 | `os << u8"text"`, `os << L"text"` | does not compile | The inserters are deleted, as [ostream.inserters.character] requires. A narrow stream does not transcode; convert explicitly. (Until Ф31e-a this compiled and printed the pointer address.) |
 | `for (auto& [k, v] : m)` over `flat_map` or `box::flat_hash_map` | does not compile | The iterator hands out a proxy, not a reference to a pair. Use `auto` or `auto&&`. |
 | `constexpr std::string s = "a long one…";` | not a constant expression | A string that outgrows the inline buffer owns an allocation, and no allocation outlives constant evaluation. Up to 15 characters it works and the object lives in the image. Both mainstream libraries draw the line in the same place. (§2 `<string>`) |
-| a huge `{:70000}` field | throws `format_error` | Field width is capped at 65535 on purpose (§3). |
 
 ---
 
@@ -434,7 +433,7 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **210** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **211** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled.
 
 > This section said **201** until Ф41, and the number at the top of the document
@@ -451,7 +450,7 @@ the whole set, not sampled.
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 210 macros × 107 headers by
+  checked over the full cross-product of 211 macros × 107 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -459,9 +458,13 @@ the whole set, not sampled.
   against [version.syn] rather than reading it.** `__cpp_lib_chrono`,
   `filesystem`, `format`, `formatters`, `is_implicit_lifetime`, `ranges` and
   `result_of_sfinae` were simply not in the file. No false green came of it —
-  the audit skips macros boxcxx does not define, and boxcxx defines none of the
-  seven — but the gap was a trap armed for the day any one of them is defined,
-  at which point its ownership would have gone unchecked in silence. The one
+  the audit skips macros boxcxx does not define, and at the time boxcxx defined
+  none of the seven — but the gap was a trap armed for the day any one of them
+  is defined, at which point its ownership would have gone unchecked in
+  silence. **Two have since been defined and the trap did not fire, because
+  Ф41 had already disarmed it:** `__cpp_lib_formatters` in Ф42-g and
+  `__cpp_lib_format` in Ф43-e-2, both checked against the file the day they
+  landed. The one
   macro still absent from the file, `__cpp_lib_modules`, is absent on purpose:
   [version.syn] gives it no "also in" list at all, so `<version>` is its only
   owner and there is nothing for the file to say.
@@ -1541,9 +1544,12 @@ wide write to a wide-oriented stream refuse itself.
 **The field-width parser saturates**, at a value high enough that no width a
 program really writes is affected. That is an overflow guard and not a policy:
 a width is written by the caller, nothing bounds its digits, and `v * 10` on a
-plain `int` is signed overflow — undefined, not merely large. It is distinct
-from `<format>`'s deliberate 65535 cap (§3). Ф42 found the hole while giving
-the wide engine the same parser and having to explain why the two differed.
+plain `int` is signed overflow — undefined, not merely large. `<format>` used
+to have a deliberate 65535 cap beside it and no longer does (§2), which leaves
+this the only place in the library where a written width is quietly clamped
+rather than honoured — and printf's `%*d` grammar has no way to report the
+refusal, which is why it clamps. Ф42 found the hole while giving the wide
+engine the same parser and having to explain why the two differed.
 
 ## `<csetjmp>`
 
@@ -1961,18 +1967,30 @@ states the contract; the encoding already honoured it.
   consulted, so the `volatile` was dropped, the argument was stored as a plain
   `int`, and the library's own `static_assert(FormattableWith<…>)` guard was
   bypassed — `formattable<volatile int, char>` said `false` the whole time.
-- `+` **Field width is capped at 65535.** On the literal path this is a
-  compile-time error ("width exceeds the field limit") caught by the consteval
-  format-string check; on the dynamic path (`{:{}}`) it throws at run time. Neither
-  reference library bounds the dynamic path. Deliberate: on bare metal an
-  attacker-supplied format string asking for a two-gigabyte field is a denial of
-  service.
-- `?` The cap is **per field, not a total budget**. A nine-character spec such as
-  `"{::65535}"` applied to a large range still multiplies the output, and both
-  reference libraries produce the same volume byte for byte. A total budget was
-  considered and rejected: it would break a legitimate `format()` of a large
-  container. The threat closed here is the hostile *format string*; the size of the
-  argument is chosen by the program.
+- `✓` Closed in Ф43-e-2: **field width and precision were capped at 65535**, on
+  the literal path as a compile-time error from the consteval check and on the
+  dynamic path as a run-time throw. The reasoning had been that a hostile format
+  string must not be able to ask for a two-gigabyte field — but the number was
+  this library's own, no document mentions it, and the program that actually met
+  it was the one laying out a wide report, not the attacker. It is gone from
+  both paths. What bounds a field now is the memory the machine has: the sink
+  grows until the allocator refuses and throws `bad_alloc`, the answer every
+  other oversized request already got. The grammar still stops above `INT_MAX`,
+  because a width is an `int`.
+
+  The cap could never have been a budget anyway, and that is what settled it: a
+  nine-character spec such as `"{::65535}"` applied to a large range multiplies
+  the output whatever the per-field limit is, and both reference libraries
+  produce the same volume byte for byte. A limit that stopped the honest case
+  and not the hostile one was not paying for itself.
+
+  **What "bounded by memory" does not cover, stated rather than glossed:**
+  `formatted_size` and `format_to_n` must report the size the full field would
+  have, so they still *iterate* it — `formatted_size("{:2000000000}", x)`
+  allocates nothing and costs two billion steps. Time is not bounded here, only
+  space, and a program that hands an untrusted format string to either of those
+  should bound the string instead. libc++ behaves the same way; libstdc++ stops
+  the literal spelling of it and not the dynamic one.
 - `~` `enable_nonlocking_formatter_optimization` is provided. It is a **C++26**
   feature (P3107R5) — N4950 does not mention it — adopted early by decision. See
   §3 for the carve-outs; note also that libstdc++ 16.1 reports `true` for
@@ -1984,11 +2002,25 @@ states the contract; the encoding already honoured it.
   precision argument**: [format.string.std]/10 requires a *standard* signed or
   unsigned integer type, and the extended types are not standard integer types.
   The rejection happens in the consteval check, before any run-time throw.
-- `~` Width is measured in **code units**. There is no grapheme clustering and no
-  East-Asian width estimation; for the ASCII console this is exact. It is the
-  one thing between here and `__cpp_lib_format`, together with the width cap
-  below, and phase227 (43)-(44) assert both of today's answers on purpose so
-  that changing them cannot be forgotten.
+- `✓` Closed in Ф43-e-2: **width was measured in code units**, where
+  [format.string.std]/13 asks for the estimated width — extended grapheme
+  clusters by UAX #29, of which the eighteen ranges the standard writes out
+  count two columns. `format("{:4}", "é")` used to leave two spaces after a
+  character one column wide, and a padded table of anything but ASCII came out
+  ragged. The rules live in `<__bits/format_width>`, hand-written because a rule
+  is not a fact; the three UCD properties they read
+  (Grapheme_Cluster_Break, Extended_Pictographic, Indic_Conjunct_Break) live in
+  `<__bits/unicode_grapheme>`, generated end to end. The rules were checked
+  against **Unicode's own GraphemeBreakTest-17.0.0 — all 766 cases pass** — and
+  then against both reference libraries over 40 000 random strings drawn from
+  the alphabet where the rules bite: marks, jamo, conjuncts, emoji, regional
+  indicators, controls and ill-formed bytes. §3 has the one corner where all
+  three answers were not the same.
+
+  Precision moved with it ([format.string.std]/14): it names the longest prefix
+  whose estimated width fits, so a cut lands between clusters and can no longer
+  split a UTF-8 sequence. Both pins phase227 had planted for this fell, and
+  phase228 is where the rule is now tested.
 - `✓` Closed in Ф43-e-1: **`L` was parsed and dropped, and there were no
   locale-taking overloads at all.** Both halves of that are gone. The six
   functions [format.functions] gives a `const locale&` — `format`, `format_to`,
@@ -2044,10 +2076,28 @@ states the contract; the encoding already honoured it.
   side, where an odd-traits string was being bracketed for the same reason.
   Bracketing is the worse failure of the two: it produces output that looks
   deliberate.
-- `~` **Width is measured in code units in BOTH alphabets**, which for `wchar_t`
-  is code points and therefore exact. libc++ estimates East-Asian width — its
-  `format(L"{:6}", L"中文")` pads to four units, not six — so it is not an oracle
-  for the width of non-ASCII text, and no check here pins one against it.
+- `✓` Closed in Ф43-e-2 together with the narrow half: **both alphabets estimate
+  the width**, through one engine. A `wchar_t` is a code point here, so the wide
+  side needs no decoder — `NextScalar` hands the unit straight back — and the
+  clustering and the two-column list are the same code. The entry this replaces
+  said libc++ could not serve as an oracle for wide text; it can, and it was
+  used as one.
+- `~` A **character argument is measured too**, and that is where the two
+  references part: `format(L"{:4}", L'你')` leaves two fills here and in
+  libstdc++ 16.1, three in libc++, which counts a lone wide character as one
+  column. A character is formatted as a string of one character and the standard
+  gives it no separate rule.
+- `+` **A localized number is measured the same way every other field is**, and
+  here boxcxx parts company with BOTH references. They count the CODE POINTS of
+  a localized number: measured, `format(loc, L"{:~<20L}", 1234567)` through a
+  facet whose `thousands_sep` is U+FF0C pads to twenty code points in each of
+  them, though those two separators occupy two columns apiece and the result is
+  twenty-two columns wide. boxcxx pads to twenty columns. The reason is not
+  pedantry — `width` cannot mean columns for a string and code points for a
+  number inside one library, or a program printing a column of figures next to a
+  column of names gets a ragged table and no reason for it. The body is still
+  never materialized: one walk over the characters that are about to be written
+  feeds the measurement, so the two cannot drift apart.
 - `~` **The `'c'` presentation is the one place the two alphabets are SUPPOSED to
   disagree.** [tab:format.type.int] copies `static_cast<charT>(value)` and refuses
   what `charT` cannot hold, so `format("{:c}", 255)` throws while
@@ -4084,10 +4134,15 @@ direction. These are places where boxcxx follows the standard and a reference
 implementation does not.
 
 **Everything in this section was re-measured on 2026-08-14** against the
-toolchains installed today: **libstdc++ 16.1.0** (`__GLIBCXX__ 20260430`) and
+toolchains installed then: **libstdc++ 16.1.0** (`__GLIBCXX__ 20260430`) and
 **libc++ 22.1.6** (`_LIBCPP_VERSION 220106`). Where an older measurement has since
 been fixed upstream, it is not claimed here — several were dropped for exactly
 that reason, and §4 says which.
+
+**The grapheme entry below is newer and its libc++ column is a different
+build:** Ф43-e-2 measured on 2026-08-21 against libstdc++ 16.1.0 and the libc++
+this machine now has, **19.1.2** (`_LIBCPP_VERSION 190102`). Nothing older is
+re-claimed for 19, and nothing there is claimed for 22.
 
 ## Exception safety of the flat containers — the sharpest one
 
@@ -4152,12 +4207,34 @@ working and answers lookups with the wrong values.
   adjacent "finite nonzero x + iNaN → NaN + iNaN" bullet explicitly excludes zero.
   **Both** libstdc++ 16.1 and libc++ 22 return `(NaN, NaN)`. boxcxx implements the
   carve-out.
-- **Bounded field width.** boxcxx caps a format field at 65535 on the literal path
-  (a compile-time error, verified) and on the dynamic path (a run-time throw,
-  pinned by the in-tree suite). Neither reference library bounds the dynamic path;
-  libc++ bounds nothing. On bare metal a hostile format string asking for a
-  two-gigabyte field is a denial of service, so this is deliberate strictness —
-  recorded in §2 under `<format>` as a `+`.
+- **Extended grapheme clusters, where each reference gets a different one wrong.**
+  Ф43-e-2 gave `<format>` the estimated width of [format.string.std]/13. The
+  rules pass all 766 cases of Unicode's own GraphemeBreakTest-17.0.0; they were
+  then fuzzed against both references over 40 000 random strings, and the
+  disagreements are these three, all reproduced today (libstdc++ 16.1.0,
+  `__GLIBCXX__ 20260430`; libc++ 19.1.2, `_LIBCPP_VERSION 190102`):
+
+  | case | boxcxx | libstdc++ | libc++ | rule |
+  |---|---|---|---|---|
+  | `"\r\n"` | **1** | 1 | 2 | GB3 — CR LF is one cluster |
+  | `L"\uAC00\u0301"` (LV + a mark) | **2** | 3 | 2 | GB9 — × Extend, whatever precedes |
+  | `"\u0600\U0001F1FA\U0001F1F8"` (Prepend + flag) | **1** | 2 | 2 | GB13 — `[^RI] (RI RI)* RI × RI` |
+
+  The third is the interesting one, because **both** references break there and
+  neither the conformance suite nor any spec text says they should. GB13 asks
+  what precedes the break point: an Arabic number sign is `[^RI]`, the first
+  regional indicator is the `RI`, and the pair holds. libc++'s state machine
+  shows why it does not — the "active rule" it uses to remember an RI run is
+  never armed when GB9b is what pulled the previous character in — and
+  libstdc++ answers the same. Over 40 000 strings this was the ONLY case where
+  boxcxx and an agreeing pair of references differed: 36 hits, every one of them
+  a Prepend directly before two regional indicators.
+
+- **Precision on an escaped string is monotone.** `format("{:.2?}", "你")` is
+  `"` here and in libc++: the opening quote is one column, the ideograph would
+  make three. libstdc++ prints `"你"` — four columns — while its own answer at
+  precision **3** is `"你`, three. A longer prefix at a smaller precision is not
+  a defensible reading of [format.string.std]/14 in either direction.
 
 ---
 
@@ -4211,6 +4288,12 @@ Present in 16.1.0 (`__GLIBCXX__ 20260430`), all reproduced today: the six rows o
 the flat-container table in §3, `{:#.0f}` of `1e308`, and the ignored precision on
 floating-point-rep durations.
 
+**Two more, from Ф43-e-2's grapheme work** (§3 has the table): a Hangul syllable
+followed by a combining mark is segmented as **two** clusters, where GB9 joins any
+Extend to whatever precedes it — `L"\uAC00\u0301"` measures 3 columns there and 2
+everywhere else; and precision on an escaped string is **not monotone** —
+`{:.2?}` of `"你"` yields a longer answer than `{:.3?}` does.
+
 **Fixed since the epic measured them against 15.2 — no superiority is claimed:**
 `{:<010p}` zero-padding despite an explicit align; `{:%F}` of `year{-43}`
 disagreeing with its own `%Y`; `iterator_traits<flat_map::iterator>::value_type`
@@ -4226,6 +4309,20 @@ The two flat-container invariant violations above (both reproduced today), the
 escape-sequence work — three cases in `write_escaped.h` where a character is
 treated as "previously escaped" (`U+0020`, a non-delimiter quote, and an
 ill-formed run) and is then printed raw.
+
+**From Ф43-e-2, measured on 19.1.2** (`_LIBCPP_VERSION 190102`, the libc++ this
+machine has; the rows above are from 22.1.6 and are not re-claimed for 19):
+**GB3 is not applied** — a CR LF pair measures two columns where the rule makes
+it one cluster — and a lone wide character is measured as one column rather than
+by its own width.
+
+## In both of them
+
+**GB13 loses a regional-indicator pair to a Prepend.** `"\u0600"` followed by two
+regional indicators is one cluster by the rule and two in each library; §3 has
+the derivation and libc++'s state machine shows the mechanism. Found by fuzzing,
+not by reading: it was the only disagreement left in 40 000 random strings after
+everything else matched.
 
 # 5. `box::` — the BoxOS-native surface
 
