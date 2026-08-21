@@ -39,10 +39,12 @@
 //   * char and wchar_t. char8_t/char16_t/char32_t are not formatting
 //     character types in C++23 — [format.formatter.spec] names charT as
 //     char or wchar_t and nothing else.
-//   * the `L` (localized) flag is accepted and ignored wherever the grammar
-//     has an `L` position — the arithmetic and char formatters — since there
-//     is only the "C" locale. The string and pointer formatters have no `L`
-//     position at all and reject it, as both reference libraries do.
+//   * the `L` (localized) flag WORKS as of Ф43-e: it consults the numpunct of
+//     the locale the context carries — the one passed to a locale-taking
+//     overload, or std::locale() otherwise — for the group separators, the
+//     radix character and the two words a bool is spelt with. The string and
+//     pointer formatters have no `L` position at all and reject it, as both
+//     reference libraries do.
 //   * field width is measured in code units; no Unicode grapheme /
 //     East-Asian-width estimation — this also governs the escaped ('?')
 //     text: precision truncates it in code units and can split an escape
@@ -167,7 +169,7 @@ template <class CharT> struct StdSpec {
     int    precision     = -1;     // -1 == absent
     size_t prec_id       = 0;
     bool   prec_dynamic  = false;
-    bool   localized     = false;  // 'L' — accepted, ignored
+    bool   localized     = false;  // 'L' — consults numpunct
     char   type          = '\0';   // '\0' == default
 };
 
@@ -703,11 +705,13 @@ public:
     {
         return args_.get(id);
     }
-    // [format.context] requires this even where there is nothing to choose:
-    // the `L` flag is parsed and ignored here, so what locale() answers is
-    // the one locale the system has. It costs a return of an empty class —
-    // <ios> already holds one of these by value in every stream.
-    std::locale locale() { return std::locale(); }
+    // [format.context]: the locale passed to the formatting function if it
+    // took one, and std::locale() — the current GLOBAL locale — otherwise.
+    // Held by pointer, not by value: the pointee is the caller's own argument
+    // and outlives the call, while a locale by value would put a refcounted
+    // member in every context, including the scratch ones a range builds per
+    // element.
+    std::locale locale() { return loc_ != nullptr ? *loc_ : std::locale(); }
 
     // Internal accessor: lets a nested context (built around a scratch sink,
     // e.g. range_formatter's width-triggered buffering) share this context's
@@ -715,15 +719,21 @@ public:
     // against the real argument list.
     basic_format_args<Self> __args() const noexcept { return args_; }
 
+    // ... and the locale with it. A nested context that lost it would make
+    // `{:L}` inside a range mean something different from `{:L}` outside one.
+    const std::locale *__loc() const noexcept { return loc_; }
+
     // Internal constructor used by the engine.
-    basic_format_context(iterator out, basic_format_args<Self> args) noexcept
-        : out_(out), args_(args)
+    basic_format_context(iterator out, basic_format_args<Self> args,
+                         const std::locale *loc = nullptr) noexcept
+        : out_(out), args_(args), loc_(loc)
     {
     }
 
 private:
     iterator                out_;
     basic_format_args<Self> args_;
+    const std::locale      *loc_ = nullptr;
 };
 
 // ════════════════════════════════════════════════════════════════════════
@@ -940,8 +950,108 @@ inline void FormatIntCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec,
     else if (spec.sign == Sign::Space) sp[spn++] = ' ';
     for (const char *q = prefix; *q; ++q) sp[spn++] = *q;
 
+    if (spec.localized) {
+        // Every base groups, not only decimal — measured, on both references.
+        EmitLocalized(ctx, spec, width, string_view(sp, spn), digits, size_t(dl),
+                      size_t(dl), /*numeric=*/true);
+        return;
+    }
     EmitField(ctx, spec, width, string_view(sp, spn), string_view(digits, dl),
               Align::Right, /*numeric=*/true);
+}
+
+// ── the `L` option ([format.string.std]/6) ──────────────────────────────
+// Parsed and dropped for the whole epic, because there was no numpunct to ask.
+// There is one as of Ф43-c, and what the flag changes is the digits: the group
+// separators and the radix character come from the facet the locale carries.
+//
+// Measured on both reference implementations, which agree on every case:
+// grouping applies to EVERY base, not only to decimal ("{:Lb}" groups bits);
+// the separators COUNT toward the field width; and zero padding is NOT
+// grouped, so "{:012L}" of 1234567 is "0001'234'567" — twelve characters, of
+// which three are plain zeros.
+//
+// The body is not materialized. A float body runs to thousands of characters,
+// and multiplying such a buffer by sizeof(CharT) is the mistake this library
+// paid a page fault for in Ф43-c-1. Only its LENGTH is computed ahead, which
+// is all the padding needs.
+template <class CharT>
+inline void EmitLocalized(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
+                          string_view sign_prefix, const char *body, size_t bodyLen,
+                          size_t intLen, bool numeric)
+{
+    const std::locale      loc = ctx.locale();
+    const numpunct<CharT> &np  = use_facet<numpunct<CharT>>(loc);
+    const string           grp = np.grouping();
+    const CharT            sep = np.thousands_sep();
+    const CharT            pt  = np.decimal_point();
+
+    size_t seps = 0, taken = 0;
+    if (!grp.empty() && intLen > 0) {
+        for (;;) {
+            const size_t step = __ios::__grouping::At(grp, seps);
+            if (step == 0 || taken + step >= intLen) break;
+            taken += step;
+            ++seps;
+        }
+    }
+    const size_t firstLen = intLen - taken;
+
+    auto         out  = ctx.out();
+    const size_t core = sign_prefix.size() + bodyLen + seps;
+
+    // The leftmost group, then the rest right to left: group k counts from the
+    // RIGHT, so walking forward means counting down.
+    const auto writeBody = [&] {
+        size_t i = 0;
+        for (size_t n = 0; n < firstLen; ++n)
+            out.__sink()->Append(CharT(static_cast<unsigned char>(body[i++])));
+        for (size_t k = seps; k-- > 0;) {
+            out.__sink()->Append(sep);
+            const size_t step = __ios::__grouping::At(grp, k);
+            for (size_t n = 0; n < step; ++n)
+                out.__sink()->Append(CharT(static_cast<unsigned char>(body[i++])));
+        }
+        for (; i < bodyLen; ++i)
+            out.__sink()->Append(body[i] == '.'
+                                     ? pt
+                                     : CharT(static_cast<unsigned char>(body[i])));
+    };
+
+    if (width <= 0 || size_t(width) <= core) {
+        WriteRun(out, sign_prefix.data(), sign_prefix.size());
+        writeBody();
+        ctx.advance_to(out);
+        return;
+    }
+
+    const int pad = int(size_t(width) - core);
+    if (spec.zero && spec.align == Align::Default && numeric) {
+        WriteRun(out, sign_prefix.data(), sign_prefix.size());
+        WriteFill(out, CharT('0'), pad);
+        writeBody();
+        ctx.advance_to(out);
+        return;
+    }
+
+    const Align a    = spec.align == Align::Default ? Align::Right : spec.align;
+    const CharT fill = spec.fill;
+    if (a == Align::Left) {
+        WriteRun(out, sign_prefix.data(), sign_prefix.size());
+        writeBody();
+        WriteFill(out, fill, pad);
+    } else if (a == Align::Right) {
+        WriteFill(out, fill, pad);
+        WriteRun(out, sign_prefix.data(), sign_prefix.size());
+        writeBody();
+    } else {  // center — extra unit on the right when odd
+        const int l = pad / 2, r = pad - l;
+        WriteFill(out, fill, l);
+        WriteRun(out, sign_prefix.data(), sign_prefix.size());
+        writeBody();
+        WriteFill(out, fill, r);
+    }
+    ctx.advance_to(out);
 }
 
 // A character argument is one of the three things that really is CharT, so
@@ -1060,6 +1170,17 @@ void FormatFloatCore(Ctx<CharT> &ctx, const StdSpec<CharT> &spec, int width,
     else if (spec.sign == Sign::Plus) sp[spn++] = '+';
     else if (spec.sign == Sign::Space) sp[spn++] = ' ';
 
+    if (spec.localized) {
+        // Grouping runs over the integer part only: the digits before the
+        // radix point, or before the exponent when there is no point.
+        ptrdiff_t intLen = 0;
+        while (intLen < len && buf[intLen] != '.' && buf[intLen] != 'e' &&
+               buf[intLen] != 'E' && buf[intLen] != 'p' && buf[intLen] != 'P')
+            ++intLen;
+        EmitLocalized(ctx, spec, width, string_view(sp, spn), buf, size_t(len),
+                      size_t(intLen), /*numeric=*/finite);
+        return;
+    }
     EmitField(ctx, spec, width, string_view(sp, spn), string_view(buf, len),
               Align::Right, /*numeric=*/finite);
 }
@@ -1264,6 +1385,19 @@ struct formatter<bool, CharT> {
     {
         const int width = __format::EffectiveWidth(ctx, spec_);
         if (spec_.type == '\0' || spec_.type == 's') {
+            if (spec_.localized) {
+                // The words a locale can genuinely translate, and the one part
+                // of a formatted bool that is not ASCII by construction.
+                // The locale is held by value for the call: use_facet returns
+                // a reference INTO the table it names, and locale() hands back
+                // a temporary.
+                const std::locale         loc = ctx.locale();
+                const numpunct<CharT>    &np  = use_facet<numpunct<CharT>>(loc);
+                const basic_string<CharT> w   = value ? np.truename() : np.falsename();
+                __format::FormatString(ctx, spec_, width, -1,
+                                       basic_string_view<CharT>(w));
+                return;
+            }
             // "true"/"false" are spelt once, in ASCII, and widened on the way
             // out. A wide duplicate of the two words would be a second place
             // for them to disagree.
@@ -1950,10 +2084,11 @@ namespace __format {
 
 template <class CharT>
 inline void DoVformat(OutputSink<CharT> &sink, basic_string_view<CharT> fmt,
-                      basic_format_args<Ctx<CharT>> args)
+                      basic_format_args<Ctx<CharT>> args,
+                      const std::locale *loc = nullptr)
 {
     basic_format_parse_context<CharT> pc(fmt, args.__count());
-    Ctx<CharT>                        fc(SinkIterator<CharT>(sink), args);
+    Ctx<CharT>                        fc(SinkIterator<CharT>(sink), args, loc);
 
     const CharT *p   = fmt.data();
     const CharT *e   = p + fmt.size();
@@ -2075,6 +2210,40 @@ Out vformat_to(Out out, wstring_view fmt, wformat_args args)
 {
     __format::IteratorSink<wchar_t, Out> sink(std::move(out));
     __format::DoVformat<wchar_t>(sink, fmt, args);
+    return std::move(sink.it);
+}
+
+// ── the locale-taking half of [format.functions] ────────────────────────
+// Six functions that had no overload here at all until Ф43-e. Their absence
+// was not a small gap: `L` cannot mean anything without a locale to ask, and
+// until Ф43-c there was no numpunct to ask it of, so the flag was parsed and
+// dropped. Both halves exist now, and the locale reaches the formatter through
+// the context rather than through a global.
+inline string vformat(const locale &loc, string_view fmt, format_args args)
+{
+    __format::StringSink<char> sink;
+    __format::DoVformat<char>(sink, fmt, args, &loc);
+    return std::move(sink.str);
+}
+inline wstring vformat(const locale &loc, wstring_view fmt, wformat_args args)
+{
+    __format::StringSink<wchar_t> sink;
+    __format::DoVformat<wchar_t>(sink, fmt, args, &loc);
+    return std::move(sink.str);
+}
+
+template <class Out>
+Out vformat_to(Out out, const locale &loc, string_view fmt, format_args args)
+{
+    __format::IteratorSink<char, Out> sink(std::move(out));
+    __format::DoVformat<char>(sink, fmt, args, &loc);
+    return std::move(sink.it);
+}
+template <class Out>
+Out vformat_to(Out out, const locale &loc, wstring_view fmt, wformat_args args)
+{
+    __format::IteratorSink<wchar_t, Out> sink(std::move(out));
+    __format::DoVformat<wchar_t>(sink, fmt, args, &loc);
     return std::move(sink.it);
 }
 
@@ -2227,6 +2396,61 @@ size_t formatted_size(wformat_string<Args...> fmt, Args &&...args)
 {
     __format::CountingSink<wchar_t> sink;
     __format::DoVformat<wchar_t>(sink, fmt.get(), make_wformat_args(args...));
+    return sink.count;
+}
+
+// The same four, taking the locale their `L` will consult.
+template <class... Args>
+string format(const locale &loc, format_string<Args...> fmt, Args &&...args)
+{
+    return vformat(loc, fmt.get(), make_format_args(args...));
+}
+template <class... Args>
+wstring format(const locale &loc, wformat_string<Args...> fmt, Args &&...args)
+{
+    return vformat(loc, fmt.get(), make_wformat_args(args...));
+}
+
+template <class Out, class... Args>
+Out format_to(Out out, const locale &loc, format_string<Args...> fmt, Args &&...args)
+{
+    return vformat_to(std::move(out), loc, fmt.get(), make_format_args(args...));
+}
+template <class Out, class... Args>
+Out format_to(Out out, const locale &loc, wformat_string<Args...> fmt, Args &&...args)
+{
+    return vformat_to(std::move(out), loc, fmt.get(), make_wformat_args(args...));
+}
+
+template <class Out, class... Args>
+format_to_n_result<Out> format_to_n(Out out, ptrdiff_t n, const locale &loc,
+                                    format_string<Args...> fmt, Args &&...args)
+{
+    __format::TruncatingSink<char, Out> sink(std::move(out), n);
+    __format::DoVformat<char>(sink, fmt.get(), make_format_args(args...), &loc);
+    return {std::move(sink.it), sink.total};
+}
+template <class Out, class... Args>
+format_to_n_result<Out> format_to_n(Out out, ptrdiff_t n, const locale &loc,
+                                    wformat_string<Args...> fmt, Args &&...args)
+{
+    __format::TruncatingSink<wchar_t, Out> sink(std::move(out), n);
+    __format::DoVformat<wchar_t>(sink, fmt.get(), make_wformat_args(args...), &loc);
+    return {std::move(sink.it), sink.total};
+}
+
+template <class... Args>
+size_t formatted_size(const locale &loc, format_string<Args...> fmt, Args &&...args)
+{
+    __format::CountingSink<char> sink;
+    __format::DoVformat<char>(sink, fmt.get(), make_format_args(args...), &loc);
+    return sink.count;
+}
+template <class... Args>
+size_t formatted_size(const locale &loc, wformat_string<Args...> fmt, Args &&...args)
+{
+    __format::CountingSink<wchar_t> sink;
+    __format::DoVformat<wchar_t>(sink, fmt.get(), make_wformat_args(args...), &loc);
     return sink.count;
 }
 

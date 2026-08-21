@@ -51502,7 +51502,7 @@ void Phase224()
 // suite is the one that measured that boot at seven minutes.
 namespace {
 
-void CheckMoney(const std::string &got, const char *want, const char *what)
+void CheckText(const std::string &got, const char *want, const char *what)
 {
     if (got != want) {
         printf("[CXX] FAIL %s: got \"%s\" want \"%s\"\n", what, got.c_str(), want);
@@ -51510,11 +51510,13 @@ void CheckMoney(const std::string &got, const char *want, const char *what)
     }
 }
 
-void CheckMoneyW(const std::wstring &got, const char *want, const char *what)
+// The wide half, narrowed for printing only. A character no byte can hold
+// becomes '?' in the MESSAGE; the comparison itself already happened above.
+void CheckTextW(const std::wstring &got, const char *want, const char *what)
 {
     std::string narrow;
     for (wchar_t c : got) narrow.push_back(c < 128 ? static_cast<char>(c) : '?');
-    CheckMoney(narrow, want, what);
+    CheckText(narrow, want, what);
 }
 
 using MB = std::money_base;
@@ -51624,34 +51626,34 @@ void Phase225()
 
     // ── 2. "C" put: the sign survives ───────────────────────────────────
     {
-        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, 123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
                    "123456", "phase225 (11) a plain amount");
-        CheckMoney(MoneyOut(classic, -123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, -123456.0L, false, false, 0, ios_base::fmtflags{}, ' '),
                    "-123456", "phase225 (12) a negative amount keeps its sign");
-        CheckMoney(MoneyOut(classic, 0.0L, false, false, 0, ios_base::fmtflags{}, ' '), "0",
+        CheckText(MoneyOut(classic, 0.0L, false, false, 0, ios_base::fmtflags{}, ' '), "0",
                    "phase225 (13) zero");
-        CheckMoney(MoneyOut(classic, 1234.56L, false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, 1234.56L, false, false, 0, ios_base::fmtflags{}, ' '),
                    "1235", "phase225 (14) units are whole: 1234.56 rounds as %.0Lf does");
-        CheckMoney(MoneyOut(classic, 123456.0L, true, true, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, 123456.0L, true, true, 0, ios_base::fmtflags{}, ' '),
                    "123456", "phase225 (15) showbase adds nothing when there is no symbol");
 
-        CheckMoney(MoneyOut(classic, string("123456"), false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, string("123456"), false, false, 0, ios_base::fmtflags{}, ' '),
                    "123456", "phase225 (16) the digits overload");
-        CheckMoney(MoneyOut(classic, string("-123456"), false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, string("-123456"), false, false, 0, ios_base::fmtflags{}, ' '),
                    "-123456", "phase225 (17) ... with a leading minus");
-        CheckMoney(MoneyOut(classic, string("12a34"), false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, string("12a34"), false, false, 0, ios_base::fmtflags{}, ' '),
                    "12", "phase225 (18) ... stopping at the first non-digit, digits after it ignored");
-        CheckMoney(MoneyOut(classic, string(""), false, false, 0, ios_base::fmtflags{}, ' '),
+        CheckText(MoneyOut(classic, string(""), false, false, 0, ios_base::fmtflags{}, ' '),
                    "0", "phase225 (19) ... and no digits at all is zero, not nothing");
     }
 
     // ── 3. "C" width and adjustfield ────────────────────────────────────
     {
-        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::fmtflags{}, '*'),
+        CheckText(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::fmtflags{}, '*'),
                    "********123456", "phase225 (20) width pads on the left by default");
-        CheckMoney(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::left, '*'),
+        CheckText(MoneyOut(classic, 123456.0L, false, false, 14, ios_base::left, '*'),
                    "123456********", "phase225 (21) left");
-        CheckMoney(MoneyOut(classic, -123456.0L, false, false, 14, ios_base::internal, '*'),
+        CheckText(MoneyOut(classic, -123456.0L, false, false, 14, ios_base::internal, '*'),
                    "-*******123456",
                    "phase225 (22) internal puts the fill where `none` stands, after the sign");
         std::ostringstream os;
@@ -51665,10 +51667,10 @@ void Phase225()
     {
         bool failed = false;
         int  next   = 0;
-        CheckMoney(MoneyIn(classic, "123456", false, failed, next), "123456",
+        CheckText(MoneyIn(classic, "123456", false, failed, next), "123456",
                    "phase225 (24) a plain amount reads back");
         Check(!failed, "phase225 (25) ... without failing");
-        CheckMoney(MoneyIn(classic, "-123456", false, failed, next), "-123456",
+        CheckText(MoneyIn(classic, "-123456", false, failed, next), "-123456",
                    "phase225 (26) and so does a negative one, which \"\" could not do");
         Check(!failed, "phase225 (27) ... without failing");
 
@@ -51678,10 +51680,10 @@ void Phase225()
         Check(failed, "phase225 (29) letters fail");
         (void)MoneyIn(classic, "+123", false, failed, next);
         Check(failed, "phase225 (30) a plus fails: \"C\" has no positive sign to spend it on");
-        CheckMoney(MoneyIn(classic, "12.34", false, failed, next), "12",
+        CheckText(MoneyIn(classic, "12.34", false, failed, next), "12",
                    "phase225 (31) with no fractional digits the point ends the amount");
         Check(!failed && next == '.', "phase225 (32) ... and is left in the stream");
-        CheckMoney(MoneyIn(classic, "123abc", false, failed, next), "123",
+        CheckText(MoneyIn(classic, "123abc", false, failed, next), "123",
                    "phase225 (33) trailing text is left alone");
         Check(!failed && next == 'a', "phase225 (34) ... at the character that stopped it");
 
@@ -51710,51 +51712,51 @@ void Phase225()
         const MB::pattern vnss = MoneyPat(MB::value, MB::none, MB::sign, MB::symbol);
 
         const locale k(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "()", "\3", 2));
-        CheckMoney(MoneyOut(k, -123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k, -123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "USD(1'234.56)",
                    "phase225 (37) a two-character sign: head in place, tail at the very end");
-        CheckMoney(MoneyOut(k, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "USD+1'234.56", "phase225 (38) grouping, fraction and symbol together");
-        CheckMoney(MoneyOut(k, 123456.0L, false, false, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k, 123456.0L, false, false, 0, ios_base::fmtflags{}, '.'),
                    "+1'234.56", "phase225 (39) the symbol appears only under showbase");
-        CheckMoney(MoneyOut(k, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.05",
+        CheckText(MoneyOut(k, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.05",
                    "phase225 (40) too few digits for the fraction gets a zero integer part");
-        CheckMoney(MoneyOut(k, 0.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.00",
+        CheckText(MoneyOut(k, 0.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.00",
                    "phase225 (41) ... zero included");
-        CheckMoney(MoneyOut(k, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "USD+123'456.78", "phase225 (42) grouping runs over the integer part only");
 
         const locale k4(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\3", 4));
-        CheckMoney(MoneyOut(k4, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.0005",
+        CheckText(MoneyOut(k4, 5.0L, false, true, 0, ios_base::fmtflags{}, '.'), "USD+0.0005",
                    "phase225 (43) four fractional digits");
 
         const locale k12(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\1\2", 2));
-        CheckMoney(MoneyOut(k12, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k12, 12345678.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "USD+1'23'45'6.78", "phase225 (44) a two-element grouping repeats its last");
 
         const locale k0(classic, new Krona<false>(ssnv, ssnv, "USD", "+", "-", "\3", 0));
-        CheckMoney(MoneyOut(k0, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(k0, 123456.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "USD+123'456", "phase225 (45) no fraction, no point");
 
         const locale ksp(classic, new Krona<false>(vsns, vsns, "USD", "+", "-", "\3", 2));
-        CheckMoney(MoneyOut(ksp, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(ksp, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "12.34 +USD",
                    "phase225 (46) `space` generates a space, not the fill character");
         const locale kno(classic, new Krona<false>(vnss, vnss, "USD", "+", "-", "\3", 2));
-        CheckMoney(MoneyOut(kno, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
+        CheckText(MoneyOut(kno, 1234.0L, false, true, 0, ios_base::fmtflags{}, '.'),
                    "12.34+USD", "phase225 (47) `none` generates nothing");
 
-        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::internal, '.'),
+        CheckText(MoneyOut(k, 1234.0L, false, true, 20, ios_base::internal, '.'),
                    "USD+...........12.34",
                    "phase225 (48) internal fill lands on the `none` slot");
-        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::left, '.'),
+        CheckText(MoneyOut(k, 1234.0L, false, true, 20, ios_base::left, '.'),
                    "USD+12.34...........", "phase225 (49) left");
-        CheckMoney(MoneyOut(k, 1234.0L, false, true, 20, ios_base::right, '.'),
+        CheckText(MoneyOut(k, 1234.0L, false, true, 20, ios_base::right, '.'),
                    "...........USD+12.34", "phase225 (50) right");
-        CheckMoney(MoneyOut(ksp, 1234.0L, false, true, 20, ios_base::internal, '.'),
+        CheckText(MoneyOut(ksp, 1234.0L, false, true, 20, ios_base::internal, '.'),
                    "12.34.......... +USD",
                    "phase225 (51) internal fill precedes the required space, never replaces it");
-        CheckMoney(MoneyOut(k, -1234.0L, false, true, 20, ios_base::internal, '.'),
+        CheckText(MoneyOut(k, -1234.0L, false, true, 20, ios_base::internal, '.'),
                    "USD(..........12.34)",
                    "phase225 (52) the sign's tail stays last, past the fill");
     }
@@ -51768,16 +51770,16 @@ void Phase225()
 
         bool failed = false;
         int  next   = 0;
-        CheckMoney(MoneyIn(k, "USD+1'234.56", false, failed, next), "123456",
+        CheckText(MoneyIn(k, "USD+1'234.56", false, failed, next), "123456",
                    "phase225 (53) symbol, sign, groups and fraction all parsed");
         Check(!failed, "phase225 (54) ... without failing");
-        CheckMoney(MoneyIn(k, "USD+1'234.56", true, failed, next), "123456",
+        CheckText(MoneyIn(k, "USD+1'234.56", true, failed, next), "123456",
                    "phase225 (55) showbase makes the symbol required and it is there");
         (void)MoneyIn(k, "+1'234.56", true, failed, next);
         Check(failed, "phase225 (56) ... and required means required");
-        CheckMoney(MoneyIn(k, "+1'234.56", false, failed, next), "123456",
+        CheckText(MoneyIn(k, "+1'234.56", false, failed, next), "123456",
                    "phase225 (57) without showbase the symbol is optional");
-        CheckMoney(MoneyIn(k, "USD(1'234.56)", false, failed, next), "-123456",
+        CheckText(MoneyIn(k, "USD(1'234.56)", false, failed, next), "-123456",
                    "phase225 (58) a two-character sign is closed at the end of the field");
         Check(!failed, "phase225 (59) ... without failing");
         (void)MoneyIn(k, "USD()1'234.56", false, failed, next);
@@ -51790,12 +51792,12 @@ void Phase225()
         Check(failed, "phase225 (63) a facet with a fraction requires the fraction");
         (void)MoneyIn(kp, "USD+1'234.5", false, failed, next);
         Check(failed, "phase225 (64) ... all of it");
-        CheckMoney(MoneyIn(kp, "USD+1'234.567", false, failed, next), "123456",
+        CheckText(MoneyIn(kp, "USD+1'234.567", false, failed, next), "123456",
                    "phase225 (65) ... and exactly it, leaving the rest");
         Check(!failed && next == '7', "phase225 (66) ... in the stream");
 
         const locale ksp(classic, new Krona<false>(vsns, vsns, "USD", "+", "-", "\3", 2));
-        CheckMoney(MoneyIn(ksp, "1'234.56 +USD", false, failed, next), "123456",
+        CheckText(MoneyIn(ksp, "1'234.56 +USD", false, failed, next), "123456",
                    "phase225 (67) a pattern that ends with the symbol");
         (void)MoneyIn(ksp, "1'234.56+USD", false, failed, next);
         Check(failed, "phase225 (68) ... whose required space is required");
@@ -51813,13 +51815,13 @@ void Phase225()
         std::wostringstream wos;
         wos.imbue(classic);
         wos << std::put_money(-4242.0L);
-        CheckMoneyW(wos.str(), "-4242", "phase225 (70) wchar_t put_money");
+        CheckTextW(wos.str(), "-4242", "phase225 (70) wchar_t put_money");
 
         std::wistringstream wis(L"-4242");
         wis.imbue(classic);
         std::wstring wd;
         wis >> std::get_money(wd);
-        CheckMoneyW(wd, "-4242", "phase225 (71) wchar_t get_money");
+        CheckTextW(wd, "-4242", "phase225 (71) wchar_t get_money");
 
         const auto &wmp = std::use_facet<std::moneypunct<wchar_t, true>>(classic);
         Check(wmp.negative_sign() == L"-" && wmp.frac_digits() == 0,
@@ -51853,7 +51855,7 @@ void Phase225()
             }
         };
         const locale sh(classic, new Shouty);
-        CheckMoney(MoneyOut(sh, 1.0L, false, false, 0, ios_base::fmtflags{}, ' '), "LOTS",
+        CheckText(MoneyOut(sh, 1.0L, false, false, 0, ios_base::fmtflags{}, ' '), "LOTS",
                    "phase225 (75) put_money goes through the facet, whatever it decides");
     }
 
@@ -51880,9 +51882,9 @@ void Phase225()
         const MB::pattern ssnv = MoneyPat(MB::symbol, MB::sign, MB::none, MB::value);
         locale both(classic, new Krona<false>(ssnv, ssnv, "NAR", "", "-", "", 0));
         both = locale(both, new Krona<true>(ssnv, ssnv, "INT", "", "-", "", 0));
-        CheckMoney(MoneyOut(both, 5.0L, false, true, 0, ios_base::fmtflags{}, ' '), "NAR5",
+        CheckText(MoneyOut(both, 5.0L, false, true, 0, ios_base::fmtflags{}, ' '), "NAR5",
                    "phase225 (77) intl=false asks moneypunct<charT,false>");
-        CheckMoney(MoneyOut(both, 5.0L, true, true, 0, ios_base::fmtflags{}, ' '), "INT5",
+        CheckText(MoneyOut(both, 5.0L, true, true, 0, ios_base::fmtflags{}, ' '), "INT5",
                    "phase225 (78) intl=true asks the other facet entirely");
     }
 
@@ -51959,14 +51961,6 @@ std::string TimeOut(const std::locale &loc, const std::tm &t, const char *fmt)
     return os.str();
 }
 
-void CheckTime(const std::string &got, const char *want, const char *what)
-{
-    if (got != want) {
-        printf("[CXX] FAIL %s: got \"%s\" want \"%s\"\n", what, got.c_str(), want);
-        g_failures++;
-    }
-}
-
 } // namespace
 
 void Phase226()
@@ -52013,7 +52007,7 @@ void Phase226()
             {"%Ec %EY %Oy %Od", "Mon Mar  9 14:05:07 2026 2026 26 09",
              "phase226 (25) E and O select representations \"C\" does not have"},
         };
-        for (const Row &r : rows) CheckTime(TimeOut(classic, ref, r.fmt), r.want, r.what);
+        for (const Row &r : rows) CheckText(TimeOut(classic, ref, r.fmt), r.want, r.what);
     }
 
     // ── 2. the zone this system actually has ────────────────────────────
@@ -52021,7 +52015,7 @@ void Phase226()
     // the offset is known exactly and it is zero. The host oracle printed its
     // own zone here (MSK/+0300), which is a fact about the host.
     {
-        CheckTime(TimeOut(classic, ref, "%Z %z"), "UTC +0000",
+        CheckText(TimeOut(classic, ref, "%Z %z"), "UTC +0000",
                   "phase226 (26) the one zone BoxOS has, stated");
     }
 
@@ -52030,11 +52024,11 @@ void Phase226()
     // renderer does not implement. Writing "%s" back is what strftime does with
     // a specifier it does not know; the alternative is inventing a number.
     {
-        CheckTime(TimeOut(classic, ref, "%s"), "%s",
+        CheckText(TimeOut(classic, ref, "%s"), "%s",
                   "phase226 (27) an unimplemented conversion is written literally");
         std::tm bad = ref;
         bad.tm_mon  = 99;
-        CheckTime(TimeOut(classic, bad, "%b"), "%b",
+        CheckText(TimeOut(classic, bad, "%b"), "%b",
                   "phase226 (28) ... and so is one whose field cannot be rendered");
     }
 
@@ -52199,7 +52193,7 @@ void Phase226()
         // Two conversions and a literal between them: the facet is asked twice
         // and the '-' is copied straight through, which is what makes this a
         // check of the WALK and not only of the facet call.
-        CheckTime(TimeOut(locale(classic, new ShoutPut), ref, "%Y-%m"), "LATE-LATE",
+        CheckText(TimeOut(locale(classic, new ShoutPut), ref, "%Y-%m"), "LATE-LATE",
                   "phase226 (59) put_time asks the facet once per conversion");
 
         struct SevenGet : std::time_get<char> {
@@ -52226,7 +52220,7 @@ void Phase226()
         wos << std::put_time(&ref, L"%F %T");
         std::string narrow;
         for (wchar_t c : wos.str()) narrow.push_back(c < 128 ? static_cast<char>(c) : '?');
-        CheckTime(narrow, "2026-03-09 14:05:07", "phase226 (61) wchar_t put_time");
+        CheckText(narrow, "2026-03-09 14:05:07", "phase226 (61) wchar_t put_time");
 
         std::wistringstream wis(L"2026-03-09");
         wis.imbue(classic);
@@ -52256,7 +52250,7 @@ void Phase226()
               "phase226 (64) both _byname facets refuse a name this system is not");
 
         const locale byname(classic, new std::time_put_byname<char>("C"));
-        CheckTime(TimeOut(byname, ref, "%F"), "2026-03-09",
+        CheckText(TimeOut(byname, ref, "%F"), "2026-03-09",
                   "phase226 (65) ... and the one it is renders like \"C\"");
     }
 
@@ -52282,6 +52276,244 @@ void Phase226()
 
     printf("[CXX] PASS phase226: the time category - the last of the six, and not one "
            "line of a second renderer\n");
+}
+
+// ── phase227: <format> gets a locale, and `L` starts meaning something ───
+// Every expected string below is what BOTH g++-16 and clang produce for the
+// same facet and the same argument. They agreed on all of it — there was no
+// decision to make here, only a rule to reproduce.
+namespace {
+
+struct P227Punct : std::numpunct<char> {
+protected:
+    char        do_decimal_point() const override { return ','; }
+    char        do_thousands_sep() const override { return '\''; }
+    std::string do_grouping() const override { return "\3"; }
+    std::string do_truename() const override { return "yes"; }
+    std::string do_falsename() const override { return "no"; }
+};
+
+struct P227PunctW : std::numpunct<wchar_t> {
+protected:
+    wchar_t     do_decimal_point() const override { return L','; }
+    wchar_t     do_thousands_sep() const override { return L'_'; }
+    std::string do_grouping() const override { return "\3"; }
+};
+
+// A type whose formatter asks the CONTEXT for the locale. It is the only probe
+// that reaches a nested context which has no `L` position of its own.
+struct P227Probe {};
+
+// grouping "\1\2": one digit, then twos, the last element repeating.
+struct P227Stepped : std::numpunct<char> {
+protected:
+    char        do_thousands_sep() const override { return '.'; }
+    std::string do_grouping() const override { return "\1\2"; }
+};
+
+} // namespace
+
+template <>
+struct std::formatter<P227Probe, char> {
+    constexpr auto parse(std::format_parse_context &pc) { return pc.begin(); }
+    auto           format(P227Probe, std::format_context &fc) const
+    {
+        const std::locale loc = fc.locale();
+        auto              out = fc.out();
+        *out++ = std::use_facet<std::numpunct<char>>(loc).thousands_sep();
+        return out;
+    }
+};
+
+void Phase227()
+{
+    using std::locale;
+    using std::string;
+
+    const locale classic = locale::classic();
+    const locale L(locale(classic, new P227Punct), new P227PunctW);
+
+    // ── 1. integers: every base groups, and separators count as width ────
+    {
+        const long long v = 1234567;
+        CheckText(std::format(L, "{:L}", v), "1'234'567", "phase227 (1) {:L}");
+        CheckText(std::format(L, "{:Ld}", v), "1'234'567", "phase227 (2) {:Ld}");
+        CheckText(std::format(L, "{:12L}", v), "   1'234'567",
+                  "phase227 (3) the separators count toward the field width");
+        CheckText(std::format(L, "{:<12L}", v), "1'234'567   ", "phase227 (4) left");
+        CheckText(std::format(L, "{:012L}", v), "0001'234'567",
+                  "phase227 (5) zero padding is NOT grouped");
+        CheckText(std::format(L, "{:+012L}", v), "+001'234'567",
+                  "phase227 (6) ... and the sign still comes first");
+        CheckText(std::format(L, "{:#Lx}", v), "0x12d'687",
+                  "phase227 (7) hexadecimal groups too");
+        CheckText(std::format(L, "{:Lb}", v), "100'101'101'011'010'000'111",
+                  "phase227 (8) so do bits");
+        CheckText(std::format(L, "{:Lo}", v), "4'553'207", "phase227 (9) and octal");
+        CheckText(std::format(L, "{:L}", 0), "0", "phase227 (10) nothing to group");
+        CheckText(std::format(L, "{:L}", 12), "12", "phase227 (11) still nothing");
+        CheckText(std::format(L, "{:L}", -1234567), "-1'234'567",
+                  "phase227 (12) the sign stays outside the groups");
+    }
+
+    // ── 2. floating point: the integer part groups, the point moves ──────
+    {
+        const double d = 1234567.891;
+        CheckText(std::format(L, "{:L}", d), "1'234'567,891", "phase227 (13) {:L}");
+        CheckText(std::format(L, "{:.2Lf}", d), "1'234'567,89", "phase227 (14) fixed");
+        CheckText(std::format(L, "{:15.2Lf}", d), "   1'234'567,89",
+                  "phase227 (15) width over a grouped body");
+        CheckText(std::format(L, "{:015.2Lf}", d), "0001'234'567,89",
+                  "phase227 (16) zero-padded");
+        CheckText(std::format(L, "{:Le}", d), "1,234568e+06",
+                  "phase227 (17) the exponent is untouched, the point is not");
+        CheckText(std::format(L, "{:Lg}", d), "1,23457e+06", "phase227 (18) general");
+        CheckText(std::format(L, "{:La}", d), "1,2d687e4189375p+20",
+                  "phase227 (19) hexfloat gets the point as well");
+    }
+
+    // ── 3. bool: the two words a locale can genuinely translate ──────────
+    {
+        CheckText(std::format(L, "{:L}", true), "yes", "phase227 (20) truename");
+        CheckText(std::format(L, "{:L}", false), "no", "phase227 (21) falsename");
+        CheckText(std::format(L, "{:Ls}", true), "yes", "phase227 (22) {:Ls}");
+        CheckText(std::format(L, "{:8L}", true), "yes     ",
+                  "phase227 (23) a bool is still left-aligned by default");
+        CheckText(std::format(L, "{:Ld}", true), "1",
+                  "phase227 (24) an integer presentation prints an integer");
+    }
+
+    // ── 4. no L, no locale ──────────────────────────────────────────────
+    {
+        CheckText(std::format(L, "{}", 1234567), "1234567",
+                  "phase227 (25) a locale-taking call without L changes nothing");
+        CheckText(std::format(L, "{:12}", 1234567), "     1234567",
+                  "phase227 (26) ... width included");
+        CheckText(std::format("{:L}", 1234567), "1234567",
+                  "phase227 (27) and L against the classic global locale is a no-op");
+    }
+
+    // ── 5. all six [format.functions] overloads take a locale now ────────
+    // They did not exist at all before Ф43-e; `L` had nothing to consult and
+    // the whole point of the flag was unreachable from the public surface.
+    {
+        string to;
+        std::format_to(std::back_inserter(to), L, "{:L}", 1234567);
+        CheckText(to, "1'234'567", "phase227 (28) format_to");
+
+        char  buf[6] = {};
+        auto  r      = std::format_to_n(buf, 5, L, "{:L}", 1234567);
+        Check(r.size == 9 && string(buf, 5) == "1'234",
+              "phase227 (29) format_to_n truncates but counts the whole");
+
+        Check(std::formatted_size(L, "{:L}", 1234567) == 9,
+              "phase227 (30) formatted_size");
+
+        CheckText(std::vformat(L, "{:L}", std::make_format_args(*(new long long(1234567)))),
+                  "1'234'567", "phase227 (31) vformat");
+
+        string vt;
+        std::vformat_to(std::back_inserter(vt), L, "{:L}",
+                        std::make_format_args(*(new long long(1234567))));
+        CheckText(vt, "1'234'567", "phase227 (32) vformat_to");
+
+        CheckText(std::format(L, "{:L}", 1234567), "1'234'567", "phase227 (33) format");
+    }
+
+    // ── 6. the locale survives into a nested context ─────────────────────
+    // A range formats its elements through a context of its own, built around
+    // a scratch sink. If that context lost the locale, `{::L}` inside a range
+    // would mean something different from `{:L}` outside one.
+    {
+        std::vector<int> v{1234567, 89};
+        CheckText(std::format(L, "{::L}", v), "[1'234'567, 89]",
+                  "phase227 (34) L reaches the elements of a range");
+        // A width on the RANGE is what forces the nested context: the range
+        // has to know its own length before it can pad, so it formats its
+        // elements into a scratch sink through a context of its own. Without a
+        // width the elements go through the outer context and the plumbing is
+        // never exercised — a mutation that dropped the locale from the nested
+        // context survived (34) and was caught only by these.
+        CheckText(std::format(L, "{:20:L}", v), "[1'234'567, 89]     ",
+                  "phase227 (34b) ... including through the scratch context a width forces");
+        CheckText(std::format(L, "{:*^24:L}", v), "****[1'234'567, 89]*****",
+                  "phase227 (34c) ... whatever the alignment");
+        CheckText(std::format(L, "{}", std::make_tuple(1234567, 2)), "(1234567, 2)",
+                  "phase227 (35) ... and a tuple without L still groups nothing");
+        // A tuple's element spec cannot carry `L` at all — [format.tuple]'s
+        // grammar has no element-spec position — so the only way to prove that
+        // ITS scratch context keeps the locale is a formatter that asks for
+        // the locale itself. Which is exactly what a user-defined one may do.
+        CheckText(std::format(L, "{:8}", std::make_tuple(P227Probe{})), "(')     ",
+                  "phase227 (35b) a tuple's scratch context keeps the locale too");
+    }
+
+    // ── 7. the wide side asks the WIDE facet ─────────────────────────────
+    {
+        CheckTextW(std::format(L, L"{:L}", 1234567), "1_234_567",
+                   "phase227 (36) a wide format asks numpunct<wchar_t>");
+        CheckTextW(std::format(L, L"{:L}", 1234.5), "1_234,5",
+                   "phase227 (37) ... for the point as well");
+        Check(std::formatted_size(L, L"{:L}", 1234567) == 9,
+              "phase227 (38) and the wide formatted_size counts it");
+    }
+
+    // ── 8. a grouping that changes step, and one that stops ──────────────
+    {
+        const locale stepped(classic, new P227Stepped);
+        CheckText(std::format(stepped, "{:L}", 12345678LL), "1.23.45.67.8",
+                  "phase227 (39) the last grouping element repeats");
+
+        struct Once : std::numpunct<char> {
+        protected:
+            char        do_thousands_sep() const override { return '/'; }
+            std::string do_grouping() const override { return "\3\0"s; }
+        };
+        const locale once(classic, new Once);
+        CheckText(std::format(once, "{:L}", 1234567LL), "1234/567",
+                  "phase227 (40) a zero element stops grouping there");
+    }
+
+    // ── 9. an installed numpunct is what answers, not a table here ───────
+    {
+        struct Spy : std::numpunct<char> {
+        protected:
+            char        do_thousands_sep() const override { return '@'; }
+            std::string do_grouping() const override { return "\2"; }
+            std::string do_truename() const override { return "AYE"; }
+        };
+        const locale spy(classic, new Spy);
+        CheckText(std::format(spy, "{:L}", 123456LL), "12@34@56",
+                  "phase227 (41) format goes through the facet the locale carries");
+        CheckText(std::format(spy, "{:L}", true), "AYE",
+                  "phase227 (42) ... for the words too");
+    }
+
+    // ── 10. PIN for e-2 ─────────────────────────────────────────────────
+    // Two claims that are wrong today and that e-2 is obliged to break. Field
+    // width is measured in CODE UNITS, so a two-code-unit character counts as
+    // two where [format.string.std]/13 says one; and the width itself is
+    // capped at a number this library invented.
+    {
+        // U+00E9 is one code point, two UTF-8 code units, and one column.
+        CheckText(std::format("{:4}", "é"), "é  ",
+                  "phase227 (43) PIN: width counts code units - e-2 must make this 3 spaces");
+        // Through vformat, because the consteval check on a format_string
+        // rejects this at COMPILE time — which is itself part of what e-2 has
+        // to change, and cannot be observed from inside a program that must
+        // still compile.
+        bool threw = false;
+        try {
+            const int one = 1;
+            (void)std::vformat("{:65536}", std::make_format_args(one));
+        } catch (const std::format_error &) {
+            threw = true;
+        }
+        Check(threw, "phase227 (44) PIN: the width cap is 65535 - e-2 must remove it");
+    }
+
+    printf("[CXX] PASS phase227: <format> takes a locale, and L stops being a "
+           "flag that is parsed and dropped\n");
 }
 
 // ── phase2: the compile-time half of the suite ─────────────────────────
@@ -52553,6 +52785,7 @@ const PhaseRow kPhases[] = {
     {"224", Phase224},
     {"225", Phase225},
     {"226", Phase226},
+    {"227", Phase227},
     {"2", Phase2},
 };
 

@@ -323,7 +323,7 @@ public:
         // width/precision inside the buffered sub-format must still
         // resolve against the real argument list, not an empty one.
         __format::Ctx<CharT> nested(__format::SinkIterator<CharT>(scratch),
-                                    ctx.__args());
+                                    ctx.__args(), ctx.__loc());
         FormatBody(r, nested);
         __format::EmitField(ctx, spec_, width, string_view(),
                             SV(scratch.str.data(), scratch.str.size()),

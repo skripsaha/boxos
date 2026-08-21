@@ -42,7 +42,24 @@ for cfg in $CONFIGS; do
     extra=$(cfg_env "$cfg")
     [ -z "$extra" ] && { echo "[$cfg] unknown config name"; FAILED=1; continue; }
     echo "================ CONFIG: $cfg  ($extra) ================"
+    # `make run-stop` sends SIGTERM, waits 0.3 s, then SIGKILL — and returns
+    # without waiting for the process to actually be gone. Starting the next
+    # config on top of a dying QEMU means two processes holding the same
+    # serial.log at two different offsets, which is exactly what a line cut off
+    # mid-printf looks like. Measured: the uefi1 config, third in the sequence,
+    # stalled twice this way while the SAME tree passed a standalone run four
+    # times. So wait for it, and say so if it will not go.
     make run-stop >/dev/null 2>&1 || true
+    gone=0
+    for i in $(seq 1 60); do
+        pgrep -f "qemu-system-x86_64 -drive .*boxos.img" >/dev/null 2>&1 || { gone=1; break; }
+        sleep 0.25
+    done
+    if [ "$gone" != 1 ]; then
+        echo "[$cfg] previous QEMU would not die — refusing to boot on top of it"
+        FAILED=1
+        continue
+    fi
     : > build/serial.log 2>/dev/null || true
     eval "$extra make run-bg" >/dev/null 2>&1
 
