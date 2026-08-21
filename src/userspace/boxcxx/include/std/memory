@@ -13,6 +13,7 @@
 #include <__bits/uses_allocator>
 #include <__bits/iterator_core>
 #include <__bits/pointer>
+#include <__bits/pointer_tag>
 #include <__bits/ranges_uninitialized>
 #include <atomic>
 #include <compare>
@@ -97,6 +98,25 @@ template <size_t N, class T>
 // does not have -- the same missing builtin that keeps
 // __cpp_lib_is_implicit_lifetime undefined in <version>. The other half,
 // "not an incomplete type", the sizeof below enforces on its own.
+// [obj.lifetime]/1-2. The one member of this family that takes a REFERENCE,
+// and the only one that can be constexpr: during constant evaluation a
+// reference can only bind to an object already within its lifetime, so
+// "no effects" is the whole of the specification there and doing nothing is
+// exactly right. At run time it is the same self-memmove as start_lifetime_as
+// below, for the same reason.
+//
+// Mandates says "implicit-lifetime AGGREGATE type" — a narrower set than
+// start_lifetime_as asks for. Neither half is checked here, for the reason the
+// note below gives: x86_64-elf-g++ 15.2.0 has no __builtin_is_implicit_lifetime.
+template <class T>
+constexpr void start_lifetime(T &r) noexcept
+{
+    if !consteval {
+        (void)__builtin_memmove(__builtin_addressof(r), __builtin_addressof(r),
+                                sizeof(T));
+    }
+}
+
 template <class T>
 T *start_lifetime_as(void *p) noexcept
 {
@@ -2347,5 +2367,10 @@ using polymorphic = std::polymorphic<T, polymorphic_allocator<T>>;
 // [specialized.algorithms] declares the execution-policy overloads in THIS
 // header; the brigade behind them is <__bits/par_engine>.
 #include <__bits/par_memory>
+
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_memory
+#include <__bits/version_freestanding>
 
 #endif // BOXCXX_MEMORY

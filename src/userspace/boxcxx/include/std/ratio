@@ -176,4 +176,10 @@ using exa   = ratio<1000000000000000000LL, 1>;
 
 } // namespace std
 
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_ratio
+#define BOXCXX_OWNS_ratio
+#include <__bits/version_freestanding>
+
 #endif // BOXCXX_RATIO

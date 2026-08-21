@@ -38,11 +38,11 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | | |
 |---|---|
 | Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 151 |
-| Header source | ~103 000 lines |
-| Feature-test macros defined | 211 — 165 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Internal implementation leaves (`include/std/__bits/`) | 153 |
+| Header source | ~104 000 lines |
+| Feature-test macros defined | 237 — 165 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 244 phases (225 of them the numbered `PhaseN` series), 6 379 runtime checks, 2 016 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 245 phases (226 of them the numbered `PhaseN` series), 6 413 runtime checks, 2 062 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -67,7 +67,7 @@ with the launch args selecting which rows run. The count is therefore
 `sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
 ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
 can be checked against a boot log instead of against a grep that has to be
-maintained. That is **244** — 225 purely numbered, 18 suffixed (`Phase4a`,
+maintained. That is **245** — 226 purely numbered, 18 suffixed (`Phase4a`,
 `Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by four across
 Ф43: `Phase225`, `Phase226` and `Phase227` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
@@ -433,7 +433,7 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **211** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **237** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled.
 
 > This section said **201** until Ф41, and the number at the top of the document
@@ -450,7 +450,7 @@ the whole set, not sampled.
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 211 macros × 107 headers by
+  checked over the full cross-product of 237 macros × 107 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -514,23 +514,29 @@ the whole set, not sampled.
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-**39 of the 248 macros [version.syn] names are not defined** — measured as a
+**11 of the 248 macros [version.syn] names are not defined** — measured as a
 set difference between the transcription and what a translation unit including
 only `<version>` reports, not counted by hand. They divide cleanly:
 
 | Why undefined | Count | Which |
 |---|---|---|
-| freestanding-subset markers: not features, an unrun [compliance] audit | 26 | all 25 `__cpp_lib_freestanding_*` plus `__cpp_lib_ratio` |
 | whole-clause requirements relaxations, unprovable by inspection | 2 | `ranges`, `algorithm_iterator_requirements` |
-| the feature is excluded or absent here | 8 | `filesystem`, `char8_t`, `chrono`, `format`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` — `formatters` LEFT this row in Ф42-g |
+| the feature is excluded or absent here | 7 | `filesystem`, `char8_t`, `chrono`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
 | C++26 draft additions no implementation has | 2 | `initializer_list` (202511L), `ranges_generate_random` (202403L) |
 
-That first row is the interesting one, and Ф41 is why it is a row at all: the
-transcription had **eleven** of the twenty-five freestanding markers, and
-`<version>`'s backlog had none of them. The library is built freestanding —
-`-ffreestanding -nostdlib`, no libc under it — and is very likely entitled to
-most of them; entitled is not audited, and the audit is against [compliance],
-per header. The last row is measured too: neither libstdc++ 16.1 nor libc++ 22
+**This table had a fourth row until Ф43-f, and it was the largest of them:**
+twenty-six freestanding-subset markers, described here as "not features, an
+unrun [compliance] audit". Ф41 is why it was a row at all — the transcription
+had eleven of the twenty-five and `<version>` had none — and the entry said the
+library was "very likely entitled to most of them; entitled is not audited".
+Ф43-f ran the audit and the row is gone. Twenty of the twenty-five subsets were
+complete already; four wanted C23 functions that neither reference library has;
+one wanted the whole of [ptrtag]. `tools/cxx_freestanding_audit.sh` re-derives
+the answer on demand and refuses an overclaim, so the row cannot come back
+quietly.
+
+`format` left the "excluded or absent" row in Ф43-e-2 and `formatters` left it
+in Ф42-g. The last row is measured too: neither libstdc++ 16.1 nor libc++
 defines either macro at any `-std` they accept. The governing rule is that a
 macro is defined only when the feature
 behind it is *complete*, established by reading the implementation rather than by
@@ -1198,6 +1204,14 @@ The header that made an old claim checkable, and the claim did not survive.
 
 ## `<cstdlib>`
 
+- `✓` Closed in Ф43-f: **`memalignment` was missing.** C23's, and a freestanding
+  entity of [cstdlib.syn]: the largest power of two a pointer is aligned to.
+  Neither libstdc++ 16.1 nor libc++ has it. `v & -v` isolates the lowest set
+  bit, which IS that power of two — and the null case needs no branch, which a
+  mutation established rather than an argument: `~0 + 1` is `0`, so the
+  arithmetic already answers zero for a null pointer. The separate sentence the
+  standard spends on null describes the same answer, not a different one.
+
 The header the "BoxOS has no libc" sentence was really about, and building it
 was mostly answering questions the system had never been asked.
 
@@ -1256,6 +1270,21 @@ was mostly answering questions the system had never been asked.
   liberty.
 
 ## `<cstring>`
+
+- `✓` Closed in Ф43-f: **`memccpy` and `memset_explicit` were missing.** Both are
+  C23 and both are freestanding entities of [cstring.syn]; neither reference
+  library has either. `memccpy` is the one mem-copy that stops on a VALUE, and
+  its null return is load-bearing — it is how a caller learns the record was
+  truncated rather than terminated. `memset_explicit` is memset the optimizer
+  may not delete, which is what erasing a key needs and what plain memset does
+  not promise.
+- `?` **The "may not be deleted" half of `memset_explicit` is not pinned by any
+  check, and cannot be.** Proving a store was not elided means reading a dead
+  object, which is the undefined behaviour the function exists to make safe. A
+  mutation deleting the compiler barrier survived the suite, correctly. It is
+  also inert in this build — the function has its own translation unit and
+  nothing links with LTO, so the call cannot be inlined and the store cannot be
+  seen to be dead. What would pin it is reading generated code.
 
 The functions are boxlib's — one `memcpy` in the system, shared by C and C++ —
 so what this header adds is the part C++ adds to C: **the six const-preserving
@@ -1652,6 +1681,12 @@ family will take it by value, and on x86-64 SysV a `va_list` is an array of one
 struct and therefore decays on the way in. No deviations.
 
 ## `<cwchar>`
+
+- `✓` Closed in Ф43-f: **`WCHAR_WIDTH` was missing**, a freestanding entity of
+  [cwchar.syn] that C23 added and neither reference library defines. It is
+  `__WCHAR_WIDTH__`, not a literal 32: the width of `wchar_t` belongs to the
+  target, and a number written here would be a second claim about it that
+  nothing keeps in step with the first.
 
 All of [cwchar.syn]: the wide strings, the restartable conversions, the seven
 `wcsto*`, the wide character I/O, and the formatted families. `wchar_t` here is
@@ -2857,6 +2892,29 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   the common case for a framebuffer — does not compile there. It does here.
 
 ## `<memory>`
+
+- `✓` Closed in Ф43-f: **the whole of [ptrtag] was missing**, and with it
+  `start_lifetime`. Both are freestanding entities of [memory.syn], so
+  `__cpp_lib_freestanding_memory` could not be claimed without them.
+  **No implementation ships [ptrtag]** — measured on libstdc++ 16.1 and libc++
+  19.1.2, neither has `pointer_tag_pair`, `pointer_bits_available` or
+  `max_pointer_bits_available` — so boxcxx is, as of Ф43-f, the only one of the
+  three with C++26 pointer tagging. It lives in `<__bits/pointer_tag>`.
+- `~` **`max_pointer_bits_available` is 12**, which is implementation-defined and
+  is the only number in the facility boxcxx had to choose. On x86-64 every bit
+  below an object's alignment is genuinely free and BoxOS puts nothing in them,
+  so the limit is not a property of the pointer — it is the coarsest alignment
+  the system can promise, which is one PAGE. A larger number would have been a
+  promise about `alignas` on somebody's static object, which is not the
+  system's to make; `from_overaligned` is how a caller who knows better says so.
+- `+` **A `pointer_tag_pair` cannot be built during constant evaluation.** Tagging
+  is arithmetic on a pointer's bits and the language has no constant-evaluation
+  form of that — `reinterpret_cast` is not a constant expression and there is no
+  other way to reach the low bits. The members are still declared `constexpr`
+  exactly as the synopsis writes them, so the declaration matches and the
+  failure is a compile error at the point of use rather than a silent
+  difference; the default constructor and `tag()` really do work in a constant
+  expression. Nothing to compare against: no other implementation has the type.
 
 - `✓` Added in Ф38: **the whole of [allocator.uses.construction]** —
   `uses_allocator_construction_args` in all nine of its overloads,
@@ -4229,6 +4287,21 @@ working and answers lookups with the wrong values.
   libstdc++ answers the same. Over 40 000 strings this was the ONLY case where
   boxcxx and an agreeing pair of references differed: 36 hits, every one of them
   a Prepend directly before two regional indicators.
+
+- **Five entities of the freestanding subsets that NEITHER reference library
+  has.** Ф43-f's audit named them and they had to be written before the macros
+  could be claimed: `memccpy` and `memset_explicit` ([cstring.syn]),
+  `memalignment` ([cstdlib.syn]), `WCHAR_WIDTH` ([cwchar.syn]) and the whole of
+  **[ptrtag]** — `pointer_tag_pair`, `pointer_bits_available`,
+  `max_pointer_bits_available` and the tuple interface — plus `start_lifetime`
+  ([memory.syn]). Measured on libstdc++ 16.1.0 and libc++ 19.1.2: not one of
+  them is present in either.
+
+  libstdc++ defines seven `__cpp_lib_freestanding_*` macros and libc++ defines
+  none; boxcxx defines all twenty-five, plus `__cpp_lib_ratio`. That is not a
+  claim about being more complete in general — it is a claim about having run
+  the audit, which is why the audit ships with it as
+  `tools/cxx_freestanding_audit.sh` and refuses an overclaim.
 
 - **Precision on an escaped string is monotone.** `format("{:.2?}", "你")` is
   `"` here and in libc++: the opening quote is one column, the ideograph would

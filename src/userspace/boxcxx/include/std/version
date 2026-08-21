@@ -77,6 +77,7 @@
 #include <__bits/version_flat_map>        // <flat_map>
 #include <__bits/version_flat_set>        // <flat_set>
 #include <__bits/version_format>          // <format>
+#include <__bits/version_freestanding>    // the [compliance] subsets (25 + ratio)
 #include <__bits/version_functional>      // <functional>
 #include <__bits/version_iostreams>       // <ios>/<iomanip>/<sstream>/<fstream>/<iosfwd>/<syncstream>
 #include <__bits/version_inplace_vector>  // <inplace_vector>
@@ -130,9 +131,10 @@
 // list is the backlog: when the reason is fixed, the macro moves into the
 // owning header's leaf. The count read "eight" until Ф39 recounted it; it had
 // been true when it was written and five headers have been built since. There
-// are twelve entries covering twenty-three macros, because the last of them
-// (freestanding_*) is a group of twelve; filesystem is the only one whose
-// header is missing rather than whose feature is partial.
+// are EIGHT entries covering nine macros; filesystem is the only one whose
+// header is missing rather than whose feature is partial. It read "twelve
+// entries covering twenty-three macros" until Ф43-f, when the group of twelve
+// (freestanding_*) was audited and left, and until Ф43-e-2, when format did.
 //
 // Ф41 measured this list against reality instead of reading it, and the
 // freestanding group is what the measurement found: eleven macros [version.syn]
@@ -187,23 +189,13 @@
 // constexpr_cmath          fabs/ceil/floor/trunc/round/fmod/... are not
 //                          constexpr.
 // filesystem               no <filesystem> header.
-// format                   the reason this entry gave until Ф42-g -- "<format>
-//                          is char-only: no wchar_t, no wformat_context, no
-//                          wformat/wformat_to" -- is dead: all of that exists.
-//                          What holds the macro back now is a DEVIATION rather
-//                          than an absence, and it is deliberate.
-//                          [format.string.std]/13 measures a field's width as
-//                          the ESTIMATED width of the formatted text, with
-//                          East-Asian wide characters counting two; boxcxx
-//                          counts code units in both alphabets and says so
-//                          (CONFORMANCE §2 <format>). Field width is also
-//                          capped at 65535, which the standard does not
-//                          permit either. Both are chosen, both are recorded,
-//                          and a macro claiming the feature would be claiming
-//                          the parts that were declined along with the parts
-//                          that were built.
-//
-//                          formatters LEFT this list in Ф42-g -- see
+//                          format LEFT this list in Ф43-e-2, and its entry is
+//                          worth remembering for the shape of it: what held
+//                          the macro back was never an absence but two
+//                          DEVIATIONS — a width counted in code units and an
+//                          invented 65535 cap. Both were chosen, both were
+//                          recorded here, and both were undone rather than
+//                          argued for. formatters left in Ф42-g -- see
 //                          <__bits/version_thread>.
 // is_implicit_lifetime     the trait cannot be written correctly without
 //                          compiler support, and x86_64-elf-g++ 15.2.0 has
@@ -256,25 +248,16 @@
 //                          file exists to prevent.
 // result_of_sfinae         std::result_of does not exist (removed in
 //                          C++20); the macro names exactly that template.
-// freestanding_*           TWELVE macros, and Ф41 put them on this list
-//                          because they had never been on it: freestanding_
-//                          charconv, _cstdlib, _errc, _functional, _iterator,
-//                          _memory, _numeric, _ranges, _ratio, _tuple,
-//                          _utility, plus __cpp_lib_ratio, which is held back
-//                          for the same reason. They are not features at all
-//                          — each asserts that a header meets the standard's
-//                          freestanding subset ([compliance]), which is a
-//                          per-header audit nobody has run. The irony is on
-//                          the record: boxcxx IS built freestanding
-//                          (-ffreestanding -nostdlib, no libc under it) and
-//                          is very likely entitled to most of them. Entitled
-//                          is not audited. One of the twelve additionally
-//                          waits on a header: freestanding_cstdlib names
-//                          <cstdlib> and <cmath>, and <cstdlib> arrives later
-//                          in Ф41. freestanding_errc's two headers — <cerrno>
-//                          and <system_error> — both exist as of Ф41-a, so
-//                          nothing but the audit stands between it and being
-//                          claimed.
+//                          freestanding_* LEFT this list in Ф43-f, all
+//                          twenty-five of them and __cpp_lib_ratio with them.
+//                          The entry had said this library "is very likely
+//                          entitled to most of them. Entitled is not audited."
+//                          Ф43-f audited: twenty of the twenty-five subsets
+//                          were already complete, four wanted C23 functions
+//                          neither reference library has, and one wanted the
+//                          whole of [ptrtag]. See <__bits/version_freestanding>
+//                          and tools/cxx_freestanding_audit.sh, which
+//                          re-derives the answer and refuses an overclaim.
 //
 // parallel_algorithm LEFT this list in Ф40's last commit, when the overload
 // set stopped being partial. Its entry had been honest about the distinction

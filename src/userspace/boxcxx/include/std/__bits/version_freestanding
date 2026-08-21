@@ -1,0 +1,228 @@
+// boxcxx — <__bits/version_freestanding>
+//
+// The freestanding family of [version.syn]: twenty-five
+// __cpp_lib_freestanding_* macros and __cpp_lib_ratio, which travels with them
+// because the paper that added it is a freestanding one.
+//
+// They share ONE leaf rather than getting twenty-five of their own, and that
+// is the only place in this library where a version leaf is organized by
+// FAMILY instead of by header. The reason is what the macros say. Every other
+// macro names a feature, and the header that provides the feature is the one
+// that answers for it. These name a SUBSET — "the freestanding part of this
+// header is here" — so they are twenty-five answers to one question, they were
+// all earned by one audit, and they are all kept honest by one tool
+// (tools/cxx_freestanding_audit.sh). Splitting them across twenty-five files
+// would have scattered a single claim.
+//
+// Each block is still gated on its own BOXCXX_OWNS_freestanding_<stem>, so a
+// header answers for its own subset and for nothing else — <cstring> including
+// this leaf does not make <cstring> claim <ranges>'s subset. That is the same
+// [support.limits.general] rule the other leaves follow, and
+// tools/cxx_ftm_audit.sh checks it across the whole cross-product.
+//
+// ── what earning one of these means ─────────────────────────────────────
+// [compliance] does not write the subsets out. Each is spelled inside its
+// header's synopsis, as `// freestanding` on the declarations that belong to
+// it. tools/gen_freestanding_manifest.py fetches those marks from the working
+// draft into tools/freestanding_manifest.txt; the audit script compiles a
+// probe per macro against the real cross-compiler and reports, per macro,
+// whether every entity is here. It also refuses a macro defined without the
+// entities behind it — an overclaim is fatal there, which is the mechanical
+// form of this library's rule that a defined macro can be trusted.
+//
+// Ф43-f ran that audit for the first time. Twenty of the twenty-five subsets
+// turned out to be complete already and unclaimed; four needed entities that
+// NEITHER libstdc++ 16.1 NOR libc++ has (memccpy, memset_explicit,
+// memalignment, WCHAR_WIDTH); one needed the whole of [ptrtag], which no
+// implementation ships. See CONFORMANCE.md §2 for each.
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_algorithm)) && \
+    !defined(__cpp_lib_freestanding_algorithm)
+#  define __cpp_lib_freestanding_algorithm 202502L
+#endif
+#undef BOXCXX_OWNS_freestanding_algorithm
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_array)) && \
+    !defined(__cpp_lib_freestanding_array)
+#  define __cpp_lib_freestanding_array 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_array
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_char_traits)) && \
+    !defined(__cpp_lib_freestanding_char_traits)
+#  define __cpp_lib_freestanding_char_traits 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_char_traits
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_charconv)) && \
+    !defined(__cpp_lib_freestanding_charconv)
+#  define __cpp_lib_freestanding_charconv 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_charconv
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_cstdlib)) && \
+    !defined(__cpp_lib_freestanding_cstdlib)
+// The subset that needed C23's memalignment, which arrived with this macro:
+// the largest power of two a pointer is aligned to. <cmath> co-owns the macro
+// because [cstdlib.syn]'s integral abs lives there too.
+#  define __cpp_lib_freestanding_cstdlib 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_cstdlib
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_cstring)) && \
+    !defined(__cpp_lib_freestanding_cstring)
+// memccpy and memset_explicit arrived with this one. The second is the
+// interesting half: it is memset that the optimizer may not delete, which is
+// what erasing a key requires and what a plain memset does not promise.
+#  define __cpp_lib_freestanding_cstring 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_cstring
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_cwchar)) && \
+    !defined(__cpp_lib_freestanding_cwchar)
+#  define __cpp_lib_freestanding_cwchar 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_cwchar
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_errc)) && \
+    !defined(__cpp_lib_freestanding_errc)
+// Half in <cerrno> (the seventy-four E-macros) and half in <system_error>
+// (the errc enumeration), which is why both headers own it.
+#  define __cpp_lib_freestanding_errc 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_errc
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_execution)) && \
+    !defined(__cpp_lib_freestanding_execution)
+// The freestanding part of <execution> is only is_execution_policy and its
+// variable template — the policies themselves and the whole of [exec] are
+// hosted. A small subset is still a subset, and this says it is here.
+#  define __cpp_lib_freestanding_execution 202502L
+#endif
+#undef BOXCXX_OWNS_freestanding_execution
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_expected)) && \
+    !defined(__cpp_lib_freestanding_expected)
+#  define __cpp_lib_freestanding_expected 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_expected
+
+#if (defined(BOXCXX_OWNS_ALL) || \
+     defined(BOXCXX_OWNS_freestanding_feature_test_macros)) && \
+    !defined(__cpp_lib_freestanding_feature_test_macros)
+// The one macro of the family with no entity list: it says the implementation
+// reports its feature-test macros in a freestanding environment. boxcxx has no
+// hosted mode to differ from — <version> is compiled with -ffreestanding
+// -nostdlib like everything else here — so this is true by construction, and
+// the audit checks it by asking a freestanding translation unit rather than by
+// asserting it.
+#  define __cpp_lib_freestanding_feature_test_macros 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_feature_test_macros
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_functional)) && \
+    !defined(__cpp_lib_freestanding_functional)
+#  define __cpp_lib_freestanding_functional 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_functional
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_iterator)) && \
+    !defined(__cpp_lib_freestanding_iterator)
+#  define __cpp_lib_freestanding_iterator 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_iterator
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_mdspan)) && \
+    !defined(__cpp_lib_freestanding_mdspan)
+#  define __cpp_lib_freestanding_mdspan 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_mdspan
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_memory)) && \
+    !defined(__cpp_lib_freestanding_memory)
+// The largest of them, and the only one that needed a facility rather than a
+// function: [ptrtag], pointer tagging, in <__bits/pointer_tag>. Also
+// start_lifetime, the one member of the explicit-lifetime family that takes a
+// reference.
+#  define __cpp_lib_freestanding_memory 202502L
+#endif
+#undef BOXCXX_OWNS_freestanding_memory
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_numeric)) && \
+    !defined(__cpp_lib_freestanding_numeric)
+#  define __cpp_lib_freestanding_numeric 202502L
+#endif
+#undef BOXCXX_OWNS_freestanding_numeric
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_operator_new)) && \
+    !defined(__cpp_lib_freestanding_operator_new)
+// [version.syn]/4 spells this one out rather than leaving it to the family
+// rule: 202306L if all the default replaceable global allocation functions
+// meet the requirements of a HOSTED implementation, and 0 otherwise. Note that
+// 0 is still a definition — the macro is not absent on an implementation whose
+// operator new is reduced, it answers zero. boxcxx's operator new is the
+// hosted one: real storage from the process heap, suitably aligned, new_handler
+// consulted on failure and bad_alloc thrown when it returns.
+#  define __cpp_lib_freestanding_operator_new 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_operator_new
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_optional)) && \
+    !defined(__cpp_lib_freestanding_optional)
+#  define __cpp_lib_freestanding_optional 202506L
+#endif
+#undef BOXCXX_OWNS_freestanding_optional
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_random)) && \
+    !defined(__cpp_lib_freestanding_random)
+// The engines are in the subset and the distributions are not — a distribution
+// needs <cmath>'s transcendentals, an engine needs only integer arithmetic.
+#  define __cpp_lib_freestanding_random 202502L
+#endif
+#undef BOXCXX_OWNS_freestanding_random
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_ranges)) && \
+    !defined(__cpp_lib_freestanding_ranges)
+#  define __cpp_lib_freestanding_ranges 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_ranges
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_ratio)) && \
+    !defined(__cpp_lib_freestanding_ratio)
+#  define __cpp_lib_freestanding_ratio 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_ratio
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_string_view)) && \
+    !defined(__cpp_lib_freestanding_string_view)
+#  define __cpp_lib_freestanding_string_view 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_string_view
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_tuple)) && \
+    !defined(__cpp_lib_freestanding_tuple)
+#  define __cpp_lib_freestanding_tuple 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_tuple
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_utility)) && \
+    !defined(__cpp_lib_freestanding_utility)
+#  define __cpp_lib_freestanding_utility 202306L
+#endif
+#undef BOXCXX_OWNS_freestanding_utility
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_freestanding_variant)) && \
+    !defined(__cpp_lib_freestanding_variant)
+#  define __cpp_lib_freestanding_variant 202311L
+#endif
+#undef BOXCXX_OWNS_freestanding_variant
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_ratio)) && \
+    !defined(__cpp_lib_ratio)
+// Not a freestanding macro by name, and one by descent: the paper that added
+// it is the freestanding one, which is why it was held back with the family
+// and is released with it. It says <ratio> is complete, which the audit
+// establishes the same way as the rest.
+#  define __cpp_lib_ratio 202306L
+#endif
+#undef BOXCXX_OWNS_ratio

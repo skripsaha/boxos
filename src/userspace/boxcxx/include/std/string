@@ -1720,4 +1720,9 @@ basic_istream<CharT, Traits> &getline(basic_istream<CharT, Traits> &&is,
 
 } // namespace std
 
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_char_traits
+#include <__bits/version_freestanding>
+
 #endif // BOXCXX_STRING

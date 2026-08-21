@@ -31,10 +31,12 @@
 
 namespace std {
 
+using ::memccpy;
 using ::memcmp;
 using ::memcpy;
 using ::memmove;
 using ::memset;
+using ::memset_explicit;
 using ::strcat;
 using ::strcmp;
 using ::strcoll;
@@ -117,5 +119,10 @@ char *strerror(int errnum) noexcept;
 // libstdc++ does not manage: there, std::memchr on a const pointer still hands
 // back a mutable one.
 using std::strerror;
+
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_cstring
+#include <__bits/version_freestanding>
 
 #endif // BOXCXX_CSTRING
