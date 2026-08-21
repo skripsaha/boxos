@@ -1,0 +1,40 @@
+// boxcxx — <__bits/time_render>
+//
+// One declaration, and a boundary that has to exist.
+//
+// `time_put` renders through <chrono>'s conversion engine — there is exactly
+// one set of month names, one ISO-week calendar and one "%c" in this library,
+// and a facet writing its own would be a second place for any of them to be
+// wrong. But <locale> cannot INCLUDE that engine: <__bits/chrono_format>
+// includes <format>, <format> includes <locale>, and <locale> would then be
+// including itself through two more headers. The cycle is real and the
+// compiler found it immediately.
+//
+// So the call crosses a declaration instead. The definition lives in
+// src/runtime/ctime.cpp beside strftime, which was already the engine's other
+// tm-shaped caller and already carried the tm-to-Parts conversion this shares
+// with it — one conversion, two callers, rather than the two copies that were
+// briefly here.
+#ifndef BOXCXX_BITS_TIME_RENDER
+#define BOXCXX_BITS_TIME_RENDER
+
+#include <ctime>
+#include <string>
+
+namespace std {
+namespace __timeput {
+
+// Render ONE conversion specifier of `t` into `out` as ASCII, appending.
+// Returns false — leaving `out` untouched — when the engine has no answer:
+// a specifier it does not implement, or a field that cannot be rendered, such
+// as %b with a month of 99. The caller decides what to write instead.
+//
+// noexcept: the engine signals refusal by throwing, and that throw is caught
+// here rather than crossing into a facet, where [locale.time.put.virtuals]
+// gives it no meaning.
+bool RenderTm(string &out, char spec, char mod, const tm &t) noexcept;
+
+} // namespace __timeput
+} // namespace std
+
+#endif // BOXCXX_BITS_TIME_RENDER

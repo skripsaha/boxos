@@ -12,6 +12,7 @@
 #include <string>
 #include <__bits/chrono_calendar>
 #include <__bits/chrono_format>
+#include <__bits/time_render>
 
 #include "box/clock.h"
 #include "box/system.h"
@@ -219,25 +220,26 @@ char *ctime(const time_t *timer) noexcept
     return g_ctime;
 }
 
-size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) noexcept
+// A `tm` said in the vocabulary <chrono>'s renderer speaks. It was written for
+// strftime and is shared with time_put as of Ф43-d-3 — the facet's first draft
+// carried a second copy of it, which is one more than there can be.
+static __chrono_fmt::Parts PartsFromTm(const tm &t) noexcept
 {
-    if (!s || !format || !timeptr || maxsize == 0) return 0;
-
     __chrono_fmt::Parts p;
-    p.year      = static_cast<long long>(timeptr->tm_year) + 1900;
-    p.month     = static_cast<unsigned>(timeptr->tm_mon) + 1u;
-    p.day       = static_cast<unsigned>(timeptr->tm_mday);
-    p.h         = timeptr->tm_hour;
-    p.mi        = timeptr->tm_min;
-    p.s         = timeptr->tm_sec;
+    p.year      = static_cast<long long>(t.tm_year) + 1900;
+    p.month     = static_cast<unsigned>(t.tm_mon) + 1u;
+    p.day       = static_cast<unsigned>(t.tm_mday);
+    p.h         = t.tm_hour;
+    p.mi        = t.tm_min;
+    p.s         = t.tm_sec;
     p.sub       = 0;
     p.subw      = 0; // a tm has no subsecond, so %S prints no fraction
-    p.wd        = static_cast<unsigned>(timeptr->tm_wday);
-    p.yday      = static_cast<long long>(timeptr->tm_yday) + 1; // render counts from 1
+    p.wd        = static_cast<unsigned>(t.tm_wday);
+    p.yday      = static_cast<long long>(t.tm_yday) + 1; // render counts from 1
     p.have_date = true;
     p.have_time = true;
-    p.mon_ok    = static_cast<unsigned>(timeptr->tm_mon) < 12u;
-    p.wd_ok     = static_cast<unsigned>(timeptr->tm_wday) < 7u;
+    p.mon_ok    = static_cast<unsigned>(t.tm_mon) < 12u;
+    p.wd_ok     = static_cast<unsigned>(t.tm_wday) < 7u;
     p.date_ok   = true;
     // localtime is gmtime here, so the zone is not unknown — it is UTC, and %Z
     // and %z say so rather than throwing or printing nothing.
@@ -245,6 +247,31 @@ size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) 
     p.has_zone = true;
     p.has_zoff = true;
     p.zoff_sec = 0;
+    return p;
+}
+
+namespace __timeput {
+
+// The declaration in <__bits/time_render>, and the whole reason it exists:
+// <locale> cannot include <__bits/chrono_format>, because that leaf includes
+// <format> and <format> includes <locale>.
+bool RenderTm(string &out, char spec, char mod, const tm &t) noexcept
+{
+    try {
+        __chrono_fmt::RenderOne(out, spec, mod, PartsFromTm(t));
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+} // namespace __timeput
+
+size_t strftime(char *s, size_t maxsize, const char *format, const tm *timeptr) noexcept
+{
+    if (!s || !format || !timeptr || maxsize == 0) return 0;
+
+    const __chrono_fmt::Parts p = PartsFromTm(*timeptr);
 
     string out;
     try {
