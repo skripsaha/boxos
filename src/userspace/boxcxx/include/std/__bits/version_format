@@ -4,10 +4,6 @@
 // split out for the same [support.limits.general] per-header reason as
 // <__bits/version_any>/<__bits/version_bitset> -- see those files' comments.
 //
-// __cpp_lib_format itself (the base <format> macro) is deliberately NOT
-// defined here: backfilling feature-test macros for Ф1-Ф28 is a separate,
-// out-of-scope epic-wide item (see <version>'s own header comment).
-//
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
 // defining only what that header declared it owns. [support.limits.general]
@@ -17,6 +13,29 @@
 // question it was not asked, so it no longer does. <version> defines
 // BOXCXX_OWNS_ALL and takes the lot. Checked by tools/cxx_ftm_audit.sh.
 
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format)) && \
+    !defined(__cpp_lib_format)
+// The base <format> macro, claimed in Ф43-e-2 and not before. What had been
+// missing was never the surface -- it was two answers this library gave that
+// the standard does not:
+//   * a field's width was counted in CODE UNITS, where [format.string.std]/13
+//     asks for the estimated width in extended grapheme clusters. Closed by
+//     <__bits/format_width> (the UAX #29 rules) over <__bits/unicode_grapheme>
+//     (the three UCD properties they read); the rules pass all 766 cases of
+//     Unicode's own GraphemeBreakTest.
+//   * width and precision were capped at 65535, a number this library
+//     invented. Removed: the bound is now the memory the machine has.
+// Ф43-e-1 had already added the six locale-taking overloads [format.functions]
+// names, without which the header was not the one the synopsis describes.
+//
+// 202304L, not higher: that is the last C++23 bump (P2510R3, formatting
+// pointers, which is implemented -- the '0' flag is accepted for a pointer).
+// The C++26 values need P2905R2 and P2918R2 (std::runtime_format), which this
+// library does not have. 202106L's other half, P2418R2, is what
+// <__bits/format_range>'s fmt-maybe-const machinery answers for.
+#  define __cpp_lib_format 202304L
+#endif
+#undef BOXCXX_OWNS_format
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format_uchar)) && \
     !defined(__cpp_lib_format_uchar)
 // P2909R4 "Fix formatting of code units as integers". A char formatted

@@ -26166,6 +26166,23 @@ template <class T> bool P123Parses(const char *spec, T v)
     return true;
 }
 
+// Parse WITHOUT formatting: hand the std-format-spec (no braces, up to and
+// including the closing '}') straight to the formatter's parse(). Ф43-e-2
+// needs this, because once the width cap was removed a spec the parser
+// ACCEPTS may name a field far larger than the machine can hold -- vformat
+// would answer the question by trying to allocate it.
+template <class T> bool P129ParseOnly(std::string_view spec)
+{
+    std::formatter<T, char>   f;
+    std::format_parse_context pc(spec);
+    try {
+        (void)f.parse(pc);
+    } catch (const std::format_error &) {
+        return false;
+    }
+    return true;
+}
+
 // Sweeps all 39 conversion specifiers against the type's advertised set.
 template <class T>
 void P123Matrix(const char *label, T v, const char *accept)
@@ -28229,40 +28246,38 @@ void Phase129()
         Check(feq(std::format("{:.00}", abc), ""), "phase129 (21) string precision 00 truncates to empty");
     }
 
-    // (22-29) the field limit. The standard bounds neither width nor
-    // precision; libstdc++ rejects a literal above 65535 but lets a dynamic
-    // {:{}} through, libc++ bounds neither and really emits a two-gigabyte
-    // field. A hostile format string reaching vformat() must not be able to
-    // ask for gigabytes of heap or billions of fill iterations, so boxcxx
-    // applies kMaxFieldWidth to BOTH paths -- (27-29) are deliberately
-    // stronger than either reference library.
+    // (22-29) the width the GRAMMAR admits. Until Ф43-e-2 this library capped
+    // both paths at 65535, a number it had invented; that cap is gone and what
+    // stops a field now is the memory the machine has. What is still refused
+    // is a number the grammar cannot hold: a width is an int, so ParseNumber
+    // stops above INT_MAX. Nothing here formats a field it cannot afford --
+    // "does this spec parse" and "can this machine hold the field" became two
+    // different questions, and P129ParseOnly asks only the first.
     {
         const std::string wide = std::format("{:65535}", i42);
         Check(wide.size() == 65535 && wide.front() == ' ' && wide.back() == '2',
-              "phase129 (22) width 65535 (the limit itself) still formats, right-aligned");
-        Check(!P123Parses("{:65536}", i42), "phase129 (23) literal width 65536 exceeds the field limit");
-        Check(!P123Parses("{:2000000000}", i42), "phase129 (24) literal width 2000000000 rejected");
-        Check(feq(std::format("{:.65535}", abc), "abc"), "phase129 (25) precision 65535 (the limit itself) accepted");
-        Check(!P123Parses("{:.65536}", abc), "phase129 (26) literal precision 65536 exceeds the field limit");
+              "phase129 (22) width 65535 still formats, right-aligned");
+        Check(std::format("{:65536}", i42).size() == 65536,
+              "phase129 (23) width 65536 formats too -- the 65535 cap is GONE");
+        Check(P129ParseOnly<int>("2000000000}"),
+              "phase129 (24) a width of 2000000000 PARSES -- only memory bounds it now");
+        Check(!P129ParseOnly<int>("2147483648}"),
+              "phase129 (24a) a width past INT_MAX is still refused: a width is an int");
+        Check(feq(std::format("{:.65535}", abc), "abc"), "phase129 (25) precision 65535 accepted");
+        Check(feq(std::format("{:.65536}", abc), "abc"),
+              "phase129 (26) precision 65536 accepted as well -- same cap, equally gone");
 
         auto dynWidth = [](int w) {
             int v = 42;
             return std::vformat("{0:{1}}", std::make_format_args(v, w));
         };
-        auto dynWidthThrows = [&](int w) {
-            try {
-                (void)dynWidth(w);
-            } catch (const std::format_error &) {
-                return true;
-            }
-            return false;
-        };
-        Check(dynWidth(65535).size() == 65535, "phase129 (27) dynamic width 65535 accepted, same limit as the literal path");
-        Check(dynWidthThrows(65536),
-              "phase129 (28) dynamic width 65536 rejected -- boxcxx bounds the dynamic path too, "
-              "where libstdc++ and libc++ both let it through");
-        Check(dynWidthThrows(2000000000),
-              "phase129 (29) dynamic width 2000000000 rejected -- libc++ really allocates 2 GB here");
+        Check(dynWidth(65535).size() == 65535, "phase129 (27) dynamic width 65535");
+        Check(dynWidth(65536).size() == 65536,
+              "phase129 (28) dynamic width 65536 -- the dynamic path had the same cap and lost it");
+        const std::string big = dynWidth(1000000);
+        Check(big.size() == 1000000 && big.back() == '2',
+              "phase129 (29) a field fifteen times past the old cap is simply built -- "
+              "what bounds one now is the memory it takes, and this one fits");
     }
 
     // [format.formatter.spec]/2.3-2.4 provide formatters only for
@@ -28424,13 +28439,20 @@ void Phase129()
         std::chrono::duration<double> fd{1.25};
 
         Check(std::format("{:65535%H}", sec).size() == 65535,
-              "phase129 (60) chrono width 65535 (the limit itself) still formats");
-        Check(!P123Parses("{:65536%H}", sec), "phase129 (61) chrono literal width 65536 exceeds the field limit");
-        Check(!P123Parses("{:2000000000%H}", sec), "phase129 (62) chrono literal width 2000000000 rejected");
+              "phase129 (60) chrono width 65535 still formats");
+        Check(std::format("{:65536%H}", sec).size() == 65536,
+              "phase129 (61) chrono width 65536 too -- <chrono> parses its own width through the "
+              "same ParseWidth, so it lost the cap in the same line");
+        Check(P129ParseOnly<std::chrono::seconds>("2000000000%H}"),
+              "phase129 (62) chrono width 2000000000 parses");
+        Check(!P129ParseOnly<std::chrono::seconds>("2147483648%H}"),
+              "phase129 (62a) chrono width past INT_MAX still refused");
         Check(P123Parses("{:.65535%S}", fd),
               "phase129 (63) chrono precision 65535 accepted -- a floating-point rep is what admits a precision at all");
-        Check(!P123Parses("{:.65536%S}", fd), "phase129 (64) chrono literal precision 65536 exceeds the field limit");
-        Check(!P123Parses("{:.2000000000%S}", fd), "phase129 (65) chrono literal precision 2000000000 rejected");
+        Check(P123Parses("{:.65536%S}", fd),
+              "phase129 (64) chrono precision 65536 accepted as well");
+        Check(!P129ParseOnly<std::chrono::duration<double>>(".2147483648%S}"),
+              "phase129 (65) chrono precision past INT_MAX still refused");
 
         auto dynThrows = [](const char *spec, auto &&value, int n) {
             try {
@@ -28451,9 +28473,10 @@ void Phase129()
     }
 
     printf("[CXX] PASS phase129: <format> conformance -- leading-zero width rejected for "
-           "every argument type (precision keeps its legal leading zeros), one per-field "
-           "limit on the literal and the dynamic width/precision path in <format> and "
-           "<chrono> alike, formattable<volatile T> false for integers and floating-point "
+           "every argument type (precision keeps its legal leading zeros), the invented "
+           "65535 field cap GONE from the literal and the dynamic path in <format> and "
+           "<chrono> alike with only INT_MAX left to stop a width, "
+           "formattable<volatile T> false for integers and floating-point "
            "per [format.formatter.spec]/2.3-2.4, enable_nonlocking_formatter_optimization "
            "with the [time.format]/8 duration and [format.tuple] conjunction rules both "
            "libc++ gets wrong, and P2510R3's '0' accepted in the pointer spec with the "
@@ -29636,9 +29659,13 @@ static_assert(__cpp_lib_execution == 201902L, "phase131: __cpp_lib_execution —
 #ifdef __cpp_lib_filesystem
 #  error "phase131: __cpp_lib_filesystem must stay undefined"
 #endif
-#ifdef __cpp_lib_format
-#  error "phase131: __cpp_lib_format must stay undefined"
-#endif
+static_assert(__cpp_lib_format == 202304L,
+              "phase131: __cpp_lib_format — closed by Ф43-e-2. It stood undefined "
+              "through the whole epic for two reasons that were real: a field's "
+              "width was counted in code units, and both width and precision were "
+              "capped at a number this library had invented. This guard is what "
+              "kept the macro from being claimed on the strength of the surface "
+              "alone, and the value is the last C++23 bump (P2510R3)");
 static_assert(__cpp_lib_formatters == 202302L,
               "phase131: __cpp_lib_formatters — closed by Ф42-g, when "
               "formatter<thread::id, wchar_t> arrived; it was the only half of "
@@ -30208,9 +30235,12 @@ static_assert(__cpp_lib_transparent_operators == 201510L, "phase131: __cpp_lib_t
     }
 
     printf("[CXX] PASS phase131: [version.syn] backfill for phases 1-28 plus the Ф31a-5 overclaim "
-           "sweep -- 126 macros defined, every value pinned == its N4950 C++23 value rather than "
+           "sweep -- 142 macros pinned by value, every one == its N4950 C++23 value rather than "
            "a reference library's DR-applied C++26 one, owning headers interrogated for macro "
-           "visibility BEFORE <version> is ever included, and 58 absence guards. Six macros were "
+           "visibility BEFORE <version> is ever included, and 9 absence guards left. The two "
+           "counts read 126 and 58 when this line was written and neither was re-derived as "
+           "phase after phase turned a guard into a pin -- __cpp_lib_format was the last of "
+           "them, in Ф43-e-2. Six macros were "
            "found to overstate: three DROPPED into the omission list -- __cpp_lib_ranges (short 23 "
            "entities: take_while, drop_while, istream_view, seven [range.access] CPOs, "
            "range_rvalue_reference_t, range_common_reference_t, subrange's two range deduction "
@@ -52489,31 +52519,222 @@ void Phase227()
                   "phase227 (42) ... for the words too");
     }
 
-    // ── 10. PIN for e-2 ─────────────────────────────────────────────────
-    // Two claims that are wrong today and that e-2 is obliged to break. Field
-    // width is measured in CODE UNITS, so a two-code-unit character counts as
-    // two where [format.string.std]/13 says one; and the width itself is
-    // capped at a number this library invented.
+    // ── 10. the two pins Ф43-e-2 was obliged to break ───────────────────
+    // Both were written here asserting the WRONG answer on purpose — width in
+    // code units, and a cap this library had invented — so that changing them
+    // could not be forgotten. Both fell, and the lines now say what is true.
+    // Phase228 is where the new rule is tested; these two stay where they were
+    // pinned, as the record that the pin worked.
     {
-        // U+00E9 is one code point, two UTF-8 code units, and one column.
-        CheckText(std::format("{:4}", "é"), "é  ",
-                  "phase227 (43) PIN: width counts code units - e-2 must make this 3 spaces");
-        // Through vformat, because the consteval check on a format_string
-        // rejects this at COMPILE time — which is itself part of what e-2 has
-        // to change, and cannot be observed from inside a program that must
-        // still compile.
-        bool threw = false;
-        try {
-            const int one = 1;
-            (void)std::vformat("{:65536}", std::make_format_args(one));
-        } catch (const std::format_error &) {
-            threw = true;
-        }
-        Check(threw, "phase227 (44) PIN: the width cap is 65535 - e-2 must remove it");
+        // U+00E9 is one code point, two UTF-8 code units, and ONE column.
+        CheckText(std::format("{:4}", "é"), "é   ",
+                  "phase227 (43) width is columns, not code units");
+        // Through vformat, because until e-2 the consteval check rejected this
+        // at COMPILE time and a program that had to keep compiling could not
+        // name it at all.
+        const int one = 1;
+        Check(std::vformat("{:65536}", std::make_format_args(one)).size() == 65536,
+              "phase227 (44) a width past the old 65535 cap formats — the cap is gone");
     }
 
     printf("[CXX] PASS phase227: <format> takes a locale, and L stops being a "
            "flag that is parsed and dropped\n");
+}
+
+// ── phase228: a field's width is COLUMNS ([format.string.std]/13) ───────
+//
+// Every expected string below was measured on libstdc++ 16.1 and libc++ 19
+// before it was written, and where those two disagree the comment names the
+// disagreement and the rule that decides it. The rules themselves were checked
+// against Unicode's own GraphemeBreakTest-17.0.0: all 766 cases pass.
+//
+// The characters are spelt as \u escapes rather than pasted, because half of
+// what this phase is about is invisible — a combining mark, a zero-width
+// joiner, a regional indicator, an Arabic number sign — and a reader cannot
+// check by eye what an editor may have normalized.
+namespace {
+
+// A separator that is TWO columns wide, to reach the one measurement this
+// library makes that neither reference makes (see the note at check (40)).
+struct P228WidePunct : std::numpunct<wchar_t> {
+protected:
+    wchar_t     do_thousands_sep() const override { return L'，'; }  // fullwidth comma
+    std::string do_grouping() const override { return "\3"; }
+};
+
+// A separator that is a COMBINING MARK, which joins the digit before it and
+// therefore adds no column at all.
+struct P228CombPunct : std::numpunct<wchar_t> {
+protected:
+    wchar_t     do_thousands_sep() const override { return L'́'; }  // combining acute
+    std::string do_grouping() const override { return "\3"; }
+};
+
+} // namespace
+
+void Phase228()
+{
+    using std::string;
+
+    // ── 1. one cluster is one column, however many code units it takes ──
+    {
+        CheckText(std::format("{:*<6}", "abc"), "abc***", "phase228 (1) ASCII");
+        CheckText(std::format("{:*<4}", "é"), "é***",
+                  "phase228 (2) U+00E9: two code units, one column");
+        CheckText(std::format("{:*<4}", "é"), "é***",
+                  "phase228 (3) e + combining acute: three code units, one cluster");
+        CheckText(std::format("{:*<4}", "áb"), "áb**",
+                  "phase228 (4) the mark joins what precedes it, 'b' starts anew");
+        CheckText(std::format("{:*<4}", "क्ष"), "क्ष***",
+                  "phase228 (5) GB9c: consonant-virama-consonant is ONE cluster");
+        CheckText(std::format("{:*<4}", "कष"), "कष**",
+                  "phase228 (6) ... and without the virama it is two");
+        CheckText(std::format("{:*<4}", "؀z"), "؀z***",
+                  "phase228 (7) GB9b: a Prepend joins what follows it");
+        CheckText(std::format("{:*<4}", "\U0001f1fa\U0001f1f8"), "\U0001f1fa\U0001f1f8***",
+                  "phase228 (8) GB12/13: a flag is one cluster of ONE column — the "
+                  "regional indicators are not in the standard's two-column list");
+        CheckText(std::format("{:*<4}", "\U0001f468‍\U0001f469"),
+                  "\U0001f468‍\U0001f469**",
+                  "phase228 (9) GB11: an emoji ZWJ sequence is one cluster, two columns");
+        CheckText(std::format("{:*<4}", "\U0001f600‍a"), "\U0001f600‍a*",
+                  "phase228 (10) ... and a ZWJ before a NON-pictograph does not join");
+    }
+
+    // ── 2. the eighteen ranges that count two ────────────────────────────
+    {
+        CheckText(std::format("{:*<6}", "你好"), "你好**",
+                  "phase228 (11) CJK: two clusters, four columns");
+        CheckText(std::format("{:*<4}", "\U0001f600"), "\U0001f600**",
+                  "phase228 (12) U+1F600 is inside 1F300..1F64F");
+        CheckText(std::format("{:*<4}", "\U0001fa00"), "\U0001fa00***",
+                  "phase228 (13) U+1FA00 is NOT — the list is the standard's, not "
+                  "East_Asian_Width");
+        CheckText(std::format("{:*<4}", "Ａ"), "Ａ**",
+                  "phase228 (14) fullwidth A");
+        CheckText(std::format("{:*<4}", "\U00020000"), "\U00020000**",
+                  "phase228 (15) plane 2");
+        CheckText(std::format("{:*<4}", "가"), "가**",
+                  "phase228 (16) hangul L+V is one cluster, and its FIRST code point "
+                  "decides the width");
+        CheckText(std::format("{:*<4}", "ᄀᆨ"), "ᄀᆨ*",
+                  "phase228 (17) GB6 does not admit T after L, so this is two clusters");
+    }
+
+    // ── 3. controls, and the one row the references disagree on ──────────
+    {
+        CheckText(std::format("{:*<4}", "\r\n"), "\r\n***",
+                  "phase228 (18) GB3: CR LF is ONE cluster. libc++ says two and is "
+                  "wrong; libstdc++ agrees with the rule");
+        CheckText(std::format("{:*<4}", "\n\r"), "\n\r**",
+                  "phase228 (19) ... the other order is two");
+        CheckText(std::format("{:*<4}", "\ŕ"), "\ŕ**",
+                  "phase228 (20) GB4 outranks GB9: nothing joins a CR from the right");
+        CheckText(std::format("{:*<4}", "؀\r"), "؀\r**",
+                  "phase228 (21) GB5 outranks GB9b: a Prepend does not swallow a CR");
+    }
+
+    // ── 4. text that is not valid UTF-8 still has a width ────────────────
+    {
+        CheckText(std::format("{:*<4}", "\xff"), "\xff***",
+                  "phase228 (22) an ill-formed unit is one column, not an exception — "
+                  "a diagnostic must still print when the string is the problem");
+        CheckText(std::format("{:*<4}", "\xff" "a"), "\xff" "a**",
+                  "phase228 (23) ... and the next unit is its own cluster");
+        CheckText(std::format("{:*<4}", "\xff" "́"), "\xff" "́***",
+                  "phase228 (24) it clusters like an ordinary Other code point, so a "
+                  "mark JOINS it — measured on both references, which agree");
+    }
+
+    // ── 5. precision is a width too ([format.string.std]/14) ─────────────
+    {
+        const string cjk = "你好世界";
+        Check(std::format("{:.2}", cjk).size() == 3,
+              "phase228 (25) precision 2 keeps one two-column cluster");
+        Check(std::format("{:.3}", cjk).size() == 3,
+              "phase228 (26) precision 3 keeps the same one — the second would make 4");
+        Check(std::format("{:.1}", cjk).empty(),
+              "phase228 (27) precision 1 keeps NOTHING: the first cluster is 2 wide");
+        Check(std::format("{:.4}", cjk).size() == 6, "phase228 (28) precision 4 keeps two");
+        Check(std::format("{:.2}", string("ééé")).size() == 6,
+              "phase228 (29) two clusters of three code units each");
+        Check(std::format("{:.1}", string("\U0001f1fa\U0001f1f8\U0001f1fa\U0001f1f8")).size() == 8,
+              "phase228 (30) one flag is one column and eight bytes");
+        Check(std::format("{:.1}", string("\r\n\r\n")).size() == 2,
+              "phase228 (31) a cut never lands inside CR LF");
+        CheckText(std::format("{:.3}", "abcdef"), "abc", "phase228 (32) ASCII is exact");
+    }
+
+    // ── 6. the escaped presentation measures the ESCAPED text ────────────
+    {
+        CheckText(std::format("{:*<6?}", "é"), "\"é\"***",
+                  "phase228 (33) the quotes are two of the three columns");
+        CheckText(std::format("{:.2?}", "你"), "\"",
+                  "phase228 (34) precision 2 keeps the opening quote alone: the "
+                  "ideograph would make three. libstdc++ answers \"你\" here, "
+                  "which is WIDER than its own answer at precision 3");
+        CheckText(std::format("{:.3?}", "你"), "\"你",
+                  "phase228 (35) precision 3 fits quote plus ideograph");
+        CheckText(std::format("{:.2?}", "abc"), "\"a", "phase228 (36) ASCII, same rule");
+    }
+
+    // ── 7. every field, not only a string ────────────────────────────────
+    {
+        CheckTextW(std::format(L"{:*<6}", L"你好"), "??**",
+                   "phase228 (37) the wide alphabet measures the same");
+        CheckTextW(std::format(L"{:*<4}", L'你'), "?**",
+                   "phase228 (38) a CHARACTER argument is measured too — libstdc++ "
+                   "agrees, libc++ counts it as one column");
+        CheckText(std::format("{:*<10}", std::vector<std::string>{"你"}),
+                  "[\"你\"]****",
+                  "phase228 (39) a range pads by the width of the whole rendered form");
+    }
+
+    // ── 8. the localized body is measured the same way ───────────────────
+    // Here boxcxx parts company with BOTH references, deliberately. They count
+    // the CODE POINTS of a localized number and stop; measured, `{:~<20L}` of
+    // 1234567 through a fullwidth-comma facet pads to twenty code points in
+    // each of them. But `width` cannot mean columns for a string and code
+    // points for a number in the same library — a program padding a column of
+    // figures would get a ragged column and no reason for it.
+    {
+        const std::locale wide(std::locale::classic(), new P228WidePunct);
+        const std::locale comb(std::locale::classic(), new P228CombPunct);
+        const long long   v = 1234567;
+
+        CheckTextW(std::format(wide, L"{:~<20L}", v), "1?234?567~~~~~~~~~",
+                   "phase228 (40) a two-column separator costs two columns: nine "
+                   "code points, eleven columns, nine fills");
+        CheckTextW(std::format(comb, L"{:~<20L}", v), "1?234?567~~~~~~~~~~~~~",
+                   "phase228 (41) a COMBINING separator joins the digit before it and "
+                   "costs nothing: nine code points, seven columns, thirteen fills");
+        CheckText(std::format(std::locale::classic(), "{:*<12L}", v), "1234567*****",
+                  "phase228 (42) the classic facet groups nothing and stays ASCII, so "
+                  "the fast path answers");
+    }
+
+    // ── 9. where this library follows the RULE and both references do not ─
+    // GB13 is `[^RI] (RI RI)* RI × RI`: after an Arabic number sign (Prepend)
+    // the two regional indicators still pair, so the whole thing is one
+    // cluster. Both references break between them — their rule-state machines
+    // lose the RI run when GB9b pulls the Prepend into the cluster — and
+    // neither Unicode's GraphemeBreakTest nor any spec text says they should.
+    // Found by fuzzing 40 000 random strings against both: this was the ONLY
+    // disagreement left, all 36 hits of it.
+    {
+        CheckText(std::format("{:*<4}", "؀\U0001f1fa\U0001f1f8"),
+                  "؀\U0001f1fa\U0001f1f8***",
+                  "phase228 (43) Prepend + flag is ONE cluster of one column; both "
+                  "references say two clusters");
+    }
+
+    // ── 10. and the macro that all of this was in the way of ─────────────
+    static_assert(__cpp_lib_format == 202304L,
+                  "phase228 (44) __cpp_lib_format is claimed as of Ф43-e-2");
+    Check(__cpp_lib_format == 202304L, "phase228 (44) __cpp_lib_format == 202304L");
+
+    printf("[CXX] PASS phase228: a field is as wide as it LOOKS, and <format> "
+           "says so\n");
 }
 
 // ── phase2: the compile-time half of the suite ─────────────────────────
@@ -52786,6 +53007,7 @@ const PhaseRow kPhases[] = {
     {"225", Phase225},
     {"226", Phase226},
     {"227", Phase227},
+    {"228", Phase228},
     {"2", Phase2},
 };
 

@@ -42,6 +42,13 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф43-e-2 raised it 171 -> 172, and the delta is ONE macro:
+#           __cpp_lib_format, whose owner <format> is included by <chrono>,
+#           <ostream>, <iostream>, <bitset>, <complex> and eight more, so
+#           claiming it at last necessarily made it visible from all of them.
+#           The count is of MACROS, and exactly one macro was added to the
+#           library in that commit; nothing started leaking that had not been.
+#
 #           Ф42-g raised it 170 -> 171, and the delta is ONE macro reaching
 #           ONE header: __cpp_lib_formatters, whose owners are <stacktrace>
 #           and <thread>, becomes visible from <future> because <future>
@@ -114,7 +121,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=171
+LEAK_BUDGET=172
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 
