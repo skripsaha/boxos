@@ -60,6 +60,27 @@ using ::free;
 using ::malloc;
 using ::realloc;
 
+// C23's memalignment, which [cstdlib.syn] puts in the freestanding subset:
+// the largest power of two the pointer is aligned to, and zero for a null
+// pointer — zero because every power of two divides zero, so the honest answer
+// to "how aligned is nothing" is not "infinitely".
+//
+// `v & -v` isolates the lowest set bit, which IS that largest power of two.
+// Written on the unsigned integer rather than on the pointer because pointer
+// arithmetic has no such operation and casting through uintptr_t is what the
+// question actually is. constexpr is not possible: a pointer's numeric value
+// is not a constant expression.
+//
+// The null case needs no branch and had one until a mutation showed the branch
+// was unreachable: ~0 + 1 is 0, so `v & -v` is already zero for a null pointer.
+// The standard's separate sentence about null describes the same answer this
+// arithmetic gives, not a different one.
+[[nodiscard]] inline size_t memalignment(const void *p) noexcept
+{
+    const __UINTPTR_TYPE__ v = reinterpret_cast<__UINTPTR_TYPE__>(p);
+    return size_t(v & (~v + 1));
+}
+
 // ── termination [support.start.term] ────────────────────────────────────
 // exit and _Exit are boxlib's — one process-ending path for C and C++ — and
 // abort is <csignal>'s, because [support.start.term]/9 defines it as
@@ -166,5 +187,10 @@ using std::strtoull;
 using std::system;
 using std::wcstombs;
 using std::wctomb;
+
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_cstdlib
+#include <__bits/version_freestanding>
 
 #endif // BOXCXX_CSTDLIB

@@ -1,0 +1,295 @@
+// boxcxx — <__bits/pointer_tag>
+//
+// [ptrtag], pointer tagging: a pointer and a small integer in ONE word, using
+// the low bits an aligned pointer cannot be using anyway. A pointer to an
+// object of alignment 8 always ends in three zero bits; storing a three-bit
+// tag there costs nothing and reads back with a mask.
+//
+// Every program that has ever wanted this has open-coded it, and each copy has
+// had to answer the same three questions on its own: how many bits am I
+// allowed, does the compiler still understand that this is a pointer, and what
+// happens on a machine where the answer is different. [ptrtag] answers them
+// once. boxcxx implements it in Ф43-f because the freestanding audit named it:
+// `pointer_tag_pair` is a freestanding entity of [memory.syn], and a
+// __cpp_lib_freestanding_memory that skipped it would be a claim this library
+// could not keep.
+//
+// NEITHER libstdc++ 16.1 NOR libc++ has any of this — measured, not assumed.
+// It is new in C++26 and boxcxx is, as of this leaf, the only one of the three
+// that ships it.
+//
+// ── how many bits, and why twelve ───────────────────────────────────────
+// max_pointer_bits_available is implementation-defined. On x86-64 every bit
+// below an object's alignment is genuinely free, and BoxOS puts nothing in
+// them, so the honest limit is not a property of the pointer — it is a
+// property of the alignment the system can promise. That is one PAGE: the
+// memory manager hands out page-aligned storage and nothing coarser, so
+// twelve bits is the most a program can rely on for a pointer the system
+// itself produced. A larger number would be a promise about `alignas` on
+// somebody's static object, which is not the system's to make.
+//
+// ── constant evaluation ─────────────────────────────────────────────────
+// Building a tagged pointer means doing arithmetic on a pointer's bits, and
+// the language has no constant-evaluation form of that: reinterpret_cast is
+// not a constant expression and there is no other way to reach the low bits.
+// The members are still declared constexpr, exactly as the synopsis writes
+// them — the default constructor and tag() really do work in a constant
+// expression, and the rest fail loudly at the point of use rather than
+// silently differing from the standard's declaration. See CONFORMANCE.md.
+#ifndef BOXCXX_BITS_POINTER_TAG
+#define BOXCXX_BITS_POINTER_TAG
+
+#include <__bits/pointer>   // pointer_traits
+#include <bit>              // bit_width, countr_zero
+#include <compare>
+#include <concepts>
+#include <cstddef>
+#include <type_traits>
+#include <utility>          // to_underlying
+
+namespace std {
+
+// [ptrtag.bits]. See the header note for where twelve comes from.
+inline constexpr unsigned max_pointer_bits_available = 12;
+
+// The number of unused bits in a pointer to an object of the given alignment.
+// Precondition: alignment is a power of two — countr_zero of a non-power-of-two
+// would answer about its lowest set bit, which is not what was asked.
+constexpr unsigned pointer_bits_available(size_t alignment)
+{
+    const unsigned free_bits = static_cast<unsigned>(countr_zero(alignment));
+    return free_bits < max_pointer_bits_available ? free_bits
+                                                  : max_pointer_bits_available;
+}
+
+namespace __ptrtag {
+
+// alignof(void) is ill-formed, and `element-of<Ptr>` is void for the very
+// common void*. The standard's exposition-only bits-available<T> is written
+// as pointer_bits_available(alignof(T)); this is that, with the one type the
+// operator cannot be applied to answered as 1 — a void object has no
+// alignment to donate, so it donates nothing.
+template <class T>
+inline constexpr size_t kAlignOf = alignof(T);
+template <>
+inline constexpr size_t kAlignOf<void> = 1;
+template <>
+inline constexpr size_t kAlignOf<const void> = 1;
+template <>
+inline constexpr size_t kAlignOf<volatile void> = 1;
+template <>
+inline constexpr size_t kAlignOf<const volatile void> = 1;
+
+template <class Ptr> using ElementOf = typename pointer_traits<Ptr>::element_type;
+
+template <class T>
+inline constexpr unsigned kBitsAvailable = pointer_bits_available(kAlignOf<T>);
+
+// [ptrtag.pair.general]/5, the exposition-only tag-bit-width: how many bits a
+// tag value actually occupies, which is what the precondition on the
+// constructors is written against.
+template <class T> constexpr unsigned TagBitWidth(T v) noexcept
+{
+    if constexpr (is_enum_v<T>)
+        return static_cast<unsigned>(bit_width(to_underlying(v)));
+    else
+        return static_cast<unsigned>(bit_width(v));
+}
+
+// [ptrtag.pair]/4.4 is written on "underlying_type_t<TagT> if TagT is an
+// enumeration type, and TagT otherwise" — and underlying_type_t is ill-formed
+// for a non-enumeration, so the choice cannot be made with conditional_t.
+template <class T, bool = is_enum_v<T>> struct TagUnderlying {
+    using type = T;
+};
+template <class T> struct TagUnderlying<T, true> {
+    using type = underlying_type_t<T>;
+};
+
+// tagged_pointer_type is `cv void*` for the cv of the pointee.
+template <class Ptr> struct TaggedPtr { using type = void *; };
+template <class T> struct TaggedPtr<const T *> { using type = const void *; };
+template <class T> struct TaggedPtr<volatile T *> { using type = volatile void *; };
+template <class T> struct TaggedPtr<const volatile T *> {
+    using type = const volatile void *;
+};
+
+} // namespace __ptrtag
+
+// [ptrtag.pair.general], the exposition-only tagging-compatible-pointee. The
+// last disjunct is what keeps a tagged pointer from silently pointing at the
+// wrong subobject: for a class type, U must share its address with the
+// element type, which is what pointer-interconvertibility means.
+template <class U, class PtrT, unsigned BitsRequested,
+          size_t Alignment = __ptrtag::kAlignOf<U>>
+concept __tagging_compatible_pointee =
+    convertible_to<U *, PtrT> &&
+    (pointer_bits_available(Alignment) >= BitsRequested) &&
+    (is_void_v<__ptrtag::ElementOf<PtrT>> ||
+     is_scalar_v<__ptrtag::ElementOf<PtrT>> ||
+     is_union_v<__ptrtag::ElementOf<PtrT>> ||
+     is_pointer_interconvertible_base_of_v<__ptrtag::ElementOf<PtrT>, U>);
+
+// [ptrtag.pair]. sizeof and alignof equal those of Ptr, and the type is
+// trivially copyable — all three are normative, and all three are why the
+// storage below is one integer rather than a pointer and a tag side by side.
+template <class Ptr,
+          unsigned BitsRequested = __ptrtag::kBitsAvailable<__ptrtag::ElementOf<Ptr>>,
+          class TagT = unsigned>
+class pointer_tag_pair {
+    static_assert(is_same_v<remove_cvref_t<Ptr>, Ptr>,
+                  "[ptrtag.pair]/4.1: Ptr is cv-unqualified");
+    static_assert(is_same_v<remove_cvref_t<TagT>, TagT>,
+                  "[ptrtag.pair]/4.2: TagT is cv-unqualified");
+    static_assert(is_pointer_v<Ptr> && !is_function_v<remove_pointer_t<Ptr>>,
+                  "[ptrtag.pair]/4.3: Ptr is an object pointer type");
+    static_assert(is_unsigned_v<typename __ptrtag::TagUnderlying<TagT>::type>,
+                  "[ptrtag.pair]/4.4: the tag's underlying type is unsigned");
+    static_assert(sizeof(TagT) <= sizeof(void *), "[ptrtag.pair]/4.5");
+    static_assert(BitsRequested <= max_pointer_bits_available,
+                  "[ptrtag.pair]/4.6: more tag bits than this target has");
+
+    using uintptr_t = __UINTPTR_TYPE__;
+
+    static constexpr uintptr_t kMask =
+        BitsRequested == 0 ? uintptr_t(0)
+                           : ((uintptr_t(1) << BitsRequested) - uintptr_t(1));
+
+    static constexpr uintptr_t TagBits(TagT t) noexcept
+    {
+        if constexpr (is_enum_v<TagT>)
+            return static_cast<uintptr_t>(to_underlying(t)) & kMask;
+        else
+            return static_cast<uintptr_t>(t) & kMask;
+    }
+
+    uintptr_t bits_;
+
+public:
+    using pointer_type        = Ptr;
+    using element_type        = typename pointer_traits<Ptr>::element_type;
+    using tagged_pointer_type = typename __ptrtag::TaggedPtr<Ptr>::type;
+    using tag_type            = TagT;
+
+    static constexpr unsigned bits_requested = BitsRequested;
+
+    // [ptrtag.pair.cons]
+    constexpr pointer_tag_pair() noexcept : bits_(0) {}
+
+    template <__tagging_compatible_pointee<pointer_type, bits_requested> U>
+    constexpr pointer_tag_pair(U *p, tag_type t)
+        : bits_(reinterpret_cast<uintptr_t>(static_cast<pointer_type>(p)) |
+                TagBits(t))
+    {
+    }
+
+    constexpr pointer_tag_pair(nullptr_t, tag_type t) : bits_(TagBits(t)) {}
+
+    // [ptrtag.pair.overalign]. The alignment is PROMISED by the caller rather
+    // than read off the type, which is the whole point: a char* into a
+    // page-aligned buffer carries twelve free bits that alignof(char) does
+    // not know about.
+    template <size_t PromisedAlignment,
+              __tagging_compatible_pointee<pointer_type, bits_requested,
+                                           PromisedAlignment> U>
+    static constexpr pointer_tag_pair from_overaligned(U *p, tag_type t)
+    {
+        pointer_tag_pair r;
+        r.bits_ = reinterpret_cast<uintptr_t>(static_cast<pointer_type>(p)) |
+                  TagBits(t);
+        return r;
+    }
+
+    // [ptrtag.pair.tagops]. The returned value IS an invalid pointer — that is
+    // what the standard says it is, and it exists so the pair can be handed to
+    // something that only speaks void* and taken back afterwards.
+    tagged_pointer_type tagged_pointer() const noexcept
+    {
+        return reinterpret_cast<tagged_pointer_type>(bits_);
+    }
+    static pointer_tag_pair from_tagged(tagged_pointer_type p) noexcept
+    {
+        pointer_tag_pair r;
+        r.bits_ = reinterpret_cast<uintptr_t>(p);
+        return r;
+    }
+
+    // [ptrtag.pair.accessors]
+    constexpr pointer_type pointer() const noexcept
+    {
+        return reinterpret_cast<pointer_type>(bits_ & ~kMask);
+    }
+    constexpr tag_type tag() const noexcept
+    {
+        return static_cast<tag_type>(bits_ & kMask);
+    }
+
+    // [ptrtag.pair.swap]
+    constexpr void swap(pointer_tag_pair &o) noexcept
+    {
+        const uintptr_t t = bits_;
+        bits_             = o.bits_;
+        o.bits_           = t;
+    }
+
+    // [ptrtag.pair.comp]. Specified as comparing the (pointer, tag) pair, and
+    // the recommended practice is to compare the words directly when the tag
+    // comparison is built-in — which it is here, so that is what this does.
+    friend constexpr auto operator<=>(pointer_tag_pair lhs,
+                                      pointer_tag_pair rhs) noexcept
+        requires three_way_comparable<tag_type>
+    {
+        return lhs.bits_ <=> rhs.bits_;
+    }
+    friend constexpr bool operator==(pointer_tag_pair lhs,
+                                     pointer_tag_pair rhs) noexcept
+        requires equality_comparable<tag_type>
+    {
+        return lhs.bits_ == rhs.bits_;
+    }
+
+};
+
+template <class Ptr> pointer_tag_pair(Ptr *) -> pointer_tag_pair<Ptr *>;
+template <class Ptr, class TagT>
+pointer_tag_pair(Ptr *, TagT)
+    -> pointer_tag_pair<Ptr *, __ptrtag::kBitsAvailable<Ptr>, TagT>;
+
+// [ptrtag.pair.get], the tuple interface — which is what makes
+// `auto [p, t] = pair;` work, and is the reason the accessors are not the
+// only way in.
+template <class Ptr, unsigned BitsRequested, class TagT>
+struct tuple_size<pointer_tag_pair<Ptr, BitsRequested, TagT>>
+    : integral_constant<size_t, 2> {};
+
+template <class Ptr, unsigned BitsRequested, class TagT>
+struct tuple_element<0, pointer_tag_pair<Ptr, BitsRequested, TagT>> {
+    using type = Ptr;
+};
+template <class Ptr, unsigned BitsRequested, class TagT>
+struct tuple_element<1, pointer_tag_pair<Ptr, BitsRequested, TagT>> {
+    using type = TagT;
+};
+template <class Ptr, unsigned BitsRequested, class TagT>
+struct tuple_element<0, const pointer_tag_pair<Ptr, BitsRequested, TagT>> {
+    using type = Ptr;
+};
+template <class Ptr, unsigned BitsRequested, class TagT>
+struct tuple_element<1, const pointer_tag_pair<Ptr, BitsRequested, TagT>> {
+    using type = TagT;
+};
+
+template <size_t I, class Ptr, unsigned BitsRequested, class TagT>
+constexpr tuple_element_t<I, pointer_tag_pair<Ptr, BitsRequested, TagT>>
+get(pointer_tag_pair<Ptr, BitsRequested, TagT> p) noexcept
+{
+    static_assert(I < 2, "[ptrtag.pair.get]/1");
+    if constexpr (I == 0)
+        return p.pointer();
+    else
+        return p.tag();
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_POINTER_TAG

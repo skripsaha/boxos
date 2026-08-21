@@ -3048,4 +3048,10 @@ inline bool isunordered(long double x, long double y) { return __builtin_isunord
 #define BOXCXX_OWNS_interpolate
 #define BOXCXX_OWNS_math_special_functions
 #include <__bits/version_cmath>
+
+// [version.syn] gives __cpp_lib_freestanding_cstdlib two owners, because the
+// subset it names is split: the termination and search functions are in
+// <cstdlib> and the integral abs overloads are here.
+#define BOXCXX_OWNS_freestanding_cstdlib
+#include <__bits/version_freestanding>
 #endif

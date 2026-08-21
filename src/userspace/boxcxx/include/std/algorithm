@@ -68,4 +68,9 @@ void shuffle(RandomIt first, RandomIt last, URBG &&g)
 // Last, because they build on everything above.
 #include <__bits/par_algo>
 
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_algorithm
+#include <__bits/version_freestanding>
+
 #endif // BOXCXX_ALGORITHM

@@ -86,6 +86,13 @@
 #ifndef WCHAR_MIN
 #define WCHAR_MIN __WCHAR_MIN__
 #endif
+// C23's width macro, which [cwchar.syn] puts in the freestanding subset.
+// Derived from the compiler's own answer rather than written as 32: the width
+// of wchar_t is the target's business, and a literal here would be a second
+// claim about it that nothing keeps in step with the first.
+#ifndef WCHAR_WIDTH
+#define WCHAR_WIDTH __WCHAR_WIDTH__
+#endif
 #ifndef WCHAR_MAX
 #define WCHAR_MAX __WCHAR_MAX__
 #endif
@@ -263,5 +270,10 @@ using std::wmemcmp;
 using std::wmemcpy;
 using std::wmemmove;
 using std::wmemset;
+
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_cwchar
+#include <__bits/version_freestanding>
 
 #endif // BOXCXX_CWCHAR

@@ -101,6 +101,11 @@ __cpp_lib_format_uchar|format
 __cpp_lib_formatters|stacktrace,thread
 __cpp_lib_format|format
 __cpp_lib_forward_like|utility
+# [version.syn] gives this one no "also in" list at all -- like
+# __cpp_lib_modules, <version> is its only owner -- so the right-hand side is
+# empty on purpose. Ф43-f defined it, which is the day the MAPPED check would
+# otherwise have started refusing to run.
+__cpp_lib_freestanding_feature_test_macros|
 __cpp_lib_freestanding_algorithm|algorithm
 __cpp_lib_freestanding_array|array
 __cpp_lib_freestanding_char_traits|string

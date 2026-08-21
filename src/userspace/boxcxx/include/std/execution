@@ -32,4 +32,9 @@
 #define BOXCXX_OWNS_execution
 #include <__bits/version_execution>
 
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_execution
+#include <__bits/version_freestanding>
+
 #endif // BOXCXX_EXECUTION

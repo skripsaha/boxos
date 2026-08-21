@@ -42,6 +42,18 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф43-f raised it 172 -> 191, the largest jump the pin has ever
+#           taken, and the delta is EXACTLY the freestanding family: 26 macros
+#           arrived and 19 of them leak, because their owners are <utility>,
+#           <memory>, <iterator>, <algorithm>, <tuple>, <ranges>, <optional>,
+#           <variant>, <array>, <string_view>, <charconv>, <cstdlib>, <new>,
+#           <functional>, <numeric>, <string>, <cerrno> and <ratio> — which is
+#           most of what every other header includes. Measured as a set
+#           difference: the 172 that leaked before still leak, none stopped,
+#           and nothing outside the family started. The seven that do NOT leak
+#           are cstring, cwchar, execution, expected, mdspan, random and
+#           feature_test_macros, whose owners nothing else includes.
+#
 #           Ф43-e-2 raised it 171 -> 172, and the delta is ONE macro:
 #           __cpp_lib_format, whose owner <format> is included by <chrono>,
 #           <ostream>, <iostream>, <bitset>, <complex> and eight more, so
@@ -121,7 +133,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=172
+LEAK_BUDGET=191
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

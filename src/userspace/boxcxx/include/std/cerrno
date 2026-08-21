@@ -119,4 +119,9 @@ inline thread_local int __boxcxx_errno = 0;
 #define EOWNERDEAD       130
 #define ENOTRECOVERABLE  131
 
+// [version.syn] names this header as an owner of the freestanding marker(s)
+// below; nothing else here is declared, so nothing else is answered for.
+#define BOXCXX_OWNS_freestanding_errc
+#include <__bits/version_freestanding>
+
 #endif // BOXCXX_CERRNO

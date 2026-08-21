@@ -87,6 +87,44 @@ void* memset(void* ptr, int value, size_t n) {
     return ptr;
 }
 
+/* C23 memccpy: copy at most n bytes, stopping AFTER the first byte equal to
+ * (unsigned char)c. Returns the address just past that byte in dest, or NULL
+ * when c never appeared — the null return is the whole point, because it is
+ * how the caller learns the record was truncated. Byte at a time on purpose:
+ * the loop has to stop on a value, so there is no word-sized fast path that
+ * would not have to re-examine what it just copied. */
+void* memccpy(void* dest, const void* src, int c, size_t n) {
+    if (!dest || !src || n == 0) return 0;
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    const unsigned char stop = (unsigned char)c;
+    while (n--) {
+        *d++ = *s;
+        if (*s++ == stop) return d;
+    }
+    return 0;
+}
+
+/* C23 memset_explicit: memset that MAY NOT be optimized away. A plain memset
+ * over an object nothing reads again is a dead store, and a compiler is
+ * entitled to delete it — which is exactly the wrong answer when the object
+ * held a key. The empty asm with "memory" tells the compiler the bytes were
+ * read by something it cannot see, so the writes have to be there.
+ *
+ * ‼ The barrier is not observable from inside a conforming program, and a
+ * mutation that deleted it was NOT caught by the suite — correctly. Reading an
+ * object to prove its erasure was not elided means reading a dead object,
+ * which is the undefined behaviour the whole exercise is about. It is also
+ * belt and braces in THIS build: the function lives in its own translation
+ * unit and nothing links with LTO, so the call cannot be inlined and the store
+ * cannot be seen to be dead. The barrier is here for the build where one day
+ * it can be. What would pin it is reading generated code, not running it. */
+void* memset_explicit(void* ptr, int value, size_t n) {
+    memset(ptr, value, n);
+    __asm__ __volatile__("" : : "r"(ptr) : "memory");
+    return ptr;
+}
+
 void* memmove(void* dest, const void* src, size_t n) {
     if (!dest || !src || n == 0 || dest == src) return dest;
     unsigned char *d = (unsigned char *)dest;

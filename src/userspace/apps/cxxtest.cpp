@@ -52737,6 +52737,240 @@ void Phase228()
            "says so\n");
 }
 
+// ── phase229: the freestanding subsets, and what they were missing ──────
+//
+// __cpp_lib_freestanding_* says "the freestanding subset of this header is
+// here". The subsets are not written out anywhere as lists — each is spelled
+// inside its header's synopsis, as `// freestanding` on the declarations that
+// belong to it — so the claim is only as good as an audit that reads all
+// twenty-five. tools/gen_freestanding_manifest.py fetches those marks and
+// tools/cxx_freestanding_audit.sh compiles a probe per macro; this phase pins
+// the VALUES the audit earned, and exercises the five entities that had to be
+// written before it could earn them.
+//
+// Four of the five are C23 functions neither libstdc++ 16.1 nor libc++ has,
+// and the fifth is the whole of [ptrtag], which no implementation ships.
+namespace {
+
+struct P229Agg {           // an implicit-lifetime aggregate, for start_lifetime
+    int  a;
+    char b;
+};
+
+enum class P229Tag : unsigned char { None = 0, Red = 1, Green = 2, Blue = 3 };
+
+} // namespace
+
+void Phase229()
+{
+    // ── 1. the twenty-five subsets, at the values [version.syn] gives ───
+    static_assert(__cpp_lib_freestanding_algorithm == 202502L, "phase229 algorithm");
+    static_assert(__cpp_lib_freestanding_array == 202311L, "phase229 array");
+    static_assert(__cpp_lib_freestanding_char_traits == 202306L, "phase229 char_traits");
+    static_assert(__cpp_lib_freestanding_charconv == 202306L, "phase229 charconv");
+    static_assert(__cpp_lib_freestanding_cstdlib == 202306L, "phase229 cstdlib");
+    static_assert(__cpp_lib_freestanding_cstring == 202311L, "phase229 cstring");
+    static_assert(__cpp_lib_freestanding_cwchar == 202306L, "phase229 cwchar");
+    static_assert(__cpp_lib_freestanding_errc == 202306L, "phase229 errc");
+    static_assert(__cpp_lib_freestanding_execution == 202502L, "phase229 execution");
+    static_assert(__cpp_lib_freestanding_expected == 202311L, "phase229 expected");
+    static_assert(__cpp_lib_freestanding_feature_test_macros == 202306L,
+                  "phase229 feature_test_macros");
+    static_assert(__cpp_lib_freestanding_functional == 202306L, "phase229 functional");
+    static_assert(__cpp_lib_freestanding_iterator == 202306L, "phase229 iterator");
+    static_assert(__cpp_lib_freestanding_mdspan == 202311L, "phase229 mdspan");
+    static_assert(__cpp_lib_freestanding_memory == 202502L, "phase229 memory");
+    static_assert(__cpp_lib_freestanding_numeric == 202502L, "phase229 numeric");
+    static_assert(__cpp_lib_freestanding_operator_new == 202306L,
+                  "phase229 operator_new — 202306L means the replaceable global "
+                  "allocation functions meet the HOSTED requirements, which "
+                  "boxcxx's do; [version.syn]/4 spells 0 as the other answer");
+    static_assert(__cpp_lib_freestanding_optional == 202506L, "phase229 optional");
+    static_assert(__cpp_lib_freestanding_random == 202502L, "phase229 random");
+    static_assert(__cpp_lib_freestanding_ranges == 202306L, "phase229 ranges");
+    static_assert(__cpp_lib_freestanding_ratio == 202306L, "phase229 ratio");
+    static_assert(__cpp_lib_freestanding_string_view == 202311L, "phase229 string_view");
+    static_assert(__cpp_lib_freestanding_tuple == 202306L, "phase229 tuple");
+    static_assert(__cpp_lib_freestanding_utility == 202306L, "phase229 utility");
+    static_assert(__cpp_lib_freestanding_variant == 202311L, "phase229 variant");
+    static_assert(__cpp_lib_ratio == 202306L, "phase229 ratio (the plain one)");
+    Check(__cpp_lib_freestanding_memory == 202502L,
+          "phase229 (1) the twenty-five subsets are claimed at [version.syn]'s values");
+
+    // ── 2. memccpy: the one mem-copy that stops on a VALUE ───────────────
+    {
+        char       dst[16];
+        const char src[] = "ab|cd";
+        std::memset(dst, '.', sizeof dst);
+        void *end = std::memccpy(dst, src, '|', sizeof dst);
+        Check(end == dst + 3, "phase229 (2) memccpy returns just past the copied stop byte");
+        Check(dst[0] == 'a' && dst[1] == 'b' && dst[2] == '|' && dst[3] == '.',
+              "phase229 (3) ... and copied exactly up to and including it");
+        std::memset(dst, '.', sizeof dst);
+        Check(std::memccpy(dst, src, '|', 2) == nullptr,
+              "phase229 (4) a null return is how the caller learns it was truncated");
+        Check(dst[0] == 'a' && dst[1] == 'b' && dst[2] == '.',
+              "phase229 (5) ... and n bytes were still copied");
+        Check(std::memccpy(dst, src, 'z', sizeof src) == nullptr,
+              "phase229 (6) a stop byte that never appears is the same answer");
+    }
+
+    // ── 3. memset_explicit: memset the optimizer may not delete ──────────
+    {
+        char secret[8];
+        for (int i = 0; i < 8; ++i) secret[i] = char('A' + i);
+        void *r = std::memset_explicit(secret, 0, sizeof secret);
+        Check(r == secret, "phase229 (7) memset_explicit returns its argument");
+        bool cleared = true;
+        for (int i = 0; i < 8; ++i) cleared = cleared && secret[i] == 0;
+        Check(cleared, "phase229 (8) ... and the object really is erased");
+    }
+
+    // ── 4. memalignment: the largest power of two a pointer sits on ──────
+    {
+        alignas(64) char buf[128];
+        const std::size_t m = std::memalignment(buf);
+        Check(m >= 64, "phase229 (9) memalignment is at least the declared alignment");
+        Check((m & (m - 1)) == 0, "phase229 (10) ... and is a power of two");
+        Check(std::memalignment(buf + 1) == 1,
+              "phase229 (11) an odd address is aligned to exactly one");
+        Check(std::memalignment(buf + 2) == 2, "phase229 (12) and this one to two");
+        Check(std::memalignment(nullptr) == 0,
+              "phase229 (13) a null pointer answers ZERO, not 'infinitely aligned' — "
+              "every power of two divides zero, so the useful answer is the other one");
+    }
+
+    // ── 5. WCHAR_WIDTH, C23's width macro ────────────────────────────────
+    static_assert(WCHAR_WIDTH == 32, "phase229 (14) WCHAR_WIDTH");
+    Check(WCHAR_WIDTH == 32,
+          "phase229 (14) WCHAR_WIDTH is the compiler's own answer, not a literal 32");
+
+    // ── 6. start_lifetime ────────────────────────────────────────────────
+    {
+        alignas(P229Agg) unsigned char storage[sizeof(P229Agg)];
+        std::memset(storage, 0, sizeof storage);
+        P229Agg *p = reinterpret_cast<P229Agg *>(storage);
+        std::start_lifetime(*p);
+        p->a = 42;
+        p->b = 'q';
+        Check(p->a == 42 && p->b == 'q',
+              "phase229 (15) start_lifetime begins the lifetime of the object a "
+              "reference denotes, without initializing it");
+    }
+    {
+        // Constant evaluation: a reference can only bind to an object already
+        // within its lifetime there, so "no effects" is the whole rule and the
+        // function is usable in a constant expression.
+        constexpr int v = [] { int x = 7; std::start_lifetime(x); return x; }();
+        static_assert(v == 7, "phase229 (16) start_lifetime is constexpr");
+        Check(v == 7, "phase229 (16) start_lifetime in a constant expression");
+    }
+
+    // ── 7. [ptrtag]: a pointer and a tag in ONE word ─────────────────────
+    {
+        using PT = std::pointer_tag_pair<int *, 2, unsigned>;
+        static_assert(sizeof(PT) == sizeof(int *),
+                      "phase229 (17) [ptrtag.pair]/3: same size as the pointer");
+        static_assert(alignof(PT) == alignof(int *), "phase229 (18) ... and same alignment");
+        static_assert(std::is_trivially_copyable_v<PT>,
+                      "phase229 (19) ... and trivially copyable");
+        static_assert(PT::bits_requested == 2, "phase229 (20) bits_requested");
+        static_assert(std::is_same_v<PT::pointer_type, int *>, "phase229 (21) pointer_type");
+        static_assert(std::is_same_v<PT::element_type, int>, "phase229 (22) element_type");
+        static_assert(std::is_same_v<PT::tagged_pointer_type, void *>,
+                      "phase229 (23) tagged_pointer_type is cv void*");
+        static_assert(std::is_same_v<PT::tag_type, unsigned>, "phase229 (24) tag_type");
+        Check(sizeof(PT) == sizeof(int *),
+              "phase229 (17) a tagged pointer costs no more than a pointer");
+
+        constexpr PT empty;
+        static_assert(empty.tag() == 0u,
+                      "phase229 (25) the default constructor works in a constant "
+                      "expression — reading the TAG needs no pointer arithmetic");
+
+        int      x = 5, y = 6;
+        PT       a(&x, 3u);
+        Check(a.pointer() == &x, "phase229 (26) the pointer survives the tag");
+        Check(a.tag() == 3u, "phase229 (27) and the tag survives the pointer");
+        Check(*a.pointer() == 5, "phase229 (28) ... and it still points at the object");
+
+        PT b(nullptr, 1u);
+        Check(b.pointer() == nullptr && b.tag() == 1u,
+              "phase229 (29) a null pointer still carries a tag");
+        PT z;
+        Check(z.pointer() == nullptr && z.tag() == 0u,
+              "phase229 (30) the default is a null pointer and a zero tag");
+
+        // The round trip through an invalid pointer value, which is what the
+        // type exists for: hand the word to something that speaks void*.
+        void *raw = a.tagged_pointer();
+        PT    back = PT::from_tagged(raw);
+        Check(back.pointer() == &x && back.tag() == 3u,
+              "phase229 (31) tagged_pointer/from_tagged is a round trip");
+        Check(raw != static_cast<void *>(&x),
+              "phase229 (32) ... and the tagged value is NOT the plain pointer");
+
+        PT c(&y, 3u);
+        Check(!(a == c), "phase229 (33) pointers differ, so the pairs differ");
+        PT d(&x, 3u);
+        Check(a == d, "phase229 (34) same pointer and same tag compare equal");
+        Check((a <=> d) == std::strong_ordering::equal,
+              "phase229 (35) and three-way agrees");
+        a.swap(c);
+        Check(a.pointer() == &y && c.pointer() == &x, "phase229 (36) swap");
+
+        auto [ptr, tag] = d;
+        Check(ptr == &x && tag == 3u,
+              "phase229 (37) the tuple interface makes structured bindings work");
+        static_assert(std::tuple_size_v<PT> == 2, "phase229 (38) tuple_size");
+        static_assert(std::is_same_v<std::tuple_element_t<0, PT>, int *>,
+                      "phase229 (39) tuple_element<0>");
+        static_assert(std::is_same_v<std::tuple_element_t<1, PT>, unsigned>,
+                      "phase229 (40) tuple_element<1>");
+        Check(std::get<0>(d) == &x && std::get<1>(d) == 3u, "phase229 (41) get<I>");
+    }
+
+    // ── 8. how many bits there are, and borrowing more by promise ────────
+    {
+        static_assert(std::max_pointer_bits_available == 12,
+                      "phase229 (42) BoxOS donates a page's worth of low bits — the "
+                      "coarsest alignment its memory manager promises");
+        static_assert(std::pointer_bits_available(1) == 0,
+                      "phase229 (43) a byte-aligned object donates nothing");
+        static_assert(std::pointer_bits_available(8) == 3, "phase229 (44) eight gives three");
+        static_assert(std::pointer_bits_available(4096) == 12, "phase229 (45) a page gives twelve");
+        static_assert(std::pointer_bits_available(1u << 20) == 12,
+                      "phase229 (46) ... and nothing beyond a page gives more");
+        Check(std::pointer_bits_available(8) == 3, "phase229 (44) eight bytes, three bits");
+
+        // alignof(char) is 1, so the ordinary constructor cannot promise even
+        // one bit — the whole point of from_overaligned is that the CALLER
+        // knows something the type does not.
+        alignas(4096) static char page[8192];
+        using WidePT = std::pointer_tag_pair<char *, 12, unsigned>;
+        WidePT w = WidePT::from_overaligned<4096>(page, 4095u);
+        Check(w.pointer() == page && w.tag() == 4095u,
+              "phase229 (47) from_overaligned stores twelve bits in a page-aligned "
+              "pointer, which alignof(char) could never have justified");
+        Check(WidePT::from_tagged(w.tagged_pointer()).tag() == 4095u,
+              "phase229 (48) ... and the wide tag survives the round trip too");
+    }
+
+    // ── 9. an enumeration is a tag type, which is how it should be used ──
+    {
+        using EPT = std::pointer_tag_pair<long *, 2, P229Tag>;
+        long e   = 9;
+        EPT  p(&e, P229Tag::Blue);
+        Check(p.tag() == P229Tag::Blue && p.pointer() == &e,
+              "phase229 (49) an enumeration with an unsigned underlying type is a "
+              "tag, so the bits carry a MEANING rather than a number");
+        static_assert(std::is_same_v<EPT::tag_type, P229Tag>, "phase229 (50) tag_type");
+    }
+
+    printf("[CXX] PASS phase229: the freestanding subsets, audited rather than "
+           "assumed — and the five entities that had to exist first\n");
+}
+
 // ── phase2: the compile-time half of the suite ─────────────────────────
 // cxxtest_traits.cpp is a translation unit that only has to COMPILE; this
 // asks the linker whether it did. It sits last in the table so a full run
@@ -53008,6 +53242,7 @@ const PhaseRow kPhases[] = {
     {"226", Phase226},
     {"227", Phase227},
     {"228", Phase228},
+    {"229", Phase229},
     {"2", Phase2},
 };
 

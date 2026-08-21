@@ -48,6 +48,15 @@ void* memset(void* ptr, int value, size_t n);
 int memcmp(const void* s1, const void* s2, size_t n);
 void* memchr(const void* s, int c, size_t n);
 
+/* C23. memccpy stops after copying the first byte equal to c, which is what
+ * makes it the one mem-copy that can be used to append a delimited record
+ * without walking the source twice. memset_explicit is memset that the
+ * optimizer may not elide: it exists so that erasing a key is an erase and not
+ * a dead store. Both are freestanding entities of [cstring.syn], which is why
+ * they arrived with the freestanding audit rather than with a caller. */
+void* memccpy(void* dest, const void* src, int c, size_t n);
+void* memset_explicit(void* ptr, int value, size_t n);
+
 #ifdef __cplusplus
 }
 #endif
