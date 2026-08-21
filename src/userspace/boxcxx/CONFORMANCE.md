@@ -42,7 +42,7 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Header source | ~102 000 lines |
 | Feature-test macros defined | 210 — 164 at their C++23 value, 46 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 242 phases (223 of them the numbered `PhaseN` series), 6 287 runtime checks, 2 014 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 243 phases (224 of them the numbered `PhaseN` series), 6 333 runtime checks, 2 014 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -53,7 +53,7 @@ and Ф38 re-derived every row and found that one off by exactly that
 directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are ROWS OF THE
 `kPhases` TABLE in `cxxtest.cpp` (see the drift note below); checks are
-occurrences of `Check(`, `CheckMoney(`, `CheckMoneyW(` and `CheckTime(` in `cxxtest.cpp` and
+occurrences of `Check(`, `CheckText(` and `CheckTextW(` in `cxxtest.cpp` and
 `static_assert`s are occurrences of the bare token `static_assert` (which is 24
 more than `static_assert(`, the difference being the times the keyword is
 named in a comment — the two rows were never counted the same way, and saying
@@ -67,9 +67,9 @@ with the launch args selecting which rows run. The count is therefore
 `sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
 ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
 can be checked against a boot log instead of against a grep that has to be
-maintained. That is **242** — 223 purely numbered, 18 suffixed (`Phase4a`,
-`Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by three across
-Ф43: `Phase225` and `Phase226` are new, and `phase2` — the compile-time header
+maintained. That is **243** — 224 purely numbered, 18 suffixed (`Phase4a`,
+`Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by four across
+Ф43: `Phase225`, `Phase226` and `Phase227` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
 ordinary row. The 166 recorded at Ф33 was the numbered series alone, which is
 why both numbers are given above: neither can drift without the other
@@ -424,9 +424,11 @@ and line — is recorded there.
   `messages`, the monetary family and the time family, each with its `_byname`
   form. What is still absent is a second locale to *name*: `locale("de_DE")`
   throws rather than answering as `"C"`, because there is one locale here and
-  saying otherwise would be the lie. The `L` format specifier is still accepted
-  and ignored, and will stay that way until `<format>` is pointed at
-  `numpunct`. Details and reasoning are in §2 `<locale>`.
+  saying otherwise would be the lie. The `L` format specifier WORKS as of
+  Ф43-e-1 — it reads the `numpunct` of whichever locale the formatting context
+  carries — and `<format>` gained the six locale-taking overloads of
+  [format.functions] it had never had. Details and reasoning are in §2
+  `<locale>` and §2 `<format>`.
 - **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
   `zoned_time`, and no leap-second table.
 
@@ -1983,9 +1985,32 @@ states the contract; the encoding already honoured it.
   unsigned integer type, and the extended types are not standard integer types.
   The rejection happens in the consteval check, before any run-time throw.
 - `~` Width is measured in **code units**. There is no grapheme clustering and no
-  East-Asian width estimation; for the ASCII console this is exact.
-- `~` `L` (locale) is parsed and ignored for arithmetic types, and explicitly
-  rejected for strings and pointers. There is only the `"C"` locale.
+  East-Asian width estimation; for the ASCII console this is exact. It is the
+  one thing between here and `__cpp_lib_format`, together with the width cap
+  below, and phase227 (43)-(44) assert both of today's answers on purpose so
+  that changing them cannot be forgotten.
+- `✓` Closed in Ф43-e-1: **`L` was parsed and dropped, and there were no
+  locale-taking overloads at all.** Both halves of that are gone. The six
+  functions [format.functions] gives a `const locale&` — `format`, `format_to`,
+  `format_to_n`, `formatted_size`, `vformat`, `vformat_to` — exist, the context
+  carries the locale (by pointer: the pointee is the caller's argument and
+  outlives the call, while a locale by value would put a refcounted member in
+  every scratch context a range builds), and `basic_format_context::locale()`
+  returns it rather than a default-constructed one. `L` then reads `numpunct`
+  for the group separators, the radix character, and the two words a `bool` is
+  spelt with.
+
+  Measured on both reference implementations, which agree on every case:
+  grouping applies to EVERY base (`{:Lb}` groups bits), the separators count
+  toward the field width, and zero padding is NOT grouped — `{:012L}` of
+  1234567 is `0001'234'567`. `L` is still explicitly rejected for strings and
+  pointers, as both references reject it.
+
+  The locale survives into the scratch context a range or tuple builds when a
+  width forces it to measure itself first. That is not a detail: a mutation
+  that dropped it survived the first version of the check, because without a
+  width the elements go through the OUTER context and the plumbing is never
+  exercised. The check that catches it now puts a width on the range.
 - `~` The `set` and `map` range formatters expose `set_brackets` and
   `set_separator`, which the standard gives only to the sequence specialization.
   Both reference libraries reject those calls. A harmless extension, but generic
@@ -4563,8 +4588,8 @@ in numbers" and counted this way, so the figures are reproducible rather than
 recalled: **phases** are the rows of the `kPhases` table `main` walks — phase 2,
 which is proven by its translation unit linking at all rather than by anything
 it does at run time, is an ordinary row of it as of Ф43 and no longer an
-exception to the rule; **runtime checks** are `Check(`, `CheckMoney(`,
-`CheckMoneyW(` and `CheckTime(` call sites; **`static_assert`s** are occurrences of the keyword. Two of the three figures had drifted before Ф31e-d and were
+exception to the rule; **runtime checks** are `Check(`, `CheckText(`
+and `CheckTextW(` call sites; **`static_assert`s** are occurrences of the keyword. Two of the three figures had drifted before Ф31e-d and were
 re-measured there; the phase figure had drifted again by Ф32-a — the rule above
 yields 170, not the 166 that incrementing the recorded 165 would have given — so
 it is stated here as measured rather than as carried forward. The other two

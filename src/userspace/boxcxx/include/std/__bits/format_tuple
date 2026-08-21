@@ -135,7 +135,7 @@ public:
         }
         const int          width = EffectiveWidth(ctx, spec_);
         StringSink<CharT>  scratch;
-        Ctx<CharT> nested(SinkIterator<CharT>(scratch), ctx.__args());
+        Ctx<CharT> nested(SinkIterator<CharT>(scratch), ctx.__args(), ctx.__loc());
         FormatBody(elems, nested);
         EmitField(ctx, spec_, width, string_view(),
                  SV(scratch.str.data(), scratch.str.size()),
