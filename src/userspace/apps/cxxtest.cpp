@@ -53150,9 +53150,13 @@ void Phase230()
                       "phase230 (5) egrep reads a newline as alternation");
 
     // ── 6. which machine may run the program ─────────────────────────────
-    // Not bookkeeping: a program with a backreference or a lookahead is not
-    // regular, and the linear machine of Ф44-b may not be handed one. The flag
-    // and the instructions have to agree, in both directions.
+    // Not bookkeeping. regular() is the formal question — a backreference and
+    // a lookahead are both outside the regular languages — and the flags have
+    // to agree with the instructions in both directions. Which MACHINE runs a
+    // program is a second question with a different answer: Ф44-b keeps
+    // lookahead on the linear one, because an assertion's answer depends on
+    // the position and is remembered, so only a backreference moves a program
+    // to the bounded path.
     {
         const std::regex plain("a(b|c)*[d-f]{2,3}");
         Check(plain.__prog().regular(), "phase230 (6) a regular program says so");
@@ -53320,6 +53324,305 @@ void Phase230()
     }
 
     Check(true, "phase230 (11) <regex> compiles a pattern into a program");
+}
+
+
+// ── Phase231: <regex> — the machines ───────────────────────────────────────
+// Ф44-b runs the program Ф44-a compiled. Two machines: a Pike VM for anything
+// without a backreference, and a bounded depth-first one for the rest.
+//
+// The engine itself was checked where checking is cheap — 40000 generated
+// cases against libstdc++ 16.1 and libc++ 22.1.6 at once, through
+// tools/cxx_regex_oracle.sh, with every disagreement reduced to a named cell.
+// What is pinned here is what that stand cannot see: the standard's own
+// surface, the match flags, and the three cells where boxcxx answers and the
+// references do not.
+namespace phase231 {
+
+void One(const char *pat, const char *subject, const char *want, const char *what,
+         std::regex::flag_type f = std::regex::ECMAScript,
+         std::regex_constants::match_flag_type mf = std::regex_constants::match_default)
+{
+    const std::string s(subject);
+    std::smatch m;
+    std::string got;
+    try {
+        const std::regex re(pat, f);
+        if (!std::regex_search(s, m, re)) got = "nomatch";
+        else {
+            got = "at=" + std::to_string(m.position(0)) + " len=" + std::to_string(m.length(0));
+            for (std::size_t i = 1; i < m.size(); ++i)
+                got += m[i].matched
+                           ? " g" + std::to_string(i) + "='" + m[i].str() + "'"
+                           : " g" + std::to_string(i) + "=-";
+        }
+    } catch (const std::regex_error &) {
+        got = "throw";
+    }
+    CheckText(got, want, what);
+}
+
+} // namespace phase231
+
+void Phase231()
+{
+    using namespace std::regex_constants;
+
+    // ── 1. the shapes a match can take ───────────────────────────────────
+    phase231::One("a", "bab", "at=1 len=1", "phase231 (1) leftmost");
+    phase231::One("a|ab", "ab", "at=0 len=1",
+                  "phase231 (1) ECMAScript alternation is leftmost-FIRST, so the "
+                  "shorter branch written first wins over the longer one");
+    phase231::One("a*", "baaa", "at=0 len=0", "phase231 (1) an empty match at the front");
+    phase231::One("(a|b)+", "abab", "at=0 len=4 g1='b'", "phase231 (1) the last turn's capture");
+    phase231::One("(a)(b)?", "a", "at=0 len=1 g1='a' g2=-",
+                  "phase231 (1) a group that did not take part");
+    phase231::One("a{2,3}", "aaaa", "at=0 len=3", "phase231 (1) a greedy interval");
+    phase231::One("a{2,3}?", "aaaa", "at=0 len=2", "phase231 (1) and a lazy one");
+    phase231::One("[[:alpha:]]+", "12abc34", "at=2 len=3", "phase231 (1) a named class");
+    phase231::One("(?=ab)a", "ab", "at=0 len=1", "phase231 (1) a positive assertion");
+    phase231::One("(?!b)a", "ba", "at=1 len=1", "phase231 (1) a negative one");
+
+    // ── 2. ECMA-262's empty-iteration rule is observable ─────────────────
+    // RepeatMatcher refuses a turn that consumed nothing and ends the
+    // repetition — but what that turn captured stands. Measured: libc++ agrees,
+    // libstdc++ does not.
+    phase231::One("(a|)*", "a", "at=0 len=1 g1=''",
+                  "phase231 (2) the last turn matched empty, and group 1 holds it");
+    phase231::One("(?:(a)|b)*", "ab", "at=0 len=2 g1=-",
+                  "phase231 (2) and a turn that did not reach the group clears it");
+    phase231::One("(b{0,2})*", " ", "at=0 len=0 g1=''",
+                  "phase231 (2) an empty repetition still turns once");
+
+    // ── 3. the shape the linear machine exists for ───────────────────────
+    // /(a*)*b/ against a run of a's. libstdc++ 16.1 does not answer this at
+    // eighteen characters; libc++ 22.1.6 refuses it from thirteen with
+    // error_complexity. There is nothing clever in the answer — it is "no" —
+    // and the machine reaches it in one pass.
+    {
+        const std::string aaa(4000, 'a');
+        const std::regex re("(a*)*b");
+        Check(!std::regex_search(aaa, re),
+              "phase231 (3) four thousand characters of the pattern that hangs libstdc++");
+        const std::regex re2("(a+)+b");
+        Check(!std::regex_search(aaa, re2), "phase231 (3) and the other shape of it");
+        const std::regex re3("(a|a)*b");
+        Check(!std::regex_search(aaa, re3), "phase231 (3) and the third");
+    }
+
+    // ── 4. the bounded machine refuses rather than hangs ─────────────────
+    // A backreference is not regular, so this program takes the depth-first
+    // path — where a budget, not luck, decides how long it may run. [re.err]
+    // names that outcome: error_complexity.
+    {
+        bool refused = false;
+        try {
+            const std::string aaa(64, 'a');
+            const std::regex re("(a+)+\\1b");
+            (void)std::regex_search(aaa, re);
+        } catch (const std::regex_error &e) {
+            refused = e.code() == error_complexity;
+        }
+        Check(refused, "phase231 (4) the bounded path refuses with error_complexity");
+
+        // And these are why the empty-iteration rule is an instruction rather
+        // than a comment. Without it the bounded machine goes round a loop that
+        // consumes nothing until the budget is gone, and refuses a question
+        // whose answer is plainly "no".
+        phase231::One("(a*)*\\1b", "aaaa", "nomatch",
+                      "phase231 (4) an empty-capable loop with a backreference answers");
+        phase231::One("(a?)*\\1x", "ay", "nomatch", "phase231 (4) and so does this one");
+        phase231::One("((a)|)*\\2", "a", "at=0 len=1 g1='' g2=-",
+                      "phase231 (4) and the turn that emptied the groups is the one "
+                      "the backreference sees");
+    }
+
+    // ── 5. three cells where boxcxx answers and the references do not ────
+    // ECMA-262's BackreferenceMatcher: "if r is undefined, return c(x)" — a
+    // reference to a group that did not take part matches the EMPTY STRING.
+    // Measured: both references treat it as a failure, so both say this cannot
+    // match. It plainly can.
+    phase231::One("x(a)?\\1y", "xy", "at=0 len=2 g1=-",
+                  "phase231 (5) an unmatched backreference matches nothing at all, "
+                  "which is not the same as failing");
+    phase231::One("(?:(a))?\\1", "", "at=0 len=0 g1=-", "phase231 (5) and on its own");
+    // ECMA-262 does not modify DecimalEscape, so a forward reference is legal.
+    phase231::One("\\1(a)", "a", "at=0 len=1 g1='a'", "phase231 (5) a forward reference");
+    // libstdc++ loses the meaning of `^` inside a lookahead; libc++ does not.
+    phase231::One("a(?=^)", "ab", "nomatch",
+                  "phase231 (5) `^` inside an assertion is still an assertion");
+    phase231::One(".{0,2}(?=^)", "ab", "at=0 len=0",
+                  "phase231 (5) so the greedy part must give its characters back");
+
+    // ── 6. match_results is the standard's object, not a tuple ───────────
+    {
+        const std::string s = "xxabcyy";
+        std::smatch m;
+        const std::regex re("a(b)(z)?(c)");
+        Check(!m.ready(), "phase231 (6) a fresh match_results is not ready");
+        Check(std::regex_search(s, m, re), "phase231 (6) search");
+        Check(m.ready(), "phase231 (6) and now it is");
+        Check(m.size() == 4, "phase231 (6) size is mark_count() + 1");
+        Check(m.str(0) == "abc" && m.position(0) == 2 && m.length(0) == 3,
+              "phase231 (6) the whole match");
+        Check(m.str(1) == "b" && m.position(1) == 3, "phase231 (6) a group");
+        Check(!m[2].matched && m[2].str().empty(),
+              "phase231 (6) a group that did not take part is empty, not absent");
+        Check(m.prefix().str() == "xx" && m.prefix().matched, "phase231 (6) prefix");
+        Check(m.suffix().str() == "yy" && m.suffix().matched, "phase231 (6) suffix");
+        Check(m[7].str().empty() && !m[7].matched,
+              "phase231 (6) an index past the end is the unmatched sub_match");
+
+        std::size_t seen = 0;
+        for (const auto &sm : m) { (void)sm; ++seen; }
+        Check(seen == 4, "phase231 (6) it iterates over its own subs");
+
+        // sub_match is a pair of iterators, and says so.
+        Check(m[1].first == s.begin() + 3 && m[1].second == s.begin() + 4,
+              "phase231 (6) [re.submatch]: the iterators are public");
+        Check(m[1] == std::string("b") && m[1] == "b" && m[1] == 'b',
+              "phase231 (6) and compare against text three ways");
+        Check((m[1] <=> std::string("c")) < 0, "phase231 (6) and order against it");
+
+        std::smatch other = m;
+        Check(other == m, "phase231 (6) copies compare equal");
+        std::smatch empty;
+        other.swap(empty);
+        Check(!other.ready() && empty.ready(), "phase231 (6) swap");
+    }
+
+    // ── 7. format [re.results.form], both vocabularies ───────────────────
+    {
+        const std::string s = "xxabcyy";
+        std::smatch m;
+        Check(std::regex_search(s, m, std::regex("a(b)(c)")), "phase231 (7) search");
+        CheckText(m.format("[$&]"), "[abc]", "phase231 (7) $& is the whole match");
+        CheckText(m.format("$1-$2"), "b-c", "phase231 (7) $1 and $2");
+        CheckText(m.format("$`|$'"), "xx|yy", "phase231 (7) the prefix and the suffix");
+        CheckText(m.format("$$"), "$", "phase231 (7) a literal dollar");
+        CheckText(m.format("$9"), "", "phase231 (7) a group that is not there is empty");
+        CheckText(m.format("a$z"), "a$z",
+                  "phase231 (7) an unrecognised sequence is left standing");
+        CheckText(m.format("[&] \\1", format_sed), "[abc] b",
+                  "phase231 (7) sed reads & and backslash-one");
+        CheckText(m.format("\\& \\\\", format_sed), "& \\",
+                  "phase231 (7) and escapes them with a backslash");
+    }
+
+    // ── 8. the match flags change what the ends of the sequence mean ─────
+    {
+        const std::string s = "abc";
+        Check(std::regex_search(s, std::regex("^a")), "phase231 (8) ^ at the front");
+        Check(!std::regex_search(s, std::regex("^a"), match_not_bol),
+              "phase231 (8) match_not_bol takes that away");
+        Check(std::regex_search(s, std::regex("c$")), "phase231 (8) $ at the back");
+        Check(!std::regex_search(s, std::regex("c$"), match_not_eol),
+              "phase231 (8) match_not_eol likewise");
+        Check(std::regex_search(s, std::regex("\\babc\\b")), "phase231 (8) word boundaries");
+        Check(!std::regex_search(s, std::regex("\\ba"), match_not_bow),
+              "phase231 (8) match_not_bow");
+        Check(!std::regex_search(s, std::regex("c\\b"), match_not_eow),
+              "phase231 (8) match_not_eow");
+        Check(std::regex_search(s, std::regex("b")), "phase231 (8) an unanchored search");
+        Check(!std::regex_search(s, std::regex("b"), match_continuous),
+              "phase231 (8) match_continuous refuses to move the start");
+        Check(std::regex_search(s, std::regex("a*")), "phase231 (8) an empty match is a match");
+        Check(!std::regex_search(s, std::regex("z*"), match_not_null),
+              "phase231 (8) unless match_not_null says otherwise");
+
+        // match_prev_avail: the character before `first` exists, so `first` is
+        // no longer the beginning of anything.
+        const std::string t = "ab";
+        Check(!std::regex_search(t.begin() + 1, t.end(), std::regex("^b"), match_prev_avail),
+              "phase231 (8) match_prev_avail: `first` is not the beginning");
+        Check(std::regex_search(t.begin() + 1, t.end(), std::regex("^b")),
+              "phase231 (8) and without it, it is");
+    }
+
+    // ── 9. multiline is a grammar flag, not a match flag ─────────────────
+    {
+        const std::string s = "ab\ncd";
+        std::smatch m;
+        Check(std::regex_search(s, m, std::regex("^cd", std::regex::multiline))
+              && m.position(0) == 3,
+              "phase231 (9) ^ finds the second line");
+        Check(!std::regex_search(s, std::regex("^cd")),
+              "phase231 (9) and does not without the flag");
+        Check(std::regex_search(s, m, std::regex("ab$", std::regex::multiline)),
+              "phase231 (9) $ likewise");
+        Check(!std::regex_search(s, std::regex("a.c")),
+              "phase231 (9) and `.` never crosses a line terminator");
+    }
+
+    // ── 10. regex_match is not regex_search ──────────────────────────────
+    {
+        const std::string s = "abc";
+        Check(!std::regex_match(s, std::regex("b")), "phase231 (10) match is the whole sequence");
+        Check(std::regex_match(s, std::regex("a.c")), "phase231 (10) all of it");
+        Check(std::regex_search(s, std::regex("b")), "phase231 (10) search is any of it");
+        std::smatch m;
+        Check(std::regex_match(s, m, std::regex("(a)(.)(c)")) && m.size() == 4
+              && m.str(2) == "b",
+              "phase231 (10) and fills the same object");
+        Check(std::regex_match("abc", std::regex("a.c")), "phase231 (10) from a pointer");
+        std::cmatch cm;
+        Check(std::regex_search("xxabc", cm, std::regex("a(b)c")) && cm.str(1) == "b",
+              "phase231 (10) and into a cmatch");
+        const char *raw = "abc";
+        Check(std::regex_match(raw, raw + 3, std::regex("abc")),
+              "phase231 (10) and over an iterator pair");
+    }
+
+    // ── 11. icase, collate and nosubs reach the machine ──────────────────
+    {
+        Check(std::regex_search(std::string("ABC"), std::regex("abc", std::regex::icase)),
+              "phase231 (11) icase on a literal");
+        Check(std::regex_search(std::string("B"), std::regex("[a-c]", std::regex::icase)),
+              "phase231 (11) icase on a range");
+        Check(std::regex_search(std::string("b"), std::regex("[a-c]", std::regex::collate)),
+              "phase231 (11) collate on a range");
+        // Not a temporary: [re.except] deletes the rvalue-string overloads
+        // precisely so that this cannot be written, and every iterator the
+        // results object would hold cannot dangle.
+        const std::string ab = "ab";
+        std::smatch m;
+        Check(std::regex_search(ab, m, std::regex("(a)(b)", std::regex::nosubs))
+              && m.size() == 1,
+              "phase231 (11) nosubs reports the whole match and nothing else");
+    }
+
+    // ── 12. the POSIX grammars run, they do not merely parse ─────────────
+    {
+        std::smatch m;
+        const std::string aaa = "aaa", abab = "abab", aab = "aab";
+        Check(std::regex_search(aaa, m, std::regex("a\\{2\\}", std::regex::basic))
+              && m.length(0) == 2,
+              "phase231 (12) BRE intervals");
+        Check(std::regex_search(abab, m, std::regex("\\(ab\\)\\1", std::regex::basic))
+              && m.length(0) == 4,
+              "phase231 (12) BRE backreferences");
+        Check(std::regex_search(aab, m, std::regex("a+b", std::regex::extended))
+              && m.length(0) == 3,
+              "phase231 (12) ERE");
+        Check(std::regex_search(std::string("a\tb"), std::regex("a\\tb", std::regex::awk)),
+              "phase231 (12) awk escapes");
+        Check(std::regex_search(std::string("xay"), std::regex("b\na", std::regex::egrep)),
+              "phase231 (12) egrep reads a newline as alternation");
+    }
+
+    // ── 13. wregex is a regex ────────────────────────────────────────────
+    {
+        const std::wstring w = L"xxabcyy";
+        std::wsmatch m;
+        Check(std::regex_search(w, m, std::wregex(L"a(b)c")) && m.str(1) == L"b",
+              "phase231 (13) wide search");
+        Check(std::regex_match(std::wstring(L"abc"), std::wregex(L"a.c")),
+              "phase231 (13) wide match");
+        Check(std::regex_search(std::wstring(L"ā"), std::wregex(L"[Ā-Ă]")),
+              "phase231 (13) and a range that only a wide class can hold");
+    }
+
+    Check(true, "phase231 (14) <regex> runs");
 }
 
 const PhaseRow kPhases[] = {
@@ -53568,6 +53871,7 @@ const PhaseRow kPhases[] = {
     {"228", Phase228},
     {"229", Phase229},
     {"230", Phase230},
+    {"231", Phase231},
     {"2", Phase2},
 };
 

@@ -46,6 +46,11 @@ enum class Op : unsigned char {
     Split,      // try x first, then y — priority order IS the semantics
     Jmp,        // continue at x
     Save,       // record the current position in slot x
+    Mark,       // record the current position in hidden slot x — the head of a
+                // repetition, so that the tail can tell whether it moved
+    Check,      // if hidden slot x still holds the current position, this
+                // iteration consumed nothing: leave the loop at y instead of
+                // going round again, KEEPING what it captured
     Reset,      // forget slots x..y  (ECMA-262 clears a quantifier's captures
                 // at the head of every iteration; that rule is observable)
     Bol,        // ^
@@ -131,13 +136,21 @@ struct Program {
     std::vector<inst_type> code;
     std::vector<class_type> classes;
     unsigned groups = 0;
+    // ECMA-262's RepeatMatcher refuses an iteration that consumed nothing and
+    // ends the repetition instead — which is why /(b{0,2})*/ leaves group 1
+    // holding an empty match rather than nothing at all. Telling "went round
+    // and moved" from "went round and did not" needs one remembered position
+    // per repetition, and they live past the capture slots in the same vector,
+    // so a thread carries them exactly the way it carries its captures.
+    unsigned loops = 0;
     bool backrefs = false;
     bool looks = false;
     bool icase = false;
     bool collate = false;
     bool multiline = false;
 
-    unsigned slots() const noexcept { return 2u * (groups + 1u); }
+    unsigned captureSlots() const noexcept { return 2u * (groups + 1u); }
+    unsigned slots() const noexcept { return captureSlots() + loops; }
     bool regular() const noexcept { return !backrefs && !looks; }
 
     unsigned Emit(Op op, unsigned x = 0, unsigned y = 0, CharT ch = CharT())

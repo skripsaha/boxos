@@ -14,8 +14,10 @@
 #ifndef BOXCXX_REGEX
 #define BOXCXX_REGEX
 
+#include <__bits/regex_exec>
 #include <__bits/regex_parse>
 #include <__bits/regex_program>
+#include <__bits/regex_results>
 #include <__bits/regex_syntax>
 #include <cstddef>
 #include <initializer_list>
@@ -376,6 +378,176 @@ void swap(basic_regex<charT, traits> &a, basic_regex<charT, traits> &b)
 {
     a.swap(b);
 }
+
+
+// ── running a regex over a sequence [re.alg] ────────────────────────────
+// The machines want a contiguous run of characters, which is what the
+// algorithms take in every use that matters — a basic_string's iterator is a
+// pointer here, and so is a const charT*. A merely bidirectional sequence is
+// copied once into a buffer, because a machine that had to walk an iterator
+// backwards to read a captured group would pay for that on every step of every
+// match, and the sequences that would benefit do not exist in practice.
+template <class BidirectionalIterator, class Allocator, class charT, class traits>
+bool __regex_run(BidirectionalIterator first, BidirectionalIterator last,
+                 match_results<BidirectionalIterator, Allocator> *m,
+                 const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags, bool whole)
+{
+    const auto &prog = e.__prog();
+    if (prog.code.empty()) {
+        if (m) m->__unready();
+        return false;
+    }
+    const bool anchoredStart =
+        whole || (flags & regex_constants::match_continuous) != regex_constants::match_flag_type{};
+
+    vector<ptrdiff_t> slots;
+    bool hit;
+    if constexpr (contiguous_iterator<BidirectionalIterator>) {
+        const charT *f = to_address(first);
+        const charT *l = f + (last - first);
+        hit = boxcxx::re::Execute<traits>(prog, e.__traits(), flags, f, l, f,
+                                          anchoredStart, whole, slots);
+    } else {
+        const basic_string<charT> buf(first, last);
+        const charT *f = buf.data();
+        hit = boxcxx::re::Execute<traits>(prog, e.__traits(), flags, f, f + buf.size(), f,
+                                          anchoredStart, whole, slots);
+    }
+
+    if (!hit) {
+        if (m) m->__unready();
+        return false;
+    }
+    if (!m) return true;
+
+    // [re.synopt] Table 118: with nosubs no sub-expression match is STORED, so
+    // the object reports one sub_match and not one per group. The groups still
+    // exist in the program — a backreference to one still had to resolve.
+    const unsigned groups = e.mark_count();
+    const auto At = [&](ptrdiff_t n) { return next(first, n); };
+    m->__set(first, At(slots[0]), At(slots[1]), groups);
+    m->__setSub(0, At(slots[0]), At(slots[1]), true);
+    for (unsigned g = 1; g <= groups; ++g) {
+        const ptrdiff_t b = slots[2u * g], t = slots[2u * g + 1u];
+        const bool ok = b >= 0 && t >= 0;
+        m->__setSub(g, ok ? At(b) : last, ok ? At(t) : last, ok);
+    }
+    m->__setSuffix(At(slots[1]), last);
+    return true;
+}
+
+template <class BidirectionalIterator, class Allocator, class charT, class traits>
+bool regex_match(BidirectionalIterator first, BidirectionalIterator last,
+                 match_results<BidirectionalIterator, Allocator> &m,
+                 const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return __regex_run(first, last, &m, e, flags, true);
+}
+
+template <class BidirectionalIterator, class charT, class traits>
+bool regex_match(BidirectionalIterator first, BidirectionalIterator last,
+                 const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return __regex_run<BidirectionalIterator, allocator<sub_match<BidirectionalIterator>>>(
+        first, last, nullptr, e, flags, true);
+}
+
+template <class charT, class Allocator, class traits>
+bool regex_match(const charT *str, match_results<const charT *, Allocator> &m,
+                 const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_match(str, str + traits::length(str), m, e, flags);
+}
+
+template <class ST, class SA, class Allocator, class charT, class traits>
+bool regex_match(const basic_string<charT, ST, SA> &s,
+                 match_results<typename basic_string<charT, ST, SA>::const_iterator, Allocator> &m,
+                 const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_match(s.begin(), s.end(), m, e, flags);
+}
+
+// [re.except]: matching against a temporary string would leave every iterator
+// in the results dangling, so the overload exists in order to be refused.
+template <class ST, class SA, class Allocator, class charT, class traits>
+bool regex_match(const basic_string<charT, ST, SA> &&,
+                 match_results<typename basic_string<charT, ST, SA>::const_iterator, Allocator> &,
+                 const basic_regex<charT, traits> &,
+                 regex_constants::match_flag_type = regex_constants::match_default) = delete;
+
+template <class charT, class traits>
+bool regex_match(const charT *str, const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_match(str, str + traits::length(str), e, flags);
+}
+
+template <class ST, class SA, class charT, class traits>
+bool regex_match(const basic_string<charT, ST, SA> &s, const basic_regex<charT, traits> &e,
+                 regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_match(s.begin(), s.end(), e, flags);
+}
+
+template <class BidirectionalIterator, class Allocator, class charT, class traits>
+bool regex_search(BidirectionalIterator first, BidirectionalIterator last,
+                  match_results<BidirectionalIterator, Allocator> &m,
+                  const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return __regex_run(first, last, &m, e, flags, false);
+}
+
+template <class BidirectionalIterator, class charT, class traits>
+bool regex_search(BidirectionalIterator first, BidirectionalIterator last,
+                  const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return __regex_run<BidirectionalIterator, allocator<sub_match<BidirectionalIterator>>>(
+        first, last, nullptr, e, flags, false);
+}
+
+template <class charT, class Allocator, class traits>
+bool regex_search(const charT *str, match_results<const charT *, Allocator> &m,
+                  const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_search(str, str + traits::length(str), m, e, flags);
+}
+
+template <class charT, class traits>
+bool regex_search(const charT *str, const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_search(str, str + traits::length(str), e, flags);
+}
+
+template <class ST, class SA, class charT, class traits>
+bool regex_search(const basic_string<charT, ST, SA> &s, const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_search(s.begin(), s.end(), e, flags);
+}
+
+template <class ST, class SA, class Allocator, class charT, class traits>
+bool regex_search(const basic_string<charT, ST, SA> &s,
+                  match_results<typename basic_string<charT, ST, SA>::const_iterator, Allocator> &m,
+                  const basic_regex<charT, traits> &e,
+                  regex_constants::match_flag_type flags = regex_constants::match_default)
+{
+    return regex_search(s.begin(), s.end(), m, e, flags);
+}
+
+template <class ST, class SA, class Allocator, class charT, class traits>
+bool regex_search(const basic_string<charT, ST, SA> &&,
+                  match_results<typename basic_string<charT, ST, SA>::const_iterator, Allocator> &,
+                  const basic_regex<charT, traits> &,
+                  regex_constants::match_flag_type = regex_constants::match_default) = delete;
 
 using regex = basic_regex<char>;
 using wregex = basic_regex<wchar_t>;

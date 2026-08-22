@@ -1,0 +1,791 @@
+// boxcxx — <__bits/regex_exec>
+//
+// The two machines that run a compiled program, and the capture store they
+// share.
+//
+// ── the linear one ──────────────────────────────────────────────────────
+// PikeVm advances every live thread over the subject together, one character
+// at a time, and two threads that reach the same instruction at the same
+// position ARE the same thread. That single rule is what bounds the work at
+// (instructions x subject length) and what makes `(a*)*b` terminate where a
+// backtracker loops: the second visit to an instruction at a position is
+// recognised as a repeat instead of explored again. Measured 2026-08-21,
+// libstdc++ 16.1 does not answer that pattern at eighteen characters and
+// libc++ 22.1.6 refuses it from thirteen.
+//
+// Priority IS the semantics. ECMAScript alternation is leftmost-FIRST, not
+// leftmost-longest, so threads are held in the order the Splits produced them
+// and a thread that accepts kills every thread below it — never one above.
+//
+// ── the bounded one ─────────────────────────────────────────────────────
+// A backreference is not a regular construct and no NFA expresses it, so a
+// program that has one takes Backtracker instead: the same instructions,
+// explored depth-first, under an explicit budget. Exhausting the budget throws
+// regex_error(error_complexity), which is not an invention — [re.err] has that
+// name for exactly "the complexity of an attempted match exceeded a pre-set
+// level", and it is what makes refusing a legitimate answer rather than a hang.
+//
+// ── neither machine recurses on anything the caller controls ────────────
+// The usual way to write the thread-adding half of a Pike VM is recursion over
+// Split and Jmp, and the usual way to write a backtracker is recursion over
+// the subject. A counted repetition here is compiled by EXPANSION, so
+// `a{10000}` is ten thousand instructions and a Jmp chain as long; a cabin's
+// stack is fixed and would not survive either. Both machines carry an explicit
+// stack instead. That the two reference implementations happen to survive a
+// 200000-character subject is a fact about their hosts, not a design.
+#ifndef BOXCXX_BITS_REGEX_EXEC
+#define BOXCXX_BITS_REGEX_EXEC
+
+#include <__bits/regex_program>
+#include <__bits/regex_syntax>
+#include <cstddef>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+namespace boxcxx {
+namespace re {
+
+// A position that no capture holds. Slots are offsets from the start of the
+// subject, so -1 cannot collide with a real one.
+inline constexpr std::ptrdiff_t kUnset = -1;
+
+// ── the capture store ───────────────────────────────────────────────────
+// Every thread carries the whole capture vector, and at any moment most
+// threads carry the SAME one: they diverged at a Split and have written
+// nothing since. Copying per thread per character would be the dominant cost
+// of the machine, so a capture set is reference counted and copied only when a
+// Save or a Reset is about to write into one that is shared.
+//
+// Handles are indices, not pointers, because the pool reallocates.
+class CapPool {
+public:
+    explicit CapPool(unsigned slots) : slots_(slots ? slots : 2u) {}
+
+    unsigned New()
+    {
+        const unsigned h = Take();
+        std::ptrdiff_t *s = At(h);
+        for (unsigned i = 0; i < slots_; ++i) s[i] = kUnset;
+        return h;
+    }
+
+    void AddRef(unsigned h) noexcept { ++refs_[h]; }
+
+    void Release(unsigned h) noexcept
+    {
+        if (--refs_[h] == 0) free_.push_back(h);
+    }
+
+    // The handle to write through. Shared sets are copied first, which is the
+    // only place a capture vector is ever duplicated.
+    unsigned ForWrite(unsigned h)
+    {
+        if (refs_[h] == 1) return h;
+        const unsigned n = Take();
+        const std::ptrdiff_t *from = At(h);
+        std::ptrdiff_t *to = At(n);
+        for (unsigned i = 0; i < slots_; ++i) to[i] = from[i];
+        --refs_[h];
+        return n;
+    }
+
+    std::ptrdiff_t *At(unsigned h) noexcept { return data_.data() + (std::size_t)h * slots_; }
+    const std::ptrdiff_t *At(unsigned h) const noexcept
+    {
+        return data_.data() + (std::size_t)h * slots_;
+    }
+    unsigned slots() const noexcept { return slots_; }
+
+private:
+    unsigned Take()
+    {
+        if (!free_.empty()) {
+            const unsigned h = free_.back();
+            free_.pop_back();
+            refs_[h] = 1;
+            return h;
+        }
+        const unsigned h = (unsigned)refs_.size();
+        refs_.push_back(1);
+        data_.resize(data_.size() + slots_);
+        return h;
+    }
+
+    unsigned slots_;
+    std::vector<std::ptrdiff_t> data_;
+    std::vector<unsigned> refs_;
+    std::vector<unsigned> free_;
+};
+
+// ── what the machines need to know about characters ─────────────────────
+// Everything locale-shaped goes through the traits object, as [re.grammar]/2
+// requires, and nothing below this line knows what a locale is.
+template <class Traits>
+class Subject {
+public:
+    using char_type = typename Traits::char_type;
+    using class_type = typename Traits::char_class_type;
+    using string_type = std::basic_string<char_type>;
+    using program_type = Program<char_type, class_type>;
+    using uchar_type = typename std::make_unsigned<char_type>::type;
+
+    Subject(const program_type &prog, const Traits &traits,
+            std::regex_constants::match_flag_type flags,
+            const char_type *first, const char_type *last)
+        : prog_(prog), traits_(traits), flags_(flags), first_(first), last_(last)
+    {
+        const char_type w[1] = { (char_type)(unsigned char)'w' };
+        word_ = traits_.lookup_classname(w, w + 1, false);
+    }
+
+    bool Flag(std::regex_constants::match_flag_type f) const noexcept
+    {
+        return (flags_ & f) != std::regex_constants::match_flag_type{};
+    }
+
+    // [re.grammar]/14.1: which characters count as equal.
+    char_type Translate(char_type c) const
+    {
+        if (prog_.icase) return traits_.translate_nocase(c);
+        if (prog_.collate) return traits_.translate(c);
+        return c;
+    }
+
+    // ECMA-262's line terminators. A narrow character can only ever be two of
+    // the four; the other two are code points a wchar_t can hold.
+    static bool IsLineTerm(char_type c) noexcept
+    {
+        const unsigned long long v = (uchar_type)c;
+        if (v == 0x0A || v == 0x0D) return true;
+        return sizeof(char_type) > 1 && (v == 0x2028 || v == 0x2029);
+    }
+
+    bool AtBol(const char_type *p) const
+    {
+        if (p == first_) {
+            // [re.matchflag]: with match_prev_avail, --first is valid and
+            // match_not_bol is ignored — because the position is no longer the
+            // beginning of anything, so there is nothing for the flag to deny.
+            if (Flag(std::regex_constants::match_prev_avail))
+                return prog_.multiline && IsLineTerm(*(p - 1));
+            return !Flag(std::regex_constants::match_not_bol);
+        }
+        return prog_.multiline && IsLineTerm(*(p - 1));
+    }
+
+    bool AtEol(const char_type *p) const
+    {
+        if (p == last_) return !Flag(std::regex_constants::match_not_eol);
+        return prog_.multiline && IsLineTerm(*p);
+    }
+
+    bool IsWord(char_type c) const { return traits_.isctype(c, word_); }
+
+    bool AtWordBoundary(const char_type *p) const
+    {
+        const bool prevAvail = Flag(std::regex_constants::match_prev_avail);
+        if (p == first_ && !prevAvail && Flag(std::regex_constants::match_not_bow)) return false;
+        if (p == last_ && Flag(std::regex_constants::match_not_eow)) return false;
+        const bool before = (p != first_ || prevAvail) ? IsWord(*(p - 1)) : false;
+        const bool after = (p != last_) ? IsWord(*p) : false;
+        return before != after;
+    }
+
+    // A bracket expression's four kinds of member, and the one negation that
+    // applies to the answer rather than to any of them.
+    bool InClass(const typename program_type::class_type &cc, char_type raw) const
+    {
+        const char_type c = Translate(raw);
+        bool in = false;
+        const unsigned long long v = (uchar_type)c;
+        if (v < 256 && cc.InNarrow((unsigned)v)) in = true;
+        if (!in) {
+            for (const auto &r : cc.ranges) {
+                if ((uchar_type)r.first <= v && v <= (uchar_type)r.second) { in = true; break; }
+            }
+        }
+        if (!in && !cc.collatedRanges.empty()) {
+            const string_type s(1, c);
+            const string_type key = traits_.transform(s.begin(), s.end());
+            for (const auto &r : cc.collatedRanges) {
+                if (r.first <= key && key <= r.second) { in = true; break; }
+            }
+        }
+        if (!in && cc.masks != class_type{}) in = traits_.isctype(c, cc.masks);
+        // A negated class ESCAPE inside a bracket — the \D of [\D] — is a way
+        // of belonging, not a way of being excluded, so it is or'ed in like the
+        // rest and only cc.negate inverts the whole answer.
+        if (!in && cc.negMasks != class_type{}) in = !traits_.isctype(c, cc.negMasks);
+        if (!in && !cc.equiv.empty()) {
+            const string_type s(1, c);
+            const string_type key = traits_.transform_primary(s.begin(), s.end());
+            for (const auto &e : cc.equiv) {
+                if (e == key) { in = true; break; }
+            }
+        }
+        return cc.negate ? !in : in;
+    }
+
+    // Does the instruction that consumes a character accept the one at p?
+    bool Consumes(const Inst<char_type> &in, const char_type *p) const
+    {
+        if (p == last_) return false;
+        switch (in.op) {
+        case Op::Char:   return Translate(*p) == in.ch;
+        case Op::Any:    return !IsLineTerm(*p);
+        case Op::AnyAll: return true;
+        case Op::Class:  return InClass(prog_.classes[in.x], *p);
+        default:         return false;
+        }
+    }
+
+    const program_type &prog_;
+    const Traits &traits_;
+    std::regex_constants::match_flag_type flags_;
+    const char_type *first_;
+    const char_type *last_;
+    class_type word_{};
+};
+
+
+// ── the linear machine ──────────────────────────────────────────────────
+template <class Traits>
+class PikeVm : public Subject<Traits> {
+    using Base = Subject<Traits>;
+    using Base::prog_; using Base::traits_; using Base::first_; using Base::last_;
+    using Base::Flag; using Base::AtBol; using Base::AtEol; using Base::AtWordBoundary;
+    using Base::Consumes;
+
+public:
+    using typename Base::char_type;
+    using typename Base::class_type;
+    using typename Base::program_type;
+
+    PikeVm(const program_type &prog, const Traits &traits,
+           std::regex_constants::match_flag_type flags,
+           const char_type *first, const char_type *last)
+        : Base(prog, traits, flags, first, last)
+    {
+        if (!prog.code.empty()) {
+            unsigned looks = 0;
+            for (const auto &in : prog.code)
+                if (in.op == Op::Look) ++looks;
+            memo_.resize(looks);
+            lookIndex_.assign(prog.code.size(), 0u);
+            unsigned n = 0;
+            for (std::size_t i = 0; i < prog.code.size(); ++i)
+                if (prog.code[i].op == Op::Look) lookIndex_[i] = n++;
+        }
+    }
+
+    // Fills `out` with slot positions relative to first_. Returns false and
+    // leaves `out` alone when nothing matched.
+    bool Execute(const char_type *start, bool anchoredStart, bool anchoredEnd,
+                 std::vector<std::ptrdiff_t> &out)
+    {
+        return Core(0u, start, anchoredStart, anchoredEnd, false, out);
+    }
+
+private:
+    struct Thread { unsigned pc; unsigned caps; };
+
+    // Two threads at the same instruction and the same position are the same
+    // thread — that is the rule the whole machine rests on. The instruction
+    // alone is not the whole of the state, though: a Check asks whether the
+    // repetition it closes has moved, so "this loop is standing still" changes
+    // what the SAME instruction will do next. One bit per repetition carries
+    // that, and without it the second turn of /(a|)*/ is discarded as a repeat
+    // of the first — which loses the empty match ECMA-262 says group 1 holds.
+    //
+    // Open addressing over (instruction, bits), cleared by stamp rather than
+    // by writing, because it is reset once per character.
+    struct StateSet {
+        std::vector<unsigned> stamp;
+        std::vector<unsigned long long> key;
+        unsigned gen = 0;
+
+        void Begin(std::size_t n, unsigned g)
+        {
+            std::size_t want = 8;
+            while (want < n * 4u) want *= 2;
+            if (stamp.size() != want) { stamp.assign(want, 0u); key.assign(want, 0ull); }
+            gen = g;
+        }
+
+        bool Insert(unsigned long long k)
+        {
+            const std::size_t mask = stamp.size() - 1;
+            std::size_t i = (std::size_t)((k * 0x9E3779B97F4A7C15ull) >> 32) & mask;
+            for (;;) {
+                if (stamp[i] != gen) { stamp[i] = gen; key[i] = k; return true; }
+                if (key[i] == k) return false;
+                i = (i + 1) & mask;
+            }
+        }
+    };
+
+    struct List {
+        std::vector<Thread> threads;
+        StateSet seen;
+        unsigned gen = 0;
+
+        // The stamp comes from OUTSIDE and only ever increases. A counter
+        // per list would look right and be wrong: the two lists trade their
+        // `seen` vectors every position, so a value reused two positions later
+        // meets stamps left by the same value two positions earlier and reads
+        // them as "already added" — which silently drops threads, and turns a
+        // pattern that matches into one that does not.
+        void Begin(std::size_t n, unsigned stamp)
+        {
+            seen.Begin(n, stamp);
+            gen = stamp;
+            threads.clear();
+        }
+        bool Mark(unsigned pc, unsigned long long bits)
+        {
+            return seen.Insert(((unsigned long long)pc << 32) ^ bits);
+        }
+    };
+
+    // Follow every instruction that consumes nothing, in priority order, and
+    // append the ones that do. An explicit stack, not recursion: a counted
+    // repetition is compiled by expansion, so the Jmp chain of `a{10000}` is
+    // ten thousand long and a cabin's stack is fixed.
+    void AddThread(List &l, CapPool &pool, unsigned pc, const char_type *p, unsigned caps)
+    {
+        // The stack is a member so that it is allocated once and not per call,
+        // and it is used from a BASE rather than emptied: a lookahead runs a
+        // nested machine from inside this very loop, and that machine enters
+        // here again. Clearing would throw away the work the outer call had
+        // left to do — which is a thread quietly lost, and a pattern that
+        // matches reported as one that does not.
+        const std::size_t base = work_.size();
+        work_.push_back(Thread{pc, caps});
+        while (work_.size() > base) {
+            const Thread t = work_.back();
+            work_.pop_back();
+            if (!l.Mark(t.pc, LoopBits(pool, t.caps, p))) { pool.Release(t.caps); continue; }
+            const auto &in = prog_.code[t.pc];
+            switch (in.op) {
+            case Op::Jmp:
+                work_.push_back(Thread{in.x, t.caps});
+                break;
+            case Op::Split:
+                // The preferred branch is pushed LAST so it is popped FIRST:
+                // the order these two reach the list is what leftmost-first
+                // alternation means.
+                pool.AddRef(t.caps);
+                work_.push_back(Thread{in.y, t.caps});
+                work_.push_back(Thread{in.x, t.caps});
+                break;
+            case Op::Save: {
+                const unsigned w = pool.ForWrite(t.caps);
+                pool.At(w)[in.x] = p - first_;
+                work_.push_back(Thread{t.pc + 1, w});
+                break;
+            }
+            case Op::Reset: {
+                if (in.x == 0) { work_.push_back(Thread{t.pc + 1, t.caps}); break; }
+                const unsigned w = pool.ForWrite(t.caps);
+                std::ptrdiff_t *s = pool.At(w);
+                for (unsigned g = in.x; g <= in.y; ++g) {
+                    s[2u * g] = kUnset;
+                    s[2u * g + 1u] = kUnset;
+                }
+                work_.push_back(Thread{t.pc + 1, w});
+                break;
+            }
+            case Op::Mark: {
+                // Only a position that actually changed is worth a copy: this
+                // runs once per turn of every repetition, and copying the
+                // capture vector each time would make the remembered position
+                // cost more than the captures it sits beside.
+                if (pool.At(t.caps)[in.x] == p - first_) {
+                    work_.push_back(Thread{t.pc + 1, t.caps});
+                    break;
+                }
+                const unsigned w = pool.ForWrite(t.caps);
+                pool.At(w)[in.x] = p - first_;
+                work_.push_back(Thread{t.pc + 1, w});
+                break;
+            }
+            case Op::Check:
+                // ECMA-262's RepeatMatcher: a turn that consumed nothing does
+                // not take another, and what it captured stands.
+                //
+                // Measured: in THIS machine the rule changes no answer — over
+                // 40000 cases, none. The state key already carries whether the
+                // repetition is standing still, so the extra visit to the loop
+                // head is deduplicated along with everything it would reach.
+                // It is written out anyway because the instruction belongs to
+                // the program and not to a machine, and in the bounded machine
+                // below it decides between an answer and a refusal.
+                work_.push_back(Thread{pool.At(t.caps)[in.x] == p - first_ ? in.y : t.pc + 1,
+                                       t.caps});
+                break;
+            case Op::Bol:
+                if (AtBol(p)) work_.push_back(Thread{t.pc + 1, t.caps});
+                else pool.Release(t.caps);
+                break;
+            case Op::Eol:
+                if (AtEol(p)) work_.push_back(Thread{t.pc + 1, t.caps});
+                else pool.Release(t.caps);
+                break;
+            case Op::WordB:
+                if (AtWordBoundary(p)) work_.push_back(Thread{t.pc + 1, t.caps});
+                else pool.Release(t.caps);
+                break;
+            case Op::NotWordB:
+                if (!AtWordBoundary(p)) work_.push_back(Thread{t.pc + 1, t.caps});
+                else pool.Release(t.caps);
+                break;
+            case Op::Look: {
+                const std::vector<std::ptrdiff_t> *caps2 = nullptr;
+                const bool hit = LookAt(t.pc, p, caps2);
+                if (hit == in.neg) { pool.Release(t.caps); break; }
+                if (caps2) {
+                    // Only the slots the assertion actually filled travel out
+                    // of it; everything it left alone keeps the value the
+                    // thread already had.
+                    const unsigned w = pool.ForWrite(t.caps);
+                    std::ptrdiff_t *s = pool.At(w);
+                    for (unsigned i = 2; i < pool.slots(); ++i)
+                        if ((*caps2)[i] != kUnset) s[i] = (*caps2)[i];
+                    work_.push_back(Thread{in.y, w});
+                } else {
+                    work_.push_back(Thread{in.y, t.caps});
+                }
+                break;
+            }
+            default:
+                l.threads.push_back(Thread{t.pc, t.caps});
+                break;
+            }
+        }
+    }
+
+    // Which repetitions are standing still here. Only that matters beyond the
+    // instruction itself, because it is the only thing a Check reads.
+    unsigned long long LoopBits(CapPool &pool, unsigned caps, const char_type *p) const
+    {
+        if (prog_.loops == 0) return 0ull;
+        const std::ptrdiff_t at = p - first_;
+        const std::ptrdiff_t *s = pool.At(caps);
+        const unsigned base = prog_.captureSlots();
+        unsigned long long bits = 0;
+        const unsigned n = prog_.loops < 64u ? prog_.loops : 64u;
+        for (unsigned i = 0; i < n; ++i)
+            if (s[base + i] == at) bits |= 1ull << i;
+        return bits;
+    }
+
+    // A lookahead's answer at a position depends on the position and nothing
+    // else, so it is computed once per (assertion, position) and kept. That is
+    // what keeps an assertion linear in the subject instead of costing a
+    // nested run per live thread per character.
+    bool LookAt(unsigned pc, const char_type *p, const std::vector<std::ptrdiff_t> *&caps)
+    {
+        Memo &m = memo_[lookIndex_[pc]];
+        const std::size_t at = (std::size_t)(p - first_);
+        if (m.state.size() != (std::size_t)(last_ - first_) + 1u) {
+            m.state.assign((std::size_t)(last_ - first_) + 1u, (signed char)-1);
+            m.caps.assign((std::size_t)(last_ - first_) + 1u, std::vector<std::ptrdiff_t>());
+        }
+        if (m.state[at] < 0) {
+            std::vector<std::ptrdiff_t> got;
+            const bool hit = Core(prog_.code[pc].x, p, true, false, true, got);
+            m.state[at] = hit ? (signed char)1 : (signed char)0;
+            if (hit) m.caps[at] = static_cast<std::vector<std::ptrdiff_t> &&>(got);
+        }
+        // A negative assertion contributes no captures even when its body
+        // matched: nothing inside it took part in the match that continues.
+        caps = (m.state[at] == 1 && !prog_.code[pc].neg && !m.caps[at].empty())
+                   ? &m.caps[at] : nullptr;
+        return m.state[at] == 1;
+    }
+
+    bool Core(unsigned entryPc, const char_type *start, bool anchoredStart,
+              bool anchoredEnd, bool lookMode, std::vector<std::ptrdiff_t> &out)
+    {
+        CapPool pool(prog_.slots());
+        List clist, dlist;
+        unsigned stamp = 0;
+        clist.Begin(prog_.code.size(), ++stamp);
+        dlist.Begin(prog_.code.size(), ++stamp);
+
+        bool matched = false;
+        const bool notNull = Flag(std::regex_constants::match_not_null);
+
+        for (const char_type *p = start;; ++p) {
+            if (!matched && (!anchoredStart || p == start))
+                AddThread(clist, pool, entryPc, p, pool.New());
+
+            if (clist.threads.empty() && (matched || anchoredStart)) break;
+
+            dlist.Begin(prog_.code.size(), ++stamp);
+            for (std::size_t i = 0; i < clist.threads.size(); ++i) {
+                const Thread t = clist.threads[i];
+                const auto &in = prog_.code[t.pc];
+                const bool accepting = lookMode ? in.op == Op::LookEnd : in.op == Op::Accept;
+                if (accepting) {
+                    const std::ptrdiff_t *s = pool.At(t.caps);
+                    const bool endOk = !anchoredEnd || p == last_;
+                    const bool nullOk = !notNull || lookMode || s[1] != s[0];
+                    if (endOk && nullOk) {
+                        out.assign(s, s + pool.slots());
+                        if (lookMode) out[1] = p - first_;
+                        matched = true;
+                        // Every thread after this one is a lower-priority way
+                        // of matching the same start, and leftmost-first says
+                        // they no longer exist. Threads BEFORE it are still
+                        // preferred and go on running.
+                        for (std::size_t k = i; k < clist.threads.size(); ++k)
+                            pool.Release(clist.threads[k].caps);
+                        break;
+                    }
+                    pool.Release(t.caps);
+                    continue;
+                }
+                if (Consumes(in, p)) AddThread(dlist, pool, t.pc + 1u, p + 1, t.caps);
+                else pool.Release(t.caps);
+            }
+
+            if (p == last_) break;
+            clist.threads.swap(dlist.threads);
+            std::swap(clist.seen, dlist.seen);
+            std::swap(clist.gen, dlist.gen);
+        }
+        return matched;
+    }
+
+    struct Memo {
+        std::vector<signed char> state;                    // -1 unknown, 0 no, 1 yes
+        std::vector<std::vector<std::ptrdiff_t>> caps;
+    };
+
+    std::vector<Thread> work_;
+    std::vector<Memo> memo_;
+    std::vector<unsigned> lookIndex_;
+};
+
+
+// ── the bounded machine ─────────────────────────────────────────────────
+// A backreference asks whether the text here is the text some group captured,
+// and no finite automaton can ask that. So a program that has one is explored
+// depth-first instead — the same instructions, the same capture store, and a
+// stack of the choices not yet taken.
+//
+// What keeps this from being the thing Ф44 was written to avoid is the budget.
+// Every instruction executed spends one, and running out throws
+// regex_error(error_complexity). [re.err] defines that name as "the complexity
+// of an attempted match against a regular expression exceeded a pre-set
+// level", so refusing is an answer the standard provides for, and it is the
+// only honest one when the alternative is not returning.
+//
+// The budget scales with the subject rather than being a number chosen once:
+// a long string legitimately needs more steps than a short one, and a bound
+// that ignored the input would refuse ordinary work on large inputs while
+// permitting absurd work on small ones.
+template <class Traits>
+class Backtracker : public Subject<Traits> {
+    using Base = Subject<Traits>;
+    using Base::prog_; using Base::traits_; using Base::first_; using Base::last_;
+    using Base::Flag; using Base::AtBol; using Base::AtEol; using Base::AtWordBoundary;
+    using Base::Consumes; using Base::Translate;
+
+public:
+    using typename Base::char_type;
+    using typename Base::program_type;
+
+    Backtracker(const program_type &prog, const Traits &traits,
+                std::regex_constants::match_flag_type flags,
+                const char_type *first, const char_type *last)
+        : Base(prog, traits, flags, first, last),
+          budget_(kBase + kPerChar * (unsigned long long)(last - first)) {}
+
+    bool Execute(const char_type *start, bool anchoredStart, bool anchoredEnd,
+                 std::vector<std::ptrdiff_t> &out)
+    {
+        for (const char_type *at = start;; ++at) {
+            CapPool pool(prog_.slots());
+            if (Run(pool, 0u, at, anchoredEnd, false, pool.New(), out)) return true;
+            if (anchoredStart || at == last_) return false;
+        }
+    }
+
+private:
+    // A choice not taken yet: where to resume, how far the subject had been
+    // read, and what had been captured by then.
+    struct Point { unsigned pc; const char_type *p; unsigned caps; };
+
+    static constexpr unsigned long long kBase = 1ull << 16;
+    static constexpr unsigned long long kPerChar = 4096ull;
+
+    void Spend()
+    {
+        if (budget_ == 0) ThrowRegex(std::regex_constants::error_complexity);
+        --budget_;
+    }
+
+    bool Run(CapPool &pool, unsigned entry, const char_type *start, bool anchoredEnd,
+             bool lookMode, unsigned caps, std::vector<std::ptrdiff_t> &out)
+    {
+        const std::size_t floor = stack_.size();
+        unsigned pc = entry;
+        const char_type *p = start;
+
+        for (;;) {
+            Spend();
+            bool failed = false;
+            const auto &in = prog_.code[pc];
+            switch (in.op) {
+            case Op::Split:
+                // The branch not preferred becomes a choice point; the
+                // preferred one is simply followed, which is what makes the
+                // order of the two the meaning of greedy and lazy.
+                pool.AddRef(caps);
+                stack_.push_back(Point{in.y, p, caps});
+                pc = in.x;
+                break;
+            case Op::Jmp:
+                pc = in.x;
+                break;
+            case Op::Save:
+                caps = pool.ForWrite(caps);
+                pool.At(caps)[in.x] = p - first_;
+                ++pc;
+                break;
+            case Op::Reset:
+                if (in.x != 0) {
+                    caps = pool.ForWrite(caps);
+                    std::ptrdiff_t *s = pool.At(caps);
+                    for (unsigned g = in.x; g <= in.y; ++g) {
+                        s[2u * g] = kUnset;
+                        s[2u * g + 1u] = kUnset;
+                    }
+                }
+                ++pc;
+                break;
+            case Op::Mark:
+                if (pool.At(caps)[in.x] != p - first_) {
+                    caps = pool.ForWrite(caps);
+                    pool.At(caps)[in.x] = p - first_;
+                }
+                ++pc;
+                break;
+            case Op::Check:
+                pc = pool.At(caps)[in.x] == p - first_ ? in.y : pc + 1;
+                break;
+            case Op::Bol:      failed = !AtBol(p); pc += failed ? 0 : 1; break;
+            case Op::Eol:      failed = !AtEol(p); pc += failed ? 0 : 1; break;
+            case Op::WordB:    failed = !AtWordBoundary(p); pc += failed ? 0 : 1; break;
+            case Op::NotWordB: failed = AtWordBoundary(p); pc += failed ? 0 : 1; break;
+            case Op::Backref: {
+                const std::ptrdiff_t *s = pool.At(caps);
+                const std::ptrdiff_t b = s[2u * in.x], e = s[2u * in.x + 1u];
+                // ECMA-262: a reference to a group that has not taken part
+                // matches the empty string. It is not a failure and it is not
+                // ill-formed — which is also why a forward reference is legal.
+                if (b == kUnset || e == kUnset) { ++pc; break; }
+                const std::ptrdiff_t len = e - b;
+                if (last_ - p < len) { failed = true; break; }
+                bool same = true;
+                for (std::ptrdiff_t i = 0; i < len; ++i) {
+                    Spend();
+                    if (Translate(first_[b + i]) != Translate(p[i])) { same = false; break; }
+                }
+                if (!same) { failed = true; break; }
+                p += len;
+                ++pc;
+                break;
+            }
+            case Op::Look: {
+                // The assertion is explored by the same machine, seeded with
+                // the captures in hand — it may contain a backreference to one
+                // of them, which is exactly why this program is here.
+                std::vector<std::ptrdiff_t> got;
+                pool.AddRef(caps);
+                const bool hit = Run(pool, in.x, p, false, true, caps, got);
+                if (hit == in.neg) { failed = true; break; }
+                if (hit && !in.neg) {
+                    caps = pool.ForWrite(caps);
+                    std::ptrdiff_t *s = pool.At(caps);
+                    for (unsigned i = 2; i < pool.slots(); ++i) s[i] = got[i];
+                }
+                pc = in.y;
+                break;
+            }
+            case Op::LookEnd:
+                if (!lookMode) { failed = true; break; }
+                out.assign(pool.At(caps), pool.At(caps) + pool.slots());
+                Unwind(pool, floor);
+                pool.Release(caps);
+                return true;
+            case Op::Accept: {
+                const std::ptrdiff_t *s = pool.At(caps);
+                if (lookMode) { failed = true; break; }
+                if (anchoredEnd && p != last_) { failed = true; break; }
+                if (Flag(std::regex_constants::match_not_null) && s[1] == s[0]) {
+                    failed = true;
+                    break;
+                }
+                out.assign(s, s + pool.slots());
+                Unwind(pool, floor);
+                pool.Release(caps);
+                return true;
+            }
+            default:
+                failed = !Consumes(in, p);
+                if (!failed) { ++pc; ++p; }
+                break;
+            }
+
+            if (!failed) continue;
+            pool.Release(caps);
+            if (stack_.size() == floor) return false;
+            const Point pt = stack_.back();
+            stack_.pop_back();
+            pc = pt.pc;
+            p = pt.p;
+            caps = pt.caps;
+        }
+    }
+
+    void Unwind(CapPool &pool, std::size_t floor)
+    {
+        while (stack_.size() > floor) {
+            pool.Release(stack_.back().caps);
+            stack_.pop_back();
+        }
+    }
+
+    std::vector<Point> stack_;
+    unsigned long long budget_;
+};
+
+// Which machine a program takes. A lookahead stays with the linear one — its
+// answer at a position depends on the position and is remembered — so only a
+// backreference, which no automaton expresses, moves a program to the bounded
+// path.
+template <class Traits>
+bool Execute(const Program<typename Traits::char_type, typename Traits::char_class_type> &prog,
+             const Traits &traits, std::regex_constants::match_flag_type flags,
+             const typename Traits::char_type *first, const typename Traits::char_type *last,
+             const typename Traits::char_type *start, bool anchoredStart, bool anchoredEnd,
+             std::vector<std::ptrdiff_t> &out)
+{
+    if (prog.code.empty()) return false;
+    if (prog.backrefs) {
+        Backtracker<Traits> bt(prog, traits, flags, first, last);
+        return bt.Execute(start, anchoredStart, anchoredEnd, out);
+    }
+    PikeVm<Traits> vm(prog, traits, flags, first, last);
+    return vm.Execute(start, anchoredStart, anchoredEnd, out);
+}
+
+} // namespace re
+} // namespace boxcxx
+
+#endif // BOXCXX_BITS_REGEX_EXEC

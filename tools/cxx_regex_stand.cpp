@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include <__bits/regex_exec>
 #include <__bits/regex_parse>
 #include <__bits/regex_program>
 #include <__bits/regex_syntax>
@@ -186,12 +187,51 @@ static const char *OpName(boxcxx::re::Op op)
     case Op::AnyAll: return "AnyAll"; case Op::Class: return "Class";
     case Op::Split: return "Split"; case Op::Jmp: return "Jmp";
     case Op::Save: return "Save"; case Op::Reset: return "Reset";
+    case Op::Mark: return "Mark"; case Op::Check: return "Check";
     case Op::Bol: return "Bol"; case Op::Eol: return "Eol";
     case Op::WordB: return "WordB"; case Op::NotWordB: return "NotWordB";
     case Op::Backref: return "Backref"; case Op::Look: return "Look";
     case Op::LookEnd: return "LookEnd"; case Op::Accept: return "Accept";
     }
     return "?";
+}
+
+// The match verdict, printed in the oracle's format so the three columns diff
+// directly. match_results does not exist yet; the machine fills a slot vector
+// and this reads it, which is exactly what match_results will do.
+static void MatchOne(const char *id, const std::string &pattern, const std::string &subject,
+                     std::regex_constants::syntax_option_type f)
+{
+    std::printf("%s |%s| |%s| -> ", id, pattern.c_str(), subject.c_str());
+    HostTraits t;
+    boxcxx::re::Program<char, HostTraits::char_class_type> prog;
+    try {
+        boxcxx::re::Compiler<HostTraits> c(t, f);
+        prog = c.Run(pattern.data(), pattern.data() + pattern.size());
+    } catch (const std::regex_error &e) {
+        std::printf("throw %s\n", ErrName(e.code()));
+        return;
+    }
+    const char *first = subject.data();
+    const char *last = first + subject.size();
+    std::vector<std::ptrdiff_t> slots;
+    bool hit;
+    try {
+        hit = boxcxx::re::Execute<HostTraits>(prog, t, std::regex_constants::match_default,
+                                              first, last, first, false, false, slots);
+    } catch (const std::regex_error &e) {
+        std::printf("throw %s\n", ErrName(e.code()));
+        return;
+    }
+    if (!hit) { std::printf("nomatch\n"); return; }
+    std::printf("at=%d len=%d groups=%u", (int)slots[0], (int)(slots[1] - slots[0]), prog.groups);
+    for (unsigned g = 1; g <= prog.groups; ++g) {
+        const std::ptrdiff_t b = slots[2 * g], e = slots[2 * g + 1];
+        if (b < 0 || e < 0) std::printf(" g%u=-", g);
+        else std::printf(" g%u=[%d,%d]'%s'", g, (int)b, (int)(e - b),
+                         subject.substr((std::size_t)b, (std::size_t)(e - b)).c_str());
+    }
+    std::printf("\n");
 }
 
 static int Dump(const char *pattern, std::regex_constants::syntax_option_type f)
@@ -214,6 +254,8 @@ static int Dump(const char *pattern, std::regex_constants::syntax_option_type f)
                 std::printf(" body=%u cont=%u%s", in.x, in.y, in.neg ? " NEG" : ""); break;
             case boxcxx::re::Op::Save:  std::printf(" slot %u", in.x); break;
             case boxcxx::re::Op::Reset: std::printf(" groups %u..%u", in.x, in.y); break;
+            case boxcxx::re::Op::Mark:  std::printf(" slot %u", in.x); break;
+            case boxcxx::re::Op::Check: std::printf(" slot %u -> %u", in.x, in.y); break;
             case boxcxx::re::Op::Class: std::printf(" #%u", in.x); break;
             case boxcxx::re::Op::Backref: std::printf(" \\%u", in.x); break;
             default: break;
@@ -230,6 +272,41 @@ int main(int argc, char **argv)
 {
     if (argc > 2 && std::strcmp(argv[1], "dump") == 0)
         return Dump(argv[2], GrammarOf(argc > 3 ? argv[3] : nullptr));
+
+    if (argc > 1 && std::strcmp(argv[1], "match") == 0) {
+        const std::uint64_t from = argc > 2 ? std::strtoull(argv[2], nullptr, 0) : 1;
+        const std::uint64_t to   = argc > 3 ? std::strtoull(argv[3], nullptr, 0) : 4000;
+        const int depth = argc > 4 ? std::atoi(argv[4]) : 1;
+        const int fan   = argc > 5 ? std::atoi(argv[5]) : 2;
+        const auto g = GrammarOf(argc > 6 ? argv[6] : nullptr);
+        std::fprintf(stderr, "# regex stand: boxcxx match, cases [%llu,%llu)\n",
+                     (unsigned long long)from, (unsigned long long)to);
+        for (std::uint64_t i = from; i < to; ++i) {
+            const Case c = MakeCase(i, depth, fan);
+            MatchOne(c.id, c.pattern, c.subject, g);
+        }
+        return 0;
+    }
+
+    if (argc > 2 && std::strcmp(argv[1], "mfile") == 0) {
+        const auto g = GrammarOf(argc > 3 ? argv[3] : nullptr);
+        std::FILE *in = std::fopen(argv[2], "r");
+        if (!in) { std::fprintf(stderr, "cannot open %s\n", argv[2]); return 2; }
+        char line[8192];
+        int n = 0;
+        while (std::fgets(line, sizeof line, in)) {
+            std::string s(line);
+            while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+            if (s.empty() || s[0] == '#') continue;
+            const std::string::size_type tab = s.find('\t');
+            char id[16];
+            std::snprintf(id, sizeof id, "case%04d", ++n);
+            MatchOne(id, tab == std::string::npos ? s : s.substr(0, tab),
+                     tab == std::string::npos ? std::string() : s.substr(tab + 1), g);
+        }
+        std::fclose(in);
+        return 0;
+    }
     if (argc > 2 && std::strcmp(argv[1], "file") == 0) {
         const auto f = GrammarOf(argc > 3 ? argv[3] : nullptr);
         std::FILE *in = std::fopen(argv[2], "r");

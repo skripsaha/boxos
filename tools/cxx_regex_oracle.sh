@@ -18,6 +18,10 @@
 #                                             boxcxx stands alone
 #   tools/cxx_regex_oracle.sh --posix         --parse over every grammar, on
 #                                             tools/regex_oracle_posix.txt
+#   tools/cxx_regex_oracle.sh --match [G]     three columns of MATCHES, not
+#                                             verdicts — what a parse sweep
+#                                             cannot see is what a program
+#                                             does once it runs
 #   tools/cxx_regex_oracle.sh --adversarial   time the blowup shapes, one
 #                                             process per case under a clock
 #   tools/cxx_regex_oracle.sh --repin         overwrite the pin with today's set
@@ -54,6 +58,8 @@ MODE=gen
 case "${1:-}" in
     --cases) MODE=cases ;;
     --parse) MODE=parse ;;
+    --match) MODE=match ;;
+    --posixmatch) MODE=posixmatch ;;
     --posix) MODE=posix ;;
     --adversarial) MODE=adv ;;
     --repin) MODE=repin ;;
@@ -69,10 +75,10 @@ LEAVES="$ROOT/src/userspace/boxcxx/include/std/__bits"
 # that boxcxx's <string> and <vector> cannot shadow the host's.
 build_stand() {
     mkdir -p "$OUT/inc/__bits"
-    for leaf in regex_syntax regex_program regex_scan regex_parse; do
+    for leaf in regex_syntax regex_program regex_scan regex_parse regex_exec; do
         ln -sf "$LEAVES/$leaf" "$OUT/inc/__bits/$leaf"
     done
-    _newest=$(ls -t "$LEAVES"/regex_syntax "$LEAVES"/regex_program "$LEAVES"/regex_scan "$LEAVES"/regex_parse "$STAND_SRC" 2>/dev/null | head -1)
+    _newest=$(ls -t "$LEAVES"/regex_syntax "$LEAVES"/regex_program "$LEAVES"/regex_scan "$LEAVES"/regex_parse "$LEAVES"/regex_exec "$STAND_SRC" 2>/dev/null | head -1)
     [ -x "$OUT/stand" ] && [ "$OUT/stand" -nt "$_newest" ] && return 0
     "$GNU" -O2 -std=c++20 -I"$OUT/inc" -I"$TOOLS" "$STAND_SRC" -o "$OUT/stand" || exit 2
 }
@@ -85,7 +91,9 @@ three_way() {
     _label=$1; _gram=$2; _bfile=$3; _gfile=$4; _lfile=$5
     paste -d"$(printf '\t')" "$_bfile" "$_gfile" "$_lfile" | awk -F"$(printf '\t')" -v L="$_label" '
         function verdict(s,  a) { split(s, a, " -> "); return a[2] }
-        function accepted(v) { return v ~ /^ok/ }
+        # For a parse sweep the question is accepted-or-not; for a match sweep
+        # the verdict IS the answer, so compare it whole.
+        function accepted(v) { return (v ~ /^ok/) ? "ok" : ((v ~ /^throw/) ? "throw" : v) }
         {
             b = verdict($1); g = verdict($2); c = verdict($3)
             total++
@@ -134,6 +142,33 @@ if [ "$MODE" = posix ]; then
         three_way "$g" "$g" "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt" || rc=1
     done
     exit $rc
+fi
+
+if [ "$MODE" = posixmatch ]; then
+    build_stand
+    MCASES="$TOOLS/regex_oracle_match.txt"
+    [ -f "$MCASES" ] || { echo "no $MCASES" >&2; exit 2; }
+    echo "--- POSIX grammars, curated cases (the MATCH, not the verdict)"
+    rc=0
+    for g in basic extended awk grep egrep ECMAScript; do
+        "$OUT/or_gnu"  file  "$MCASES" "$g" > "$OUT/x_gnu.txt"  2>/dev/null
+        "$OUT/or_llvm" file  "$MCASES" "$g" > "$OUT/x_llvm.txt" 2>/dev/null
+        "$OUT/stand"   mfile "$MCASES" "$g" > "$OUT/x_box.txt"  2>/dev/null
+        three_way "$g" "$g" "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt" || rc=1
+    done
+    exit $rc
+fi
+
+if [ "$MODE" = match ]; then
+    build_stand
+    shift
+    GRAM=${1:-ECMAScript}; FROM=${2:-1}; TO=${3:-4000}; DEPTH=${4:-1}; FAN=${5:-2}
+    echo "--- matches, three columns"
+    "$OUT/or_gnu"  gen   "$FROM" "$TO" "$DEPTH" "$FAN" > "$OUT/x_gnu.txt"  2>/dev/null
+    "$OUT/or_llvm" gen   "$FROM" "$TO" "$DEPTH" "$FAN" > "$OUT/x_llvm.txt" 2>/dev/null
+    "$OUT/stand"   match "$FROM" "$TO" "$DEPTH" "$FAN" "$GRAM" > "$OUT/x_box.txt" 2>/dev/null
+    three_way "$GRAM" "$GRAM" "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt"
+    exit $?
 fi
 
 if [ "$MODE" = parse ]; then

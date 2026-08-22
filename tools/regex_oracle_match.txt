@@ -1,0 +1,27 @@
+# Match cases for the <regex> stand — `pattern<TAB>subject`, run under each
+# grammar in turn. A parse sweep answers "is this legal"; these answer "what
+# does it do", which is a different question and the one that found \( opening
+# a group in a basic expression and leaving the backslash behind as a literal.
+\(ab\)\1	abab
+\(ab\)	xaby
+\(a\)\(b\)	ab
+a\{2\}	aaa
+a\{2,\}	aaaa
+*a	*ab
+a*b	aaab
+^ab	abc
+ab$	xab
+a^b	a^b
+a$b	a$b
+[[:digit:]]\{2\}	x42y
+(ab)\1	abab
+(ab)	xaby
+a+b	aab
+a?b	b
+(a|b)+	abab
+a{2}	aaa
+[a-c]+	xabcy
+\.	a.b
+\+	a+b
+a\tb	a	b
+\(a\)|b	b
