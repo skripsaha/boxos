@@ -157,7 +157,7 @@ static int ReplayParse(const char *path, std::regex_constants::syntax_option_typ
     return 0;
 }
 
-static int Replay(const char *path)
+static int Replay(const char *path, std::regex_constants::syntax_option_type gram)
 {
     std::ifstream in(path);
     if (!in) { std::fprintf(stderr, "cannot open %s\n", path); return 2; }
@@ -169,7 +169,7 @@ static int Replay(const char *path)
         if (tab == std::string::npos) continue;
         char id[16];
         std::snprintf(id, sizeof id, "case%04d", ++n);
-        Report(id, line.substr(0, tab), line.substr(tab + 1));
+        Report(id, line.substr(0, tab), line.substr(tab + 1), gram);
     }
     return 0;
 }
@@ -205,8 +205,9 @@ int main(int argc, char **argv)
         return ReplayParse(argv[2], g);
     }
     if (argc > 2 && std::strcmp(argv[1], "file") == 0) {
+        const auto g = GrammarOf(argc > 3 ? argv[3] : nullptr);
         std::fprintf(stderr, "# regex oracle: %s, replay %s\n", kLib, argv[2]);
-        return Replay(argv[2]);
+        return Replay(argv[2], g);
     }
     const bool parseOnly = argc > 1 && std::strcmp(argv[1], "parse") == 0;
     int a = (argc > 1 && (std::strcmp(argv[1], "gen") == 0 || parseOnly)) ? 1 : 0;

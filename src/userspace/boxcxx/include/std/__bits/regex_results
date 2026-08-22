@@ -1,0 +1,364 @@
+// boxcxx — <__bits/regex_results>
+//
+// sub_match and match_results: what a match IS once the machine has answered.
+//
+// The engine below deals in offsets, because that is what a machine can carry
+// cheaply in a thread; these two deal in iterators into the caller's own
+// sequence, because that is what [re.submatch] promises — a sub_match IS a
+// pair of iterators, publicly, and code is entitled to say `m[1].first`.
+//
+// The one member with real behaviour in it is format ([re.results.form]),
+// which is the engine of regex_replace and is therefore written here rather
+// than beside the algorithm that will use it.
+#ifndef BOXCXX_BITS_REGEX_RESULTS
+#define BOXCXX_BITS_REGEX_RESULTS
+
+#include <__bits/regex_syntax>
+#include <compare>
+#include <iosfwd>
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace std {
+
+// ── sub_match [re.submatch] ─────────────────────────────────────────────
+template <class BidirectionalIterator>
+class sub_match : public pair<BidirectionalIterator, BidirectionalIterator> {
+    using Base = pair<BidirectionalIterator, BidirectionalIterator>;
+
+public:
+    using value_type = typename iterator_traits<BidirectionalIterator>::value_type;
+    using difference_type = typename iterator_traits<BidirectionalIterator>::difference_type;
+    using iterator = BidirectionalIterator;
+    using string_type = basic_string<value_type>;
+
+    bool matched = false;
+
+    constexpr sub_match() = default;
+
+    constexpr difference_type length() const
+    {
+        return matched ? distance(this->first, this->second) : difference_type();
+    }
+
+    operator string_type() const { return str(); }
+
+    string_type str() const
+    {
+        return matched ? string_type(this->first, this->second) : string_type();
+    }
+
+    int compare(const sub_match &s) const { return str().compare(s.str()); }
+    int compare(const string_type &s) const { return str().compare(s); }
+    int compare(const value_type *s) const { return str().compare(s); }
+
+    void swap(sub_match &s)
+    {
+        this->Base::swap(s);
+        std::swap(matched, s.matched);
+    }
+};
+
+using csub_match = sub_match<const char *>;
+using wcsub_match = sub_match<const wchar_t *>;
+using ssub_match = sub_match<string::const_iterator>;
+using wssub_match = sub_match<wstring::const_iterator>;
+
+// [re.submatch.op]. Every one of these is defined as a compare() against the
+// matched text, which is why a sub_match that did not match compares equal to
+// the empty string rather than to nothing at all.
+template <class BiIter>
+bool operator==(const sub_match<BiIter> &a, const sub_match<BiIter> &b)
+{
+    return a.compare(b) == 0;
+}
+template <class BiIter>
+strong_ordering operator<=>(const sub_match<BiIter> &a, const sub_match<BiIter> &b)
+{
+    return a.compare(b) <=> 0;
+}
+
+template <class BiIter, class ST, class SA>
+bool operator==(const sub_match<BiIter> &a,
+                const basic_string<typename iterator_traits<BiIter>::value_type, ST, SA> &b)
+{
+    return a.compare(typename sub_match<BiIter>::string_type(b.data(), b.size())) == 0;
+}
+template <class BiIter, class ST, class SA>
+strong_ordering operator<=>(const sub_match<BiIter> &a,
+                            const basic_string<typename iterator_traits<BiIter>::value_type,
+                                               ST, SA> &b)
+{
+    return a.compare(typename sub_match<BiIter>::string_type(b.data(), b.size())) <=> 0;
+}
+
+template <class BiIter>
+bool operator==(const sub_match<BiIter> &a,
+                const typename iterator_traits<BiIter>::value_type *b)
+{
+    return a.compare(b) == 0;
+}
+template <class BiIter>
+strong_ordering operator<=>(const sub_match<BiIter> &a,
+                            const typename iterator_traits<BiIter>::value_type *b)
+{
+    return a.compare(b) <=> 0;
+}
+
+template <class BiIter>
+bool operator==(const sub_match<BiIter> &a,
+                const typename iterator_traits<BiIter>::value_type &b)
+{
+    return a.compare(typename sub_match<BiIter>::string_type(1, b)) == 0;
+}
+template <class BiIter>
+strong_ordering operator<=>(const sub_match<BiIter> &a,
+                            const typename iterator_traits<BiIter>::value_type &b)
+{
+    return a.compare(typename sub_match<BiIter>::string_type(1, b)) <=> 0;
+}
+
+template <class charT, class ST, class BiIter>
+basic_ostream<charT, ST> &operator<<(basic_ostream<charT, ST> &os, const sub_match<BiIter> &m)
+{
+    return os << m.str();
+}
+
+// ── match_results [re.results] ──────────────────────────────────────────
+template <class BidirectionalIterator,
+          class Allocator = allocator<sub_match<BidirectionalIterator>>>
+class match_results {
+    using Store = vector<sub_match<BidirectionalIterator>, Allocator>;
+
+public:
+    using value_type = sub_match<BidirectionalIterator>;
+    using const_reference = const value_type &;
+    using reference = value_type &;
+    using const_iterator = typename Store::const_iterator;
+    using iterator = const_iterator;
+    using difference_type = typename iterator_traits<BidirectionalIterator>::difference_type;
+    using size_type = typename allocator_traits<Allocator>::size_type;
+    using allocator_type = Allocator;
+    using char_type = typename iterator_traits<BidirectionalIterator>::value_type;
+    using string_type = basic_string<char_type>;
+
+    match_results() = default;
+    explicit match_results(const Allocator &a) : store_(a) {}
+    match_results(const match_results &) = default;
+    match_results(match_results &&) noexcept = default;
+    match_results &operator=(const match_results &) = default;
+    match_results &operator=(match_results &&) = default;
+    ~match_results() = default;
+
+    // [re.results.state]. A default-constructed object is NOT ready, and every
+    // observer below has a precondition that it is — which is why the flag is
+    // separate from "the store happens to be empty".
+    bool ready() const { return ready_; }
+
+    size_type size() const { return store_.size(); }
+    size_type max_size() const { return store_.max_size(); }
+    [[nodiscard]] bool empty() const { return store_.empty(); }
+
+    difference_type length(size_type sub = 0) const { return (*this)[sub].length(); }
+    difference_type position(size_type sub = 0) const
+    {
+        return distance(begin_, (*this)[sub].first);
+    }
+    string_type str(size_type sub = 0) const { return (*this)[sub].str(); }
+
+    const_reference operator[](size_type n) const
+    {
+        return n < store_.size() ? store_[n] : unmatched_;
+    }
+    const_reference prefix() const { return prefix_; }
+    const_reference suffix() const { return suffix_; }
+
+    const_iterator begin() const { return store_.begin(); }
+    const_iterator end() const { return store_.end(); }
+    const_iterator cbegin() const { return store_.cbegin(); }
+    const_iterator cend() const { return store_.cend(); }
+
+    allocator_type get_allocator() const { return store_.get_allocator(); }
+
+    void swap(match_results &that)
+    {
+        store_.swap(that.store_);
+        std::swap(prefix_, that.prefix_);
+        std::swap(suffix_, that.suffix_);
+        std::swap(unmatched_, that.unmatched_);
+        std::swap(begin_, that.begin_);
+        std::swap(ready_, that.ready_);
+    }
+
+    // ── format [re.results.form] ────────────────────────────────────────
+    template <class OutputIter>
+    OutputIter format(OutputIter out, const char_type *first, const char_type *last,
+                      regex_constants::match_flag_type flags
+                          = regex_constants::format_default) const
+    {
+        return (flags & regex_constants::format_sed) != regex_constants::match_flag_type{}
+                   ? FormatSed(out, first, last)
+                   : FormatEcma(out, first, last);
+    }
+
+    template <class OutputIter, class ST, class SA>
+    OutputIter format(OutputIter out, const basic_string<char_type, ST, SA> &fmt,
+                      regex_constants::match_flag_type flags
+                          = regex_constants::format_default) const
+    {
+        return format(out, fmt.data(), fmt.data() + fmt.size(), flags);
+    }
+
+    template <class ST, class SA>
+    basic_string<char_type, ST, SA> format(const basic_string<char_type, ST, SA> &fmt,
+                                           regex_constants::match_flag_type flags
+                                               = regex_constants::format_default) const
+    {
+        basic_string<char_type, ST, SA> out;
+        format(back_inserter(out), fmt.data(), fmt.data() + fmt.size(), flags);
+        return out;
+    }
+
+    string_type format(const char_type *fmt,
+                       regex_constants::match_flag_type flags
+                           = regex_constants::format_default) const
+    {
+        string_type out;
+        const char_type *last = fmt;
+        while (*last) ++last;
+        format(back_inserter(out), fmt, last, flags);
+        return out;
+    }
+
+    // ── filled by the algorithms, not by the user ───────────────────────
+    void __set(BidirectionalIterator begin, BidirectionalIterator first,
+               BidirectionalIterator last, unsigned groups)
+    {
+        begin_ = begin;
+        store_.assign((typename Store::size_type)groups + 1u, value_type());
+        prefix_.first = begin;
+        prefix_.second = first;
+        prefix_.matched = prefix_.first != prefix_.second;
+        suffix_.first = last;
+        suffix_.second = last;
+        suffix_.matched = false;
+        unmatched_.first = last;
+        unmatched_.second = last;
+        unmatched_.matched = false;
+        ready_ = true;
+    }
+
+    void __setSub(unsigned n, BidirectionalIterator first, BidirectionalIterator last, bool ok)
+    {
+        value_type &s = store_[n];
+        s.first = first;
+        s.second = last;
+        s.matched = ok;
+    }
+
+    void __setSuffix(BidirectionalIterator first, BidirectionalIterator last)
+    {
+        suffix_.first = first;
+        suffix_.second = last;
+        suffix_.matched = first != last;
+    }
+
+    void __unready() { ready_ = false; store_.clear(); }
+
+private:
+    template <class OutputIter>
+    OutputIter Emit(OutputIter out, const value_type &s) const
+    {
+        if (!s.matched) return out;
+        for (BidirectionalIterator i = s.first; i != s.second; ++i) *out++ = *i;
+        return out;
+    }
+
+    static constexpr char_type Ch(char c) { return (char_type)(unsigned char)c; }
+
+    // ECMA-262's Table of replacement patterns. An unrecognised `$` sequence
+    // is left standing, which is what the table says and what makes a format
+    // string containing a bare `$` safe to hand to this.
+    template <class OutputIter>
+    OutputIter FormatEcma(OutputIter out, const char_type *p, const char_type *last) const
+    {
+        while (p != last) {
+            if (*p != Ch('$')) { *out++ = *p++; continue; }
+            if (++p == last) { *out++ = Ch('$'); break; }
+            if (*p == Ch('$')) { *out++ = Ch('$'); ++p; continue; }
+            if (*p == Ch('&')) { out = Emit(out, (*this)[0]); ++p; continue; }
+            if (*p == Ch('`')) { out = Emit(out, prefix_); ++p; continue; }
+            if (*p == Ch('\'')) { out = Emit(out, suffix_); ++p; continue; }
+            unsigned n = 0, digits = 0;
+            while (p != last && digits < 2 && *p >= Ch('0') && *p <= Ch('9')) {
+                n = n * 10u + (unsigned)(*p - Ch('0'));
+                ++p;
+                ++digits;
+            }
+            if (digits == 0) { *out++ = Ch('$'); continue; }
+            out = Emit(out, (*this)[n]);
+        }
+        return out;
+    }
+
+    // The sed vocabulary, where the escape is a backslash and the whole match
+    // is an ampersand.
+    template <class OutputIter>
+    OutputIter FormatSed(OutputIter out, const char_type *p, const char_type *last) const
+    {
+        while (p != last) {
+            if (*p == Ch('&')) { out = Emit(out, (*this)[0]); ++p; continue; }
+            if (*p != Ch('\\')) { *out++ = *p++; continue; }
+            if (++p == last) { *out++ = Ch('\\'); break; }
+            if (*p >= Ch('0') && *p <= Ch('9')) {
+                out = Emit(out, (*this)[(size_type)(*p - Ch('0'))]);
+                ++p;
+                continue;
+            }
+            *out++ = *p++;
+        }
+        return out;
+    }
+
+    Store store_;
+    value_type prefix_;
+    value_type suffix_;
+    value_type unmatched_;
+    BidirectionalIterator begin_ = BidirectionalIterator();
+    bool ready_ = false;
+};
+
+using cmatch = match_results<const char *>;
+using wcmatch = match_results<const wchar_t *>;
+using smatch = match_results<string::const_iterator>;
+using wsmatch = match_results<wstring::const_iterator>;
+
+template <class BidirectionalIterator, class Allocator>
+bool operator==(const match_results<BidirectionalIterator, Allocator> &a,
+                const match_results<BidirectionalIterator, Allocator> &b)
+{
+    if (!a.ready() && !b.ready()) return true;
+    if (a.ready() != b.ready()) return false;
+    if (a.size() != b.size()) return false;
+    if (a.empty()) return true;
+    if (!(a.prefix() == b.prefix()) || !(a.suffix() == b.suffix())) return false;
+    for (typename match_results<BidirectionalIterator, Allocator>::size_type i = 0;
+         i < a.size(); ++i)
+        if (!(a[i] == b[i])) return false;
+    return true;
+}
+
+template <class BidirectionalIterator, class Allocator>
+void swap(match_results<BidirectionalIterator, Allocator> &a,
+          match_results<BidirectionalIterator, Allocator> &b)
+{
+    a.swap(b);
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_REGEX_RESULTS

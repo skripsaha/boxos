@@ -84,6 +84,12 @@ public:
         // rejecting `(\s{2}|b)?\1*`, which has exactly one group.
         if (maxBackref_ > prog_.groups)
             ThrowRegex(std::regex_constants::error_backref);
+
+        // Now that the group count cannot move, every hidden slot takes its
+        // place above the captures.
+        const unsigned base = prog_.captureSlots();
+        for (auto &in : prog_.code)
+            if (in.op == Op::Mark || in.op == Op::Check) in.x += base;
         return static_cast<program_type &&>(prog_);
     }
 
@@ -134,6 +140,10 @@ private:
             case Op::Jmp:
             case Op::Look:
                 if (in.x >= from && in.x <= to) in.x += delta;
+                if (in.y >= from && in.y <= to) in.y += delta;
+                break;
+            case Op::Check:
+                // x is a hidden slot, y is where the loop leaves.
                 if (in.y >= from && in.y <= to) in.y += delta;
                 break;
             default:
@@ -438,29 +448,99 @@ private:
 
     void Erase(unsigned start) { prog_.code.resize(start); }
 
-    // L: Split body, out ;  body: <A> ; Jmp L ; out:
+    // A quantifier always acts on the region that was just emitted, so the
+    // body is the TAIL of the code. Lifting it out and rebuilding the loop
+    // around it is both simpler than inserting into the middle and free of the
+    // trap that inserting has: a branch target equal to the insertion point
+    // means "continue into this expression" when it comes from before and "go
+    // back to its head" when it comes from within, and treating those alike
+    // produced a program that was well formed, reported the right group count,
+    // and matched the wrong text.
+    std::vector<Inst<char_type>> Lift(unsigned from)
+    {
+        std::vector<Inst<char_type>> body(prog_.code.begin() + (std::ptrdiff_t)from,
+                                          prog_.code.end());
+        prog_.code.resize(from);
+        return body;
+    }
+
+    // Put a lifted region back at the current end, moving every target that
+    // pointed inside it — the fallthrough one past the end included, because
+    // that is where the instruction after the body now stands.
+    void Place(const std::vector<Inst<char_type>> &body, unsigned oldStart)
+    {
+        const unsigned delta = Here() - oldStart;
+        const unsigned oldEnd = oldStart + (unsigned)body.size();
+        for (Inst<char_type> in : body) {
+            const bool branch = in.op == Op::Split || in.op == Op::Jmp || in.op == Op::Look;
+            if (branch) {
+                if (in.x >= oldStart && in.x <= oldEnd) in.x += delta;
+                if ((in.op == Op::Split || in.op == Op::Look)
+                    && in.y >= oldStart && in.y <= oldEnd)
+                    in.y += delta;
+            }
+            // A Check's exit is a code target too, and it is the one branch
+            // whose x is a slot rather than an address.
+            if (in.op == Op::Check && in.y >= oldStart && in.y <= oldEnd) in.y += delta;
+            prog_.code.push_back(in);
+        }
+    }
+
+    // Hidden slot numbers are handed out from zero and turned into absolute
+    // positions once parsing is over: the capture slots they sit above are not
+    // all known yet, because a group later in the pattern still moves the line.
+    unsigned NewLoopSlot() { return prog_.loops++; }
+
+    // L: Split body, exit ; body: Mark h ; <A> ; Check h -> exit ; Jmp L ; exit:
     void MakeStar(unsigned start, unsigned end, bool greedy)
     {
-        const unsigned jmp = Emit(Op::Jmp);
-        InsertSplitBefore(start, end + 1, greedy);
-        prog_.code[jmp + 1].x = start;   // the Jmp moved by the insertion
+        (void)end;
+        std::vector<Inst<char_type>> body = Lift(start);
+        const unsigned h = NewLoopSlot();
+        const unsigned head = Emit(Op::Split);
+        Emit(Op::Mark, h);
+        Place(body, start);
+        const unsigned chk = Emit(Op::Check, h);
+        Emit(Op::Jmp, head);
+        const unsigned exit = Here();
+        prog_.code[head].x = greedy ? head + 1 : exit;
+        prog_.code[head].y = greedy ? exit : head + 1;
+        prog_.code[chk].y = exit;
     }
 
-    // body: <A> ; Split body, out ; out:
+    // body: Mark h ; <A> ; Check h -> exit ; Split body, exit ; exit:
+    // The first turn is mandatory, so there is no Split before it; the empty
+    // check still stands, because a repetition that consumed nothing may not
+    // take another turn whether or not it has taken one already.
     void MakePlus(unsigned start, unsigned end, bool greedy)
     {
-        const unsigned sp = Emit(Op::Split);
-        if (greedy) { prog_.code[sp].x = start; prog_.code[sp].y = sp + 1; }
-        else { prog_.code[sp].x = sp + 1; prog_.code[sp].y = start; }
         (void)end;
+        std::vector<Inst<char_type>> body = Lift(start);
+        const unsigned h = NewLoopSlot();
+        const unsigned entry = Here();
+        Emit(Op::Mark, h);
+        Place(body, start);
+        const unsigned chk = Emit(Op::Check, h);
+        const unsigned sp = Emit(Op::Split);
+        const unsigned exit = Here();
+        prog_.code[sp].x = greedy ? entry : exit;
+        prog_.code[sp].y = greedy ? exit : entry;
+        prog_.code[chk].y = exit;
     }
 
+    // Split body, exit ; body: <A> ; exit:   — no loop, so nothing to check.
     void MakeOptional(unsigned start, unsigned end, bool greedy)
     {
-        InsertSplitBefore(start, end, greedy);
+        (void)end;
+        std::vector<Inst<char_type>> body = Lift(start);
+        const unsigned sp = Emit(Op::Split);
+        Place(body, start);
+        const unsigned exit = Here();
+        prog_.code[sp].x = greedy ? sp + 1 : exit;
+        prog_.code[sp].y = greedy ? exit : sp + 1;
     }
 
-    // The mirror of InsertSplitBefore. A reserved instruction that turned out
+    // A reserved instruction that turned out
     // not to be needed is worth removing rather than leaving as a no-op,
     // because the machine's cost is instructions TIMES subject length: a no-op
     // per group is a tax on every character of every match.
@@ -468,30 +548,11 @@ private:
     {
         prog_.code.erase(prog_.code.begin() + (std::ptrdiff_t)at);
         for (Inst<char_type> &in : prog_.code) {
+            if (in.op == Op::Check) { if (in.y > at) --in.y; continue; }
             if (in.op != Op::Split && in.op != Op::Jmp && in.op != Op::Look) continue;
             if (in.x > at) --in.x;
             if ((in.op == Op::Split || in.op == Op::Look) && in.y > at) --in.y;
         }
-    }
-
-    // Put a Split at `start` whose preferred branch is the body and whose other
-    // branch is `end`, moving everything from `start` up by one and repairing
-    // every branch target that pointed at or past it.
-    void InsertSplitBefore(unsigned start, unsigned end, bool greedy)
-    {
-        Inst<char_type> sp;
-        sp.op = Op::Split;
-        prog_.code.insert(prog_.code.begin() + (std::ptrdiff_t)start, sp);
-        for (unsigned i = 0; i < prog_.code.size(); ++i) {
-            Inst<char_type> &in = prog_.code[i];
-            if (in.op != Op::Split && in.op != Op::Jmp && in.op != Op::Look) continue;
-            if (i == start) continue;
-            if (in.x >= start) ++in.x;
-            if ((in.op == Op::Split || in.op == Op::Look) && in.y >= start) ++in.y;
-        }
-        const unsigned out = end + 1;
-        if (greedy) { prog_.code[start].x = start + 1; prog_.code[start].y = out; }
-        else { prog_.code[start].x = out; prog_.code[start].y = start + 1; }
     }
 
     // ── Atom ────────────────────────────────────────────────────────────
@@ -543,7 +604,11 @@ private:
 
     void Group()
     {
-        ++p_;   // '('
+        // A basic expression opens a group with TWO characters, and the cursor
+        // arrives here still on the backslash. Stepping over one of them left
+        // the `(` behind as a literal — a defect the parse sweep could not see,
+        // because the group was still counted and the pattern still accepted.
+        p_ += grammar_ == Grammar::Basic ? 2 : 1;
         bool capturing = true;
         bool look = false;
         bool negLook = false;
