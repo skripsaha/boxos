@@ -56,14 +56,26 @@ struct local_info {
 };
 
 // ── the boundary to the table ───────────────────────────────────────────
-// Four functions and no more. Each takes an index into the baked name table,
-// which is what a `time_zone` is.
+// Four functions and no more. Three of them name a loaded database and an
+// index into its name table, which together are what a `time_zone` is; the
+// fourth walks the list of loaded databases.
+//
+// The database is an opaque handle rather than a table pointer on purpose:
+// this leaf has never known what a table looks like, and the TagFS door did
+// not change that. It became necessary when the door did open, because
+// [time.zone.db.remote]/3 promises that a time_zone handed out BEFORE a
+// reload_tzdb() keeps answering afterwards — so a zone cannot be an index
+// alone; it has to remember which database it came out of.
 namespace __detail {
 
-int         zone_find(string_view name) noexcept;   // -1 when there is no such zone
-string_view zone_name(int idx) noexcept;
-sys_info    zone_info_sys(int idx, sys_seconds t);
-local_info  zone_info_local(int idx, local_seconds t);
+string_view zone_name(const void *db, int idx) noexcept;
+sys_info    zone_info_sys(const void *db, int idx, sys_seconds t);
+local_info  zone_info_local(const void *db, int idx, local_seconds t);
+
+// The entry after this one in the loaded list, or nullptr. The list is walked
+// rather than threaded through tzdb itself, so tzdb stays exactly the struct
+// the standard spells and carries no member of ours.
+const tzdb *db_next(const tzdb *cur) noexcept;
 
 // The text of the two exceptions, built where <format> is already linked
 // rather than in a header every <chrono> user parses.
@@ -97,29 +109,30 @@ public:
 enum class choose { earliest, latest };
 
 class time_zone {
-    int idx_ = -1;
+    const void *db_ = nullptr;
+    int         idx_ = -1;
 
 public:
     // Not part of the synopsis: the library builds these, nobody else can.
     // [time.zone.timezone] leaves the default constructor unspecified and
     // gives users only the move operations.
-    explicit time_zone(int idx) noexcept : idx_(idx) {}
+    time_zone(const void *db, int idx) noexcept : db_(db), idx_(idx) {}
 
     time_zone(time_zone &&) = default;
     time_zone &operator=(time_zone &&) = default;
 
-    string_view name() const noexcept { return __detail::zone_name(idx_); }
+    string_view name() const noexcept { return __detail::zone_name(db_, idx_); }
 
     template <class Duration>
     sys_info get_info(const sys_time<Duration> &st) const
     {
-        return __detail::zone_info_sys(idx_, time_point_cast<seconds>(st));
+        return __detail::zone_info_sys(db_, idx_, time_point_cast<seconds>(st));
     }
 
     template <class Duration>
     local_info get_info(const local_time<Duration> &tp) const
     {
-        return __detail::zone_info_local(idx_, time_point_cast<seconds>(tp));
+        return __detail::zone_info_local(db_, idx_, time_point_cast<seconds>(tp));
     }
 
     template <class Duration>
@@ -174,18 +187,22 @@ inline strong_ordering operator<=>(const time_zone &x, const time_zone &y) noexc
 
 // ── [time.zone.link] ────────────────────────────────────────────────────
 class time_zone_link {
-    int idx_ = -1;
-    int target_ = -1;
+    const void *db_ = nullptr;
+    int         idx_ = -1;
+    int         target_ = -1;
 
 public:
-    explicit time_zone_link(int idx, int target) noexcept
-        : idx_(idx), target_(target) {}
+    time_zone_link(const void *db, int idx, int target) noexcept
+        : db_(db), idx_(idx), target_(target) {}
 
     time_zone_link(time_zone_link &&) = default;
     time_zone_link &operator=(time_zone_link &&) = default;
 
-    string_view name() const noexcept { return __detail::zone_name(idx_); }
-    string_view target() const noexcept { return __detail::zone_name(target_); }
+    string_view name() const noexcept { return __detail::zone_name(db_, idx_); }
+    string_view target() const noexcept
+    {
+        return __detail::zone_name(db_, target_);
+    }
 };
 
 inline bool operator==(const time_zone_link &x, const time_zone_link &y) noexcept
@@ -320,10 +337,12 @@ struct tzdb {
     const time_zone *current_zone() const;
 };
 
-// [time.zone.db.list]. One database, and a list that holds it — the standard's
-// shape for "a program can reload while another thread is reading". BoxOS
-// reloads from the TagFS door rather than from a network, and the front entry
-// is the one the image was built with until something opens that door.
+// [time.zone.db.list]. The databases this program has loaded, newest first —
+// the standard's shape for "a program can reload while another thread is
+// reading". BoxOS reloads from the TagFS door rather than from a network; the
+// front entry is the one the image was built with until something is laid
+// behind that door, and after a reload BOTH stay readable, because zones
+// handed out before it are still pointing into the older one.
 class tzdb_list {
 public:
     tzdb_list(const tzdb_list &) = delete;
@@ -360,7 +379,11 @@ public:
     reference operator*() const noexcept { return *p_; }
     pointer operator->() const noexcept { return p_; }
 
-    const_iterator &operator++() noexcept { p_ = nullptr; return *this; }
+    const_iterator &operator++() noexcept
+    {
+        p_ = p_ ? __detail::db_next(p_) : nullptr;
+        return *this;
+    }
     const_iterator operator++(int) noexcept
     {
         const_iterator t = *this;

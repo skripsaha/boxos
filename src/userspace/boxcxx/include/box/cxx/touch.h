@@ -152,7 +152,18 @@ inline bool publish(const tag &tg, const void *payload, std::uint32_t plen,
     return touch_send(tg.pair(), payload, plen, after_ms) == OK;
 }
 
+// ‼ Constrained against pointers, and the reason was measured rather than
+// imagined. `publish(tg, name.data(), name.size())` reads like the raw
+// overload above and is not: a `const char*` binds to `const T&` by identity
+// while the raw overload needs a pointer conversion, so the TEMPLATE wins —
+// and it sends the eight bytes of the pointer itself, silently, with the
+// length quietly becoming after_ms. Ф45 wrote exactly that call and the
+// Touch arrived carrying 8 bytes of an address instead of "Asia/Tokyo".
+// A pointer value means nothing in another address space, so no caller can
+// have meant this; refusing it turns a silent wrong payload into a
+// compile error, and leaves publish(tg, ptr, len) unambiguously raw.
 template <class T>
+    requires (!std::is_pointer_v<T>)
 inline bool publish(const tag &tg, const T &v, std::uint32_t after_ms = 0) noexcept
 {
     static_assert(std::is_trivially_copyable_v<T>,
