@@ -2346,6 +2346,26 @@ consteval void CheckScan(basic_string_view<CharT> fmt)
 
 } // namespace __format
 
+// [format.syn]'s exposition-only runtime-format-string. It exists so that a
+// format string which is not known until run time has a way past the consteval
+// constructor below -- not around the checking, but to the run-time half of it,
+// where format_error already lives.
+//
+// Its copy operations are DELETED, and that is the whole design. The object
+// holds a VIEW of the caller's string, so a program that binds it to a name and
+// formats with it later is reading a string that may be gone; deleting the copy
+// turns that into a diagnostic at the point where it is written. The correct
+// use pays nothing for it: `format(runtime_format(s), ...)` is a prvalue that
+// materialises directly into the parameter, so there is no copy to delete.
+template <class CharT> struct __runtime_format_string {
+    basic_string_view<CharT> __str;
+
+    __runtime_format_string(basic_string_view<CharT> s) noexcept : __str(s) {}
+
+    __runtime_format_string(const __runtime_format_string &)            = delete;
+    __runtime_format_string &operator=(const __runtime_format_string &) = delete;
+};
+
 template <class CharT, class... Args> class basic_format_string;
 
 template <class CharT, class... Args>
@@ -2359,6 +2379,19 @@ public:
         __format::CheckScan<CharT, Args...>(str_);
     }
 
+    // The run-time door (P2918R2). Not consteval, and it does NOT run
+    // CheckScan: a string nobody has yet cannot be scanned before it exists.
+    // The engine's own parse reaches the same fields and throws format_error
+    // when one of them cannot be answered, which is the trade the paper names
+    // and the reason this constructor is not a hole in the compile-time check
+    // -- it is the other half of it, taken at the only time available.
+    //
+    // No `requires` clause and no ambiguity with the consteval constructor
+    // above: __runtime_format_string keeps its view private to itself and
+    // converts to nothing, so `is_convertible_v<const __runtime_format_string&,
+    // basic_string_view<CharT>>` is false and that template never applies.
+    basic_format_string(__runtime_format_string<CharT> s) noexcept : str_(s.__str) {}
+
     constexpr basic_string_view<CharT> get() const noexcept { return str_; }
 
 private:
@@ -2369,6 +2402,18 @@ template <class... Args>
 using format_string = basic_format_string<char, type_identity_t<Args>...>;
 template <class... Args>
 using wformat_string = basic_format_string<wchar_t, type_identity_t<Args>...>;
+
+// [format.fmt.string]. Both character types get their own overload, as the
+// synopsis spells them, rather than one template: a caller never names the
+// character type here either.
+inline __runtime_format_string<char> runtime_format(string_view fmt) noexcept
+{
+    return fmt;
+}
+inline __runtime_format_string<wchar_t> runtime_format(wstring_view fmt) noexcept
+{
+    return fmt;
+}
 
 // ── format / format_to / format_to_n / formatted_size ───────────────────
 // The narrow and wide entry points are OVERLOADS, not one template over the

@@ -28,12 +28,26 @@
 // Ф43-e-1 had already added the six locale-taking overloads [format.functions]
 // names, without which the header was not the one the synopsis describes.
 //
-// 202304L, not higher: that is the last C++23 bump (P2510R3, formatting
-// pointers, which is implemented -- the '0' flag is accepted for a pointer).
-// The C++26 values need P2905R2 and P2918R2 (std::runtime_format), which this
-// library does not have. 202106L's other half, P2418R2, is what
-// <__bits/format_range>'s fmt-maybe-const machinery answers for.
-#  define __cpp_lib_format 202304L
+// 202304L was the last C++23 bump (P2510R3, formatting pointers, which is
+// implemented -- the '0' flag is accepted for a pointer). 202106L's other half,
+// P2418R2, is what <__bits/format_range>'s fmt-maybe-const machinery answers
+// for.
+//
+// 202311L as of Ф46, and getting there took ONE of the two papers this comment
+// used to name. It said "the C++26 values need P2905R2 and P2918R2", and half
+// of that was already false when it was written: P2905R2 is the paper that
+// makes make_format_args take Args& rather than Args&&, so that a temporary
+// cannot be stored and then read after it dies -- and make_format_args here
+// has always been declared `make_format_args(Ts &...vs)`. Measured rather than
+// remembered: `make_format_args(i)` compiles and `make_format_args(42)` does
+// not. Only P2918R2 was missing, and it is std::runtime_format, which is now
+// beside basic_format_string in <format>.
+//
+// Not 202603L, which is where libstdc++ 16.1 stands at -std=c++26: that value
+// carries further papers this library does not have, and a macro names the
+// newest feature actually PRESENT. libc++ 22 reports 202110L at every -std it
+// accepts, so this is now ahead of it by two bumps.
+#  define __cpp_lib_format 202311L
 #endif
 #undef BOXCXX_OWNS_format
 #if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_format_uchar)) && \
