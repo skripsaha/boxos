@@ -549,6 +549,392 @@ bool regex_search(const basic_string<charT, ST, SA> &&,
                   const basic_regex<charT, traits> &,
                   regex_constants::match_flag_type = regex_constants::match_default) = delete;
 
+
+// ── regex_iterator [re.regiter] ─────────────────────────────────────────
+// One match after another, which is a harder thing than it looks: a pattern
+// that can match nothing at all would otherwise stand still forever. The
+// standard's answer is precise and it is followed here literally — after an
+// empty match the next search demands a non-empty one AT the same place, and
+// only when that fails does the position move on.
+template <class BidirectionalIterator,
+          class charT = typename iterator_traits<BidirectionalIterator>::value_type,
+          class traits = regex_traits<charT>>
+class regex_iterator {
+public:
+    using regex_type = basic_regex<charT, traits>;
+    using iterator_category = forward_iterator_tag;
+    using iterator_concept = input_iterator_tag;
+    using value_type = match_results<BidirectionalIterator>;
+    using difference_type = ptrdiff_t;
+    using pointer = const value_type *;
+    using reference = const value_type &;
+
+    regex_iterator() = default;
+
+    regex_iterator(BidirectionalIterator a, BidirectionalIterator b, const regex_type &re,
+                   regex_constants::match_flag_type m = regex_constants::match_default)
+        : begin_(a), end_(b), re_(&re), flags_(m)
+    {
+        if (!regex_search(a, b, match_, *re_, flags_)) re_ = nullptr;
+        else match_.__rebase(begin_, begin_);
+    }
+
+    // [re.except]: the object holds a POINTER to the expression, so a
+    // temporary would leave it dangling at the first increment.
+    regex_iterator(BidirectionalIterator, BidirectionalIterator, const regex_type &&,
+                   regex_constants::match_flag_type = regex_constants::match_default) = delete;
+
+    bool operator==(const regex_iterator &that) const
+    {
+        if (re_ == nullptr && that.re_ == nullptr) return true;
+        if (re_ == nullptr || that.re_ == nullptr) return false;
+        return begin_ == that.begin_ && end_ == that.end_ && re_ == that.re_
+               && flags_ == that.flags_ && match_[0] == that.match_[0];
+    }
+
+    bool operator==(default_sentinel_t) const { return re_ == nullptr; }
+
+    const value_type &operator*() const { return match_; }
+    const value_type *operator->() const { return &match_; }
+
+    regex_iterator &operator++()
+    {
+        if (re_ == nullptr) return *this;
+        BidirectionalIterator start = match_[0].second;
+        const BidirectionalIterator prev = start;
+
+        if (match_[0].first == match_[0].second) {
+            // [re.regiter.incr]: a zero-length match at the end is the end.
+            if (start == end_) { re_ = nullptr; return *this; }
+            // Otherwise demand something non-empty here before moving on.
+            if (regex_search(start, end_, match_, *re_,
+                             flags_ | regex_constants::match_not_null
+                                 | regex_constants::match_continuous)) {
+                match_.__rebase(begin_, prev);
+                return *this;
+            }
+            ++start;
+        }
+
+        // No shortcut for start == end_: [re.regiter.incr] says to search, and
+        // an expression that can match nothing matches THERE. Stopping early
+        // loses the empty match at the end of the sequence, which is the one
+        // /b*/ over "ab" ends on.
+        const auto f = flags_ | regex_constants::match_prev_avail;
+        if (!regex_search(start, end_, match_, *re_, f)) {
+            re_ = nullptr;
+            return *this;
+        }
+        match_.__rebase(begin_, prev);
+        return *this;
+    }
+
+    regex_iterator operator++(int)
+    {
+        regex_iterator was = *this;
+        ++*this;
+        return was;
+    }
+
+private:
+    BidirectionalIterator begin_ = BidirectionalIterator();
+    BidirectionalIterator end_ = BidirectionalIterator();
+    const regex_type *re_ = nullptr;
+    regex_constants::match_flag_type flags_ = regex_constants::match_default;
+    value_type match_;
+};
+
+using cregex_iterator = regex_iterator<const char *>;
+using wcregex_iterator = regex_iterator<const wchar_t *>;
+using sregex_iterator = regex_iterator<string::const_iterator>;
+using wsregex_iterator = regex_iterator<wstring::const_iterator>;
+
+// ── regex_token_iterator [re.tokiter] ───────────────────────────────────
+// The same walk, but yielding chosen sub-matches instead of whole results —
+// and, when -1 is among the chosen, the text BETWEEN matches, which is what
+// makes this a splitter as well as a scanner.
+template <class BidirectionalIterator,
+          class charT = typename iterator_traits<BidirectionalIterator>::value_type,
+          class traits = regex_traits<charT>>
+class regex_token_iterator {
+public:
+    using regex_type = basic_regex<charT, traits>;
+    using iterator_category = forward_iterator_tag;
+    using iterator_concept = input_iterator_tag;
+    using value_type = sub_match<BidirectionalIterator>;
+    using difference_type = ptrdiff_t;
+    using pointer = const value_type *;
+    using reference = const value_type &;
+
+    regex_token_iterator() = default;
+
+    regex_token_iterator(BidirectionalIterator a, BidirectionalIterator b, const regex_type &re,
+                         int submatch = 0,
+                         regex_constants::match_flag_type m = regex_constants::match_default)
+        : position_(a, b, re, m), subs_(1, submatch), end_(b), suffixFrom_(a)
+    {
+        Start();
+    }
+
+    regex_token_iterator(BidirectionalIterator a, BidirectionalIterator b, const regex_type &re,
+                         const vector<int> &submatches,
+                         regex_constants::match_flag_type m = regex_constants::match_default)
+        : position_(a, b, re, m), subs_(submatches), end_(b), suffixFrom_(a)
+    {
+        Start();
+    }
+
+    template <size_t N>
+    regex_token_iterator(BidirectionalIterator a, BidirectionalIterator b, const regex_type &re,
+                         const int (&submatches)[N],
+                         regex_constants::match_flag_type m = regex_constants::match_default)
+        : position_(a, b, re, m), subs_(submatches, submatches + N), end_(b), suffixFrom_(a)
+    {
+        Start();
+    }
+
+    regex_token_iterator(BidirectionalIterator a, BidirectionalIterator b, const regex_type &re,
+                         initializer_list<int> submatches,
+                         regex_constants::match_flag_type m = regex_constants::match_default)
+        : position_(a, b, re, m), subs_(submatches), end_(b), suffixFrom_(a)
+    {
+        Start();
+    }
+
+    regex_token_iterator(BidirectionalIterator, BidirectionalIterator, const regex_type &&,
+                         int = 0,
+                         regex_constants::match_flag_type = regex_constants::match_default) = delete;
+    regex_token_iterator(BidirectionalIterator, BidirectionalIterator, const regex_type &&,
+                         const vector<int> &,
+                         regex_constants::match_flag_type = regex_constants::match_default) = delete;
+    template <size_t N>
+    regex_token_iterator(BidirectionalIterator, BidirectionalIterator, const regex_type &&,
+                         const int (&)[N],
+                         regex_constants::match_flag_type = regex_constants::match_default) = delete;
+    regex_token_iterator(BidirectionalIterator, BidirectionalIterator, const regex_type &&,
+                         initializer_list<int>,
+                         regex_constants::match_flag_type = regex_constants::match_default) = delete;
+
+    bool operator==(const regex_token_iterator &that) const
+    {
+        if (done_ && that.done_) return true;
+        if (done_ || that.done_) return false;
+        return position_ == that.position_ && n_ == that.n_ && subs_ == that.subs_;
+    }
+
+    bool operator==(default_sentinel_t) const { return done_; }
+
+    const value_type &operator*() const { return result_; }
+    const value_type *operator->() const { return &result_; }
+
+    regex_token_iterator &operator++()
+    {
+        if (done_) return *this;
+        const BidirectionalIterator prevEnd = suffixFrom_;
+        if (++n_ < subs_.size()) { Select(); return *this; }
+        n_ = 0;
+        ++position_;
+        if (position_ != regex_iterator<BidirectionalIterator, charT, traits>()) {
+            Select();
+            return *this;
+        }
+        // [re.tokiter]: after the last match, one more token — the tail — but
+        // only when -1 was asked for and the tail is not empty.
+        if (HasMinusOne() && prevEnd != end_) {
+            result_.first = prevEnd;
+            result_.second = end_;
+            result_.matched = true;
+            suffixFrom_ = end_;
+            suffix_ = true;
+            return *this;
+        }
+        done_ = true;
+        return *this;
+    }
+
+    regex_token_iterator operator++(int)
+    {
+        regex_token_iterator was = *this;
+        ++*this;
+        return was;
+    }
+
+private:
+    bool HasMinusOne() const
+    {
+        if (suffix_) return false;
+        for (int i : subs_)
+            if (i == -1) return true;
+        return false;
+    }
+
+    void Start()
+    {
+        if (position_ == regex_iterator<BidirectionalIterator, charT, traits>()) {
+            // No match at all: the whole sequence is the one token, and only
+            // if -1 was asked for.
+            bool minus = false;
+            for (int i : subs_)
+                if (i == -1) minus = true;
+            const BidirectionalIterator b = suffixFrom_;
+            if (minus && b != end_) {
+                result_.first = b;
+                result_.second = end_;
+                result_.matched = true;
+                suffix_ = true;
+                done_ = false;
+                return;
+            }
+            return;
+        }
+        done_ = false;
+        Select();
+    }
+
+    void Select()
+    {
+        const auto &m = *position_;
+        const int which = subs_[n_];
+        if (which == -1) {
+            result_.first = suffixFrom_;
+            result_.second = m[0].first;
+            result_.matched = true;
+        } else {
+            result_ = m[(typename value_type::difference_type)which >= 0
+                            ? (size_t)which : (size_t)0];
+        }
+        suffixFrom_ = m[0].second;
+    }
+
+    regex_iterator<BidirectionalIterator, charT, traits> position_;
+    vector<int> subs_{1, 0};
+    size_t n_ = 0;
+    value_type result_;
+    BidirectionalIterator end_ = BidirectionalIterator();
+    // Where the text between matches begins. It has to start at the sequence's
+    // own beginning: a -1 token asks for [suffixFrom_, match.first), and a
+    // default-constructed iterator there makes that a string of unbounded
+    // length — which is a bad_alloc thrown before a single test has printed,
+    // and reads like anything but an uninitialised member.
+    BidirectionalIterator suffixFrom_ = BidirectionalIterator();
+    // A default-constructed token iterator IS the end of the sequence, so this
+    // starts true and the constructors that find something turn it off. The
+    // other way round, `it != stop` never becomes false and the loop that uses
+    // it runs until the allocator gives up — which is what it did.
+    bool done_ = true;
+    bool suffix_ = false;
+};
+
+using cregex_token_iterator = regex_token_iterator<const char *>;
+using wcregex_token_iterator = regex_token_iterator<const wchar_t *>;
+using sregex_token_iterator = regex_token_iterator<string::const_iterator>;
+using wsregex_token_iterator = regex_token_iterator<wstring::const_iterator>;
+
+// The one implementation the six regex_replace overloads share.
+template <class OutputIterator, class BidirectionalIterator, class traits, class charT>
+OutputIterator __regex_replace(OutputIterator out, BidirectionalIterator first,
+                               BidirectionalIterator last,
+                               const basic_regex<charT, traits> &e, const charT *fmtFirst,
+                               const charT *fmtLast,
+                               regex_constants::match_flag_type flags)
+{
+    using Iter = regex_iterator<BidirectionalIterator, charT, traits>;
+    const bool copy = (flags & regex_constants::format_no_copy)
+                      == regex_constants::match_flag_type{};
+    const bool once = (flags & regex_constants::format_first_only)
+                      != regex_constants::match_flag_type{};
+
+    Iter it(first, last, e, flags), stop;
+    if (it == stop) {
+        if (copy) for (BidirectionalIterator i = first; i != last; ++i) *out++ = *i;
+        return out;
+    }
+    BidirectionalIterator tail = first;
+    for (; it != stop; ++it) {
+        const auto &m = *it;
+        if (copy) for (BidirectionalIterator i = tail; i != m[0].first; ++i) *out++ = *i;
+        out = m.format(out, fmtFirst, fmtLast, flags);
+        tail = m[0].second;
+        if (once) break;
+    }
+    if (copy) for (BidirectionalIterator i = tail; i != last; ++i) *out++ = *i;
+    return out;
+}
+
+// ── regex_replace [re.alg.replace] ──────────────────────────────────────
+template <class OutputIterator, class BidirectionalIterator, class traits, class charT,
+          class ST, class SA>
+OutputIterator regex_replace(OutputIterator out, BidirectionalIterator first,
+                             BidirectionalIterator last,
+                             const basic_regex<charT, traits> &e,
+                             const basic_string<charT, ST, SA> &fmt,
+                             regex_constants::match_flag_type flags
+                                 = regex_constants::format_default)
+{
+    return __regex_replace(out, first, last, e, fmt.data(), fmt.data() + fmt.size(), flags);
+}
+
+template <class OutputIterator, class BidirectionalIterator, class traits, class charT>
+OutputIterator regex_replace(OutputIterator out, BidirectionalIterator first,
+                             BidirectionalIterator last,
+                             const basic_regex<charT, traits> &e, const charT *fmt,
+                             regex_constants::match_flag_type flags
+                                 = regex_constants::format_default)
+{
+    return __regex_replace(out, first, last, e, fmt, fmt + traits::length(fmt), flags);
+}
+
+template <class traits, class charT, class ST, class SA, class FST, class FSA>
+basic_string<charT, ST, SA> regex_replace(const basic_string<charT, ST, SA> &s,
+                                          const basic_regex<charT, traits> &e,
+                                          const basic_string<charT, FST, FSA> &fmt,
+                                          regex_constants::match_flag_type flags
+                                              = regex_constants::format_default)
+{
+    basic_string<charT, ST, SA> out;
+    __regex_replace(back_inserter(out), s.begin(), s.end(), e, fmt.data(),
+                    fmt.data() + fmt.size(), flags);
+    return out;
+}
+
+template <class traits, class charT, class ST, class SA>
+basic_string<charT, ST, SA> regex_replace(const basic_string<charT, ST, SA> &s,
+                                          const basic_regex<charT, traits> &e,
+                                          const charT *fmt,
+                                          regex_constants::match_flag_type flags
+                                              = regex_constants::format_default)
+{
+    basic_string<charT, ST, SA> out;
+    __regex_replace(back_inserter(out), s.begin(), s.end(), e, fmt,
+                    fmt + traits::length(fmt), flags);
+    return out;
+}
+
+template <class traits, class charT, class ST, class SA>
+basic_string<charT> regex_replace(const charT *s, const basic_regex<charT, traits> &e,
+                                  const basic_string<charT, ST, SA> &fmt,
+                                  regex_constants::match_flag_type flags
+                                      = regex_constants::format_default)
+{
+    basic_string<charT> out;
+    __regex_replace(back_inserter(out), s, s + traits::length(s), e, fmt.data(),
+                    fmt.data() + fmt.size(), flags);
+    return out;
+}
+
+template <class traits, class charT>
+basic_string<charT> regex_replace(const charT *s, const basic_regex<charT, traits> &e,
+                                  const charT *fmt,
+                                  regex_constants::match_flag_type flags
+                                      = regex_constants::format_default)
+{
+    basic_string<charT> out;
+    __regex_replace(back_inserter(out), s, s + traits::length(s), e, fmt,
+                    fmt + traits::length(fmt), flags);
+    return out;
+}
+
+
 using regex = basic_regex<char>;
 using wregex = basic_regex<wchar_t>;
 

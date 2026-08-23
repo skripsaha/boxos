@@ -148,6 +148,13 @@ struct Program {
     bool icase = false;
     bool collate = false;
     bool multiline = false;
+    // POSIX asks a different question of the same program. ECMAScript takes
+    // the first match the priority order reaches — /a|ab/ matches "a" in "ab",
+    // because the branch written first wins. POSIX takes the LONGEST match
+    // that starts leftmost, so the same expression matches "ab". Measured
+    // 2026-08-22: both references do this, and it is the one thing that makes
+    // the five POSIX grammars more than a spelling of the ECMAScript one.
+    bool longest = false;
 
     unsigned captureSlots() const noexcept { return 2u * (groups + 1u); }
     unsigned slots() const noexcept { return captureSlots() + loops; }

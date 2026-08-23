@@ -534,16 +534,35 @@ private:
                     const bool endOk = !anchoredEnd || p == last_;
                     const bool nullOk = !notNull || lookMode || s[1] != s[0];
                     if (endOk && nullOk) {
-                        out.assign(s, s + pool.slots());
-                        if (lookMode) out[1] = p - first_;
-                        matched = true;
-                        // Every thread after this one is a lower-priority way
-                        // of matching the same start, and leftmost-first says
-                        // they no longer exist. Threads BEFORE it are still
-                        // preferred and go on running.
-                        for (std::size_t k = i; k < clist.threads.size(); ++k)
-                            pool.Release(clist.threads[k].caps);
-                        break;
+                        // Two questions, two rules.
+                        //
+                        // ECMAScript takes the first match the priority order
+                        // reaches: every thread after this one is a
+                        // lower-priority way of matching the same start and no
+                        // longer exists. Threads BEFORE it are still preferred
+                        // and go on running, which is why a match here is not
+                        // the end of the search.
+                        //
+                        // POSIX takes the longest match that starts leftmost,
+                        // so no thread is killed and the answer is whichever
+                        // one reaches furthest — priority decides nothing but
+                        // the captures, once the extent is settled.
+                        if (!prog_.longest) {
+                            out.assign(s, s + pool.slots());
+                            if (lookMode) out[1] = p - first_;
+                            matched = true;
+                            for (std::size_t k = i; k < clist.threads.size(); ++k)
+                                pool.Release(clist.threads[k].caps);
+                            break;
+                        }
+                        const ptrdiff_t end = lookMode ? p - first_ : s[1];
+                        if (!matched || s[0] < out[0] || (s[0] == out[0] && end > out[1])) {
+                            out.assign(s, s + pool.slots());
+                            out[1] = end;
+                            matched = true;
+                        }
+                        pool.Release(t.caps);
+                        continue;
                     }
                     pool.Release(t.caps);
                     continue;
@@ -633,6 +652,8 @@ private:
              bool lookMode, unsigned caps, std::vector<std::ptrdiff_t> &out)
     {
         const std::size_t floor = stack_.size();
+        const bool outerBest = best_;
+        best_ = false;
         unsigned pc = entry;
         const char_type *p = start;
 
@@ -722,6 +743,7 @@ private:
                 out.assign(pool.At(caps), pool.At(caps) + pool.slots());
                 Unwind(pool, floor);
                 pool.Release(caps);
+                best_ = outerBest;
                 return true;
             case Op::Accept: {
                 const std::ptrdiff_t *s = pool.At(caps);
@@ -731,10 +753,21 @@ private:
                     failed = true;
                     break;
                 }
-                out.assign(s, s + pool.slots());
-                Unwind(pool, floor);
-                pool.Release(caps);
-                return true;
+                if (!prog_.longest) {
+                    out.assign(s, s + pool.slots());
+                    Unwind(pool, floor);
+                    pool.Release(caps);
+                    return true;
+                }
+                // Under POSIX the first way found is not the answer: keep the
+                // furthest-reaching one and go on looking. The budget is what
+                // bounds that, exactly as it bounds everything else here.
+                if (!best_ || s[0] < out[0] || (s[0] == out[0] && s[1] > out[1])) {
+                    out.assign(s, s + pool.slots());
+                    best_ = true;
+                }
+                failed = true;
+                break;
             }
             default:
                 failed = !Consumes(in, p);
@@ -744,7 +777,7 @@ private:
 
             if (!failed) continue;
             pool.Release(caps);
-            if (stack_.size() == floor) return false;
+            if (stack_.size() == floor) return best_;
             const Point pt = stack_.back();
             stack_.pop_back();
             pc = pt.pc;
@@ -763,6 +796,7 @@ private:
 
     std::vector<Point> stack_;
     unsigned long long budget_;
+    bool best_ = false;
 };
 
 // Which machine a program takes. A lookahead stays with the linear one — its
