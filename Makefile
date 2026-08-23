@@ -538,9 +538,36 @@ $(SHELL_EMBED): $(BUILDDIR)/shell.elf
 	@echo "Embedded object: $@"
 
 # ==== KERNEL BUILD RULES ====
-$(KERNEL_BIN): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
+# ---- Kernel Nameplate ------------------------------------------------------
+# The kernel carries its own address->name table, for the same reason every
+# userspace image does: a panic is exactly when you want names, and exactly
+# when you cannot go and look them up. A photograph of a screen reading
+# "efi_runtime_init+0x39" is a diagnosis; one reading "ffffffff8014bae9" is a
+# request for the matching kernel.elf, which the person holding the camera
+# does not have and which the next build will overwrite.
+#
+# Two passes, because the table names addresses and so cannot exist before
+# them. Pass one produces the addresses, the tool turns them into a table,
+# pass two links it in — and since .nameplate sits before .data in the linker
+# script, pass two moves data and not one function. `nameplate verify` checks
+# that claim against the binary's own symbols on every build.
+KERNEL_NP_OBJ   = $(BUILDDIR)/kernel.np.o
+KERNEL_PASS1    = $(BUILDDIR)/kernel.pass1.elf
+NAMEPLATE_TOOL  = tools/nameplate
+KERNEL_LINK_IN  = $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
+
+$(NAMEPLATE_TOOL): tools/nameplate.c src/include/nameplate_format.h
+	@echo "Compiling Nameplate tool..."
+	@$(CC_HOST) -O2 -Wall -Wextra -Isrc/include -o $@.$$$$ $< && mv -f $@.$$$$ $@
+
+$(KERNEL_NP_OBJ): $(KERNEL_LINK_IN) $(NAMEPLATE_TOOL) $(ENTRYDIR)/linker.ld
+	@echo "Nameplate pass 1 (kernel)..."
+	@$(LD) -g -nostdlib -T $(ENTRYDIR)/linker.ld -o $(KERNEL_PASS1) $(KERNEL_LINK_IN)
+	@$(NAMEPLATE_TOOL) build $(KERNEL_PASS1) $@
+
+$(KERNEL_BIN): $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ)
 	@echo "Linking kernel (raw binary)..."
-	@$(LD) $(LDFLAGS) -o $@ $^
+	@$(LD) $(LDFLAGS) -o $@ $(KERNEL_LINK_IN) $(KERNEL_NP_OBJ)
 	@echo "Validating kernel size..."
 	@KERNEL_SIZE=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null); \
 	MAX_SIZE=$(KERNEL_MAX_BYTES); \

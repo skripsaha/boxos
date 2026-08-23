@@ -68,6 +68,11 @@ int nameplate_locate(const void *image, uint64_t bytes, uintptr_t load_base,
  * so a wild or unmapped table ends the lookup instead of faulting the kernel
  * inside its own exception handler.
  */
+/* The kernel's own table, resident in the kernel image. Same search, read
+ * with plain loads instead of get_user — see nameplate.c. */
+int nameplate_name_at_kernel(uintptr_t table_va, uint64_t table_bytes,
+                             uintptr_t addr, NameplateName *out);
+
 int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
                       NameplateName *out);
 

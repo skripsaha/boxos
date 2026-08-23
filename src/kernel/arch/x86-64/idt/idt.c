@@ -14,6 +14,7 @@
 #include "vmm.h"
 #include "uaccess.h"  /* UACCESS_USER_VA_MAX for SMAP-fault diagnostic */
 #include "nameplate.h"  /* nameplate_name_at — name the frames of a user fault */
+#include "nameplate_format.h"  /* NameplateHeader — the kernel table's own minimum size */
 #include "atomics.h"
 #include "touch.h"   /* TouchTag types — Phase 2K #CP publish */
 #include "scheduler.h"
@@ -328,6 +329,35 @@ static void panic_claim_or_halt(bool *already_claimed_here)
     *already_claimed_here = true;
 }
 
+/* The kernel's own Nameplate, linked in by the second pass — see the linker
+ * script and the Makefile. Riveted to the image, so naming a frame costs no
+ * disk, no lock and no matching kernel.elf at the other end of the world;
+ * which is the situation a panic on a machine you are not sitting at leaves
+ * you in, and the situation this table exists for. */
+extern const char __nameplate_start[];
+extern const char __nameplate_end[];
+
+/* Print an address, and its name when the image can supply one.
+ *
+ * `for_return` turns a return address into the byte that belongs to the call
+ * before naming it: the saved address points PAST the call, so naming it
+ * directly names the NEXT function whenever a call is the last instruction of
+ * its own. The address printed is still the one that was saved, because that
+ * is what a reader compares against a disassembly. */
+static void panic_name_addr(const char *prefix, uint64_t addr, bool for_return)
+{
+    NameplateName site;
+    uint64_t bytes = (uint64_t)(__nameplate_end - __nameplate_start);
+    uintptr_t look = (uintptr_t)(for_return && addr ? addr - 1 : addr);
+
+    if (bytes >= sizeof(NameplateHeader) &&
+        nameplate_name_at_kernel((uintptr_t)__nameplate_start, bytes, look, &site))
+        kprintf("%s%016lx  %s+0x%lx\n", prefix, addr, site.Text,
+                site.Offset + (for_return ? 1u : 0u));
+    else
+        kprintf("%s%016lx\n", prefix, addr);
+}
+
 /* Readable across `len` bytes, page boundary included. Two probes cover every
  * length this file asks about; nothing here reads more than sixteen bytes. */
 static bool panic_probe_range(uint64_t va, uint64_t len)
@@ -401,6 +431,8 @@ void exception_handler(interrupt_frame_t *frame)
         bool     cp_enclave = (frame->error_code & 0x8000u) != 0;
         kprintf("[CET] #CP fired: type=%u enclave=%d RIP=0x%lx\n",
                 (unsigned)cp_type, (int)cp_enclave, frame->rip);
+        if ((frame->cs & 3) == 0)
+            panic_name_addr("[CET]   in ", frame->rip, false);
         /* Touch publish via pre-resolved tag (resolved in vmm_cet_probe
          * at BSP boot, outside IRQ context). TouchTagIntern in this
          * handler would take registry locks → deadlock against any
@@ -511,6 +543,17 @@ void exception_handler(interrupt_frame_t *frame)
                     frame->vector, proc->pid);
             kprintf("[EXCEPTION] RIP=0x%lx RSP=0x%lx Error=0x%lx\n",
                     frame->rip, frame->rsp, frame->error_code);
+            /* Named from the process's own table, not the kernel's: the
+             * address belongs to its image, and the backtrace below already
+             * reads that table. Naming the faulting instruction while naming
+             * everything that called it was an odd place to stop. */
+            {
+                NameplateName here;
+                if (proc->nameplate_va && proc->nameplate_bytes &&
+                    nameplate_name_at(proc->nameplate_va, proc->nameplate_bytes,
+                                      (uintptr_t)frame->rip, &here))
+                    kprintf("[EXCEPTION]   in %s+0x%lx\n", here.Text, here.Offset);
+            }
             kprintf("[EXCEPTION] TagBits: 0x%lx\n", proc->cabin ? proc->cabin->tag_bits : 0);
             /* Split-lock #AC hint: if userspace fired #AC with error_code==0
              * while BoxOS was supposed to clear TEST_CTL.bit29, the
@@ -670,6 +713,8 @@ void exception_handler(interrupt_frame_t *frame)
             kprintf("================================================================\n");
             kprintf("  PID: %u  TagBits: 0x%lx\n", overflow_proc->pid, overflow_proc->cabin ? overflow_proc->cabin->tag_bits : 0);
             kprintf("  RSP: 0x%lx  RIP: 0x%lx\n", frame->rsp, frame->rip);
+            if ((frame->cs & 3) == 0)
+                panic_name_addr("  in  ", frame->rip, false);
             if (overflow_proc->kernel_stack_guard_base)
             {
                 kprintf("  Guard: 0x%lx  Stack: 0x%lx-0x%lx\n",
@@ -743,6 +788,7 @@ void exception_handler(interrupt_frame_t *frame)
     kprintf("  R14=%016lx  R15=%016lx\n", frame->r14, frame->r15);
     kprintf("  RIP=%016lx  RFL=%016lx\n", frame->rip, frame->rflags);
     kprintf("  CS=%04lx  SS=%04lx\n", frame->cs, frame->ss);
+    panic_name_addr("  fault at ", frame->rip, false);
 
     uint64_t panic_cr2, panic_cr3;
     __asm__ volatile("mov %%cr2, %0" : "=r"(panic_cr2));
@@ -786,7 +832,15 @@ void exception_handler(interrupt_frame_t *frame)
         uint64_t ret_addr = fp[1];
 
         bool in_text = (ret_addr >= (uint64_t)_text_start && ret_addr < (uint64_t)_text_end);
-        kprintf("  #%u  %016lx%s\n", depth, ret_addr, in_text ? "" : "  [!]");
+        if (in_text) {
+            kprintf("  #%u  ", depth);
+            panic_name_addr("", ret_addr, true);
+        } else {
+            /* Outside .text: not a return address at all, so there is nothing
+             * to name and naming the nearest thing would be a guess wearing a
+             * function's clothes. */
+            kprintf("  #%u  %016lx  [!]\n", depth, ret_addr);
+        }
 
         if (saved_rbp <= walk_rbp || saved_rbp == 0)
             break;

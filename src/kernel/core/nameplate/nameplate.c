@@ -144,38 +144,57 @@ int nameplate_locate(const void *image, uint64_t bytes, uintptr_t load_base,
 
 /* ── lookup, across the address-space boundary ────────────────────────── */
 
-/* Every read below goes through this. get_user_u32 is the only user-memory
- * primitive the fault dump already used before Nameplate, and it stays the
- * only one: a diagnostic is a bad place to introduce a mechanism that has
- * never run in exception context. */
-static int ReadWord(uintptr_t at, uint32_t *out)
+/* Every read below goes through one of these, chosen by the caller. The table
+ * being searched is sometimes in a faulted process's address space and
+ * sometimes in the kernel's own image, and those are not the same memory —
+ * get_user_u32 exists precisely to refuse a kernel address. One search, two
+ * ways of touching the bytes; the alternative is a second copy of a binary
+ * search, which is a second place for it to be wrong.
+ *
+ * get_user_u32 stays the user-side primitive: it is the one the fault dump
+ * already used before Nameplate existed, and a diagnostic is a bad place to
+ * introduce a mechanism that has never run in exception context. */
+typedef int (*NameplateReadWord)(uintptr_t at, uint32_t *out);
+
+static int ReadWordUser(uintptr_t at, uint32_t *out)
 {
     if (at & 3u) return 0;                       /* every field is aligned */
     return get_user_u32(out, (const uint32_t *)at) == 0;
 }
 
-static int ReadHeader(uintptr_t table_va, uint64_t table_bytes, NameplateHeader *out)
+/* The kernel's own table lives inside the kernel image, which is mapped for
+ * as long as there is a kernel at all. A plain load is correct here and a
+ * get_user would simply refuse the address. */
+static int ReadWordKernel(uintptr_t at, uint32_t *out)
+{
+    if (at & 3u) return 0;
+    *out = *(const volatile uint32_t *)at;
+    return 1;
+}
+
+static int ReadHeader(NameplateReadWord Read, uintptr_t table_va,
+                      uint64_t table_bytes, NameplateHeader *out)
 {
     uint32_t lo, hi;
 
     if (table_va & 7u) return 0;
 
-    if (!ReadWord(table_va + 0, &out->Magic)) return 0;
+    if (!Read(table_va + 0, &out->Magic)) return 0;
     if (out->Magic != NAMEPLATE_MAGIC) return 0;
-    if (!ReadWord(table_va + 4, &out->Version)) return 0;
-    if (!ReadWord(table_va + 8, &out->EntryCount)) return 0;
-    if (!ReadWord(table_va + 12, &out->NameBytes)) return 0;
+    if (!Read(table_va + 4, &out->Version)) return 0;
+    if (!Read(table_va + 8, &out->EntryCount)) return 0;
+    if (!Read(table_va + 12, &out->NameBytes)) return 0;
 
-    if (!ReadWord(table_va + 16, &lo) || !ReadWord(table_va + 20, &hi)) return 0;
+    if (!Read(table_va + 16, &lo) || !Read(table_va + 20, &hi)) return 0;
     out->BaseAddress = ((uint64_t)hi << 32) | lo;
-    if (!ReadWord(table_va + 24, &lo) || !ReadWord(table_va + 28, &hi)) return 0;
+    if (!Read(table_va + 24, &lo) || !Read(table_va + 28, &hi)) return 0;
     out->TotalBytes = ((uint64_t)hi << 32) | lo;
 
     return NameplateHeaderValid(out, table_bytes);
 }
 
-int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
-                      NameplateName *out)
+static int NameAt(NameplateReadWord Read, uintptr_t table_va,
+                  uint64_t table_bytes, uintptr_t addr, NameplateName *out)
 {
     NameplateHeader header;
     uintptr_t       offsets, sizes, name_offsets, names;
@@ -183,7 +202,7 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
     uint64_t        start, delta;
 
     if (!out || table_va == 0 || table_bytes < sizeof(NameplateHeader)) return 0;
-    if (!ReadHeader(table_va, table_bytes, &header)) return 0;
+    if (!ReadHeader(Read, table_va, table_bytes, &header)) return 0;
 
     if ((uint64_t)addr < header.BaseAddress) return 0;
     if ((uint64_t)addr - header.BaseAddress > 0xFFFFFFFFull) return 0;
@@ -194,7 +213,7 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
     name_offsets = table_va + NAMEPLATE_NAME_OFFSETS_AT(header.EntryCount);
     names        = table_va + NAMEPLATE_NAMES_AT(header.EntryCount);
 
-    if (!ReadWord(offsets, &start_off)) return 0;
+    if (!Read(offsets, &start_off)) return 0;
     if (want < start_off) return 0;
 
     /* Greatest entry at or below the address — the same search boxlib does
@@ -205,7 +224,7 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
         uint32_t mid = low + (high - low) / 2;
         uint32_t probe;
 
-        if (!ReadWord(offsets + (uintptr_t)mid * 4u, &probe)) return 0;
+        if (!Read(offsets + (uintptr_t)mid * 4u, &probe)) return 0;
         if (probe <= want)
             low = mid;
         else
@@ -213,8 +232,8 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
     }
     hit = low;
 
-    if (!ReadWord(offsets + (uintptr_t)hit * 4u, &start_off)) return 0;
-    if (!ReadWord(sizes + (uintptr_t)hit * 4u, &span)) return 0;
+    if (!Read(offsets + (uintptr_t)hit * 4u, &start_off)) return 0;
+    if (!Read(sizes + (uintptr_t)hit * 4u, &span)) return 0;
 
     start = header.BaseAddress + start_off;
     delta = (uint64_t)addr - start;
@@ -225,7 +244,7 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
      * it does not know. */
     if (span != 0 && delta >= span) return 0;
 
-    if (!ReadWord(name_offsets + (uintptr_t)hit * 4u, &name_off)) return 0;
+    if (!Read(name_offsets + (uintptr_t)hit * 4u, &name_off)) return 0;
     if (name_off >= header.NameBytes) return 0;
 
     /* Copy the name out a word at a time, since the bytes are not aligned and
@@ -242,7 +261,7 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
             uintptr_t byte_at = at + n;
 
             if ((byte_at & 3u) == 0 || n == 0) {
-                if (!ReadWord(byte_at & ~(uintptr_t)3u, &word)) return 0;
+                if (!Read(byte_at & ~(uintptr_t)3u, &word)) return 0;
             }
             char c = (char)((word >> (8u * (byte_at & 3u))) & 0xFFu);
             if (c == '\0') break;
@@ -260,4 +279,24 @@ int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
 
     out->Offset = delta;
     return 1;
+}
+
+/* ── the two entry points ─────────────────────────────────────────────── */
+
+/* A faulted process's table, read across the address-space boundary. */
+int nameplate_name_at(uintptr_t table_va, uint64_t table_bytes, uintptr_t addr,
+                      NameplateName *out)
+{
+    return NameAt(ReadWordUser, table_va, table_bytes, addr, out);
+}
+
+/* The kernel's own table, read directly. This is what turns a kernel panic
+ * from a column of hexadecimal into a call chain somebody can read off a
+ * photograph of a screen — with no matching kernel.elf at the other end of
+ * the world, which is exactly the situation a panic on a strange machine
+ * puts you in. */
+int nameplate_name_at_kernel(uintptr_t table_va, uint64_t table_bytes,
+                             uintptr_t addr, NameplateName *out)
+{
+    return NameAt(ReadWordKernel, table_va, table_bytes, addr, out);
 }
