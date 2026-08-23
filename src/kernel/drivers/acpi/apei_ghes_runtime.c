@@ -111,6 +111,7 @@ typedef struct {
     uint64_t  next_poll_tsc;
     /* GHESv2 read-ack registers (zero for v1). */
     uint64_t  read_ack_addr;
+    void     *read_ack_va;        /* mapped at register-time, like gesb_va */
     uint64_t  read_ack_preserve;
     uint64_t  read_ack_write;
     /* Per-source counters. */
@@ -264,6 +265,16 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     slot->gesb_len           = gesb_len;
     slot->next_poll_tsc      = apei_ghes_rdtsc();   /* poll on first tick */
     slot->read_ack_addr      = read_ack_addr;
+    /* Mapped here, once, for the same reason the GESB above is: ghes_read_ack
+     * runs on every consumed error record, and mapping eight bytes per
+     * acknowledgement leaks one kernel MMIO mapping — and the page-table pages
+     * beneath it — per hardware error, forever. Firmware that reports
+     * corrected ECC errors regularly is not exotic; it is what a machine with
+     * one tired DIMM does all day. A leak that only appears on real hardware,
+     * hours in, is the hardest kind to find and the easiest kind to prevent. */
+    slot->read_ack_va        = (read_ack_addr != 0)
+        ? (void *)(uintptr_t)vmm_map_mmio(read_ack_addr, 8, VMM_FLAGS_KERNEL_RW)
+        : NULL;
     slot->read_ack_preserve  = read_ack_preserve;
     slot->read_ack_write     = read_ack_write;
     slot->events             = 0;
@@ -387,9 +398,9 @@ static uint32_t process_entry(const apei_ghes_source_t *src,
 static void ghes_read_ack(const apei_ghes_source_t *src) {
     if (!(src->flags & SRC_V2)) return;
     if (src->read_ack_addr == 0) return;
-    /* See comment in apei_ghes_register_runtime_source — intentional
-     * qualifier drop; volatile re-applied at dereference. */
-    void *va = (void *)(uintptr_t)vmm_map_mmio(src->read_ack_addr, 8, VMM_FLAGS_KERNEL_RW);
+    /* Mapped once at registration; see the comment there. Volatile is
+     * re-applied at the dereference below, as everywhere else in this file. */
+    void *va = src->read_ack_va;
     if (!va) return;
     volatile uint64_t *reg = (volatile uint64_t *)va;
     uint64_t cur = *reg;
