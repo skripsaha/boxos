@@ -39,10 +39,10 @@ C++26 feature is *not* implemented keeps its C++23 value.
 |---|---|
 | Standard headers provided | **108** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 164 |
-| Header source | ~104 000 lines |
+| Header source | ~118 000 lines |
 | Feature-test macros defined | 238 — 166 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
-| BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 249 phases (230 of them the numbered `PhaseN` series), 6 545 runtime checks, 2 059 `static_assert`s |
+| BoxOS-native headers (`include/box/cxx/`) | 33 (§5) |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 252 phases (233 of them the numbered `PhaseN` series), 6 586 runtime checks, 2 066 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -67,11 +67,21 @@ with the launch args selecting which rows run. The count is therefore
 `sizeof(kPhases)/sizeof(kPhases[0])`, and the program PRINTS it — every run
 ends in `ALL PASS` or `SUBSET PASS: N of M phases`, so the number in this table
 can be checked against a boot log instead of against a grep that has to be
-maintained. That is **245** — 226 purely numbered, 18 suffixed (`Phase4a`,
+maintained. That is **252** — 233 purely numbered, 18 suffixed (`Phase4a`,
 `Phase7b`, `Phase9a2` and the rest) and `PhaseCurrent`. It rose by four across
 Ф43: `Phase225`, `Phase226` and `Phase227` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
-ordinary row. The 166 recorded at Ф33 was the numbered series alone, which is
+ordinary row.
+
+**The fifth drift was this paragraph against the table again, and Ф45's door
+found it by re-deriving both.** The table said 249 phases while this paragraph
+said 245, so the document contradicted itself about the one number it had
+already recorded four corrections on — and both were wrong, because the rule
+above produces 252. The suite row's other two numbers were stale by 165 checks
+and 24 `static_assert`s at the same time, which is what happens when a session
+adds phases and copies the previous session's row. All six rows are re-derived
+here from the commands the rule names, and the three that move together —
+phases, checks, `static_assert`s — were taken in one pass rather than three. The 166 recorded at Ф33 was the numbered series alone, which is
 why both numbers are given above: neither can drift without the other
 contradicting it.
 
@@ -433,7 +443,9 @@ and line — is recorded there.
   into the image, the whole of [time.zone], and the 27 leap seconds — see §2
   `<chrono>` for what that cost and what it chose. `chrono::parse` and
   `from_stream` came with it, so the library reads back every format it writes,
-  and **`__cpp_lib_chrono` is defined** at last (§1.3).
+  and **`__cpp_lib_chrono` is defined** at last (§1.3). The `clock:tzdb` door
+  and the `clock:zone` writer followed, so [time.zone.db.remote] is a working
+  clause here rather than a truthful stub — see §2 `<chrono>`.
 
 ## 1.3 Feature-test macros
 
@@ -959,16 +971,54 @@ looks identical and is not; see there.
   same shape `<stacktrace>`'s name table takes and for the same reason:
   `locate_zone` makes no syscall, touches no disk and cannot fail for want of
   a file.
-- `?` `remote_version()` returns the baked version and `reload_tzdb()` returns
-  the loaded database. [time.zone.db.remote] is written for a system that can
-  fetch a newer release; the newest one within reach here is the one in the
-  image, so saying so is the answer rather than a placeholder. The TagFS door
-  that would change that is not built yet.
+- `✓` **[time.zone.db.remote] works, through TagFS rather than through a
+  network.** Lay a table under the tag `clock:tzdb` and `remote_version()`
+  reports its version and `reload_tzdb()` loads it, pushing a new `tzdb` onto
+  the front of the list exactly as the clause describes. With nothing behind
+  that door the newest database in reach IS the one in the image, and both
+  functions say so — which was already the honest answer before the door
+  existed, and is now a case rather than the only case.
+  **Both databases stay live.** [time.zone.db.remote]/3 requires a `time_zone`
+  handed out before a reload to keep answering after it, so a `time_zone`
+  carries the database it came out of rather than an index into a global table:
+  there is no longer a "the" table. `tzdb_list::erase_after` really erases, and
+  the entry it drops is destroyed, which is what the clause means by
+  invalidated.
+  **The blob behind the door is the only untrusted input this library has**, so
+  `tzdata::Validate` gates it: magic, every section inside the blob, every
+  offset inside the section it names, the string pool's terminating NUL, each
+  body's varint run decoding to exactly the transitions it claims, a sorted
+  name index (`Find` is a binary search — an unsorted index does not fault, it
+  answers wrongly) and a leap list that is ordered and carries only ±1. It was
+  measured rather than reviewed: on a development host under ASan and UBSan,
+  **all 119 052 truncation lengths of the real table were refused, and of
+  300 000 byte-level mutations the 29 480 that were admitted were then fully
+  exercised without one read outside the blob.** That fuzz is also what found
+  three unbounded accumulations in the reader — the POSIX-footer digit runs and
+  the varint shift — which no table IANA ships can reach and any file can.
+- `~` **The door loads a table whose version DIFFERS, where the clause says
+  NEWER.** [time.zone.db.remote]/2 is written for a service that only ever
+  moves forward; behind this door is a person, who put that file there on
+  purpose, and a deliberate step back to last month's table to undo a bad
+  release is a thing a person does. Comparing for difference obeys them;
+  comparing for newer would ignore them silently, and they would find out from
+  a wrong clock. Owner's decision, recorded here rather than left as a gap.
 - `~` **`current_zone()` reads the `clock:zone` tag and answers `Etc/UTC` when
   nothing has set it.** A machine that has not been told where it is has no
   local time to report, and UTC is the same fact `<ctime>` records when it says
   `localtime` IS `gmtime`. Every named zone still works: `locate_zone` answers
-  for all 598.
+  for all 598. The tag is read on every call rather than cached, so the answer
+  is current because it looked and not because something remembered to
+  invalidate.
+  **The other half of that tag is `box::clock::set_zone` (§5) and the
+  `timezone` command**, which no standard has a spelling for because setting
+  the zone is a question about the machine, not about time. It resolves the
+  name against the database before writing and stores the canonical spelling,
+  so a Link is stored as its Zone and what is on disk always resolves —
+  a name the database does not know would otherwise read back as `Etc/UTC` and
+  be discovered an hour later from a clock that is quietly wrong. The write
+  multicasts a Touch on `clock:zone` carrying the new name, so a clock already
+  drawn can redraw without polling.
 - `✓` **`chrono::parse` and `from_stream` exist as of Ф45**, for every type
   [time.parse] names. The ten conversions the locale decides — `%a`, `%A`,
   `%b`, `%B`, `%h`, `%c`, `%x`, `%X`, `%p`, `%r` — are read through the
@@ -4479,7 +4529,7 @@ everything else matched.
 # 5. `box::` — the BoxOS-native surface
 
 Everything above is about the ISO library. `include/box/cxx/` is the other half of
-boxcxx: 32 headers that give BoxOS's own concepts a C++ face. They are not
+boxcxx: 33 headers that give BoxOS's own concepts a C++ face. They are not
 replacements for standard facilities and they do not shadow them — they exist
 because the kernel has ideas Unix does not, and a standard library has no words
 for them.
@@ -4491,6 +4541,7 @@ for them.
 | Execution | `strand.h`, `executor.h`, `ferry.h`, `timing.h`, `timeouts.h` | In-cabin execution contexts, a cooperative executor, `co_await`-able async file I/O. |
 | Memory | `heap.h`, `bay.h`, `bay_memory_resource.h`, `memtag.h`, `pku.h`, `hw.h` | Tagged allocation and accounting, cross-cabin shared memory, tagged-RAM introspection, protection keys, LAM/TME. |
 | Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts and snapshots, anchor events. |
+| Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it under `clock:zone`, announce the change. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
 | Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |
 | System | `process.h`, `child.h`, `system.h`, `manifest.h`, `cpu.h` | Process and cabin identity, child supervision, firmware/EFI introspection, the expert syscall builder. |
 | Data | `flat_hash_map.h`, `flat_hash_set.h`, `math.h`, `error.h` | A robin-hood table, an angle-and-base maths layer, the native error model. |

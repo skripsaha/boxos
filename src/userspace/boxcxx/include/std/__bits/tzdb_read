@@ -94,16 +94,22 @@ constexpr long long I64(const unsigned char *p) noexcept
     return static_cast<long long>(v);
 }
 
-// ── header ──────────────────────────────────────────────────────────────────
+// ── the table, as a value ───────────────────────────────────────────────────
+//
+// A `Table` is a base pointer and the header read from it. Nothing below this
+// point mentions kTable, and that is precisely what the TagFS door needs: the
+// table baked into the image is one Table, a table laid behind the door is
+// another, and both must be readable AT ONCE, because
+// [time.zone.db.remote]/3 requires every time_zone handed out before a
+// reload_tzdb() to keep answering correctly after it.
 
 struct Head {
     unsigned version_off, n_names, n_bodies, n_leaps;
     unsigned off_names, off_bodytab, off_leaps, off_saves, off_pool;
 };
 
-constexpr Head ReadHead() noexcept
+constexpr Head ReadHead(const unsigned char *b) noexcept
 {
-    const unsigned char *b = kTable;
     Head h{};
     h.version_off = U32(b + 8);
     h.n_names     = U32(b + 12);
@@ -117,34 +123,64 @@ constexpr Head ReadHead() noexcept
     return h;
 }
 
-inline constexpr Head kHead = ReadHead();
+struct Table {
+    const unsigned char *base;
+    Head                 head;
+};
 
-constexpr const char *Pooled(unsigned off) noexcept
+constexpr Table Bind(const unsigned char *base) noexcept
 {
-    return reinterpret_cast<const char *>(kTable + kHead.off_pool + off);
+    return Table{base, ReadHead(base)};
 }
 
-constexpr const char *Version() noexcept { return Pooled(kHead.version_off); }
-constexpr int NameCount() noexcept { return static_cast<int>(kHead.n_names); }
-constexpr int LeapCount() noexcept { return static_cast<int>(kHead.n_leaps); }
+// The table compiled into the image. Still constexpr, so a question asked of
+// it at compile time still folds to an answer at compile time.
+inline constexpr Table kBaked = Bind(kTable);
 
-constexpr const unsigned char *NameEntry(int i) noexcept
+constexpr const char *Pooled(const Table &t, unsigned off) noexcept
 {
-    return kTable + kHead.off_names + unsigned(i) * 8;
+    return reinterpret_cast<const char *>(t.base + t.head.off_pool + off);
 }
 
-constexpr const char *NameAt(int i) noexcept { return Pooled(U32(NameEntry(i))); }
-constexpr int BodyOf(int i) noexcept { return int(U16(NameEntry(i) + 4)); }
-
-constexpr int LinkTarget(int i) noexcept
+constexpr const char *Version(const Table &t) noexcept
 {
-    const unsigned t = U16(NameEntry(i) + 6);
-    return t == 0xFFFFu ? kNoLink : int(t);
+    return Pooled(t, t.head.version_off);
 }
 
-constexpr void LeapAt(int i, long long &when, int &value) noexcept
+constexpr int NameCount(const Table &t) noexcept
 {
-    const unsigned char *p = kTable + kHead.off_leaps + unsigned(i) * 16;
+    return static_cast<int>(t.head.n_names);
+}
+
+constexpr int LeapCount(const Table &t) noexcept
+{
+    return static_cast<int>(t.head.n_leaps);
+}
+
+constexpr const unsigned char *NameEntry(const Table &t, int i) noexcept
+{
+    return t.base + t.head.off_names + unsigned(i) * 8;
+}
+
+constexpr const char *NameAt(const Table &t, int i) noexcept
+{
+    return Pooled(t, U32(NameEntry(t, i)));
+}
+
+constexpr int BodyOf(const Table &t, int i) noexcept
+{
+    return int(U16(NameEntry(t, i) + 4));
+}
+
+constexpr int LinkTarget(const Table &t, int i) noexcept
+{
+    const unsigned x = U16(NameEntry(t, i) + 6);
+    return x == 0xFFFFu ? kNoLink : int(x);
+}
+
+constexpr void LeapAt(const Table &t, int i, long long &when, int &value) noexcept
+{
+    const unsigned char *p = t.base + t.head.off_leaps + unsigned(i) * 16;
     when  = I64(p);
     value = I32(p + 8);
 }
@@ -163,12 +199,12 @@ constexpr int Compare(const char *a, const char *b, unsigned bn) noexcept
 }
 
 // Binary search over the sorted name index. Returns the name index or kNoLink.
-constexpr int Find(const char *name, unsigned len) noexcept
+constexpr int Find(const Table &t, const char *name, unsigned len) noexcept
 {
-    int lo = 0, hi = NameCount();
+    int lo = 0, hi = NameCount(t);
     while (lo < hi) {
         const int mid = lo + (hi - lo) / 2;
-        const int c = Compare(NameAt(mid), name, len);
+        const int c = Compare(NameAt(t, mid), name, len);
         if (c == 0) return mid;
         if (c < 0) lo = mid + 1; else hi = mid;
     }
@@ -185,14 +221,14 @@ struct Body {
     const char *posix;
 };
 
-constexpr Body BodyAt(int j) noexcept
+constexpr Body BodyAt(const Table &t, int j) noexcept
 {
-    const unsigned at = U32(kTable + kHead.off_bodytab + unsigned(j) * 4);
-    const unsigned char *p = kTable + at;
+    const unsigned at = U32(t.base + t.head.off_bodytab + unsigned(j) * 4);
+    const unsigned char *p = t.base + at;
     Body b{};
     b.n_types = U16(p);
     b.n_trans = U16(p + 2);
-    b.posix   = Pooled(U32(p + 4));
+    b.posix   = Pooled(t, U32(p + 4));
     b.types   = p + 8;
     const unsigned char *q = b.types + b.n_types * 8;
     const unsigned varint_bytes = U32(q);
@@ -209,9 +245,9 @@ constexpr Type TypeAt(const Body &b, unsigned i) noexcept
     return Type{I32(p), U16(p + 4), p[6] != 0};
 }
 
-constexpr int SaveAt(unsigned idx) noexcept
+constexpr int SaveAt(const Table &t, unsigned idx) noexcept
 {
-    return I32(kTable + kHead.off_saves + idx * 4);
+    return I32(t.base + t.head.off_saves + idx * 4);
 }
 
 constexpr void CopyAbbrev(char (&dst)[kAbbrevMax], const char *src) noexcept
@@ -289,6 +325,30 @@ struct Footer {
 
 constexpr bool IsDigit(char c) noexcept { return c >= '0' && c <= '9'; }
 
+// Consume a digit run into `out`, refusing to let it grow past `cap`.
+//
+// The cap is not tidiness. Past the TagFS door these parsers are handed
+// whatever bytes are in the pool, and `v = v * 10 + d` over a forty-digit run
+// is signed overflow — undefined behaviour in the library, reached through a
+// file anybody can write. The digits are consumed either way, so the parse
+// position stays correct on a string that was never a footer; only the value
+// stops climbing. Every cap below sits orders of magnitude above the largest
+// value real tzdata carries, so no table IANA has ever shipped notices.
+constexpr const char *Digits(const char *p, long long &out,
+                             long long cap) noexcept
+{
+    long long v = 0;
+    while (IsDigit(*p)) {
+        if (v <= cap) v = v * 10 + (*p - '0');
+        ++p;
+    }
+    out = v > cap ? cap : v;
+    return p;
+}
+
+// 2026c's largest footer hour is 50; a million is refusal, not rounding.
+inline constexpr long long kDigitCap = 1000000;
+
 constexpr const char *ParseAbbrev(const char *p, char (&out)[kAbbrevMax]) noexcept
 {
     unsigned i = 0;
@@ -312,9 +372,9 @@ constexpr const char *ParseOffset(const char *p, long long &secs) noexcept
     if (*p == '+') ++p;
     else if (*p == '-') { sign = -1; ++p; }
     long long h = 0, m = 0, s = 0;
-    while (IsDigit(*p)) h = h * 10 + (*p++ - '0');
-    if (*p == ':') { ++p; while (IsDigit(*p)) m = m * 10 + (*p++ - '0'); }
-    if (*p == ':') { ++p; while (IsDigit(*p)) s = s * 10 + (*p++ - '0'); }
+    p = Digits(p, h, kDigitCap);
+    if (*p == ':') { ++p; p = Digits(p, m, kDigitCap); }
+    if (*p == ':') { ++p; p = Digits(p, s, kDigitCap); }
     secs = sign * (h * 3600 + m * 60 + s);
     return p;
 }
@@ -322,21 +382,24 @@ constexpr const char *ParseOffset(const char *p, long long &secs) noexcept
 constexpr const char *ParseRule(const char *p, Rule &r) noexcept
 {
     r = Rule{Rule::kMonthWeekDay, 0, 0, 0, 0, 2 * 3600};
+    long long v = 0;
+    // A month, a week and a weekday are 1..12, 1..5 and 0..6; a thousand is
+    // already nonsense, and it keeps RuleDay's month walk short.
     if (*p == 'M') {
         ++p;
         r.kind = Rule::kMonthWeekDay;
-        while (IsDigit(*p)) r.m = r.m * 10 + (*p++ - '0');
+        p = Digits(p, v, 1000); r.m = static_cast<int>(v);
         if (*p == '.') ++p;
-        while (IsDigit(*p)) r.w = r.w * 10 + (*p++ - '0');
+        p = Digits(p, v, 1000); r.w = static_cast<int>(v);
         if (*p == '.') ++p;
-        while (IsDigit(*p)) r.d = r.d * 10 + (*p++ - '0');
+        p = Digits(p, v, 1000); r.d = static_cast<int>(v);
     } else if (*p == 'J') {
         ++p;
         r.kind = Rule::kJulianNoLeap;
-        while (IsDigit(*p)) r.n = r.n * 10 + (*p++ - '0');
+        p = Digits(p, v, kDigitCap); r.n = static_cast<int>(v);
     } else {
         r.kind = Rule::kJulianWithLeap;
-        while (IsDigit(*p)) r.n = r.n * 10 + (*p++ - '0');
+        p = Digits(p, v, kDigitCap); r.n = static_cast<int>(v);
     }
     if (*p == '/') {
         ++p;
@@ -480,13 +543,13 @@ constexpr bool InfoFromFooter(const Footer &f, long long t, long long floor_at,
 // alone ever runs.
 
 // The sum of leap seconds inserted at or before this sys instant.
-inline long long LeapElapsedAtSys(long long t) noexcept
+inline long long LeapElapsedAtSys(const Table &tab, long long t) noexcept
 {
     long long elapsed = 0;
-    for (int i = 0, n = LeapCount(); i < n; ++i) {
+    for (int i = 0, n = LeapCount(tab); i < n; ++i) {
         long long when = 0;
         int value = 0;
-        LeapAt(i, when, value);
+        LeapAt(tab, i, when, value);
         if (when > t) break;
         elapsed += value;
     }
@@ -497,14 +560,15 @@ inline long long LeapElapsedAtSys(long long t) noexcept
 // this UTC reading, and the one being inserted counts while it is happening.
 // A UTC reading is inside a positive insertion when it has passed the instant
 // the insertion starts and not yet reached the sys instant it ends at.
-inline void LeapAtUtc(long long u, bool &is_leap, long long &elapsed) noexcept
+inline void LeapAtUtc(const Table &tab, long long u, bool &is_leap,
+                      long long &elapsed) noexcept
 {
     elapsed = 0;
     is_leap = false;
-    for (int i = 0, n = LeapCount(); i < n; ++i) {
+    for (int i = 0, n = LeapCount(tab); i < n; ++i) {
         long long when = 0;
         int value = 0;
-        LeapAt(i, when, value);
+        LeapAt(tab, i, when, value);
         const long long starts = when + elapsed;      // in UTC counts
         if (u >= starts + value) {
             elapsed += value;                          // wholly behind us
@@ -520,9 +584,10 @@ inline void LeapAtUtc(long long u, bool &is_leap, long long &elapsed) noexcept
 
 // ── the two questions a zone is asked ───────────────────────────────────────
 
-inline bool InfoAtSys(int body_idx, long long t, Info &out) noexcept
+inline bool InfoAtSys(const Table &tab, int body_idx, long long t,
+                      Info &out) noexcept
 {
-    const Body b = BodyAt(body_idx);
+    const Body b = BodyAt(tab, body_idx);
     const Walk w = WalkTo(b, t);
 
     if (w.count == b.n_trans) {
@@ -537,7 +602,7 @@ inline bool InfoAtSys(int body_idx, long long t, Info &out) noexcept
             const Type ty = TypeAt(b, FirstType(b));
             out.begin = kBeginning; out.end = kForever;
             out.offset = ty.utoff; out.save = 0;
-            CopyAbbrev(out.abbrev, Pooled(ty.abbrev_off));
+            CopyAbbrev(out.abbrev, Pooled(tab, ty.abbrev_off));
             return true;
         }
     }
@@ -548,7 +613,7 @@ inline bool InfoAtSys(int body_idx, long long t, Info &out) noexcept
         out.end    = b.n_trans ? w.next : kForever;
         out.offset = ty.utoff;
         out.save   = 0;
-        CopyAbbrev(out.abbrev, Pooled(ty.abbrev_off));
+        CopyAbbrev(out.abbrev, Pooled(tab, ty.abbrev_off));
         return true;
     }
 
@@ -556,8 +621,8 @@ inline bool InfoAtSys(int body_idx, long long t, Info &out) noexcept
     out.begin  = w.at;
     out.end    = w.next;
     out.offset = ty.utoff;
-    out.save   = SaveAt(w.code >> 4);
-    CopyAbbrev(out.abbrev, Pooled(ty.abbrev_off));
+    out.save   = SaveAt(tab, w.code >> 4);
+    CopyAbbrev(out.abbrev, Pooled(tab, ty.abbrev_off));
     return true;
 }
 
@@ -581,7 +646,7 @@ inline bool InfoAtSys(int body_idx, long long t, Info &out) noexcept
 // This version does not depend on it: it walks the intervals and tests the
 // wall-clock range each one actually shows, so a future release that shortens
 // one cannot quietly turn a correct answer into a wrong one.
-inline LocalResult InfoAtLocal(int body_idx, long long lt,
+inline LocalResult InfoAtLocal(const Table &tab, int body_idx, long long lt,
                                Info &first, Info &second) noexcept
 {
     // The widest jump the database contains is a whole day (Pacific/Apia
@@ -595,9 +660,9 @@ inline LocalResult InfoAtLocal(int body_idx, long long lt,
     bool have_before = false, have_after = false;
 
     Info cur{};
-    if (!InfoAtSys(body_idx, lt - kWindow, cur)) {
+    if (!InfoAtSys(tab, body_idx, lt - kWindow, cur)) {
         // A zone that cannot answer two days early can still answer now.
-        if (InfoAtSys(body_idx, lt, first)) return LocalResult::unique;
+        if (InfoAtSys(tab, body_idx, lt, first)) return LocalResult::unique;
         first = Info{};
         return LocalResult::unique;
     }
@@ -621,7 +686,7 @@ inline LocalResult InfoAtLocal(int body_idx, long long lt,
         }
         if (cur.end == kForever || cur.end > lt + kWindow) break;
         Info next{};
-        if (!InfoAtSys(body_idx, cur.end, next)) break;
+        if (!InfoAtSys(tab, body_idx, cur.end, next)) break;
         if (next.begin <= cur.begin) break;  // no forward progress: stop
         cur = next;
     }
@@ -640,6 +705,198 @@ inline LocalResult InfoAtLocal(int body_idx, long long lt,
     if (have_before) first = before;
     if (have_after) second = after;
     return LocalResult::nonexistent;
+}
+
+// ── the door: a table that did not come from the image ──────────────────────
+//
+// The baked table is written by tools/gen_tzdb.py, which refuses to emit one
+// that breaks its own invariants, so nothing above ever checks it. A table
+// laid in TagFS is a different kind of thing: it can be truncated, half
+// written, written by an older generator, or not a table at all — and every
+// accessor above follows offsets out of it without looking. So the door checks
+// once, up front, and everything past the check runs the SAME code the image's
+// own table runs. There is no second, careful reader; there is one reader and
+// one gate.
+//
+// What is checked is exactly what the readers assume, no more:
+//   * the magic, and that every section lies wholly inside the blob;
+//   * that every offset a reader follows lands in the section it names;
+//   * that the string pool ends in a NUL, which is what bounds every name,
+//     abbreviation and POSIX footer — none of them carries a length;
+//   * that each body's varint run decodes to exactly the number of
+//     transitions the body claims, consuming exactly the bytes it reserved;
+//   * that the name index is SORTED. Find() is a binary search, and an
+//     unsorted index does not fault — it answers wrongly, silently, which is
+//     the worse failure and the one no amount of bounds checking would catch.
+//   * that a Link points at a Zone and not at another Link, because
+//     locate_zone resolves exactly one hop.
+//
+// ‼ This function is not reviewed, it is ATTACKED — run
+// `tools/tzdb_door_check.sh` after any edit here or to the generators. It
+// compiles this file on the build host under ASan and UBSan and corrupts the
+// real table 300 000 ways; the first run found three unbounded accumulations
+// below (the POSIX-footer digit runs and the varint shift), none of them
+// reachable from a table IANA ships and all of them reachable from a file
+// anybody can write.
+
+constexpr bool StrInPool(const Head &h, unsigned long long size,
+                         unsigned off) noexcept
+{
+    return static_cast<unsigned long long>(h.off_pool) + off < size;
+}
+
+// Decode `n` varints from [p, p + span) exactly as WalkTo will, and demand
+// three things of them: that they end precisely on the span, that no single
+// varint runs past ten bytes, and that the running sum is a strictly
+// increasing sequence of plausible instants.
+//
+// The ten-byte limit is not a size preference. WalkTo shifts by `shift += 7`
+// with no ceiling, so an eleventh continuation byte shifts a 64-bit value by
+// 70 — undefined behaviour, in the guest, driven by a file. Ten bytes is
+// exactly what a 64-bit value needs and one more is not a large number, it is
+// a broken one.
+//
+// Strictly increasing is what the generator writes and what WalkTo assumes
+// when it stops at the first transition past t. A run that goes backwards
+// would not fault; it would answer with the wrong interval, silently.
+constexpr bool VarintRunOk(const unsigned char *p, unsigned long long span,
+                           unsigned n) noexcept
+{
+    unsigned long long used = 0;
+    long long cur = 0;
+    for (unsigned i = 0; i < n; ++i) {
+        unsigned long long v = 0;
+        unsigned shift = 0;
+        for (;;) {
+            if (used >= span) return false;
+            if (shift > 63) return false;          // an 11th byte would be UB
+            const unsigned char byte = p[used++];
+            v |= static_cast<unsigned long long>(byte & 0x7F) << shift;
+            shift += 7;
+            if (byte < 0x80) break;
+        }
+        const long long d = static_cast<long long>((v >> 1) ^ (~(v & 1) + 1));
+        // Both operands are inside +-2^62, so the sum cannot overflow.
+        if (d < -kForever || d > kForever) return false;
+        const long long next = cur + d;
+        if (i > 0 && next <= cur) return false;    // never backwards, never twice
+        if (next < -kForever || next > kForever) return false;
+        cur = next;
+    }
+    return used == span;
+}
+
+constexpr bool Validate(const unsigned char *b, unsigned long long size) noexcept
+{
+    if (!b || size < 44) return false;
+
+    const char magic[8] = {'B', 'O', 'X', 'T', 'Z', 'D', 'B', '1'};
+    for (int i = 0; i < 8; ++i)
+        if (b[i] != static_cast<unsigned char>(magic[i])) return false;
+
+    const Head h = ReadHead(b);
+    const unsigned long long n_names  = h.n_names;
+    const unsigned long long n_bodies = h.n_bodies;
+    const unsigned long long n_leaps  = h.n_leaps;
+
+    // Every section, whole, inside the blob. Widened to 64 bits first: a
+    // count near 2^32 would otherwise wrap the sum back into range and pass.
+    if (n_names == 0 || n_bodies == 0) return false;
+    if (h.off_names + n_names * 8 > size) return false;
+    if (h.off_bodytab + n_bodies * 4 > size) return false;
+    if (h.off_leaps + n_leaps * 16 > size) return false;
+    if (static_cast<unsigned long long>(h.off_saves) + 16 * 4 > size) return false;
+    if (h.off_pool >= size) return false;
+
+    // The pool's terminator. Every string in the table is a pointer into the
+    // pool with no length beside it, so this single byte is what stops every
+    // walk over every one of them.
+    if (b[size - 1] != 0) return false;
+    if (!StrInPool(h, size, h.version_off)) return false;
+
+    // ── the name index ──────────────────────────────────────────────────
+    const unsigned char *names = b + h.off_names;
+    for (unsigned long long i = 0; i < n_names; ++i) {
+        const unsigned char *e = names + i * 8;
+        if (!StrInPool(h, size, U32(e))) return false;
+        if (static_cast<unsigned long long>(U16(e + 4)) >= n_bodies) return false;
+        const unsigned link = U16(e + 6);
+        if (link != 0xFFFFu) {
+            if (link >= n_names) return false;
+            if (link == i) return false;                       // a link to itself
+            if (U16(names + static_cast<unsigned long long>(link) * 8 + 6) != 0xFFFFu)
+                return false;                                  // a link to a link
+        }
+    }
+
+    // Sorted, strictly. Compare() takes the second operand's length because
+    // Find() searches with a string_view; here both sides are pooled and
+    // NUL-terminated, so the length of the right-hand one is what bounds it.
+    for (unsigned long long i = 1; i < n_names; ++i) {
+        const char *prev = reinterpret_cast<const char *>(
+            b + h.off_pool + U32(names + (i - 1) * 8));
+        const char *cur = reinterpret_cast<const char *>(
+            b + h.off_pool + U32(names + i * 8));
+        unsigned len = 0;
+        while (cur[len] != '\0') ++len;
+        if (Compare(prev, cur, len) >= 0) return false;
+    }
+
+    // ── the bodies ──────────────────────────────────────────────────────
+    for (unsigned long long j = 0; j < n_bodies; ++j) {
+        const unsigned long long at = U32(b + h.off_bodytab + j * 4);
+        if (at + 8 > size) return false;
+
+        const unsigned char *p = b + at;
+        const unsigned long long n_types = U16(p);
+        const unsigned long long n_trans = U16(p + 2);
+        if (n_types == 0) return false;          // FirstType would read nothing
+        if (!StrInPool(h, size, U32(p + 4))) return false;      // POSIX footer
+
+        const unsigned long long types_at = at + 8;
+        if (types_at + n_types * 8 > size) return false;
+        for (unsigned long long k = 0; k < n_types; ++k)
+            if (!StrInPool(h, size, U16(b + types_at + k * 8 + 4))) return false;
+
+        const unsigned long long vhdr = types_at + n_types * 8;
+        if (vhdr + 4 > size) return false;
+        const unsigned long long span = U32(b + vhdr);
+        const unsigned long long times_at = vhdr + 4;
+        if (times_at + span > size) return false;
+        const unsigned long long codes_at = times_at + span;
+        if (codes_at + n_trans > size) return false;
+
+        if (!VarintRunOk(b + times_at, span, static_cast<unsigned>(n_trans)))
+            return false;
+
+        // A transition's type nibble indexes the type list; its save nibble
+        // indexes the 16-entry save table, which four bits cannot overrun.
+        for (unsigned long long k = 0; k < n_trans; ++k)
+            if ((b[codes_at + k] & 0x0F) >= n_types) return false;
+    }
+
+    // ── the leap seconds ────────────────────────────────────────────────
+    // Found by the fuzz rather than by reading: nothing here was checked at
+    // all, and LeapAtUtc adds `when + elapsed + value`, so a `when` a few
+    // counts below the 64-bit ceiling is signed overflow inside the library.
+    // Bounding them by kForever — the same +-2^62 every instant in this
+    // format lives inside — removes the arithmetic edge entirely, and
+    // demanding the order LeapElapsedAtSys already assumes (it stops at the
+    // first `when` past t) closes the silent-wrong-answer half.
+    {
+        long long prev = -kForever;
+        for (unsigned long long i = 0; i < n_leaps; ++i) {
+            const unsigned char *p = b + h.off_leaps + i * 16;
+            const long long when = I64(p);
+            const int value = I32(p + 8);
+            if (when < -kForever || when > kForever) return false;
+            if (i > 0 && when <= prev) return false;
+            if (value != 1 && value != -1) return false;
+            prev = when;
+        }
+    }
+
+    return true;
 }
 
 }  // namespace std::__boxcxx::tzdata

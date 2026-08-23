@@ -231,7 +231,8 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
-             me info say reboot bye defrag fsck ipc_test memtag hw
+             me info say reboot bye defrag fsck ipc_test memtag hw \
+             timezone
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -433,6 +434,11 @@ $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a
 	@cd $(DISPLAY_DIR) && $(MAKE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
 
+# `timezone` carries the zone database, which is C++. Stated BEFORE the rule
+# below and not inside it: a target line between a rule and its recipe ends
+# that rule, which would leave every other utility with no recipe at all.
+$(UTILS_DIR)/timezone.elf: $(USERSPACE_DIR)/boxcxx/libboxcxx.a
+
 # Build utilities
 $(UTIL_ELFS): $(USERSPACE_DIR)/boxlib/libbox.a
 	@echo "Building utilities..."
@@ -545,6 +551,7 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(UTILS_DIR)/bye.elf     "utility,system" \
 		$(UTILS_DIR)/defrag.elf  "utility,storage" \
 		$(UTILS_DIR)/fsck.elf    "utility,storage" \
+		$(UTILS_DIR)/timezone.elf "utility,system,clock" \
 		$(USERSPACE_DIR)/hello.txt   "message,text" \
 		$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 		$(USERSPACE_DIR)/testbin.bin "binary, test:forerror, emptyfile" \
