@@ -129,7 +129,22 @@ int xhci_init(void) {
     }
 
     ctrl->mmio_base_phys = bar0_full;
-    ctrl->mmio_size = 0x10000;  // 64KB default; refined after reading capability registers
+    /* One page, and only to read the capability registers — CAPLENGTH,
+     * HCSPARAMS1, DBOFF and RTSOFF all live in the first 0x20 bytes. The real
+     * extent is computed from those and mapped below.
+     *
+     * This used to be a flat 64 KB "default, refined after reading capability
+     * registers", and nothing refined it. A guess about somebody else's
+     * hardware is not a default; it is a number that happens to be right on
+     * the machines you tried. On a Gigabyte B365 whose runtime registers sit
+     * past 64 KB it was wrong, and the first write to ERSTSZ was a write to an
+     * unmapped page.
+     *
+     * A probe window of one page also means the remap below runs on EVERY
+     * controller, so the path is exercised by every boot instead of only on
+     * the hardware that needs it — which is how it came to be untested in the
+     * first place. */
+    ctrl->mmio_size = 0x1000;
     debug_printf("[xHCI] MMIO base: 0x%llx (size: 0x%llx)\n",
                  ctrl->mmio_base_phys, ctrl->mmio_size);
 
@@ -194,11 +209,77 @@ int xhci_init(void) {
     debug_printf("[xHCI] Max slots: %u  Max ports: %u  Max interrupters: %u\n",
                  ctrl->max_slots, ctrl->max_ports, ctrl->max_interrupters);
 
-    ctrl->op_regs = (xhci_op_regs_t*)((uint8_t*)ctrl->cap_regs + caplength);
-
     uint32_t rtsoff = ctrl->cap_regs->rtsoff & 0xFFFFFFE0;
     uint32_t dboff = ctrl->cap_regs->dboff & 0xFFFFFFFC;
 
+    /* How much of this controller do we actually have to reach?
+     *
+     * The 64 KB mapped above was a guess with a comment promising it would be
+     * "refined after reading capability registers", and nothing refined it.
+     * Every pointer below is computed from a register the CONTROLLER fills in
+     * — RTSOFF, DBOFF, the port count — and none of them was checked against
+     * the size of the window they land in. On a controller whose runtime
+     * registers sit past 64 KB, the very first write to ERSTSZ is a write to
+     * an unmapped page: BoxOS took exactly that on a Gigabyte B365 on
+     * 2026-08-24, a kernel #PF at xhci_init+0x24d storing 1 into 0x28(%r12).
+     *
+     * A hardcoded size is a guess about somebody else's hardware. The
+     * controller already tells us where its last register is; ask it, and map
+     * to there. The three extents below are the three furthest things this
+     * driver touches, straight from the xHCI specification:
+     *
+     *   operational + 0x400 + MaxPorts * 0x10   the port register sets
+     *   RTSOFF + 0x20 + MaxIntrs * 0x20         runtime + interrupter array
+     *   DBOFF + (MaxSlots + 1) * 4              the doorbell array
+     */
+    uint64_t need_ports   = (uint64_t)caplength + 0x400
+                          + (uint64_t)ctrl->max_ports * 0x10;
+    uint64_t need_runtime = (uint64_t)rtsoff + 0x20
+                          + (uint64_t)ctrl->max_interrupters * 0x20;
+    uint64_t need_db      = (uint64_t)dboff
+                          + ((uint64_t)ctrl->max_slots + 1) * 4;
+
+    uint64_t need = need_ports;
+    if (need_runtime > need) need = need_runtime;
+    if (need_db      > need) need = need_db;
+    need = (need + 0xFFFULL) & ~0xFFFULL;
+
+    /* A ceiling, because these are still numbers a device chose. The xHCI
+     * specification caps the register space a controller may claim well below
+     * this; anything asking for more is broken, and mapping gigabytes on its
+     * say-so would be the kernel helping it. */
+    const uint64_t XHCI_MMIO_SANE_MAX = 0x100000;   /* 1 MB */
+    if (need > XHCI_MMIO_SANE_MAX) {
+        kprintf("[xHCI] ERROR: controller claims 0x%llx bytes of register "
+                     "space (RTSOFF=0x%x DBOFF=0x%x ports=%u intrs=%u slots=%u) "
+                     "— refusing\n", (unsigned long long)need, rtsoff, dboff,
+                     ctrl->max_ports, ctrl->max_interrupters, ctrl->max_slots);
+        goto cleanup_resources;
+    }
+
+    if (need > ctrl->mmio_size) {
+        /* kprintf: this is a fact about the machine, and the machine is the
+         * thing we do not know. It printed nothing on the board where the
+         * absence of it cost a kernel #PF. */
+        kprintf("[xHCI] register space: 0x%llx bytes "
+                "(CAPLENGTH=0x%x RTSOFF=0x%x DBOFF=0x%x ports=%u intrs=%u slots=%u)\n",
+                (unsigned long long)need, caplength, rtsoff, dboff,
+                ctrl->max_ports, ctrl->max_interrupters, ctrl->max_slots);
+
+        vmm_unmap_mmio(mmio_virt, ctrl->mmio_size);
+
+        mmio_virt = vmm_map_mmio(ctrl->mmio_base_phys, need,
+                                 VMM_FLAG_PRESENT | VMM_FLAG_WRITABLE);
+        if (!mmio_virt) {
+            debug_printf("[xHCI] ERROR: cannot map 0x%llx bytes of MMIO: %s\n",
+                         (unsigned long long)need, vmm_get_last_error());
+            return -1;
+        }
+        ctrl->mmio_size = need;
+        ctrl->cap_regs  = (xhci_cap_regs_t*)mmio_virt;
+    }
+
+    ctrl->op_regs = (xhci_op_regs_t*)((uint8_t*)ctrl->cap_regs + caplength);
     ctrl->runtime_regs = (xhci_runtime_regs_t*)((uint8_t*)ctrl->cap_regs + rtsoff);
     ctrl->doorbells = (xhci_doorbell_array_t*)((uint8_t*)ctrl->cap_regs + dboff);
     ctrl->ports = (xhci_port_regs_t*)((uint8_t*)ctrl->op_regs + 0x400);
