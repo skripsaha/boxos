@@ -175,6 +175,42 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
             ++fmt;
         }
 
+        /* Precision. It existed in ten format strings across the ACPI driver
+         * before it existed here, and every one of them printed the literal
+         * ".4s" and then handed the NEXT argument to the wrong conversion —
+         * so "[ACPI] Table %.4s checksum failed (len=%u)" reported a length
+         * that was really a pointer. Diagnostics that lie are worse than
+         * diagnostics that are missing, and these are the diagnostics of the
+         * subsystem you reach for when a machine you have never seen refuses
+         * to boot.
+         *
+         * For %s it is what makes a four-character ACPI signature printable
+         * at all: those are four bare bytes with no NUL after them, so the
+         * length must come from the format and not from the data. For the
+         * numeric conversions the value is parsed and ignored, which is still
+         * strictly better than leaving the '.' to fall through into the
+         * conversion switch as if it were one. */
+        int precision = -1;                     /* -1 = unspecified */
+        if (*fmt == '.')
+        {
+            ++fmt;
+            precision = 0;
+            if (*fmt == '*')
+            {
+                precision = va_arg(args, int);
+                if (precision < 0) precision = -1;
+                ++fmt;
+            }
+            else
+            {
+                while (*fmt >= '0' && *fmt <= '9')
+                {
+                    precision = precision * 10 + (*fmt - '0');
+                    ++fmt;
+                }
+            }
+        }
+
         int longflag = 0, longlongflag = 0, sizeflag = 0;
         if (*fmt == 'z')
         {
@@ -259,7 +295,20 @@ static int kvformat(const kfmt_ops_t *ops, void *ctx,
         {
             str = va_arg(args, const char *);
             if (!str) str = "(null)";
-            str_len = strlen(str);
+            if (precision >= 0)
+            {
+                /* Bounded, and it must NOT walk off looking for a NUL: the
+                 * argument is allowed to have none. Stop at the precision or
+                 * at a terminator, whichever comes first — which is exactly
+                 * what C requires of "%.Ns". */
+                str_len = 0;
+                while (str_len < (size_t)precision && str[str_len] != '\0')
+                    ++str_len;
+            }
+            else
+            {
+                str_len = strlen(str);
+            }
             break;
         }
         case 'c':

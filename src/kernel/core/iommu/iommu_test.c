@@ -37,7 +37,13 @@ void IommuPresenceTest(void) {
                     "(backend cap reached — OK)\n");
         }
     } else {
-        kprintf("[IOMMU TEST]   note: no DMAR/IVRS — IOMMU dormant\n");
+        /* Say what is actually known. iommu_present() reports whether a
+         * backend registered itself during iommu_init(), which is a different
+         * fact from whether the firmware published DMAR or IVRS — the tables
+         * can be there and the backend still decline, which is exactly what
+         * happened on the first machine that had one. */
+        kprintf("[IOMMU TEST]   note: no backend registered — IOMMU dormant "
+                "(firmware tables: see the [ACPI] inventory above)\n");
     }
 
     if (fail == 0)

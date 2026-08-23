@@ -244,11 +244,53 @@ static bool s5_in_table_cb(acpi_sdt_header_t* tbl, void* user) {
     return true;
 }
 
+/* What the firmware actually handed us, said out loud once.
+ *
+ * kprintf rather than debug_printf, deliberately. Which root table the
+ * firmware published and which tables hang off it is the first question asked
+ * of every machine BoxOS has never run on before, and the answer decides
+ * whether a missing subsystem is a missing feature or a parser that walked
+ * past it. Hiding that behind a build flag means the one boot where it matters
+ * — the first one, on someone else's hardware, photographed off a screen — is
+ * the boot that does not have it. It costs one line and one pass over at most
+ * a few dozen pointers, once.
+ */
+static void acpi_log_inventory(acpi_rsdp_t* rsdp) {
+    kprintf("[ACPI] RSDP rev=%u", (unsigned)rsdp->revision);
+    if (g_xsdt)
+        kprintf(" XSDT=0x%lx (%u tables)",
+                (unsigned long)rsdp->xsdt_address, g_xsdt_count);
+    if (g_rsdt)
+        kprintf(" RSDT=0x%lx (%u tables)%s",
+                (unsigned long)rsdp->rsdt_address, g_rsdt_count,
+                g_xsdt ? " [unused: XSDT wins]" : "");
+    kprintf("\n[ACPI] tables: ");
+
+    /* One pass over whichever root table is authoritative. The iterator
+     * filters by signature, so ask it for every signature we see by walking
+     * the root ourselves — cheaper and simpler than 30 lookups. */
+    uint32_t n = g_xsdt ? g_xsdt_count : g_rsdt_count;
+    uint32_t shown = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        uintptr_t phys = g_xsdt ? (uintptr_t)g_xsdt->entries[i]
+                                : (uintptr_t)g_rsdt->entries[i];
+        if (!phys) continue;
+        acpi_sdt_header_t* hdr = map_and_validate_table(phys);
+        if (!hdr) { kprintf("<bad@0x%lx> ", (unsigned long)phys); continue; }
+        kprintf("%.4s ", hdr->signature);
+        shown++;
+    }
+    if (shown == 0) kprintf("(none)");
+    kprintf("\n");
+}
+
 acpi_error_t acpi_parse_tables(acpi_rsdp_t* rsdp) {
     if (!rsdp) return ACPI_ERR_INVALID_RSDP;
 
     acpi_error_t err = cache_root_tables(rsdp);
     if (err != ACPI_OK) return err;
+
+    acpi_log_inventory(rsdp);
 
     /* FADT lookup (signature "FACP"). */
     acpi_fadt_t* fadt = (acpi_fadt_t*)acpi_find_table("FACP");
