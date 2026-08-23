@@ -82,9 +82,29 @@ _Static_assert(sizeof(erst_entry_t) == 32, "ERST entry = 32 bytes");
 
 static acpi_erst_t* g_erst = NULL;
 
+/* The entry array, and how many of it are actually THERE.
+ *
+ * instruction_entry_count is a firmware-supplied number that used to be
+ * returned as-is, and every loop over the array trusted it. A table that
+ * declares more entries than its own header.length can hold sends those loops
+ * reading past the end of the mapping — the count and the length are two
+ * independent claims by the same firmware, and only one of them bounds real
+ * memory. Take the smaller. */
 static erst_entry_t* erst_entries(uint32_t* count) {
     if (!g_erst) { *count = 0; return NULL; }
-    *count = g_erst->instruction_entry_count;
+
+    uint32_t len = g_erst->header.length;
+    if (len <= sizeof(acpi_erst_t)) { *count = 0; return NULL; }
+
+    uint32_t fits = (uint32_t)((len - sizeof(acpi_erst_t)) / sizeof(erst_entry_t));
+    uint32_t said = g_erst->instruction_entry_count;
+
+    if (said > fits) {
+        debug_printf("[ERST] table declares %u instructions but only %u fit in "
+                     "its %u bytes — trusting the length\n", said, fits, len);
+        said = fits;
+    }
+    *count = said;
     return (erst_entry_t*)((uint8_t*)g_erst + sizeof(acpi_erst_t));
 }
 
