@@ -2,13 +2,26 @@
 [ORG 0x8000]
 DEFAULT ABS
 
-; Memory map (dynamic layout — addresses computed from actual kernel size):
-; 0x0500              - E820 memory map
-; 0x7C00              - Stage1 (512 bytes)
-; 0x8000              - Stage2 (8192 bytes = 16 sectors)
-; 0x9000              - Boot info for kernel (structured, versioned)
-; 0x9100              - TagFS superblock buffer (512 bytes)
-; 0x9300              - TagFS metadata buffer (512 bytes)
+; Memory map (dynamic layout — addresses computed from actual kernel size).
+; Every range below is claimed by exactly one owner, and the ones that follow
+; this image start ABOVE it. That was not true until 2026-08-23: boot_info sat
+; at 0x9000 while this binary had grown past 0x904F, so the handoff structure
+; was written into the loader's own message strings, and the TagFS superblock
+; buffer had 177 bytes of clearance left. Both were harmless by accident — the
+; strings are never printed again, and the image had not yet grown that last
+; inch — and neither was harmless by construction. Stage1 also loads all
+; sixteen sectors unconditionally, so 0x8000..0x9FFF is written in full
+; whatever this binary's actual size is; the window is stage2's, entire.
+; The assertions at the bottom of this file enforce the map rather than
+; describe it.
+; 0x00500..0x01103    - E820 memory map (header + up to 128 x 24-byte entries)
+; 0x01200..0x01217    - Stage1 scratch (drive, EDD flag, geometry, DAP)
+; 0x07000             - 16-bit stack top, grows down
+; 0x07C00             - Stage1 (512 bytes)
+; 0x08000..0x09FFF    - Stage2 (16 sectors — the whole window, always loaded)
+; 0x0A000             - Boot info for kernel (structured, versioned)
+; 0x0A200             - TagFS superblock buffer (512 bytes)
+; 0x0A400             - TagFS metadata buffer (512 bytes)
 ; 0x10000             - Bounce buffer for INT 13h reads (32KB)
 ; 0x100000            - Kernel run address (1MB, linked address, loaded via Unreal Mode)
 ; kernel_end + 4KB    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - DYNAMIC
@@ -37,9 +50,25 @@ E820_COUNT_ADDR       equ 0x500
 E820_SIZE_ADDR        equ 0x502
 E820_MAP_ADDR         equ 0x504
 E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h
-BOOT_INFO_ADDR        equ 0x9000
+E820_SEG              equ E820_COUNT_ADDR >> 4   ; 0x0050:0000 = 0x500
+; Words to wipe before the firmware fills the map. It used to be a flat 1024,
+; which covers 2048 bytes — but the map reaches 0x504 + 128*24 = 0x1104, so
+; from the 34th entry onward the loader handed the kernel whatever had been in
+; that memory for any field the firmware chose not to write.
+E820_REGION_WORDS     equ (4 + E820_MAX_ENTRIES * 24 + 1) / 2
 
 STAGE2_SIGNATURE      equ 0x2907
+
+; Layout facts the image build owns — where stage2 is written, how much of it
+; stage1 loads, and where the handoff block goes. They arrive by -D and are
+; deliberately given no default: a default is a second place the number is
+; written down, and the whole point of this session was finding the fourth.
+%ifndef STAGE2_SECTORS
+  %error "STAGE2_SECTORS must come from the build (-DSTAGE2_SECTORS=...)"
+%endif
+%ifndef BOOT_INFO_ADDR
+  %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
+%endif
 
 ; boot_info structure constants (shared contract with kernel)
 BOOT_INFO_MAGIC       equ 0x42583031     ; "BX01" — BoxOS boot info v1
@@ -51,8 +80,13 @@ TAGFS_MAGIC             equ 0x54414746  ; "TAGF"
 TAGFS_METADATA_MAGIC    equ 0x544D4554  ; "TMET"
 TAGFS_FILE_ACTIVE       equ 1
 
-TAGFS_SUPERBLOCK_ADDR   equ 0x9100
-TAGFS_METADATA_ADDR     equ 0x9300
+TAGFS_SUPERBLOCK_ADDR   equ 0xA200
+TAGFS_METADATA_ADDR     equ 0xA400
+; Segment forms of the two buffers. Derived, never spelled a second time: the
+; addresses above and the bare segment literals that used to accompany them
+; were two statements of one fact, and moving a buffer meant finding each one.
+TAGFS_SUPERBLOCK_SEG    equ TAGFS_SUPERBLOCK_ADDR >> 4
+TAGFS_METADATA_SEG      equ TAGFS_METADATA_ADDR >> 4
 
 KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
@@ -643,17 +677,28 @@ load_kernel_tagfs:
     mov si, msg_loading_tagfs
     call print_string_16
 
-    ; Adaptive multi-drive probe: BIOSes occasionally hand us the wrong
-    ; drive number (USB-emulated-as-HDD, multi-disk multi-boot, RAID arrays
-    ; that re-enumerate). Try whatever DL the BIOS gave us first, then if
-    ; that fails toggle 0x80↔0x81 and try the other Primary IDE drive.
-    ; Stage1's DL validation guarantees boot_drive_saved ∈ {0x80, 0x81},
-    ; so a single XOR with 1 selects the alternate channel — exactly two
-    ; probes total, no redundant retry of the failing initial drive.
+    ; The firmware told stage1 which handle to use, and stage1 passed it here
+    ; unchanged. Now that reads go through INT 13h — the same interface the
+    ; firmware used to load us — that handle is right by construction.
+    ;
+    ; The old code toggled 0x80 <-> 0x81 here, on the theory that BIOSes
+    ; "occasionally hand us the wrong drive number". That theory only made
+    ; sense while reads bypassed the BIOS and had to name an IDE channel
+    ; themselves; the number was never wrong, it just did not mean what the
+    ; PIO path needed it to mean. The toggle also assumed DL was one of
+    ; exactly two values, which stopped being true the moment stage1 started
+    ; accepting the 0x00 that USB-FDD emulation legitimately reports — XOR 1
+    ; would have turned it into 0x01, a handle belonging to nothing.
+    ;
+    ; One fallback survives, and only one: 0x80, the first hard disk by every
+    ; convention there is, for firmware that hands out a handle it then does
+    ; not honour.
     call tagfs_read_superblock
     jnc .got_superblock
 
-    xor byte [boot_drive_saved], 1
+    cmp byte [boot_drive_saved], 0x80
+    je .tagfs_error
+    mov byte [boot_drive_saved], 0x80
     call tagfs_read_superblock
     jc  .tagfs_error
 
@@ -685,6 +730,7 @@ load_kernel_tagfs:
 .tagfs_error:
     mov si, msg_tagfs_error
     call print_string_16
+    call print_disk_status
     jmp .halt
 
 .kernel_not_found:
@@ -693,8 +739,6 @@ load_kernel_tagfs:
     jmp .halt
 
 .load_error:
-    mov si, msg_kernel_load_error
-    call print_string_16
     jmp .halt
 
 .halt:
@@ -706,7 +750,7 @@ load_kernel_tagfs:
 ; Returns: CF=0 on success, CF=1 on error
 ;
 ; Reads the TagFS superblock at LBA = TAGFS_SUPERBLOCK_SECTOR via raw ATA
-; PIO (see pio_read_lba_dap). Verifies the magic ("TAGF") at offset 0.
+; the firmware (see disk_read_dap). Verifies the magic ("TAGF") at offset 0.
 ; PIO is deterministic — no retry needed; either the disk yields the data
 ; or it doesn't.
 tagfs_read_superblock:
@@ -716,10 +760,10 @@ tagfs_read_superblock:
 
     mov si, dap_tagfs_superblock
     mov dl, [boot_drive_saved]
-    call pio_read_lba_dap
+    call disk_read_dap
     jc .error
 
-    mov ax, 0x910
+    mov ax, TAGFS_SUPERBLOCK_SEG
     mov es, ax
     xor bx, bx
     mov eax, [es:bx]
@@ -752,8 +796,8 @@ tagfs_find_kernel:
     push bx
     push es
 
-    ; Superblock already loaded at 0x9100 by tagfs_read_superblock
-    mov ax, 0x910
+    ; Superblock already loaded at TAGFS_SUPERBLOCK_ADDR by tagfs_read_superblock
+    mov ax, TAGFS_SUPERBLOCK_SEG
     mov es, ax
     xor bx, bx
 
@@ -897,40 +941,25 @@ tagfs_load_kernel_file:
     mov word [dap_kernel_chunk + 6], KERNEL_BOUNCE_SEG
     mov [dap_kernel_chunk + 8], ebx
 
-    ; INT 13h with 3-attempt retry. Before each retry, reset the disk controller
-    ; (INT 13h AH=0x00) to clear its error state — required on real hardware
-    ; where a failed read leaves the controller in an undefined condition.
-    push bp
-    mov bp, 3
-.read_retry:
+    ; No retry loop here. disk_read_dap retries with a controller reset, falls
+    ; back from EDD to CHS, and resumes from the sectors that actually landed
+    ; instead of re-reading the chunk from its start. A second loop around it
+    ; would multiply one budget by another and make the failure that finally
+    ; escapes belong to no layer in particular.
     mov si, dap_kernel_chunk
     mov dl, [boot_drive_saved]
-    call pio_read_lba_dap
-    jnc .read_ok
-    ; Reset disk controller before retry to clear hardware error state
-    xor ah, ah
-    mov dl, [boot_drive_saved]
-    int 0x13                ; ignore reset result — just clear controller state
-    dec bp
-    jnz .read_retry
-    pop bp
-    pop eax
-    pop ecx
-    jmp .load_error
+    call disk_read_dap
+    jc  .read_failed
 
-.read_ok:
-    pop bp
     pop eax     ; sectors read this pass
     pop ecx     ; remaining sector count
 
-    ; Restore Unreal Mode: INT 13h reloads ES/DS with real-mode 64KB limit.
-    ; Without this, a32 rep movsd to ES:EDI=0x100000+ silently wraps.
-    push eax
-    push ecx
-    call restore_unreal_mode
-    pop ecx
-    pop eax
-
+    ; Unreal mode is already back: disk_read_dap restores it on the way out,
+    ; for every caller, precisely so that adding a read somewhere cannot
+    ; quietly break the copy somewhere else. This is where a second call used
+    ; to sit — two mechanisms for one invariant, and the one that gets
+    ; maintained is never reliably the same one.
+    ;
     ; Copy chunk: bounce buffer (DS:ESI=0x10000) → kernel (ES:EDI=0x100000+)
     ; Both DS and ES now have 4GB limit from restore_unreal_mode.
     push ecx
@@ -969,11 +998,22 @@ tagfs_load_kernel_file:
     clc
     ret
 
+.read_failed:
+    pop eax
+    pop ecx
+    jmp .load_error
+
 .size_error:
+    ; The disk did nothing wrong here, so do not print its status underneath.
     mov si, msg_kernel_too_large
     call print_string_16
+    jmp .unwind
 
 .load_error:
+    mov si, msg_kernel_load_error_pre
+    call print_string_16
+    call print_disk_status
+.unwind:
     pop edi
     pop esi
     pop edx
@@ -994,9 +1034,9 @@ tagfs_find_kernel_by_header:
     push si
     push es
 
-    ; Compute data_start_sector from superblock (already at 0x9100):
+    ; Compute data_start_sector from superblock (already in its buffer):
     ;   data_start = block_bitmap_sector (offset 60) + block_bitmap_sector_count (offset 64)
-    mov ax, 0x910
+    mov ax, TAGFS_SUPERBLOCK_SEG
     mov es, ax
     xor bx, bx
     mov eax, [es:bx + 60]          ; block_bitmap_sector
@@ -1017,16 +1057,21 @@ tagfs_find_kernel_by_header:
     shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
     add eax, [tagfs_data_start]
 
-    ; Read first sector of this block into 0x9300 buffer
+    ; Read first sector of this block into the metadata buffer
     mov [dap_tagfs_metadata + 8], eax
-    mov dword [dap_tagfs_metadata + 10], 0
+    ; +12, not +10. The LBA is 64 bits at offset 8; zeroing a dword at +10
+    ; wrote over the top half of the 32-bit value the line above had just
+    ; stored, which is invisible while every sector we ask for is below
+    ; 65536 and silently reads the wrong sector on the first image that
+    ; isn't.
+    mov dword [dap_tagfs_metadata + 12], 0
     mov si, dap_tagfs_metadata
     mov dl, [boot_drive_saved]
-    call pio_read_lba_dap
+    call disk_read_dap
     jc .hdr_scan_next
 
     ; Check for KERNEL magic at offset 2
-    mov ax, 0x930
+    mov ax, TAGFS_METADATA_SEG
     mov es, ax
     xor bx, bx
     cmp dword [es:bx + 2], KERNEL_HDR_MAGIC
@@ -1038,7 +1083,7 @@ tagfs_find_kernel_by_header:
     mov [kernel_start_block], edx
 
     ; Estimate block count from total blocks (overestimate is safe)
-    mov ax, 0x910
+    mov ax, TAGFS_SUPERBLOCK_SEG
     mov es, ax
     xor bx, bx
     mov eax, [es:bx + 12]          ; total_blocks
@@ -1083,16 +1128,16 @@ detect_memory_e820:
     mov si, msg_detecting_memory
     call print_string_16
 
-    mov ax, 0x50
+    mov ax, E820_SEG
     mov es, ax
     xor di, di
-    mov cx, 1024
+    mov cx, E820_REGION_WORDS
     xor ax, ax
     rep stosw
 
     xor ebx, ebx
     mov edx, 0x534D4150    ; 'SMAP'
-    mov ax, 0x50
+    mov ax, E820_SEG
     mov es, ax
     mov di, 4              ; entries start at ES:4 = physical 0x504 (0x500-0x503 = count/size header)
     xor bp, bp
@@ -1101,20 +1146,28 @@ detect_memory_e820:
     ; Re-establish ES on every iteration. Some real BIOSes (older AMI/Phoenix)
     ; have been known to clobber ES across INT 15h calls; explicit restore
     ; keeps ES:DI pointed at the correct map slot regardless.
-    mov ax, 0x50
+    mov ax, E820_SEG
     mov es, ax
 
     mov eax, 0xE820
     mov ecx, 24
     mov edx, 0x534D4150
     int 0x15
-    jc .e820_fail
+    jc .e820_end
 
     cmp eax, 0x534D4150
     jne .e820_fail
 
     cmp ecx, 20
     jl .skip_entry
+
+    ; A zero-length region describes nothing, and firmware does emit them.
+    ; Checked before the ACPI test below, not after: a 20-byte entry takes the
+    ; short path around that test, and the first version of this check sat on
+    ; the far side of it and so never saw one.
+    mov eax, [es:di + 8]
+    or  eax, [es:di + 12]
+    jz .skip_entry
 
     ; ACPI 3.0 24-byte entries carry a "valid" bit at offset +20 bit 0.
     ; If the BIOS reports 24 bytes AND the valid bit is 0, drop the entry.
@@ -1134,6 +1187,22 @@ detect_memory_e820:
 .skip_entry:
     test ebx, ebx
     jnz .e820_loop
+
+.e820_end:
+    ; Two ways in. From above, the firmware said "that was the last one" by
+    ; clearing EBX and we walked here. From the carry jump, it said the same
+    ; thing by setting the carry flag on a call that was not the first —
+    ; firmware is allowed to end the list either way, and Linux's own
+    ; detect_memory_e820 breaks out on carry and keeps what it has. The old
+    ; code treated that carry as a failure of the whole function: it threw the
+    ; collected map away and replaced it with the two or three entries INT 15h
+    ; AX=E801 can describe.
+    ; A kernel handed that map treats every ACPI table, every firmware
+    ; reservation and every MMIO hole below the RAM top as free memory, and
+    ; the PMM hands them out. Nothing about that failure looks like a
+    ; bootloader bug from where it lands.
+    test bp, bp
+    jz .e820_fail                   ; the very first call failed: no E820 here
 
 .e820_done:
 
@@ -1159,7 +1228,7 @@ detect_memory_e820:
     call print_string_16
 
     ; Fallback: create minimal memory map (entries start at ES:4 = physical 0x504)
-    mov ax, 0x50
+    mov ax, E820_SEG
     mov es, ax
     mov di, 4              ; entries start at offset 4, matching E820_MAP_ADDR = 0x504
 
@@ -1261,252 +1330,329 @@ detect_memory_e820:
     ret
 
 ;============================================================================
-; pio_read_lba_dap — Read sectors per DAP via raw ATA PIO LBA28.
+; disk_read_dap — read sectors per DAP through the firmware (INT 13h).
 ;
-; Bypasses BIOS INT 13h entirely. Talks directly to the Primary IDE port
-; range (0x1F0-0x1F7) which the PC/AT spec has frozen since 1981 and every
-; chipset (legacy IDE, SATA in IDE-compat mode, ICHx PIIX) honours. This
-; is what real OS bootloaders do once they're past the very first sector:
-; BIOS firmware varies wildly in correctness (BIOS-bochs-latest's AH=0x42
-; silently rejects sectors >= cyl1, AMI/Phoenix legacy quirks, etc.) but
-; the IDE controller itself is rock-solid.
+; This replaced a raw ATA PIO reader on 2026-08-23, and the reason is the
+; first boot of BoxOS on a real machine. The old code drove ports 0x1F0-0x1F7
+; directly, on the stated ground that "the IDE controller itself is rock-solid"
+; where BIOS firmware "varies wildly in correctness". Both halves of that are
+; true and it is still the wrong trade, because it answers a question nobody
+; asked: the controller is only rock-solid if the boot device is ON it. A USB
+; stick is not. Neither is an NVMe drive, and neither is a SATA disk on a board
+; whose chipset has no IDE compatibility mode — which is every board built in
+; the last decade, including the Gigabyte B365 this was found on. The old
+; header admitted as much in its own limitations section; what it did not say
+; is that "BIOS legacy boot" and "boot from anything that is not IDE" had
+; therefore become mutually exclusive.
 ;
-; AHCI-only systems (no IDE compat) and NVMe boot via UEFI → TagBoot.efi
-; uses BlockIO protocol; this path is for the BIOS legacy/CSM boot only.
+; INT 13h is not a compromise here. It is the only interface that knows how to
+; reach the device the firmware itself booted from, whatever that device is,
+; and it is the interface the firmware has already used successfully by the
+; time we run. The correctness worries are answered where they arise:
 ;
-; Limits:
-;   • LBA28 — first 256 M sectors (128 GB). Bootloader reads stay <100 MB
-;     so this is comfortable. Kernel's AHCI/ATA driver uses LBA48 once it
-;     takes over.
-;   • Single-sector PIO per IDE command — predictable, no DMA, no IRQ
-;     coupling. Slower than DMA but boot only reads ~few MB before kernel.
+;   * EDD is probed properly, once per drive — carry clear AND BX=AA55 AND the
+;     packet bit in CX. Firmware that does not implement AH=41h may return with
+;     carry clear and leave BX alone, and a loader that trusted carry would
+;     then call into a handler that is not there.
+;   * When EDD is absent, or spends its retry budget refusing, CHS takes over
+;     with a budget of its own and resumes where EDD stopped. A CSM shim over
+;     a USB stick can answer AH=41h and still fail AH=42h.
+;   * Every attempt is retried with a controller reset (AH=00h) between tries,
+;     and the budget is renewed after every chunk that lands. A stick behind a
+;     CSM commonly refuses its first access of the session and is fine after.
+;   * CHS reads one sector per call. AH=02h may not cross a track boundary, and
+;     computing where that boundary falls for every geometry the firmware might
+;     report is a larger surface than the extra calls cost.
 ;
-; Input:  SI = pointer to DAP (size, _, count, off, seg, lba_lo, lba_hi)
-;         DL = boot drive number from BIOS (0x80 = master, 0x81 = slave)
-; Output: CF=0 on success, CF=1 on error/timeout
-; Preserves: all GP registers (via pushad/popad), ES
+; ‼ THE CALLER'S PACKET IS NEVER HANDED TO THE FIRMWARE. AH=42h writes its
+; answer into the count field of whatever packet it was given, and every DAP in
+; this file is a static structure that gets reused — dap_tagfs_metadata is
+; passed to the firmware sixty-four times during a header scan, each time
+; expecting to still say "one sector". We read the request out of the caller's
+; packet once and drive the firmware with a private one, which is also what
+; makes the count field trustworthy enough to check.
+;
+; ‼ WHAT THE FIRMWARE SAYS IT MOVED IS CHECKED. Both functions report it —
+; AH=02h in AL, AH=42h in the packet — and a firmware that transfers less than
+; it was asked for returns carry CLEAR. A loader that reads only carry then
+; copies whatever was already in the bounce buffer into the kernel image and
+; jumps to it. A short read is a failed read; the retry resumes from the
+; sectors that did land, so nothing already read is read twice.
+;
+; The private packet is also the transfer position: the LBA it holds is the
+; next sector to fetch and the segment it holds is where that sector goes,
+; stepped by 0x20 per sector so the offset never has to wrap. The caller's
+; offset is folded into that segment on entry, which is what makes a 64-sector
+; request unable to run off the end of a 64 KB window no matter what offset it
+; started from.
+;
+; Unreal mode: INT 13h re-primes DS and ES with a 64 KB real-mode limit, which
+; would silently truncate the a32 addressing the kernel copy depends on. The
+; reader restores it after every call rather than leaving that to callers, so
+; that adding a read somewhere cannot quietly break the copy somewhere else.
+;
+; Input:  SI = pointer to DAP (EDD layout: size, _, count, off, seg, lba)
+;         DL = drive number, exactly as the firmware handed it to stage1
+; Output: CF = 0 on success, CF = 1 when every path and every retry failed
+;         drd_err = the last BIOS status byte, printed by the failure paths
+; Preserves: all GP registers (pushad/popad).
+;            DS and ES come back FLAT with base 0 -- unreal mode is restored
+;            once, on the way out, and that reload is what their values become.
+;            Every caller sets ES for itself immediately after the call, so
+;            there is nothing to preserve; saying so beats a push/pop pair that
+;            restores a value the restore then overwrites.
+; ‼ CF is set AFTER restore_unreal_mode, never before: that routine drives CR0
+;   through `or`/`and`, so it destroys flags. Reading CF across it is how the
+;   first version of this reader silently never detected EDD.
 ;============================================================================
-pio_read_lba_dap:
+DRD_CHUNK   equ 64                  ; sectors per EDD call
+DRD_RETRIES equ 5
+
+disk_read_dap:
     pushad
+
+    mov [drd_drive], dl
+
+    ;-- take the request; from here the firmware sees only our own packet ---
+    mov ax, [si + 2]
+    mov [drd_left], ax
+    mov eax, [si + 8]
+    mov [drd_pkt + 8], eax
+
+    ; Fold the caller's offset into the segment. Afterwards the offset is
+    ; under 16 bytes, so DRD_CHUNK sectors of transfer cannot reach 0x10000
+    ; from it — the wrap that would otherwise write the tail of a chunk over
+    ; the head of the same buffer.
+    mov ax, [si + 4]
+    mov bx, ax
+    and bx, 0x000F
+    mov [drd_pkt + 4], bx
+    shr ax, 4
+    add ax, [si + 6]
+    mov [drd_pkt + 6], ax
+
+    mov byte [drd_pkt + 0], 0x10
+    mov byte [drd_pkt + 1], 0
+    mov dword [drd_pkt + 12], 0     ; LBA high — we address 32 bits of sector
+
+    ; Probe once per drive. A second AH=41h per read would be honest and
+    ; pointless; a drive does not gain or lose EDD between reads.
+    mov al, [drd_probed_for]
+    cmp al, dl
+    je .probed
+    mov [drd_probed_for], dl
+    mov byte [drd_edd], 0
+
+    mov ah, 0x41
+    mov bx, 0x55AA
+    mov dl, [drd_drive]
+    int 0x13
+    jc .probe_geom
+    cmp bx, 0xAA55
+    jne .probe_geom
+    test cl, 1                      ; packet access (AH=42h)
+    jz .probe_geom
+    mov byte [drd_edd], 1
+
+.probe_geom:
+    ; Geometry is asked for unconditionally: it is what makes a CHS fallback
+    ; expressible, and it costs one call at boot. Heads is stored as DH+1, so
+    ; it is never zero when the call succeeded and both fields are zero when
+    ; it failed — which is why the loop below tests sectors-per-track alone.
     push es
-
-    ; Validate boot drive number. BIOS uses 0x80=primary HDD, 0x81=secondary.
-    ; Anything else (0x00 floppy, 0xFF "no drive", 0x82+ multi-disk USB) cannot
-    ; map to the Primary IDE channel we drive directly. Reject upfront — better
-    ; than silently reading the wrong device.
-    cmp dl, 0x80
-    je .dl_ok
-    cmp dl, 0x81
-    je .dl_ok
+    xor ax, ax
+    mov es, ax
+    xor di, di
+    mov ah, 0x08
+    mov dl, [drd_drive]
+    int 0x13
     pop es
-    popad
-    stc
-    ret
-.dl_ok:
+    jc .no_geom
+    movzx ax, cl
+    and ax, 0x3F
+    mov [drd_spt], ax
+    movzx ax, dh
+    inc ax
+    mov [drd_heads], ax
+    jmp .probed
+.no_geom:
+    mov word [drd_spt], 0
+    mov word [drd_heads], 0
 
-    ; AHCI-native detection moved into pio_wait_not_busy / pio_wait_drq:
-    ; reading 0x1F7 BEFORE any drive-select (0x1F6 write) is unreliable —
-    ; some BIOSes (notably Bochs's BIOS-bochs-latest after returning from
-    ; int 13h) leave the controller in a transient state where status
-    ; reads can return 0xFF momentarily even though IDE is alive. Doing
-    ; the check post-select inside the wait loops is correct: drive
-    ; register is set, controller has had time to clock the selection,
-    ; and 0xFF then truly means open-bus / no IDE decoding.
+.probed:
+    mov byte [drd_err], 0xFF        ; "no BIOS status recorded"
+    mov byte [drd_try], DRD_RETRIES
 
-    ; Compute drive-select base byte once: 0xE0 (master+LBA) or 0xF0 (slave+LBA).
-    ; DL bit 0 distinguishes master(0)/slave(1) given the validation above.
-    mov al, dl
-    and al, 1
-    shl al, 4                   ; 0x00 (master) or 0x10 (slave)
-    or  al, 0xE0                ; 0xE0 / 0xF0 — bit 6=LBA, bits 7,5=1
-    mov [pio_drive_base], al
-
-    ; Snapshot DAP into work variables (matches old layout).
-    movzx eax, word [si+2]
-    mov [dap_work_count], eax
-    mov ax, [si+4]
-    mov [dap_work_off], ax
-    mov ax, [si+6]
-    mov [dap_work_seg], ax
-    mov eax, [si+8]
-    mov [dap_work_lba], eax
-
-.next_sector:
-    cmp dword [dap_work_count], 0
+.next:
+    cmp word [drd_left], 0
     je .ok
 
-    ; LBA28 cap — refuse silently rather than alias high bits.
-    mov eax, [dap_work_lba]
-    cmp eax, 0x10000000         ; 256 M sectors = 128 GB
-    jae .err
+    cmp byte [drd_edd], 1
+    je .via_edd
 
-    ; --- Issue READ SECTORS (LBA28, single sector) ---
-    ; Order calibrated to work on every BIOS chain we've encountered:
-    ;
-    ;   (1) Wait BSY=0 on the currently-selected drive. Stage1's int 13h
-    ;       has already selected and used the drive, so the controller
-    ;       sits in DRDY=1/BSY=0 — wait_not_busy returns immediately.
-    ;       Reading status FIRST avoids the Bochs BIOS-bochs-latest
-    ;       quirk where reading 0x1F7 right after a fresh out 0x1F6
-    ;       returns transient open-bus 0xFF until the controller clocks
-    ;       the new selection.
-    ;   (2) Write Device register (0x1F6) — drive byte | LBA[27:24]. If
-    ;       the drive is already the same one stage1 used, this is a
-    ;       hardware no-op. After multi-drive XOR-toggle it actually
-    ;       switches drives, and the 4× settle reads below clock that.
-    ;   (3) 4× Status reads — ATA-3 §9.4.2 drive-select settle (~400 ns).
-    ;       Required when switching master↔slave; harmless no-op when
-    ;       re-selecting the same drive. Mirrors Linux libata-sff.
-    ;   (4) Sector count, LBA bytes (0x1F2..0x1F5).
-    ;   (5) Command 0x20 (READ SECTORS).
-    ;   (6) Wait DRQ=1.
-    ;   (7) Transfer via INSW.
+    ;-- CHS, one sector per call -------------------------------------------
+    cmp word [drd_spt], 0
+    je .exhausted
 
-    ; (1) Wait BSY=0 on currently-selected drive.
-    call pio_wait_not_busy
-    jc .err
+    ; sector   = (LBA % SPT) + 1
+    ; head     = (LBA / SPT) % HEADS
+    ; cylinder = (LBA / SPT) / HEADS
+    mov eax, [drd_pkt + 8]
+    xor edx, edx
+    movzx ecx, word [drd_spt]
+    div ecx
+    inc dl
+    mov bl, dl                      ; 1-based sector, held until CL is built
+    xor edx, edx
+    movzx ecx, word [drd_heads]
+    div ecx
+    mov dh, dl                      ; head straight into its INT 13h register
+    cmp eax, 1023
+    ja .exhausted                   ; past what CHS can name
 
-    ; (2) Drive register: base | LBA[27:24]
-    mov eax, [dap_work_lba]
-    shr eax, 24
-    and al, 0x0F
-    or  al, [pio_drive_base]
-    mov dx, 0x1F6
-    out dx, al
-
-    ; (3) Drive-select settle: 4× Status reads = ~400 ns bus cycles.
-    mov dx, 0x1F7
-    in al, dx
-    in al, dx
-    in al, dx
-    in al, dx
-
-    ; Sector count (0x1F2) = 1
-    mov dx, 0x1F2
-    mov al, 1
-    out dx, al
-
-    ; LBA[7:0]   → 0x1F3
-    mov eax, [dap_work_lba]
-    mov dx, 0x1F3
-    out dx, al
-
-    ; LBA[15:8]  → 0x1F4
-    mov eax, [dap_work_lba]
-    shr eax, 8
-    mov dx, 0x1F4
-    out dx, al
-
-    ; LBA[23:16] → 0x1F5
-    mov eax, [dap_work_lba]
-    shr eax, 16
-    mov dx, 0x1F5
-    out dx, al
-
-    ; Command (0x1F7) = 0x20 (READ SECTORS, LBA mode via drive bit 6=1)
-    mov dx, 0x1F7
-    mov al, 0x20
-    out dx, al
-
-    ; Wait DRQ=1 + BSY=0 (also detects ERR/DF).
-    call pio_wait_drq
-    jc .err
-
-    ; Transfer 512 bytes = 256 words via INSW from data port 0x1F0.
-    mov ax, [dap_work_seg]
+    mov ch, al
+    mov cl, ah
+    shl cl, 6
+    or  cl, bl
+    mov dl, [drd_drive]
+    mov ax, [drd_pkt + 6]
     mov es, ax
-    mov di, [dap_work_off]
-    mov dx, 0x1F0
-    mov cx, 256
-    rep insw
+    mov bx, [drd_pkt + 4]
+    mov ax, 0x0201                  ; AH=02h read, AL=1 sector
+    int 0x13
+    jc .retry
+    cmp al, 1                       ; AL = sectors actually transferred
+    jne .short
+    mov ax, 1
+    jmp .advance
 
-    ; Advance dest pointer + LBA + counter.
-    mov ax, [dap_work_off]
-    add ax, 512
-    mov [dap_work_off], ax
-    jnc .no_seg_bump
-    mov ax, [dap_work_seg]
-    add ax, 0x1000              ; bump segment by 64 KB on offset wraparound
-    mov [dap_work_seg], ax
-.no_seg_bump:
-    inc dword [dap_work_lba]
-    dec dword [dap_work_count]
-    jmp .next_sector
+    ;-- EDD ----------------------------------------------------------------
+.via_edd:
+    mov ax, [drd_left]
+    cmp ax, DRD_CHUNK
+    jbe .asking
+    mov ax, DRD_CHUNK
+.asking:
+    mov [drd_asked], ax
+    mov [drd_pkt + 2], ax           ; rewritten every call: the firmware's
+    mov si, drd_pkt                 ; answer lands in this same field
+    mov ah, 0x42
+    mov dl, [drd_drive]
+    int 0x13
+    jc .retry
+    mov ax, [drd_pkt + 2]
+    test ax, ax
+    jz .short                       ; agreed, and moved nothing
+    cmp ax, [drd_asked]
+    ja .short                       ; claimed more than it was asked for
+
+.advance:                           ; AX = sectors that actually landed
+    sub [drd_left], ax
+    movzx ecx, ax
+    add [drd_pkt + 8], ecx          ; next LBA
+    shl cx, 5                       ; sectors * 0x20 = segment step
+    add [drd_pkt + 6], cx           ; next destination
+    mov byte [drd_try], DRD_RETRIES
+    jmp .next
+
+.short:
+    ; Carry clear and nothing usable moved. Record that as its own status so
+    ; the screen can tell "the firmware refused" from "the firmware agreed".
+    xor ah, ah
+.retry:
+    mov [drd_err], ah
+    dec byte [drd_try]
+    jz .exhausted
+    xor ax, ax                      ; AH=00h — reset, clearing the error latch
+    mov dl, [drd_drive]
+    int 0x13
+    jmp .next
+
+.exhausted:
+    ; EDD having failed is not the drive having failed. Hand CHS its own
+    ; budget before declaring the read impossible, and stop claiming EDD.
+    ; Whatever already landed stays landed — CHS resumes, it does not restart.
+    cmp byte [drd_edd], 1
+    jne .fail
+    mov byte [drd_edd], 0
+    mov byte [drd_try], DRD_RETRIES
+    jmp .next
 
 .ok:
-    pop es
+    call restore_unreal_mode        ; clobbers AX and flags -- both fixed below
     popad
     clc
     ret
-
-.err:
-    pop es
+.fail:
+    call restore_unreal_mode
     popad
     stc
     ret
 
-
-; pio_wait_not_busy — poll 0x1F7 until BSY (bit 7) clears, with timeout.
-; Output: CF=0 ready, CF=1 timeout
-pio_wait_not_busy:
-    push ecx
-    push dx
-    mov dx, 0x1F7
-    ; Timeout sized for slowest realistic media: 5400-RPM SATA HDD with thermal
-    ; throttling can take ~100 ms for first read after idle; weak-MCU USB 3.0
-    ; sticks similar. 0x40000 polls × ~1 µs/IO ≈ 260 ms — comfortably above any
-    ; real-HW worst case while still bounded for diagnostic clarity.
-    mov ecx, 0x40000
-.wait:
-    in al, dx
-    test al, 0x80               ; BSY?
-    jz .ready
-    dec ecx
-    jnz .wait
-    pop dx
-    pop ecx
-    stc
-    ret
-.ready:
-    pop dx
-    pop ecx
-    clc
+;--- print_hex8 — AL as two hex digits. The three fatal disk paths print the
+;--- BIOS status next to their message: "0x80" is a timeout and the device
+;--- never answered, "0x04" is sector-not-found and the geometry is wrong,
+;--- "0x00" is a firmware that reported success and moved nothing, and "0xFF"
+;--- is no INT 13h having returned a status at all. On a machine with no
+;--- serial port that difference is the entire diagnosis.
+print_disk_status:
+    mov si, msg_bios_status
+    call print_string_16
+    mov al, [drd_err]
+    call print_hex8
+    mov si, msg_crlf
+    call print_string_16
     ret
 
-
-; pio_wait_drq — poll 0x1F7 until BSY=0 AND (DRQ=1 OR ERR/DF set).
-; Output: CF=0 data ready, CF=1 error or timeout
-pio_wait_drq:
-    push ecx
-    push dx
-    mov dx, 0x1F7
-    mov ecx, 0x40000
-.wait:
-    in al, dx
-    test al, 0x80               ; BSY?
-    jnz .pending
-    test al, 0x21               ; ERR (bit 0) or DF (bit 5)?
-    jnz .err_status
-    test al, 0x08               ; DRQ?
-    jnz .ready
-.pending:
-    dec ecx
-    jnz .wait
-.err_status:
-    pop dx
-    pop ecx
-    stc
+print_hex8:
+    push bx
+    push ax
+    shr al, 4
+    call .nibble
+    pop ax
+    and al, 0x0F
+    call .nibble
+    pop bx
     ret
-.ready:
-    pop dx
-    pop ecx
-    clc
+.nibble:
+    add al, '0'
+    cmp al, '9'
+    jbe .emit
+    add al, 7                       ; '9'+1 .. 'A'
+.emit:
+    mov ah, 0x0E
+    xor bx, bx
+    int 0x10
     ret
 
-
+;--- The private packet is the transfer position. drd_pkt+8 is the next sector
+;--- to fetch, drd_pkt+6 is where it goes; nothing else holds either number.
+align 4
+drd_pkt:            times 16 db 0   ; our EDD Disk Address Packet
+drd_left:           dw 0            ; sectors still owed to the caller
+drd_asked:          dw 0            ; sectors requested of the call in flight
+drd_spt:            dw 0
+drd_heads:          dw 0
+drd_drive:          db 0
+drd_probed_for:     db 0xFF         ; 0xFF = nothing probed yet
+drd_edd:            db 0
+drd_try:            db 0
+drd_err:            db 0xFF         ; last BIOS status; 0xFF = never got one
+;----------------------------------------------------------------------------
+; Everything from here to the end of the file runs in 32-bit protected mode.
+;
+; This directive is load-bearing and it was lost once, on 2026-08-23, while the
+; disk reader above was being rewritten: it had sat between the old PIO
+; reader's data and this label, and it went out with the code around it. NASM
+; then emitted 16-bit encodings for setup_paging, and the CPU — already in
+; protected mode — read the first `call` (E8 64 FF, a rel16) as a rel32 that
+; swallowed the two bytes behind it, jumped to 0x51670A3E, and ran off through
+; unmapped memory with EIP climbing. Nothing printed, nothing faulted, no
+; message said why. The assertion at the bottom of this file exists so that
+; deleting this line again is a build error instead of that.
+;----------------------------------------------------------------------------
 [BITS 32]
 
-; Returns ECX = number of 2MB pages to identity-map (min 64, max 2048 = 4GB)
 calculate_identity_map_size:
     push eax
     push ebx
@@ -1799,7 +1945,7 @@ dap_tagfs_superblock:
     db 0x10, 0
     dw 1
     dw 0x0000
-    dw 0x0910           ; 0x9100 physical
+    dw TAGFS_SUPERBLOCK_SEG
     dq TAGFS_SUPERBLOCK_SECTOR
 
 align 4
@@ -1807,7 +1953,7 @@ dap_tagfs_metadata:
     db 0x10, 0
     dw 1
     dw 0x0000
-    dw 0x0930           ; 0x9300 physical
+    dw TAGFS_METADATA_SEG
     dq TAGFS_METADATA_START
 
 align 4
@@ -1826,7 +1972,6 @@ boot_drive_saved:       db 0
 ;   0xE0 = 1110_xxxx = master + LBA mode
 ;   0xF0 = 1111_xxxx = slave  + LBA mode
 ; The low nibble carries LBA[27:24] at issue time and is OR-ed in per sector.
-pio_drive_base:         db 0
 align 4
 dap_work_lba:           dd 0
 dap_work_count:         dd 0
@@ -1862,7 +2007,9 @@ msg_loading_tagfs     db 'Loading kernel via TagFS (Unreal Mode)...', 13, 10, 0
 msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
 msg_tagfs_error       db '[ERROR] TagFS superblock read failed!', 13, 10, 0
 msg_kernel_not_found  db '[ERROR] Kernel not found in TagFS!', 13, 10, 0
-msg_kernel_load_error db '[ERROR] Kernel file load failed!', 13, 10, 0
+msg_kernel_load_error_pre db '[ERROR] Kernel file load failed!', 13, 10, 0
+msg_bios_status       db '        last BIOS disk status: 0x', 0
+msg_crlf              db 13, 10, 0
 msg_long_mode_ok      db '[OK] CPU supports 64-bit mode', 13, 10, 0
 msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
@@ -1872,3 +2019,45 @@ msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header..
 msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0
 msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
 msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild required!', 13, 10, 0
+
+;=============================================================================
+; Assemble-time invariants. These cost nothing at runtime and each one stands
+; for a failure that has actually happened or is one edit away.
+;=============================================================================
+
+; The tail of this file must be assembled as 32-bit code. Stated here, far from
+; the [BITS 32] it checks, precisely so that deleting that directive together
+; with the code around it — which is how it was lost — cannot pass the build.
+%if __?BITS?__ != 32
+  %error "stage2 must end in BITS 32: the protected-mode block lost its directive"
+%endif
+
+; The image must fit the window stage1 loads it into, and everything the
+; loader places after that window must actually be after it. Until 2026-08-23
+; neither held: boot_info was written 0x4F bytes inside this binary, and
+; nothing in the build would have said a word if the binary had grown past
+; sixteen sectors — `dd seek=1` would simply have written the seventeenth over
+; the first sector of the kernel, and stage1 would have loaded a truncated
+; stage2 that verified its own signature happily.
+%if ($ - $$) > STAGE2_SECTORS * 512
+  %error "stage2 exceeds its sector window: stage1 would load a truncated image"
+%endif
+%if 0x8000 + STAGE2_SECTORS * 512 > BOOT_INFO_ADDR
+  %error "stage2's load window runs into boot_info"
+%endif
+%if BOOT_INFO_ADDR + 256 > TAGFS_SUPERBLOCK_ADDR
+  %error "boot_info runs into the TagFS superblock buffer"
+%endif
+%if TAGFS_SUPERBLOCK_ADDR + TAGFS_SECTOR_SIZE > TAGFS_METADATA_ADDR
+  %error "the TagFS superblock buffer runs into the metadata buffer"
+%endif
+%if TAGFS_METADATA_ADDR + TAGFS_SECTOR_SIZE > KERNEL_BOUNCE_ADDR
+  %error "the TagFS metadata buffer runs into the bounce buffer"
+%endif
+
+; The other half of a claim stage1 makes: its scratch sits at 0x1200 because
+; the largest map this loader can write ends below that. If E820_MAX_ENTRIES
+; ever grows, the map reaches into a region stage1 documents as its own.
+%if E820_MAP_ADDR + E820_MAX_ENTRIES * 24 > 0x1200
+  %error "the E820 map has grown into stage1's scratch at 0x1200"
+%endif

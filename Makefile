@@ -45,12 +45,26 @@ DEBUG    ?= off
 #   Sector 2062+    : Block Bitmap (dynamic size)
 #   After bitmap    : Data Blocks (block 0=registry, 1=ftable, 2=mpool, 3+=files)
 STAGE2_SECTORS      = 16
+
+# Physical address of the boot_info handoff block. ONE number, four consumers:
+# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/tagboot.c
+# (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
+# stack out of it before any C runs) and src/include/boot_info.h (everything
+# else). It was spelled out separately in all four until 2026-08-23, when
+# moving it turned up the copy in kernel_entry.asm — which would have taken
+# the kernel's stack pointer from whatever happened to be at the old address.
+# The two headers _Static_assert against this value, so a drift is a build
+# error rather than a boot that gets as far as its first push.
+BOOT_INFO_ADDR      = 0xA000
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
 
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
-ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE)
+# Layout facts the image build owns, handed to the assembler rather than
+# repeated inside it.
+ASM_LAYOUT     = -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DBOOT_INFO_ADDR=$(BOOT_INFO_ADDR)
+ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE) $(ASM_LAYOUT)
 # ─── Kernel CFLAGS — production-grade real-HW hardening ────────────────────
 #
 # Core ABI:
@@ -139,6 +153,13 @@ CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
 ifeq ($(DEBUG),on)
 CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
 endif
+
+# The handoff address the image build chose, handed to the C side so the two
+# headers that name it can _Static_assert against it. Unconditional on
+# purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
+# to off, so the assertion that exists to catch a drift was compiled in
+# exactly the builds nobody ships.
+CFLAGS += -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR)
 # On-demand BMIDE watchdog TIER-2 (wedge->SRST) diagnostic. Off unless requested
 # (it SRSTs the boot drive) — `make WEDGETEST=on` for a verification build.
 WEDGETEST ?= off
@@ -262,6 +283,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
                   -mno-red-zone -mno-sse -mno-mmx -mno-avx \
                   -fpic -fshort-wchar -fno-stack-protector \
                   -Wall -Wextra -Os \
+                  -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                   -I$(SRCDIR)/boot/uefi
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
@@ -271,6 +293,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
                     -fshort-wchar -fno-stack-protector \
                     -Wall -Wextra -Os \
                     -target x86_64-unknown-windows \
+                    -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                     -I$(SRCDIR)/boot/uefi
 
 # Detect whether lld-link is available for direct PE output via clang.
@@ -385,11 +408,28 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.asm | $(BUILDDIR)
 
 $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILDDIR)
 	@echo "Building Stage1..."
-	@$(ASM) $(ASMFLAGS) $< -o $@
+	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) $< -o $@
+	@sz=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@); \
+	if [ "$$sz" != "512" ]; then \
+	    echo "ERROR: stage1.bin is $$sz bytes; the boot sector is exactly 512."; \
+	    rm -f $@; exit 1; \
+	fi
 
 $(STAGE2_BIN): $(STAGE2_SRC) | $(BUILDDIR)
 	@echo "Building Stage2..."
-	@$(ASM) $(ASMFLAGS) $< -o $@
+	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) $< -o $@
+	@sz=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@); \
+	max=$$(( $(STAGE2_SECTORS) * 512 )); \
+	if [ "$$sz" -gt "$$max" ]; then \
+	    echo "ERROR: stage2.bin is $$sz bytes, over its $(STAGE2_SECTORS)-sector window ($$max)."; \
+	    echo "       dd would write the overflow across sector $(KERNEL_START_SECTOR), where the kernel begins,"; \
+	    echo "       and stage1 would load a truncated stage2 that still passes its signature check."; \
+	    rm -f $@; exit 1; \
+	fi
+	@if [ $$(( 1 + $(STAGE2_SECTORS) )) -gt $(KERNEL_START_SECTOR) ]; then \
+	    echo "ERROR: stage2 occupies sectors 1..$$(( $(STAGE2_SECTORS) )) but the kernel starts at $(KERNEL_START_SECTOR)."; \
+	    exit 1; \
+	fi
 
 $(KERNEL_ENTRY_OBJ): $(KERNEL_ENTRY_SRC) | $(BUILDDIR)
 	@echo "Assembling kernel entry..."
@@ -956,7 +996,10 @@ usb: $(IMAGE)
 		RAW_DEV=$$(echo $(DEV) | sed 's|/dev/disk|/dev/rdisk|'); \
 		echo "[usb] macOS detected — unmounting $(DEV) and writing to $${RAW_DEV} (raw, faster)"; \
 		diskutil unmountDisk $(DEV) || true; \
-		dd if=$(IMAGE) of=$${RAW_DEV} bs=4m status=progress conv=sync; \
+		echo "[usb] sudo is for the dd ONLY — running the whole make as root"; \
+		echo "      would leave root-owned objects in $(BUILDDIR) that a later"; \
+		echo "      ordinary build cannot overwrite."; \
+		sudo dd if=$(IMAGE) of=$${RAW_DEV} bs=4m status=progress conv=sync; \
 		SYNC_RC=$$?; \
 		diskutil eject $(DEV) || true; \
 		exit $$SYNC_RC; \
@@ -966,7 +1009,7 @@ usb: $(IMAGE)
 		for part in $$(mount | awk -v d=$(DEV) '$$1 ~ d {print $$1}'); do \
 			umount $$part 2>/dev/null || true; \
 		done; \
-		dd if=$(IMAGE) of=$(DEV) bs=4M status=progress conv=fsync oflag=direct; \
+		sudo dd if=$(IMAGE) of=$(DEV) bs=4M status=progress conv=fsync oflag=direct; \
 		sync; \
 	fi
 	@echo "[usb] Done. The stick now boots BoxOS via BIOS legacy / CSM."

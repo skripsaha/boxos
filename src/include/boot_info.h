@@ -9,7 +9,25 @@
 #define BOOT_INFO_VERSION2 2          /* UEFI boot (TagBoot) — RSDP forwarded */
 #define BOOT_INFO_VERSION3 3          /* UEFI boot (TagBoot) — full EFI RT handoff */
 #define BOOT_INFO_VERSION4 4          /* UEFI boot (TagBoot) — + system_table + config_table + ESRT */
-#define BOOT_INFO_ADDR     0x9000
+/*
+ * Physical address of the handoff block. Moved from 0x9000 to 0xA000 on
+ * 2026-08-23: stage1 loads sixteen sectors into 0x8000 unconditionally, so
+ * 0x8000..0x9FFF belongs to stage2 in full, and by then the BIOS loader had
+ * grown to 0x904F — it was writing this structure into its own message
+ * strings. Nothing broke, because those strings are never printed again after
+ * the handoff; it was a collision that had not gone off yet. stage2.asm
+ * asserts the whole map at assembly time now, so this address and that one
+ * cannot drift apart silently.
+ */
+#define BOOT_INFO_ADDR     0xA000
+
+#ifdef BOOT_INFO_ADDR_FROM_BUILD
+_Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
+               "boot_info address disagrees with the image build: the loaders "
+               "write the block where the Makefile says, the kernel reads it "
+               "where this header says, and a boot only finds out at its first "
+               "push");
+#endif
 
 /*
  * v1: filled by stage2.asm (MBR/BIOS boot) — 40 bytes total.
