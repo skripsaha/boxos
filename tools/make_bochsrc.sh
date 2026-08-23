@@ -18,7 +18,6 @@
 #   BOCHS_DATA_DIRS=         space-separated dirs containing keymaps/
 #   UEFI=off                 on -> use OVMF.fd as romimage + ESP disk
 #   OVMF_FD=                 path to OVMF.fd (required when UEFI=on)
-#   UEFI_ESP_IMG=            path to ESP FAT image (required when UEFI=on)
 #   GDB=off                  on -> emit gdbstub: section
 #   LOG=off                  on -> info/debug events report to log
 #   BOCHS_LOG=bochs.log      log file path
@@ -86,11 +85,13 @@ fi
 # modern BIOS / UEFI / OVMF advertises, so behaviour matches real boot.
 if [ "$UEFI_MODE" = "on" ]; then
     OVMF="${OVMF_FD:?OVMF_FD is required when UEFI=on}"
-    ESP="${UEFI_ESP_IMG:?UEFI_ESP_IMG is required when UEFI=on}"
+    # One disk, both ways in. The EFI System Partition lives inside the image
+    # now, as partition 2 of its MBR, which is the medium a real user holds;
+    # handing the emulator a separate ESP would test an arrangement that never
+    # ships.
     ROM_LINE='romimage:    file="'"$OVMF"'"'
     DISK_LINES='ata0:        enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
-ata0-master: type=disk, path="'"$ESP"'", mode=flat, cylinders=0, heads=0, spt=0, translation=lba
-ata0-slave:  type=disk, path="'"$IMG"'", mode=flat, cylinders=0, heads=0, spt=0, translation=lba'
+ata0-master: type=disk, path="'"$IMG"'", mode=flat, cylinders=0, heads=0, spt=0, translation=lba'
     BOOT_LINE='boot: disk'
 else
     BIOS="${BOCHS_BIOS:?BOCHS_BIOS is required when UEFI=off}"

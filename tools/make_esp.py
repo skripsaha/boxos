@@ -99,7 +99,7 @@ ATTR_DIRECTORY  = 0x10
 ATTR_ARCHIVE    = 0x20
 
 
-def build_fat32(efi_path: str, out_path: str):
+def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
     efi_data    = open(efi_path, 'rb').read()
     startup_nsh = b'@echo -off\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n'
 
@@ -127,7 +127,12 @@ def build_fat32(efi_path: str, out_path: str):
     struct.pack_into('<H', bpb,  22, 0)                 # SectorsPerFAT16 (0 for FAT32)
     struct.pack_into('<H', bpb,  24, 63)                # SectorsPerTrack
     struct.pack_into('<H', bpb,  26, 255)               # NumHeads
-    struct.pack_into('<I', bpb,  28, 0)                 # HiddenSectors
+    # HiddenSectors — sectors preceding the partition that holds this volume.
+    # Zero is right for a standalone image and wrong the moment the same bytes
+    # are embedded in a partitioned disk, which is what the hybrid BoxOS image
+    # does: the FAT specification defines this field as the partition's offset,
+    # and firmware that consults it computes every absolute address from it.
+    struct.pack_into('<I', bpb,  28, hidden_sectors)     # HiddenSectors
     struct.pack_into('<I', bpb,  32, IMAGE_SECTORS)     # TotalSectors32 ← critical
     # FAT32 extended BPB (starts at offset 36)
     struct.pack_into('<I', bpb,  36, FAT_SECTORS)       # SectorsPerFAT32
@@ -259,11 +264,17 @@ def build_fat32(efi_path: str, out_path: str):
 
 
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <input.efi> <output.img>", file=sys.stderr)
+    if len(sys.argv) not in (3, 4):
+        print(f"Usage: {sys.argv[0]} <input.efi> <output.img> [hidden_sectors]",
+              file=sys.stderr)
+        print("  hidden_sectors — the LBA this volume will start at once it is",
+              file=sys.stderr)
+        print("                   embedded in a partition (0 for a standalone image)",
+              file=sys.stderr)
         sys.exit(1)
     try:
-        build_fat32(sys.argv[1], sys.argv[2])
+        build_fat32(sys.argv[1], sys.argv[2],
+                    int(sys.argv[3], 0) if len(sys.argv) == 4 else 0)
     except Exception as exc:
         import traceback; traceback.print_exc()
         print(f"Error: {exc}", file=sys.stderr)
