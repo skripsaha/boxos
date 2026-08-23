@@ -169,6 +169,15 @@ ifeq ($(DEBUG),on)
 CFLAGS += -DCONFIG_DEBUG_ENABLED=1 -DCONFIG_DEBUG_MODE=1
 endif
 
+# Bring-up hold: the first user-mode fault prints in full and the machine
+# stops, instead of the process being killed and the next one scheduled. On a
+# running system the normal behaviour is right; on the first boot of a new
+# machine it scrolls the only dump that mattered off a screen with no
+# scrollback. `make BRINGUP=on` — never in a shipped build.
+ifeq ($(BRINGUP),on)
+CFLAGS += -DCONFIG_BRINGUP_HOLD_ON_FIRST_FAULT=1
+endif
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults

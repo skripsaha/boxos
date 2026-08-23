@@ -234,9 +234,124 @@ static const char *exception_mnemonic(uint8_t vector)
     }
 }
 
+#ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
+/*
+ * Bring-up hold. Off in every normal build; `make BRINGUP=on` turns it on.
+ *
+ * The user-mode path below is right for a running system: a process faults,
+ * the kernel kills it and schedules the next one, and the machine survives.
+ * On the first boot of a new machine it is exactly wrong. The next process
+ * faults too, the screen scrolls, and the one dump that mattered — the FIRST
+ * fault, the one with the cause still in CR2 and the stack not yet unwound —
+ * is gone before anyone can read it. There is no scrollback on a bare screen
+ * and, until the serial line is wired, nowhere for it to have gone.
+ *
+ * So: print the first fault in full, then stop. Every core that faults after
+ * the hold is set stops without printing a word, because a second core's
+ * dump would scroll the first one away just as effectively as a loop.
+ */
+static volatile uint32_t g_bringup_held = 0;
+
+static void bringup_hold_forever(void)
+{
+    for (;;)
+        __asm__ volatile("cli; hlt");
+}
+#endif
+
+/*
+ * panic_probe_present — is this virtual address backed by a present page?
+ *
+ * Walked straight off CR3, level by level, exactly as the hardware would. It
+ * deliberately consults nothing the kernel maintains — not the VMM's context
+ * structures, not a cached translation, not a bitmap — because everything the
+ * kernel maintains is on the list of things that might have caused the panic
+ * this is being asked during. CR3 and the page tables it points at are the one
+ * description of memory the CPU itself is already obeying.
+ *
+ * The only assumption left is that the direct map is intact, which is what
+ * makes reading the tables possible at all. That is a far smaller surface than
+ * dereferencing an arbitrary saved frame pointer and hoping.
+ */
+static bool panic_probe_present(uint64_t va)
+{
+    uint64_t cr3;
+    __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+
+    const uint64_t ADDR_MASK = 0x000FFFFFFFFFF000ULL;
+    const uint64_t P         = 1ULL << 0;
+    const uint64_t PS        = 1ULL << 7;   /* 1 GiB / 2 MiB leaf */
+
+    uint64_t *table = (uint64_t *)vmm_phys_to_virt(cr3 & ADDR_MASK);
+    if (!table)
+        return false;
+
+    for (int level = 3; level >= 0; level--) {
+        uint64_t entry = table[(va >> (12 + level * 9)) & 0x1FF];
+        if (!(entry & P))
+            return false;
+        if (level > 0 && (entry & PS))
+            return true;                    /* large page, and it is present */
+        table = (uint64_t *)vmm_phys_to_virt(entry & ADDR_MASK);
+        if (!table)
+            return false;
+    }
+    return true;
+}
+
+/*
+ * One panic, one dump.
+ *
+ * Everything the dump prints touches something: the VGA buffer, the serial
+ * UART, and — for the stack trace — memory the fault may already have proved
+ * untrustworthy. A fault raised in the middle of that re-enters the handler,
+ * and so does every other core that hit the same bug at the same instant.
+ * Without this claim the screen fills and the first dump, the only one whose
+ * CR2 still names the original cause, scrolls away. That is what a six-core
+ * machine did on its first real boot: the path already ended in `cli; hlt`,
+ * and it still never got there.
+ *
+ * Claimed BEFORE the first line is printed, not after: the loser must leave no
+ * trace at all, because half a line of someone else's dump on the end of the
+ * one that matters is its own kind of confusion.
+ */
+static void panic_claim_or_halt(bool *already_claimed_here)
+{
+    if (*already_claimed_here)
+        return;                     /* same dump, further down the same page */
+
+    static volatile uint32_t panic_claimed = 0;
+    if (__atomic_exchange_n(&panic_claimed, 1u, __ATOMIC_ACQ_REL) != 0) {
+        for (;;)
+            __asm__ volatile("cli; hlt");
+    }
+    *already_claimed_here = true;
+}
+
+/* Readable across `len` bytes, page boundary included. Two probes cover every
+ * length this file asks about; nothing here reads more than sixteen bytes. */
+static bool panic_probe_range(uint64_t va, uint64_t len)
+{
+    return panic_probe_present(va) &&
+           panic_probe_present(va + len - 1);
+}
+
 void exception_handler(interrupt_frame_t *frame)
 {
+    /* Scoped to THIS invocation. A kernel #PF claims the dump at the [VMM]
+     * line and then walks on into the panic block below, which claims again;
+     * without a per-invocation record the second claim sees the flag its own
+     * first claim set and halts the dump it was about to print. A re-entrant
+     * fault gets a fresh handler frame, a fresh false, and is stopped — which
+     * is the whole point. */
+    bool panic_claimed_here = false;
+
     atomic_fetch_add_u64(&exception_count, 1);
+
+#ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
+    if (g_bringup_held)
+        bringup_hold_forever();   /* the screen already holds the fault that matters */
+#endif
 
     /* NMI (vector 2) — server-class firmware can deliver APEI/GHES
      * notifications via NMI when a HEST source's notify type == 4. The
@@ -359,6 +474,13 @@ void exception_handler(interrupt_frame_t *frame)
          * mapped page with RFLAGS.AC=0 and CR4.SMAP=1. The panic block
          * below dumps RFLAGS so the operator can read the AC bit. */
         if ((frame->cs & 3) == 0) {
+            /* This line is the first thing an unhandled ring-0 #PF prints, so
+             * the claim belongs here rather than at the panic banner below —
+             * otherwise a fault raised while printing the dump announces
+             * itself once before being silenced, and the screen ends with a
+             * second address that is a consequence, not a cause. */
+            panic_claim_or_halt(&panic_claimed_here);
+
             bool is_smap_candidate = (frame->error_code & 0x1ULL) &&
                                      fault_addr < UACCESS_USER_VA_MAX;
             kprintf("\n[VMM] Unhandled kernel #PF at 0x%lx err=0x%lx%s\n",
@@ -496,6 +618,18 @@ void exception_handler(interrupt_frame_t *frame)
                 }
             }
 
+#ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
+            g_bringup_held = 1;
+            kprintf("\n");
+            kprintf("====================================================================\n");
+            kprintf("FIRST FAULT — HELD FOR BRING-UP. Everything above is the whole of it:\n");
+            kprintf("the faulting address in CR2, every register, and the call chain by\n");
+            kprintf("name. Nothing further will print. Photograph this screen.\n");
+            kprintf("(Normal builds kill the process and carry on; this is `make BRINGUP=on`.)\n");
+            kprintf("====================================================================\n");
+            bringup_hold_forever();
+#endif
+
             kprintf("[EXCEPTION] Killing PID %u and scheduling next process\n", proc->pid);
 
             // Mark process as crashed so scheduler won't pick it again
@@ -568,7 +702,21 @@ void exception_handler(interrupt_frame_t *frame)
         }
     }
 
-    // Kernel-mode exception: this is a real kernel panic
+    /* Kernel-mode exception: this is a real kernel panic.
+     *
+     * One panic, one dump. Everything below prints — and printing touches the
+     * VGA buffer, the serial UART and, for the stack trace, memory the fault
+     * may already have proved untrustworthy. Any fault raised in the middle of
+     * that re-enters here, and so does every other core that hits the same bug
+     * at the same moment. Without this claim the screen fills with dumps and
+     * the first one, the only one with the cause still in CR2, scrolls away.
+     * That is what a six-core machine did on its first real boot: the panic
+     * path already ended in `cli; hlt`, and it still never got there.
+     *
+     * The loser of the race stops without printing a word, because a second
+     * dump scrolls the first one away just as effectively as a loop does. */
+    panic_claim_or_halt(&panic_claimed_here);
+
     kprintf("\n");
     kprintf("====================================================================\n");
     kprintf("KERNEL PANIC: %s (vector %u)\n",
@@ -621,6 +769,17 @@ void exception_handler(interrupt_frame_t *frame)
             break;
         if (!vmm_is_kernel_addr(walk_rbp))
             break;
+        /* vmm_is_kernel_addr answers a question about the address, not about
+         * the memory: a kernel-half address is not therefore a mapped one, and
+         * the two frame words below are read from whatever the faulting code
+         * left in RBP. Reading them unverified is how a stack trace becomes a
+         * second page fault, which is how the dump naming the first one gets
+         * replaced by a dump naming itself. */
+        if (!panic_probe_range(walk_rbp, 16)) {
+            kprintf("  #%u  <frame at %016lx is not mapped — chain ends here>\n",
+                    depth, walk_rbp);
+            break;
+        }
 
         uint64_t *fp = (uint64_t *)walk_rbp;
         uint64_t saved_rbp = fp[0];
@@ -637,8 +796,12 @@ void exception_handler(interrupt_frame_t *frame)
     kprintf("====================================================================\n");
     kprintf("System halted.\n");
 
-    // Halt all cores via IPI_PANIC
-    if (g_amp.multicore_active)
+    /* Halt all cores via IPI_PANIC. Guarded on the LAPIC actually being
+     * mapped: lapic_send_ipi writes through the same MMIO window whose absence
+     * turned this machine's first panic into a fault at address 0x20. A panic
+     * raised before lapic_init() has no way to reach the other cores — and no
+     * other cores to reach, since they are started through that same LAPIC. */
+    if (g_amp.multicore_active && lapic_is_mapped())
     {
         for (uint8_t c = 0; c < g_amp.total_cores; c++)
         {

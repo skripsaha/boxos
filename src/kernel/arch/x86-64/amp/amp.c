@@ -443,7 +443,20 @@ uint8_t amp_get_core_index(void)
 
     /* Early-boot fallback: BSP only, before per-core GS is established. Derive
      * the index from the (x2APIC-correct) APIC ID via a width-independent scan
-     * of the descriptor table. */
+     * of the descriptor table.
+     *
+     * ‼ Earlier still, the LAPIC MMIO window is not mapped, and asking it for
+     * an ID is a load from virtual address 0x20 — lapic_read() indexes off a
+     * base that is null until lapic_init() maps it. This function is called
+     * from the kernel panic path, so that window is not academic: on the first
+     * boot of BoxOS on real silicon, a panic raised before lapic_init() printed
+     * "Unhandled kernel #PF at 0x20 err=0x0" and stopped, in place of the dump
+     * naming the fault that caused it. A diagnostic that cannot survive being
+     * needed early is not a diagnostic.
+     *
+     * Nothing but the BSP is running this early, so 0 is not a guess. */
+    if (!lapic_is_mapped())
+        return 0;
     return amp_index_for_lapic(lapic_get_id());
 }
 
