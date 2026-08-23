@@ -234,7 +234,14 @@ INLINE uint64_t cpu_tsc_to_ns(uint64_t ticks) {
 /* ---------------------------------------------------------------------------
  * WAITPKG user-mode wait primitives (Intel SDM Vol 2A UMONITOR/UMWAIT).
  * Gate every use on cpu_has_waitpkg() — executing these without the
- * feature raises #UD. Raw opcodes for assembler-version portability.
+ * feature raises #UD.
+ *
+ * These were written as raw .byte sequences "for assembler-version
+ * portability", and that reason has expired: the binutils shipped with
+ * x86_64-elf-gcc 15.2 assembles both mnemonics. Spelling them out is not
+ * tidiness -- a hand-encoded ModRM byte names a register that the asm
+ * constraints cannot see, and the two disagreed here for as long as this
+ * file existed (see umwait below).
  *
  * umonitor() arms a hardware monitor on the cacheline of `addr` (line
  * size from CPUID.05H). Any subsequent store to that line wakes a
@@ -247,9 +254,9 @@ INLINE uint64_t cpu_tsc_to_ns(uint64_t ticks) {
  * --------------------------------------------------------------------------- */
 INLINE void umonitor(volatile void* addr) {
     __asm__ volatile(
-        ".byte 0xf3, 0x0f, 0xae, 0xf0"
+        "umonitor %[p]"
         :
-        : "a"(addr)
+        : [p] "r"(addr)
         : "memory"
     );
 }
@@ -259,11 +266,30 @@ INLINE int umwait(uint32_t state, uint64_t deadline_tsc) {
     uint32_t edx = (uint32_t)(deadline_tsc >> 32);
     uint8_t cf;
 
+    /* ‼ UMWAIT r32 takes the preferred C-state in r32 and the TSC deadline in
+     * EDX:EAX. Bits 31:1 of the control are RESERVED, and a set bit is #GP(0)
+     * (SDM Vol 2B, UMWAIT). So the control register must not be one of the two
+     * the deadline already occupies -- and until 2026-08-23 it WAS: the raw
+     * encoding here read 0xf0, which is `umwait %eax`, so the control word was
+     * the deadline's own low half and #GP fired whenever any of those bits was
+     * set, which is essentially always.
+     *
+     * The mnemonic makes that unrepeatable: GCC picks the register, and it
+     * cannot pick %eax or %edx because the constraints below already bind
+     * them. Measured -- it emits `umwait %edi`.
+     *
+     * QEMU does not raise on the reserved bits, so the STRICT matrix passed
+     * with -cpu max (WAITPKG present) for as long as this existed. Bochs does
+     * raise, and so does silicon: found by booting the arrow_lake model, where
+     * the shell and PID 2 both died of a user-mode #GP inside
+     * touch_wait_umwait. The same image boots clean on tigerlake, whose model
+     * reports waitpkg=0.
+     */
     __asm__ volatile(
-        ".byte 0xf2, 0x0f, 0xae, 0xf0\n"
+        "umwait %[st]\n\t"
         "setc %[cf]"
         : [cf] "=r"(cf), "+d"(edx), "+a"(eax)
-        : "c"(state)
+        : [st] "r"(state)
         : "cc", "memory"
     );
 
