@@ -157,6 +157,20 @@ uintptr_t lapic_get_base(void) {
     return lapic_base_phys;
 }
 
+/* True once the MMIO window is actually mapped and lapic_read/lapic_write are
+ * safe to call. Not the same question as lapic_get_base(): the physical base
+ * is recorded before the mapping is attempted, and the mapping can fail, so a
+ * non-zero base is no promise that a register read will land anywhere.
+ *
+ * lapic_read() is `lapic_base_virt[reg / 4]`, which with a null base turns the
+ * APIC ID register at offset 0x20 into a load from virtual address 0x20. That
+ * is where BoxOS's first panic on real hardware died — the panic path prints
+ * the core index, amp_get_core_index() fell back to the APIC ID, and the dump
+ * we had asked for was replaced by "Unhandled kernel #PF at 0x20 err=0x0". */
+bool lapic_is_mapped(void) {
+    return lapic_base_virt != NULL;
+}
+
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
     debug_printf("[LAPIC] Calibrating APIC timer for %u Hz...\n", frequency_hz);
 

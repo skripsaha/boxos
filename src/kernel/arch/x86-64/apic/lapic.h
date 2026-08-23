@@ -69,6 +69,7 @@ void lapic_enable(void);
 void lapic_disable(void);
 bool lapic_is_enabled(void);
 uintptr_t lapic_get_base(void);
+bool lapic_is_mapped(void);
 
 // LAPIC timer
 void lapic_timer_init(uint8_t vector, uint32_t frequency_hz);
