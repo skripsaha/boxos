@@ -42,6 +42,16 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф47 raised it 192 -> 193, and the delta is ONE macro:
+#           __cpp_lib_constexpr_cmath, co-owned by <cmath> and <cstdlib>.
+#           <cmath> is included by <complex>, <valarray> and <random> among
+#           others, and the macro is visible from all three (measured), none of
+#           which owns it. That is the permitted cause -- a NEW macro whose
+#           owning header is widely included -- and not a header that started
+#           including more than it used to. Ф46 raised no pin at all: it bumped
+#           __cpp_lib_format's VALUE and added no macro, so nothing new could
+#           reach anywhere new.
+#
 #           Ф45 raised it 191 -> 192, and the delta is ONE macro:
 #           __cpp_lib_chrono, whose owner <chrono> is included by <format>'s
 #           users, <iomanip>, <syncstream> and a dozen more, so claiming it at
@@ -141,7 +151,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=192
+LEAK_BUDGET=193
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 

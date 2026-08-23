@@ -193,4 +193,10 @@ using std::wctomb;
 #define BOXCXX_OWNS_freestanding_cstdlib
 #include <__bits/version_freestanding>
 
+// [version.syn] gives __cpp_lib_constexpr_cmath two owners: P0533R9 covers
+// <cmath> and <cstdlib> alike, and this header's half is the integral abs/div
+// family of <__bits/c_arith>.
+#define BOXCXX_OWNS_constexpr_cmath
+#include <__bits/version_cmath>
+
 #endif // BOXCXX_CSTDLIB
