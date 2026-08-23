@@ -18,6 +18,10 @@
 //   parse FROM TO [DEPTH] [FAN]  the same cases, verdict only: accepted with
 //                                how many groups, or which error
 //   file PATH                    replay explicit `pattern<TAB>subject` cases
+//   wgen FROM TO [DEPTH] [FAN]   the same generated cases run through BOTH
+//                                halves — narrow and wide — in one process
+//   wfile PATH                   replay UTF-8 `pattern<TAB>subject` cases as
+//                                wide, for the characters no narrow half has
 //   adv  PATTERN N               time ONE search of PATTERN against 'a'*N
 //
 // `adv` is one case per process on purpose. A tool that measures exponential
@@ -28,6 +32,7 @@
 // two runs: the two libraries must walk a byte-identical case sequence.
 #include <regex>
 #include <string>
+#include <sstream>
 #include <fstream>
 #include <chrono>
 #include <cstdio>
@@ -93,6 +98,76 @@ static void Report(const char *id, const std::string &pattern, const std::string
     } catch (const std::regex_error &e) {
         std::printf("throw %s\n", ErrName(e.code()));
     }
+}
+
+// ── the wide half ───────────────────────────────────────────────────────
+// ‼ For an ASCII case the narrow half IS the oracle for the wide one, and that
+// is a stronger check than any cross-library diff: a library that answers
+// differently about the same characters depending on the width of the type it
+// stored them in has a defect, and it needs no second implementation to say
+// so. The shape is Ф42-g's, where <format>'s narrow half was the oracle for
+// its wide half over 20 286 spec/argument pairs.
+//
+// Text crosses the boundary as UTF-8 both ways, so the two verdicts are
+// byte-comparable strings and the case file stays a file anyone can read.
+// Decoding is done here rather than through a locale on purpose: mbstowcs
+// would make the answer depend on the host's LC_CTYPE, and this tool exists to
+// remove that kind of dependence, not to acquire one.
+// One verdict, rendered identically whatever the character type, so that the
+// two halves produce the same text for the same answer or the diff means
+// something. Positions and lengths are in CHARACTERS of the subject's own
+// type, which is what makes them comparable for an ASCII case and what makes
+// them the right answer for a wide one.
+template <class C>
+static std::string Verdict(const std::basic_string<C> &pattern,
+                           const std::basic_string<C> &subject,
+                           std::regex_constants::syntax_option_type gram)
+{
+    std::ostringstream out;
+    try {
+        std::basic_regex<C> re(pattern, gram);
+        std::match_results<typename std::basic_string<C>::const_iterator> m;
+        if (!std::regex_search(subject, m, re)) return "nomatch";
+        out << "at=" << (int)m.position(0) << " len=" << (int)m.length(0)
+            << " groups=" << (int)m.size() - 1;
+        for (std::size_t i = 1; i < m.size(); ++i) {
+            if (!m[i].matched) { out << " g" << i << "=-"; continue; }
+            std::basic_string<C> g = m[i].str();
+            std::string text;
+            if constexpr (sizeof(C) == 1) text.assign((const char *)g.data(), g.size());
+            else text = ToUtf8(std::wstring(g.begin(), g.end()));
+            out << " g" << i << "=[" << (int)m.position(i) << "," << (int)m.length(i)
+                << "]'" << text << "'";
+        }
+    } catch (const std::regex_error &e) {
+        return std::string("throw ") + ErrName(e.code());
+    }
+    return out.str();
+}
+
+// Both halves of one case, on one line. A column disagreeing with ITSELF is
+// the finding; the three columns are still diffed as usual, because a library
+// can also be consistently wrong.
+static void BothHalves(const char *id, const std::string &pattern, const std::string &subject,
+                       std::regex_constants::syntax_option_type gram)
+{
+    const std::string n = Verdict<char>(pattern, subject, gram);
+    const std::string w = Verdict<wchar_t>(ToWide(pattern), ToWide(subject), gram);
+    std::printf("%s |%s| |%s| -> N{%s} W{%s}%s\n", id, pattern.c_str(), subject.c_str(),
+                n.c_str(), w.c_str(), n == w ? "" : "  <<WIDTH-DIFF");
+}
+
+// A case whose characters no narrow half can hold. Here the two reference
+// columns are the oracle again, and only for the questions that do not go
+// through a locale table: literals, ranges, `.`, quantifiers, back-references
+// and the anchors. Anything that asks what KIND of character U+4E2D is would
+// be comparing macOS's wide ctype against ours, which is Ф42-a's measured
+// divergence and not a regex question — those cases live in the QEMU phase.
+static void WideOnly(const char *id, const std::string &pattern, const std::string &subject,
+                     std::regex_constants::syntax_option_type gram)
+{
+    const std::string w = Verdict<wchar_t>(ToWide(pattern), ToWide(subject), gram);
+    std::printf("%s |%s| |%s| -> %s\n", id, pattern.c_str(), subject.c_str(), w.c_str());
 }
 
 static void GenCase(std::uint64_t seed, int depth, int fan)
@@ -174,6 +249,23 @@ static int Replay(const char *path, std::regex_constants::syntax_option_type gra
     return 0;
 }
 
+static int ReplayWide(const char *path, std::regex_constants::syntax_option_type gram)
+{
+    std::ifstream in(path);
+    if (!in) { std::fprintf(stderr, "cannot open %s\n", path); return 2; }
+    std::string line;
+    int n = 0;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        const std::string::size_type tab = line.find('\t');
+        if (tab == std::string::npos) continue;
+        char id[16];
+        std::snprintf(id, sizeof id, "case%04d", ++n);
+        WideOnly(id, line.substr(0, tab), line.substr(tab + 1), gram);
+    }
+    return 0;
+}
+
 // One timed search. Printed by the caller's clock as well, so a process the
 // shell had to kill is still reported — by its absence of a line here.
 static int Adversarial(const char *pattern, int n)
@@ -209,8 +301,14 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "# regex oracle: %s, replay %s\n", kLib, argv[2]);
         return Replay(argv[2], g);
     }
+    if (argc > 2 && std::strcmp(argv[1], "wfile") == 0) {
+        const auto g = GrammarOf(argc > 3 ? argv[3] : nullptr);
+        std::fprintf(stderr, "# regex oracle: %s, wide replay %s\n", kLib, argv[2]);
+        return ReplayWide(argv[2], g);
+    }
+    const bool bothHalves = argc > 1 && std::strcmp(argv[1], "wgen") == 0;
     const bool parseOnly = argc > 1 && std::strcmp(argv[1], "parse") == 0;
-    int a = (argc > 1 && (std::strcmp(argv[1], "gen") == 0 || parseOnly)) ? 1 : 0;
+    int a = (argc > 1 && (std::strcmp(argv[1], "gen") == 0 || parseOnly || bothHalves)) ? 1 : 0;
     std::uint64_t from = argc > a + 1 ? std::strtoull(argv[a + 1], nullptr, 0) : 1;
     std::uint64_t to   = argc > a + 2 ? std::strtoull(argv[a + 2], nullptr, 0) : 4000;
     int depth = argc > a + 3 ? std::atoi(argv[a + 3]) : 1;
@@ -220,7 +318,10 @@ int main(int argc, char **argv)
                  (unsigned long long)from, (unsigned long long)to, depth, fan);
     for (std::uint64_t i = from; i < to; ++i) {
         if (parseOnly) ParseCase(i, depth, fan, gram);
-        else GenCase(i, depth, fan);
+        else if (bothHalves) {
+            const Case c = MakeCase(i, depth, fan);
+            BothHalves(c.id, c.pattern, c.subject, gram);
+        } else GenCase(i, depth, fan);
     }
     return 0;
 }

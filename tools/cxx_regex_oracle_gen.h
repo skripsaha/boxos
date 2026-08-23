@@ -10,6 +10,53 @@
 #include <cstdint>
 #include <cstdio>
 
+// ── UTF-8 <-> wide, by hand ────────────────────────────────────────────────
+// Shared because both the oracle and the stand have to agree byte for byte on
+// what a case file says. Done here rather than through mbstowcs on purpose:
+// a locale-driven conversion would make the answer depend on the host's
+// LC_CTYPE, and this stand exists to remove that kind of dependence.
+inline std::wstring ToWide(const std::string &s)
+{
+    std::wstring w;
+    for (std::size_t i = 0; i < s.size();) {
+        const unsigned char c = (unsigned char)s[i];
+        unsigned long cp;
+        int extra;
+        if (c < 0x80)      { cp = c;         extra = 0; }
+        else if (c < 0xE0) { cp = c & 0x1Fu; extra = 1; }
+        else if (c < 0xF0) { cp = c & 0x0Fu; extra = 2; }
+        else               { cp = c & 0x07u; extra = 3; }
+        ++i;
+        for (int k = 0; k < extra && i < s.size(); ++k, ++i)
+            cp = (cp << 6) | ((unsigned char)s[i] & 0x3Fu);
+        w.push_back((wchar_t)cp);
+    }
+    return w;
+}
+
+inline std::string ToUtf8(const std::wstring &w)
+{
+    std::string s;
+    for (wchar_t wc : w) {
+        const unsigned long cp = (unsigned long)wc;
+        if (cp < 0x80) s.push_back((char)cp);
+        else if (cp < 0x800) {
+            s.push_back((char)(0xC0 | (cp >> 6)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+        } else if (cp < 0x10000) {
+            s.push_back((char)(0xE0 | (cp >> 12)));
+            s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+        } else {
+            s.push_back((char)(0xF0 | (cp >> 18)));
+            s.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+            s.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+            s.push_back((char)(0x80 | (cp & 0x3F)));
+        }
+    }
+    return s;
+}
+
 // ── deterministic PRNG ─────────────────────────────────────────────────────
 // Not std::mt19937: its stream is specified, but the distributions layered on
 // top of it are not, and a case sequence that drifts between two libraries

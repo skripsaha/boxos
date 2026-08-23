@@ -3625,6 +3625,65 @@ specifies are all in place and pinned by the suite: `cin.tie() == &cout`,
   against another `size_t` needs no conversion. That type agreement is the
   entire content of the paper.
 
+## `<regex>`
+
+Provided as of Ф44 (§1.1 for why it stopped being excluded, and what the engine
+is). Everything below was decided from [re.grammar] and the ECMA-262 text it
+adopts rather than from either library, and every one of them was measured
+three ways by `tools/cxx_regex_oracle.sh` — 40 000 generated cases per sweep,
+plus curated lists for the five POSIX grammars.
+
+- `+` **The engine refuses instead of hanging.** A pattern with no
+  back-reference is regular and runs on a linear machine, where the time is set
+  by the shape of the input. One with a back-reference is not regular and takes
+  a bounded backtracker with an explicit step budget of `65536 + 4096·n`;
+  exhausting it throws `error_complexity`, which is the name [re.err] has for
+  exactly this. §3 has the measurements against both references.
+- `?` **`error_type` is numbered from 1.** [re.err] fixes the names and leaves
+  the values implementation-defined: libstdc++ numbers from 0, libc++ from 1.
+  From 1 here, so that `if (e.code())` is not false for a real error. A sweep
+  that compared the raw integers manufactured a disagreement on every throw
+  until it was taught to compare names — the first thing this tool ever found.
+- `?` **A back-reference to a group that did not participate matches the empty
+  string.** ECMA-262's BackreferenceMatcher says "if r is undefined, return
+  c(x)", so `x(a)?\1y` matches `"xy"`. **Both references call that a failure**
+  — 471 of 40 000 generated cases are this one cell, and it is the single
+  largest source of disagreement between us and them.
+- `?` **A back-reference is valid if its number is at most the number of groups
+  in the WHOLE pattern**, so forward references are legal and match the empty
+  string until the group participates. ECMA-262's DecimalEscape is not modified
+  by [re.grammar], and it counts the whole pattern. **Both references reject
+  them** — another 2 136 cases, and none outside that cell.
+- `?` **Captures inside a quantified body are reset on every iteration**, so
+  `(?:(a)|b)*` against `"ab"` leaves group 1 unset. That is ECMA-262's
+  RepeatMatcher; **libc++ does it, libstdc++ does not.**
+- `?` **`\q` is legal.** [re.grammar]/3 defines IdentityEscape as
+  "SourceCharacter but not c", which is wider than ECMA-262's own rule.
+  libstdc++ agrees; **libc++ throws `error_escape`.**
+- `?` **`[]` is an empty class** that matches nothing, and `[]]` is a class
+  containing `]`. libstdc++ agrees; libc++ does not parse the second.
+- `?` **The five POSIX grammars take the leftmost-LONGEST match**, so `a|ab`
+  against `"ab"` is two characters under `extended` and one under `ECMAScript`.
+  Both references do this; boxcxx did not until Ф44-d, which means its POSIX
+  grammars had until then been another spelling of ECMAScript.
+- `–` **No lookbehind.** `(?<=…)` is in no grammar the standard defines, and
+  neither reference has it either — measured, not assumed.
+- `~` **`a{4000000000}` throws `error_space`, not `bad_alloc`.** The repetition
+  is expanded, so the bound is memory; [re.err] has a name for running out of
+  it and this uses it.
+- **Wide is the same program.** `wregex` and every `w` typedef of [re.syn] are
+  the same templates instantiated at `wchar_t`; Ф44-e ran 40 000 generated ASCII
+  cases through BOTH halves of all three columns and each column answers about
+  a character the same way whatever width it was stored in. What is NOT the
+  same is the classification: `regex_traits<wchar_t>` asks `ctype<wchar_t>`,
+  which here is the Unicode database of Ф42-a, so `[[:alpha:]]` takes U+4E2D
+  where macOS's wide ctype refuses it, and `[[:digit:]]` still refuses U+0660
+  because C fixes it to ASCII. Those answers are ours by decision (§2
+  `<cwctype>`), and `phase238` is where they are checked — a host stand cannot,
+  because on the host that traits reads the host's tables.
+- **[version.syn] gives `<regex>` no feature-test macro of its own.** It owns
+  `__cpp_lib_nonmember_container_access`, which it defines.
+
 ## `<span>`
 
 - `✓` Closed in Ф35, found while building `<mdspan>`: the **(iterator, sentinel)
@@ -4470,6 +4529,47 @@ working and answers lookups with the wrong values.
 | Construction from an already-sorted range must be linear ([flat.set.cons]/2), N = 1000 | **1 998** comparisons | **11 620** (N log N) | 3 005 |
 | `erase_if` must call `pred(as_const(e))` ([flat.set.erasure]/2) | const | **mutable** | const |
 
+## `<regex>` — the engine answers instead of hoping
+
+Both references match with a backtracker, which is the `timeout` paradigm in
+the world of strings: it hopes it will finish in time. Measured with a clock,
+one process per case, in `tools/cxx_regex_oracle.sh --adversarial`:
+
+| Pattern, subject `a`×n | libstdc++ 16.1 | libc++ 22.1.6 | boxcxx |
+|---|---|---|---|
+| `(a+)+b`, n=12 | 0.531 ms | 1.319 ms | **0.023 ms** |
+| `(a+)+b`, n=18 | 33.4 ms | refuses, `error_complexity` | **0.013 ms** |
+| `(a+)+b`, n=22 | 528 ms | refuses | **0.014 ms** |
+| `(a+)+b`, n=26 | **8 777 ms** | refuses | **0.016 ms** |
+| `(a\|a)*b`, n=26 | no answer in 10 s | refuses | **0.013 ms** |
+| `(a*)*b`, n=18 | no answer in 10 s | refuses | **0.016 ms** |
+| `(a\|ab)*c`, n=26 | 0.037 ms | 0.089 ms | 0.013 ms |
+
+The answer to every question in that table is a trivial *no*. libstdc++ has no
+ceiling at all — its column multiplies by sixteen for every four characters
+added, which is the doubling-per-character an exponential search does — and
+libc++ has a ceiling it reaches on inputs a person would type. The linear
+machine is not faster at the same thing: it is answering questions the other
+two cannot finish, and it does so because the time a match takes is set by the
+shape of the input rather than by luck. The last row is the control — a shape
+that blows up in nobody's engine, where all three are in the same tens of
+microseconds and the difference is not the point.
+
+‼ **The numbers in that table were re-measured for it rather than carried
+here.** The figures this session started with, taken from Ф44-0's notes, said
+5.0 s for the n=26 row and put libc++'s refusal at n=13. Today's run says
+8.8 s, and libc++ answers at n=12 and refuses from n=18. A table of timings
+copied from a previous session's notes is a table of that session's machine
+load.
+
+‼ **A prediction of mine that the measurement refuted**, recorded because it
+shaped the design argument: I expected a backtracker to blow the fixed stack of
+a cabin. Neither library dies on the stack — both survive a 200 000-character
+subject. The damage is on the CLOCK, not on the stack. The argument for the
+linear engine is unweakened (a cabin hung on eighteen characters is no better
+than one that crashed), but it is a different argument than the one I started
+with.
+
 ## Elsewhere
 
 - **`span::crbegin` / `crend`.** [span.overview] declares them, with inline bodies.
@@ -4577,23 +4677,14 @@ Present in 16.1.0 (`__GLIBCXX__ 20260430`), all reproduced today: the six rows o
 the flat-container table in §3, `{:#.0f}` of `1e308`, and the ignored precision on
 floating-point-rep durations.
 
-**One from Ф44-f, and it is a whole clause of [valarray.syn] rather than a
-value:** `shift` and `cshift` **on an expression do not compile for a
-floating-point element type.** [valarray.syn]/3 permits a replacement type only
-if "all the const member functions of valarray<T> other than begin and end are
-also applicable" to it, and libc++'s `__shift_expr` computes its element
-branchlessly —
-
-```
-(__expr_[(__i + __n_) & __m] & __m) | (value_type() & ~__m)
-```
-
-— which is arithmetic no `double` has. `valarray<double>::shift` itself is
-fine; it is the replacement type that is not, so every floating-point valarray
-expression in libc++ fails that paragraph. `(a + 1.0).shift(2)` is rejected at
-compile time, which is why the stand's own case prints a placeholder in that
-column (pinned in `tools/valarray_oracle_refdiff.txt`) rather than pretending
-the columns agree.
+**One from Ф44-0, and it was found before boxcxx had a regex engine at all:**
+**`^` inside a lookahead is true everywhere.** All six non-back-reference
+disagreements of the tool's first sweep reduce to four shapes — `/a(?=^)/`
+against `"ab"` matches and must not, `/a(?!^)/` does not match and must,
+`/.{0,2}(?=^)/` reports length 2 where the assertion should force the greedy
+quantifier back to 0, and `/ab(?=^)/` matches. libc++ is right in all four, so
+on anchors inside lookaheads the oracle is libc++ and not libstdc++ — which is
+the whole reason a differential stand is drawn before the code it will judge.
 
 **Two more, from Ф43-e-2's grapheme work** (§3 has the table): a Hangul syllable
 followed by a combining mark is segmented as **two** clusters, where GB9 joins any
@@ -4640,6 +4731,34 @@ The two flat-container invariant violations above (both reproduced today), the
 escape-sequence work — three cases in `write_escaped.h` where a character is
 treated as "previously escaped" (`U+0020`, a non-delimiter quote, and an
 ill-formed run) and is then printed raw.
+
+**Two from Ф44-a, both in the grammar:** `\q` is rejected with
+`error_escape`, where [re.grammar]/3 makes IdentityEscape wider than
+ECMA-262's and admits it; and `[]]` does not parse, where `[]` is an empty
+class and the `]` that follows is an ordinary member. libstdc++ is right on
+both. **And one in the engine:** `(a*)*b` is refused with `error_complexity` on an
+eighteen-character subject — a real ceiling rather than a hang, which is the
+better of the two failures, but the question it refuses has the trivial answer
+*no*. Measured: it still answers `(a+)+b` at twelve characters and refuses from
+eighteen on (§3 has the table).
+
+**One from Ф44-f, and it is a whole clause of [valarray.syn] rather than a
+value:** `shift` and `cshift` **on an expression do not compile for a
+floating-point element type.** [valarray.syn]/3 permits a replacement type only
+if "all the const member functions of valarray<T> other than begin and end are
+also applicable" to it, and libc++'s `__shift_expr` computes its element
+branchlessly —
+
+```
+(__expr_[(__i + __n_) & __m] & __m) | (value_type() & ~__m)
+```
+
+— which is arithmetic no `double` has. `valarray<double>::shift` itself is
+fine; it is the replacement type that is not, so every floating-point valarray
+expression in libc++ fails that paragraph. `(a + 1.0).shift(2)` is rejected at
+compile time, which is why the stand's own case prints a placeholder in that
+column (pinned in `tools/valarray_oracle_refdiff.txt`) rather than pretending
+the columns agree.
 
 **From Ф43-e-2, measured on 19.1.2** (`_LIBCPP_VERSION 190102`, the libc++ this
 machine has; the rows above are from 22.1.6 and are not re-claimed for 19):

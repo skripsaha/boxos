@@ -1,0 +1,85 @@
+# Wide cases: pattern<TAB>subject, UTF-8 in the file, wide in the process.
+#
+# ‼ What is deliberately NOT here: anything that asks what KIND of character a
+# non-ASCII one is. [[:alpha:]] over U+4E2D compares macOS's wide ctype against
+# ours, which is Ф42-a's measured and intended divergence, not a regex
+# question. Those live in phase238, where boxcxx's own tables answer.
+#
+# What IS here is everything the engine decides by itself: literals, ranges
+# (including the ones that straddle the 256 boundary where the class
+# representation changes from a bitmap to a pair), the dot, quantifiers,
+# alternation, back-references, negated classes and the \u escape.
+
+# literals
+ā	ā
+ā	xāy
+中	中文
+中文	中文字
+文	中
+
+# the dot is one CHARACTER, not one byte
+.	中
+^.$	中
+^..$	中文
+^.$	中文
+
+# ranges inside the BMP
+[Ā-Ă]	ā
+[Ā-Ă]	ą
+[Ā-Ă]	Ā
+[Ā-Ă]	Ă
+[Ā-Ă]	ÿ
+
+# ‼ ranges that straddle 256, where the class stops being a bitmap
+[ð-Đ]	ā
+[ð-Đ]	ï
+[ð-Đ]	ñ
+[a-ÿ]	z
+[a-ÿ]	ÿ
+[a-ÿ]	Ā
+[ð-Đ]	ā
+[Ā-￿]	中
+[Ā-￿]	a
+
+# negated classes
+[^中]	中
+[^中]	文
+[^Ā-￿]	中
+[^Ā-￿]	a
+
+# quantifiers over wide characters
+中{2,3}	中中中中
+中+	中中
+(中|文)+	中文中
+中*文	文
+
+# alternation and grouping
+(中)(文)	中文
+(中|文)	文
+(?:中)+	中中
+
+# back-references
+(中)\1	中中
+(中)\1	中文
+(..)\1	中文中文
+(.)\1	中中
+
+# the \u escape names a code unit, and it has to reach past 255
+\u4E2D	中
+\u4E2D	文
+\u00E1	á
+[\u4E2D\u6587]	文
+[\u0100-\u0102]	ā
+\u4E2D{2}	中中
+
+# anchors and word boundaries around wide characters
+^中	中文
+文$	中文
+\b中	中
+中\b	中
+
+# something above the BMP, written as itself
+😀	😀
+.	😀
+^.$	😀
+[Ā-￿]	😀
