@@ -348,26 +348,46 @@ void amp_boot_aps(void)
 
         if (ap_up) {
             booted++;
+            c->counted_at_boot = 1;
         } else {
-            kprintf("[AMP] WARNING: Core %u (LAPIC %u) did not respond in %u ms\n",
+            kprintf("[AMP] WARNING: Core %u (LAPIC %u) has not responded in "
+                    "%u ms; its stack is kept in case it still starts\n",
                     c->core_index, c->lapic_id, LONG_WAIT_MS);
-            /* Restore the guard PTE BEFORE pmm_free. Without this the
-             * zeroed leaf persists past the free; PMM hands the same
-             * physical frame to a future allocator, that caller's
-             * vmm_phys_to_virt resolves to the same VA, and the first
-             * access faults on the still-cleared PTE. Re-map to the
-             * original physical frame with kernel-RW so the Pull-Map
-             * invariant (every RAM byte addressable via vmm_phys_to_virt)
-             * is preserved after the free. IST stacks intentionally
-             * leak — per_core_alloc_ist may have allocated them with
-             * their own guard pages before the AP timed out, and we
-             * cannot recover their stack_phys pointers from here. */
-            if (guard_pte) {
-                *guard_pte = (uint64_t)(uintptr_t)stack_phys
-                             | VMM_FLAGS_KERNEL_RW;
-                vmm_shootdown_page(kctx, (uintptr_t)stack_virt);
-            }
-            pmm_free(stack_phys, CONFIG_KERNEL_STACK_TOTAL_PAGES);
+
+            /* ‼ The stack is NOT freed, and that is the point.
+             *
+             * A timeout is a fact about our patience, not about the core. The
+             * comment above this wait lists exactly why an AP can be late —
+             * BIOS-parked loops, microcode reload, PLL relock on a physically
+             * cold core — and every one of those ends with the AP waking up
+             * and running on the stack we handed it. Returning that stack to
+             * the PMM means the next allocation gets it, writes over the
+             * return addresses of a processor that is about to use them, and
+             * that processor jumps into whatever the new owner wrote. On a
+             * core whose IDT is not up yet there is nothing to catch it: the
+             * fault becomes a triple fault and the machine resets with a
+             * black screen and no message at all.
+             *
+             * That is not hypothetical. A Gigabyte B365 with an i5-9400F
+             * reported three of five APs late on 2026-08-24, freed their
+             * stacks, printed "2/5 AP(s) online after dead-AP cleanup", and
+             * reset — and one of the "dead" cores had already printed its own
+             * banner out of order, which is what a late core looks like.
+             *
+             * This file already knew: the IST stacks a page earlier are
+             * deliberately leaked for precisely this reason. The main stack
+             * now follows the same rule. A handful of leaked pages on a boot
+             * where a core was slow costs less than any reset ever will, and
+             * the re-derivation below reads `online` again, so a core that
+             * arrives late is still counted — it just isn't standing on
+             * memory somebody else owns when it does.
+             *
+             * The guard PTE stays cleared too: it guards the stack of a core
+             * that may yet run, and it was only ever restored to keep the
+             * Pull-Map invariant across the free that no longer happens. */
+            (void)guard_pte;
+            (void)stack_virt;
+            (void)kctx;
         }
     }
 
@@ -390,6 +410,60 @@ void amp_boot_aps(void)
         }
         g_amp.k_count   = live_k;
         g_amp.app_count = live_a;
+    }
+
+    /* One last wait for the stragglers, then count them.
+     *
+     * The window above is per-core and sequential, which already gives an
+     * early core the later cores' seconds as grace — but only by accident of
+     * ordering, and the last core to be started gets none at all. A single
+     * bounded sweep at the end gives every core the same chance and makes the
+     * final tally mean something. Skipped entirely when nobody is missing,
+     * which is the normal case and costs nothing.
+     *
+     * This is not the fixed deadline the constitution warns about: the wait
+     * ends the moment the last missing core reports, and its only role is to
+     * bound how long we are willing to hold the boot. */
+    {
+        bool anyone_missing = false;
+        for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+            CoreDescriptor *c2 = &g_amp.cores[i];
+            if (!c2->is_bsp && !amp_core_online(c2)) { anyone_missing = true; break; }
+        }
+        if (anyone_missing) {
+            const uint32_t GRACE_MS = 2000;
+            kprintf("[AMP] waiting up to %u ms more for cores that were slow "
+                    "to start...\n", GRACE_MS);
+            for (uint32_t ms = 0; ms < GRACE_MS; ms++) {
+                bool still_missing = false;
+                for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+                    CoreDescriptor *c2 = &g_amp.cores[i];
+                    if (!c2->is_bsp && !amp_core_online(c2)) {
+                        still_missing = true;
+                        break;
+                    }
+                }
+                if (!still_missing) break;
+                pit_delay_us(1000);
+            }
+        }
+    }
+
+    /* Late arrivals, counted for what they are. */
+    {
+        uint8_t late = 0;
+        for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+            CoreDescriptor *c2 = &g_amp.cores[i];
+            if (c2->is_bsp || !amp_core_online(c2)) continue;
+            if (!c2->counted_at_boot) {
+                late++;
+                booted++;
+                kprintf("[AMP] Core %u (LAPIC %u) came up after its window — "
+                        "counted\n", c2->core_index, c2->lapic_id);
+            }
+        }
+        if (late)
+            kprintf("[AMP] %u core(s) were late, not dead\n", late);
     }
 
     uint32_t expected = g_amp.total_cores - 1;
