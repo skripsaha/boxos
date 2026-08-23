@@ -29725,13 +29725,15 @@ static_assert(__cpp_lib_execution == 201902L, "phase131: __cpp_lib_execution —
 #ifdef __cpp_lib_filesystem
 #  error "phase131: __cpp_lib_filesystem must stay undefined"
 #endif
-static_assert(__cpp_lib_format == 202304L,
-              "phase131: __cpp_lib_format — closed by Ф43-e-2. It stood undefined "
-              "through the whole epic for two reasons that were real: a field's "
-              "width was counted in code units, and both width and precision were "
-              "capped at a number this library had invented. This guard is what "
-              "kept the macro from being claimed on the strength of the surface "
-              "alone, and the value is the last C++23 bump (P2510R3)");
+static_assert(__cpp_lib_format == 202311L,
+              "phase131: __cpp_lib_format — closed by Ф43-e-2 at 202304L and "
+              "raised to C++26's 202311L by Ф46. It stood undefined through the "
+              "whole epic for two reasons that were real: a field's width was "
+              "counted in code units, and both width and precision were capped "
+              "at a number this library had invented. This guard is what kept "
+              "the macro from being claimed on the strength of the surface "
+              "alone, and it did its second job when Ф46 had to come here to "
+              "raise it (P2905R2, which was already in the tree, + P2918R2)");
 static_assert(__cpp_lib_formatters == 202302L,
               "phase131: __cpp_lib_formatters — closed by Ф42-g, when "
               "formatter<thread::id, wchar_t> arrived; it was the only half of "
@@ -52795,9 +52797,10 @@ void Phase228()
     }
 
     // ── 10. and the macro that all of this was in the way of ─────────────
-    static_assert(__cpp_lib_format == 202304L,
-                  "phase228 (44) __cpp_lib_format is claimed as of Ф43-e-2");
-    Check(__cpp_lib_format == 202304L, "phase228 (44) __cpp_lib_format == 202304L");
+    static_assert(__cpp_lib_format == 202311L,
+                  "phase228 (44) __cpp_lib_format is claimed as of Ф43-e-2, and "
+                  "carries C++26's value as of Ф46");
+    Check(__cpp_lib_format == 202311L, "phase228 (44) __cpp_lib_format == 202311L");
 
     printf("[CXX] PASS phase228: a field is as wide as it LOOKS, and <format> "
            "says so\n");
@@ -55107,6 +55110,160 @@ void Phase238()
     }
 }
 
+// ── Phase239: the format string nobody has until the program runs ─────────
+// Ф46. P2918R2. Everything <format> does is arranged around a format string the
+// compiler can see: basic_format_string's constructor is consteval, so a spec it
+// cannot answer is a compile error rather than a throw, and an argument index
+// past the end never reaches the engine. That is the right default and it has
+// one hole -- a string chosen at run time cannot go through it. Until this the
+// only way in was vformat plus a hand-spelled make_format_args, which asks the
+// caller to build the argument store themselves for the sake of one string that
+// happens not to be a literal.
+//
+// runtime_format is the door, and what makes it safe is what it REFUSES. The
+// object holds a VIEW of the caller's string and its copy is deleted, so it can
+// be passed straight into format and nowhere else; the dangling use becomes a
+// diagnostic where it is written instead of a read of a dead string.
+namespace p239 {
+
+// P2905R2 is the other half of this macro's value: make_format_args takes
+// Args& rather than Args&&, so a temporary cannot be stored in an argument
+// store that outlives it.
+//
+// ‼ The concept is DEPENDENT on purpose. Written without a parameter,
+// `requires { std::make_format_args(42); }` is a HARD ERROR on GCC 15.2 rather
+// than a false requires-expression: deduction succeeds with Ts = int and the
+// failure is binding int& to an rvalue, which is reported outside the immediate
+// context. Ф31 recorded that `requires{call(...)}` can answer "present" when it
+// is not; this is the same trap approached from the other side, and the fix is
+// the same one -- make the expression depend on a template parameter.
+template <class T>
+concept MakeArgsFrom = requires { std::make_format_args(std::declval<T>()); };
+
+const char *const kSpecs[] = {"{} and {}", "{1} before {0}", "{:>6}|{:<6}",
+                              "{:#x} {:08.3f}", "{{literal}} {}"};
+
+}  // namespace p239
+
+void Phase239()
+{
+    using p239::kSpecs;
+
+    // ── 1. the door leads to the same engine ─────────────────────────────
+    // Each of these is also spelled as a literal, and the two must agree: a
+    // run-time string is not a second dialect, it is the same grammar reaching
+    // the same parser one phase later.
+    {
+        std::string_view s0 = kSpecs[0];
+        CheckText(std::format(std::runtime_format(s0), 1, "two"),
+                  "1 and two", "phase239 (1) a run-time string formats");
+        CheckText(std::format(std::runtime_format(s0), 1, "two"),
+                  std::format("{} and {}", 1, "two").c_str(),
+                  "phase239 (1) and agrees with the same string as a literal");
+
+        std::string_view s1 = kSpecs[1];
+        CheckText(std::format(std::runtime_format(s1), "a", "b"), "b before a",
+                  "phase239 (1) explicit indices survive the run-time path");
+
+        std::string_view s2 = kSpecs[2];
+        CheckText(std::format(std::runtime_format(s2), "r", "l"), "     r|l     ",
+                  "phase239 (1) alignment and width too");
+
+        std::string_view s3 = kSpecs[3];
+        CheckText(std::format(std::runtime_format(s3), 255, 3.5),
+                  "0xff 0003.500", "phase239 (1) and the numeric presentations");
+
+        std::string_view s4 = kSpecs[4];
+        CheckText(std::format(std::runtime_format(s4), 9), "{literal} 9",
+                  "phase239 (1) escaped braces are still escaped");
+    }
+
+    // ── 2. every entry point that takes a format string takes this one ────
+    {
+        std::string_view s = "{}-{}";
+        std::string out;
+        std::format_to(std::back_inserter(out), std::runtime_format(s), 4, 5);
+        CheckText(out, "4-5", "phase239 (2) format_to");
+
+        Check(std::formatted_size(std::runtime_format(s), 4, 5) == 3,
+              "phase239 (2) formatted_size");
+
+        char buf[8] = {};
+        auto r = std::format_to_n(buf, 3, std::runtime_format(s), 4, 5);
+        Check(r.size == 3 && std::string(buf) == "4-5",
+              "phase239 (2) format_to_n reports the untruncated size");
+
+        // The locale-taking overloads of Ф43-e-1 reach it as well: the door is
+        // cut into basic_format_string, so every overload spelled in terms of
+        // one gets it without a second entry point.
+        CheckText(std::format(std::locale::classic(), std::runtime_format(s), 4, 5),
+                  "4-5", "phase239 (2) and the locale-taking overload");
+    }
+
+    // ── 3. the wide half ─────────────────────────────────────────────────
+    {
+        std::wstring_view s = L"{} и {}";
+        CheckTextW(std::format(std::runtime_format(s), 1, 2), "1 ? 2",
+                   "phase239 (3) runtime_format(wstring_view) picks the wide overload");
+        static_assert(std::is_same_v<decltype(std::runtime_format(std::wstring_view{})),
+                                     std::__runtime_format_string<wchar_t>>,
+                      "phase239 (3) and the character type comes from the argument");
+    }
+
+    // ── 4. what the compiler used to refuse, the engine now reports ───────
+    // This is the trade P2918R2 names, and it is worth pinning in both
+    // directions: the SAME spec as a literal does not compile at all, and
+    // through the door it is a format_error carrying a message. Neither is
+    // silence, which is the only unacceptable answer.
+    {
+        bool threw = false;
+        try {
+            std::string_view bad = "{2}";           // one argument, index two
+            (void)std::format(std::runtime_format(bad), 1);
+        } catch (const std::format_error &) {
+            threw = true;
+        }
+        Check(threw, "phase239 (4) an index past the end throws format_error");
+
+        threw = false;
+        try {
+            std::string_view bad = "{:d}";          // integer presentation, string arg
+            (void)std::format(std::runtime_format(bad), "text");
+        } catch (const std::format_error &) {
+            threw = true;
+        }
+        Check(threw, "phase239 (4) and so does a presentation the type has no answer for");
+
+        threw = false;
+        try {
+            std::string_view bad = "unmatched {";
+            (void)std::format(std::runtime_format(bad), 1);
+        } catch (const std::format_error &) {
+            threw = true;
+        }
+        Check(threw, "phase239 (4) and an unmatched brace");
+    }
+
+    // ── 5. what it refuses, which is the point ───────────────────────────
+    static_assert(!std::is_copy_constructible_v<std::__runtime_format_string<char>>,
+                  "phase239 (5) the copy is deleted -- it holds a view");
+    static_assert(!std::is_copy_assignable_v<std::__runtime_format_string<char>>,
+                  "phase239 (5) and so is the assignment");
+    static_assert(!std::is_copy_constructible_v<std::__runtime_format_string<wchar_t>>,
+                  "phase239 (5) both character types");
+
+    // ── 6. P2905R2, which was already here ───────────────────────────────
+    static_assert(!p239::MakeArgsFrom<int>,
+                  "phase239 (6) make_format_args refuses a prvalue (P2905R2)");
+    static_assert(p239::MakeArgsFrom<int &>,
+                  "phase239 (6) and takes an lvalue");
+    static_assert(__cpp_lib_format == 202311L,
+                  "phase239 (6) which is why the macro can carry P2918R2's value");
+
+    printf("[CXX] PASS phase239: the format string nobody has until the program "
+           "runs\n");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -55360,6 +55517,7 @@ const PhaseRow kPhases[] = {
     {"235", Phase235},
     {"237", Phase237},
     {"238", Phase238},
+    {"239", Phase239},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.

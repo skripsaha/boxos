@@ -499,7 +499,7 @@ the whole set, not sampled.
 - **Every C++23 macro carries its N4950 value**, and none is defined at a later
   revision's value. The exceptions are the macros of *implemented C++26
   features*, which carry their C++26 value and are listed at the end of this
-  section; there are forty-six so far, measured rather than counted by hand: every
+  section; there are forty-seven so far, measured rather than counted by hand: every
   macro whose value here exceeds what libstdc++ 16.1 reports at `-std=c++23`,
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
@@ -695,6 +695,7 @@ constructors) — the library simply stayed silent about them.
 | `__cpp_lib_ranges_indices` | 202506 | P3060R2 | Ф33 |
 | `__cpp_lib_to_string` | 202306 | P2587R3 | Ф33 |
 | `__cpp_lib_associative_heterogeneous_insertion` | 202306 | P2363R5 | Ф33 |
+| `__cpp_lib_format` | 202311 | P2905R2 + P2918R2 | Ф46 |
 
 Three of those carry a value the current working draft has already moved past,
 and deliberately: `__cpp_lib_to_chars` is at P2497R0's 202306 rather than the
@@ -2145,6 +2146,45 @@ states the contract; the encoding already honoured it.
 
 ## `<format>`
 
+- `✓` Closed in Ф46: **a format string chosen at run time had no way in.**
+  `basic_format_string`'s constructor is `consteval`, which is the whole point of
+  it — a spec the compiler cannot answer is a compile error rather than a throw,
+  and an argument index past the end never reaches the engine. The hole that
+  leaves is a string that does not exist until the program runs, and until Ф46
+  the only route was `vformat` with a hand-spelled `make_format_args`: the caller
+  builds the argument store themselves for the sake of one string that happens
+  not to be a literal. P2918R2's `runtime_format` is the door, and it leads to the
+  same engine — every spec below is also spelled as a literal in phase239, and the
+  two must produce the same text.
+
+  **What makes it safe is what it refuses.** The object holds a *view* of the
+  caller's string, so its copy and assignment are deleted: a program that binds it
+  to a name and formats with it later gets a diagnostic where that is written,
+  rather than a read of a string that has died. The correct use pays nothing —
+  `format(runtime_format(s), …)` is a prvalue that materialises straight into the
+  parameter. The door is cut into `basic_format_string` itself, so `format_to`,
+  `format_to_n`, `formatted_size` and the six locale-taking overloads of Ф43-e-1
+  all take it without a second entry point.
+
+  **The other half of the macro's value was already here, and this document's own
+  source said otherwise.** `<__bits/version_format>` recorded that C++26's values
+  "need P2905R2 and P2918R2, which this library does not have". P2905R2 is the
+  paper that makes `make_format_args` take `Args&` rather than `Args&&`, so a
+  temporary cannot be stored in an argument store that outlives it — and
+  `make_format_args` here has always been declared `make_format_args(Ts &...vs)`.
+  Measured rather than remembered: `make_format_args(i)` compiles,
+  `make_format_args(42)` does not. So Ф46 was one paper, not two, and
+  `__cpp_lib_format` is **202311L** (§1.3).
+
+  ‼ Pinning that measurement took a second attempt, and the reason is worth
+  keeping. `requires { make_format_args(42); }` written with no template
+  parameter is a **hard error** on GCC 15.2 rather than a false
+  requires-expression: deduction succeeds with `Ts = int`, and the failure is
+  binding `int&` to an rvalue, which is reported outside the immediate context.
+  Made dependent — `template <class T> concept … requires {
+  make_format_args(declval<T>()); }` — it answers `false` and `true` correctly.
+  Ф31 recorded that `requires{call(...)}` can report *present* when a thing is
+  absent; this is the same trap from the other side.
 - `✓` Closed in Ф31e-a: a `basic_string` or `basic_string_view` with non-default
   traits or allocator now has the *partial* specializations
   [format.formatter.spec]/2.2 asks for, and formats as its text. It used to match
