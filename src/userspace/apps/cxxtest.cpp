@@ -53348,7 +53348,7 @@ void One(const char *pat, const char *subject, const char *want, const char *wha
     std::string got;
     try {
         const std::regex re(pat, f);
-        if (!std::regex_search(s, m, re)) got = "nomatch";
+        if (!std::regex_search(s, m, re, mf)) got = "nomatch";
         else {
             got = "at=" + std::to_string(m.position(0)) + " len=" + std::to_string(m.length(0));
             for (std::size_t i = 1; i < m.size(); ++i)
@@ -53625,6 +53625,163 @@ void Phase231()
     Check(true, "phase231 (14) <regex> runs");
 }
 
+// ── Phase233: <regex> — the walk, and the other question ──────────────────
+// Ф44-d finishes the header: the five POSIX grammars stop being a spelling of
+// the ECMAScript one, and the three algorithms that walk a sequence rather
+// than answering about it once.
+void Phase233()
+{
+    using namespace std::regex_constants;
+
+    // ── 1. POSIX asks for the LONGEST match, ECMAScript for the first ────
+    // Measured 2026-08-22 against libstdc++ 16.1 and libc++ 22.1.6: both do
+    // this, and until Ф44-d boxcxx did not — /a|ab/ against "ab" was one
+    // character under every grammar.
+    {
+        const std::string ab = "ab";
+        std::smatch m;
+        Check(std::regex_search(ab, m, std::regex("a|ab", std::regex::extended))
+              && m.length(0) == 2,
+              "phase233 (1) ERE takes the longer branch though it is written second");
+        Check(std::regex_search(ab, m, std::regex("a|ab")) && m.length(0) == 1,
+              "phase233 (1) ECMAScript takes the branch written first");
+        Check(std::regex_search(ab, m, std::regex("a|ab", std::regex::awk))
+              && m.length(0) == 2,
+              "phase233 (1) awk is an extended grammar and asks the same");
+        const std::string abab = "abab";
+        Check(std::regex_search(abab, m,
+                                std::regex("\\(ab\\)\\1\\|ab", std::regex::basic))
+              && m.length(0) == 4,
+              "phase233 (1) and the bounded machine answers it too");
+    }
+
+    // ── 2. regex_iterator walks matches ──────────────────────────────────
+    {
+        const std::string s = "a1b22c333";
+        const std::regex re("[0-9]+");
+        std::sregex_iterator it(s.begin(), s.end(), re), stop;
+        std::string all;
+        int n = 0;
+        for (; it != stop; ++it) { all += it->str(); ++n; }
+        Check(n == 3 && all == "122333", "phase233 (2) three matches, in order");
+
+        // [re.regiter.incr]: position(i) is measured from the start of the
+        // TARGET sequence, not from where the search that found it began — an
+        // iterator hands regex_search a shrinking tail.
+        std::sregex_iterator k(s.begin(), s.end(), re);
+        ++k;
+        Check(k->position(0) == 3, "phase233 (2) positions stay absolute");
+        Check(k->prefix().str() == "b", "phase233 (2) and the prefix reaches back");
+        Check(std::distance(std::sregex_iterator(s.begin(), s.end(), re),
+                            std::sregex_iterator()) == 3,
+              "phase233 (2) it is a forward iterator");
+    }
+
+    // ── 3. an expression that can match nothing must still move on ───────
+    // The case the standard writes out in full: after an empty match the next
+    // search demands a non-empty one AT the same place, and only when that
+    // fails does the position advance. Without it this never ends.
+    {
+        const std::string s = "ab";
+        std::sregex_iterator stop;
+        const std::regex re1("c*");
+        std::sregex_iterator it(s.begin(), s.end(), re1);
+        std::string where;
+        int n = 0;
+        for (; it != stop && n < 10; ++it, ++n) where += std::to_string(it->position(0));
+        Check(n == 3 && where == "012",
+              "phase233 (3) an empty match at every position, and then it ends");
+
+        const std::regex re2("b*");
+        std::sregex_iterator j(s.begin(), s.end(), re2);
+        std::string lens;
+        for (int i = 0; i < 4 && j != stop; ++i, ++j) lens += std::to_string(j->length(0));
+        Check(lens == "010",
+              "phase233 (3) and a non-empty one in the middle does not stall it");
+    }
+
+    // ── 4. regex_token_iterator selects, and splits ──────────────────────
+    {
+        const std::string s = "a=1,b=2";
+        const std::regex re("(\\w)=(\\d)");
+        std::string keys;
+        for (std::sregex_token_iterator it(s.begin(), s.end(), re, 1), stop; it != stop; ++it)
+            keys += it->str();
+        Check(keys == "ab", "phase233 (4) one sub-match per match");
+
+        const std::vector<int> both{1, 2};
+        std::string pairs;
+        for (std::sregex_token_iterator it(s.begin(), s.end(), re, both), stop;
+             it != stop; ++it)
+            pairs += it->str();
+        Check(pairs == "a1b2", "phase233 (4) several, in the order asked for");
+
+        // -1 is the text BETWEEN matches, which turns the same iterator into a
+        // splitter.
+        const std::string csv = "one,two,,three";
+        const std::regex comma(",");
+        std::string parts;
+        int n = 0;
+        for (std::sregex_token_iterator it(csv.begin(), csv.end(), comma, -1), stop;
+             it != stop; ++it, ++n)
+            parts += "[" + it->str() + "]";
+        Check(n == 4 && parts == "[one][two][][three]",
+              "phase233 (4) -1 splits, and the empty field is a field");
+
+        const std::regex nomatch("zzz");
+        std::sregex_token_iterator whole(csv.begin(), csv.end(), nomatch, -1), stop;
+        Check(whole != stop && whole->str() == csv,
+              "phase233 (4) with nothing to split on, the sequence is one token");
+    }
+
+    // ── 5. regex_replace ─────────────────────────────────────────────────
+    {
+        const std::string s = "a1b2";
+        const std::regex re("([0-9])");
+        CheckText(std::regex_replace(s, re, "<$1>"), "a<1>b<2>",
+                  "phase233 (5) every match, with the unmatched text kept");
+        CheckText(std::regex_replace(s, re, "<$1>", format_first_only), "a<1>b2",
+                  "phase233 (5) format_first_only stops after one");
+        CheckText(std::regex_replace(s, re, "<$1>", format_no_copy), "<1><2>",
+                  "phase233 (5) format_no_copy drops what did not match");
+        CheckText(std::regex_replace(s, re, "[&]", format_sed), "a[1]b[2]",
+                  "phase233 (5) the sed vocabulary");
+        const std::string abc = "abc";
+        CheckText(std::regex_replace(abc, std::regex("z"), "!"), "abc",
+                  "phase233 (5) no match copies the sequence through");
+        CheckText(std::regex_replace("a1", re, "<$1>"), "a<1>",
+                  "phase233 (5) from a pointer");
+
+        std::string out;
+        std::regex_replace(std::back_inserter(out), s.begin(), s.end(), re, "#");
+        CheckText(out, "a#b#", "phase233 (5) and into an output iterator");
+
+        const std::string ab = "ab";
+        CheckText(std::regex_replace(ab, std::regex("c*"), "-"), "-a-b-",
+                  "phase233 (5) an empty match at every position, here too");
+    }
+
+    // ── 6. the walk is wide too ──────────────────────────────────────────
+    {
+        const std::wstring w = L"x1y2";
+        const std::wregex re(L"[0-9]");
+        int n = 0;
+        for (std::wsregex_iterator it(w.begin(), w.end(), re), stop; it != stop; ++it) ++n;
+        Check(n == 2, "phase233 (6) wide iteration");
+        Check(std::regex_replace(w, re, L"#") == L"x#y#", "phase233 (6) wide replace");
+    }
+
+    Check(true, "phase233 (7) <regex> walks a sequence");
+}
+
+// ── phase234: [time.parse] — reading back what <chrono> writes ───────────
+//
+// The oracle here is the FORMATTER, not a table of expected strings. Ф42-g
+// made the same choice for the wide layer and for the same reason: a table can
+// only say what someone thought to write down, while the other half of the
+// library can be asked about every shape the grammar builds. So most of this
+// phase renders a value and requires the parser to give it back — a defect in
+// either half shows up as a round trip that does not close.
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -53872,6 +54029,7 @@ const PhaseRow kPhases[] = {
     {"229", Phase229},
     {"230", Phase230},
     {"231", Phase231},
+    {"233", Phase233},
     {"2", Phase2},
 };
 

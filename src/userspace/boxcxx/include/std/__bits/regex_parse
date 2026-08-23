@@ -67,6 +67,7 @@ public:
         prog_.collate = collate_;
         prog_.multiline = (flags_ & std::regex_constants::multiline) != std::regex_constants::syntax_option_type{}
                           && grammar_ == Grammar::ECMAScript;
+        prog_.longest = grammar_ != Grammar::ECMAScript;
 
         prog_.Emit(Op::Save, 0);
         Disjunction();

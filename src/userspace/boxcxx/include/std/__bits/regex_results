@@ -269,6 +269,18 @@ public:
 
     void __unready() { ready_ = false; store_.clear(); }
 
+    // [re.regiter.incr] requires position(i) to be measured from the start of
+    // the TARGET sequence, which is not where the search that produced this
+    // match began — an iterator hands regex_search a shrinking tail. The
+    // prefix has to reach back to the end of the previous match for the same
+    // reason.
+    void __rebase(BidirectionalIterator begin, BidirectionalIterator prefixFrom)
+    {
+        begin_ = begin;
+        prefix_.first = prefixFrom;
+        prefix_.matched = prefix_.first != prefix_.second;
+    }
+
 private:
     template <class OutputIter>
     OutputIter Emit(OutputIter out, const value_type &s) const
