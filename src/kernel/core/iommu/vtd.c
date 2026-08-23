@@ -119,15 +119,41 @@ static uint8_t    g_unit_count = 0;
 static uint64_t* g_id_pml4    = NULL;
 static uint64_t  g_id_pml4_phys = 0;
 
+/*
+ * A VT-d table is two addresses, and they are not the same number.
+ *
+ * The hardware is given the PHYSICAL one — it walks these tables with its own
+ * DMA remapping engine, which knows nothing of the kernel's page tables. The
+ * CPU must use the VIRTUAL one, and the kernel's alias for physical memory is
+ * the pull map at PULL_MAP_BASE, not the identity of the address with itself.
+ *
+ * This function used to return the physical address as a pointer, with a
+ * comment asserting that "PMM returns physical address aliased as kernel
+ * virtual via the pull map". It does not: pmm_alloc returns physical, and the
+ * pull map aliases it at PULL_MAP_BASE + phys. The code worked in QEMU for one
+ * reason only — QEMU exposes no DMAR unless asked for one, so vtd_init()
+ * returned on its first line and none of this ever ran. The first machine with
+ * VT-d in its firmware took a kernel #PF writing to 0x3fc05000 inside memset,
+ * four instructions in, and that machine was a Gigabyte B365 on 2026-08-24.
+ */
 static void* alloc_table_4k(uint64_t* phys_out) {
     void* p = pmm_alloc(1);
     if (!p) { *phys_out = 0; return NULL; }
-    /* PMM returns physical address aliased as kernel virtual via the
-     * pull map. Treat the returned pointer as both phys (numerically)
-     * and a writable kernel mapping. */
-    *phys_out = (uint64_t)(uintptr_t)p;
-    memset(p, 0, 4096);
-    return p;
+
+    uintptr_t phys = (uintptr_t)p;
+    void*     virt = vmm_phys_to_virt(phys);
+    if (!virt) { pmm_free(p, 1); *phys_out = 0; return NULL; }
+
+    *phys_out = (uint64_t)phys;
+    memset(virt, 0, 4096);
+    return virt;
+}
+
+/* The CPU-side pointer for a table the hardware knows by physical address.
+ * Every descent through these structures goes through here, because every one
+ * of them stores what the IOMMU needs and none of them store what we do. */
+static inline void* vtd_table_virt(uint64_t entry) {
+    return vmm_phys_to_virt((uintptr_t)(entry & ~0xFFFULL));
 }
 
 static uint64_t* slpte_walk(uint64_t* parent, uint64_t parent_phys,
@@ -143,7 +169,7 @@ static uint64_t* slpte_walk(uint64_t* parent, uint64_t parent_phys,
         return (uint64_t*)child;
     }
     if (e & SLPTE_PS) return NULL;       /* super-page; cannot descend */
-    return (uint64_t*)(uintptr_t)(e & ~0xFFFULL);
+    return (uint64_t*)vtd_table_virt(e);
 }
 
 /* Identity-map [phys, phys+size) at IOVA == phys with R+W. */
@@ -205,8 +231,8 @@ static int vtd_program_context(vtd_unit_t* u, uint8_t bus, uint8_t devfn,
         re->lo = ctx_phys | 1;
         re->hi = 0;
     }
-    vtd_context_entry_t* ctx = (vtd_context_entry_t*)
-        (uintptr_t)(re->lo & ~0xFFFULL);
+    vtd_context_entry_t* ctx = (vtd_context_entry_t*)vtd_table_virt(re->lo);
+    if (!ctx) return -1;
     uint8_t aw = (uint8_t)(u->sagaw_levels - 2);
     ctx[devfn].lo = slpt_phys | 1;
     ctx[devfn].hi = ((uint64_t)domain_id << 8) | ((uint64_t)aw & 0x7);
