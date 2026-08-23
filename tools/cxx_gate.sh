@@ -15,6 +15,11 @@
 # Env:
 #   CFG=bios1|bios16|uefi1|uefi16   which config to boot   (default bios1)
 #   NOBUILD=1                       skip make (tree already built)
+#   BUDGET=<seconds>                post-shell ceiling, passed through to
+#                                   cxx_phase_matrix.sh (default 3600). The
+#                                   two slow configs no longer fit the default
+#                                   with the whole suite -- raise it, or run
+#                                   "0-80" and "81-250" as two gates.
 #
 # Examples:
 #   tools/cxx_gate.sh 220-224              # the locale/facet phases, BIOS 1c
