@@ -34,8 +34,10 @@ DEBUG    ?= off
 
 # ==== FLAGS ====
 # === BUILD CONFIGURATION ===
-# Bootloader layout (LBA addressing):
-#   Sector 0        : Stage1 (512 bytes, MBR)
+# Bootloader layout (LBA addressing). Sectors are absolute across the whole
+# medium; the partition table added on 2026-08-24 describes this layout, it did
+# not move it — which is why every LBA below is the one it always was.
+#   Sector 0        : Stage1 (446 bytes of code, then the MBR partition table)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
 #   Sectors 17+     : Kernel (dynamic size, loaded via TagFS + Unreal Mode)
 #   Sector 1034     : TagFS Superblock (primary)
@@ -44,6 +46,8 @@ DEBUG    ?= off
 #   Sectors 1038-2061: Journal Entries (512 entries * 2 sectors)
 #   Sector 2062+    : Block Bitmap (dynamic size)
 #   After bitmap    : Data Blocks (block 0=registry, 1=ftable, 2=mpool, 3+=files)
+#   Sector 49152+   : EFI System Partition (FAT32) — the UEFI half of the
+#                     medium, appended AFTER the BoxOS region on purpose
 STAGE2_SECTORS      = 16
 
 # Physical address of the boot_info handoff block. ONE number, four consumers:
@@ -58,6 +62,17 @@ STAGE2_SECTORS      = 16
 BOOT_INFO_ADDR      = 0xA000
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
+
+# The BoxOS region: sector 0 through BOXOS_SECTORS-1. Every absolute LBA the
+# loaders and the kernel already use lives inside it, and none of them moved
+# when the image became partitioned — the EFI System Partition was appended
+# AFTER this region precisely so that they would not have to.
+BOXOS_SECTORS       = 49152
+
+# Where the ESP begins. 2048-aligned, which is what every partitioning tool
+# has produced for fifteen years and what firmware and flash translation
+# layers are tuned for.
+ESP_START_SECTOR    = 49152
 
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
@@ -262,6 +277,12 @@ KERNEL_ELF   = $(BUILDDIR)/kernel.elf
 STAGE1_BIN   = $(BUILDDIR)/stage1.bin
 STAGE2_BIN   = $(BUILDDIR)/stage2.bin
 IMAGE        = $(BUILDDIR)/boxos.img
+# Defined here, with the other image paths, and not down beside the UEFI build
+# rules: Make expands a prerequisite list when it READS the rule, so a variable
+# defined below the rule that names it expands to nothing and the dependency
+# quietly disappears. That is exactly what happened when the ESP first became
+# part of the image — the build got as far as `dd if=` an empty filename.
+UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 FLOPPY_IMG   = $(BUILDDIR)/boxos_floppy.img
 ISO          = $(BUILDDIR)/boxos.iso
 ISO_DIR      = $(BUILDDIR)/isofiles
@@ -531,9 +552,9 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(EXITPATHS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
-	@echo "Creating disk image (24MB)..."
-	@dd if=/dev/zero of=$@ bs=512 count=49152 status=none
+$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(EXITPATHS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+	@echo "Creating disk image ($$(( $(BOXOS_SECTORS) / 2048 ))MB BoxOS region)..."
+	@dd if=/dev/zero of=$@ bs=512 count=$(BOXOS_SECTORS) status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
 	@echo "  Writing Stage2 (sectors 1-9, $(STAGE2_SECTORS) sectors)..."
@@ -598,6 +619,13 @@ $(IMAGE): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(
 		$(UTILS_DIR)/ipc_test.elf "utility" \
 		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 		$(UTILS_DIR)/hw.elf      "utility,system,hardware"
+	@echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."
+	@dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none
+	@echo "  Writing MBR partition table..."
+	@ESP_SECTORS=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
+	python3 tools/make_mbr.py $@ \
+	    1,$$(( $(BOXOS_SECTORS) - 1 )),7f,boot \
+	    $(ESP_START_SECTOR),$$ESP_SECTORS,ef
 	@echo "Disk image created: $(IMAGE)"
 
 $(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
@@ -778,7 +806,6 @@ OVMF_FD := $(firstword $(foreach p,$(OVMF_PATHS),$(wildcard $(p))))
 # For UEFI boot: create a minimal ESP (EFI System Partition) FAT image that
 # holds EFI/BOOT/BOOTX64.EFI, then pass it as a second drive alongside the
 # BoxOS disk image (which still holds the TagFS data).
-UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 
 # UEFI NVRAM variables image — writable copy of the OVMF vars template.
 # Searched in common locations; falls back to an empty 256 KB file if no
@@ -806,9 +833,15 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 		echo "  Created empty 256 KB NVRAM (fallback)"; \
 	fi
 
-$(UEFI_ESP_IMG): $(TAGBOOT_EFI) $(BUILDDIR)/edk2-vars.fd | $(BUILDDIR)
-	@echo "Creating UEFI ESP image (FAT32, 34 MB)..."
-	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@
+# The ESP is built to be embedded, not to stand alone: its BPB records the LBA
+# it will start at, because the FAT specification defines that field as the
+# partition's offset and firmware that reads it computes absolute addresses
+# from it. It no longer depends on edk2-vars.fd — NVRAM belongs to running a
+# virtual machine, not to building a filesystem, and the image needs this even
+# when no OVMF is installed.
+$(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
+	@echo "Creating UEFI ESP image (FAT32) for sector $(ESP_START_SECTOR)..."
+	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@ $(ESP_START_SECTOR)
 
 run: $(IMAGE)
 ifeq ($(EMU),bochs)
@@ -835,7 +868,7 @@ ifeq ($(EMU),bochs)
 	    echo "  Searched: $(BOCHS_DATA_DIRS)"; \
 	    exit 1; \
 	fi
-	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(BUILDDIR)/edk2-vars.fd)
 	@BOCHS_RC="$(BOCHS_RC)" \
 	  IMAGE="$<" \
 	  CORES="$(CORES)" \
@@ -848,7 +881,6 @@ ifeq ($(EMU),bochs)
 	  LOG="$(LOG)" \
 	  UEFI="$(UEFI)" \
 	  OVMF_FD="$(OVMF_FD)" \
-	  UEFI_ESP_IMG="$(UEFI_ESP_IMG)" \
 	  BOCHS_BIOS="$(BOCHS_BIOS)" \
 	  BOCHS_VGABIOS="$(BOCHS_VGABIOS)" \
 	  BOCHS_LOG="$(BOCHS_LOG)" \
@@ -862,14 +894,13 @@ else
 	$(if $(filter on,$(UEFI)), \
 		$(if $(OVMF_FD),, \
 			$(error UEFI=on requires OVMF.fd. Install ovmf package or place OVMF.fd in project root.)))
-	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(BUILDDIR)/edk2-vars.fd)
 	@$(QEMU) \
 		$(if $(filter on,$(UEFI)), \
 			-machine q35 \
 			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
 			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
-			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=ide$(comma)index=0 \
-			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
+			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=0, \
 			$(if $(filter on,$(STRICT)),-machine q35) \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
@@ -898,7 +929,7 @@ endif
 # Same vars as `run`: UEFI=on, CORES=N, MEM=size, USB=on, AHCI=on.
 # ===================================================================
 run-bg: $(IMAGE)
-	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(UEFI_ESP_IMG))
+	@$(MAKE) --no-print-directory $(if $(filter on,$(UEFI)),$(BUILDDIR)/edk2-vars.fd)
 	@if [ -f $(BUILDDIR)/qemu.pid ] && kill -0 $$(cat $(BUILDDIR)/qemu.pid) 2>/dev/null; then \
 		echo "[run-bg] QEMU already running (pid $$(cat $(BUILDDIR)/qemu.pid)). Use 'make run-stop' first."; \
 		exit 1; \
@@ -915,8 +946,7 @@ run-bg: $(IMAGE)
 			-machine q35 \
 			-drive if=pflash$(comma)format=raw$(comma)readonly=on$(comma)file=$(OVMF_FD) \
 			-drive if=pflash$(comma)format=raw$(comma)file=$(BUILDDIR)/edk2-vars.fd \
-			-drive format=raw$(comma)file=$(UEFI_ESP_IMG)$(comma)if=ide$(comma)index=0 \
-			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=1, \
+			-drive format=raw$(comma)file=$<$(comma)if=ide$(comma)index=0, \
 			$(if $(filter on,$(AHCI)), \
 				-drive id=disk0$(comma)file=$<$(comma)format=raw$(comma)if=none \
 				-device ahci$(comma)id=ahci \
@@ -952,14 +982,20 @@ run-bg: $(IMAGE)
 # Usage:  make usb DEV=/dev/diskN     (macOS — get from `diskutil list`)
 #         sudo make usb DEV=/dev/sdX  (Linux — get from `lsblk`)
 #
-# Writes the raw image (build/boxos.img) sector-by-sector to a USB stick
-# or external disk. Result: bootable on any x86_64 PC via BIOS legacy /
-# CSM AND UEFI:
-#   • Sector 0..16   = stage1 + stage2 (BIOS legacy boot path)
-#   • Sectors 17+    = kernel + TagFS (data + apps + UEFI loader files)
-#   • build/BOOTX64.EFI is embedded in the image too — UEFI firmware will
-#     find it automatically if the disk has GPT+ESP layout (left for a
-#     follow-up; current layout is raw + MBR signature, BIOS legacy only).
+# Writes the raw image (build/boxos.img) sector-by-sector to a USB stick or
+# external disk. One medium, both firmware paths — which is the only
+# arrangement a real user ever holds:
+#   • Sector 0        = MBR: stage1's boot code and the partition table.
+#     A stick WITHOUT that table is one the firmware has to guess about, and
+#     the guess is commonly USB-FDD — a 1.44 MB floppy emulation, 2880
+#     sectors, while the kernel lives at 2088..3272 and runs off the end of
+#     it partway through loading.
+#   • Sectors 1..16   = stage2 (BIOS legacy path)
+#   • Partition 1     = the BoxOS region, marked bootable: kernel + TagFS
+#   • Partition 2     = an EFI System Partition (FAT32) holding
+#                       EFI/BOOT/BOOTX64.EFI, which UEFI firmware finds by
+#                       itself. TagBoot then locates TagFS by its magic on
+#                       the whole disk, so both paths reach the same volume.
 #
 # SAFETY: refuses to write to /dev/disk0 / /dev/sda (likely host system),
 # requires explicit DEV=, asks for confirmation before destroying data.
@@ -1012,7 +1048,12 @@ usb: $(IMAGE)
 		sudo dd if=$(IMAGE) of=$(DEV) bs=4M status=progress conv=fsync oflag=direct; \
 		sync; \
 	fi
-	@echo "[usb] Done. The stick now boots BoxOS via BIOS legacy / CSM."
+	@echo "[usb] Done. The stick boots BoxOS both ways from this one medium:"
+	@echo "      BIOS/CSM  — MBR sector 0, partition 1 marked bootable"
+	@echo "      UEFI      — partition 2, an EFI System Partition holding"
+	@echo "                  EFI/BOOT/BOOTX64.EFI"
+	@echo "      In the firmware setup pick the plain entry for BIOS/CSM, or the"
+	@echo "      one prefixed UEFI: for the other. Both land in the same BoxOS."
 	@echo "[usb] To boot on real hardware:"
 	@echo "       1) Plug the stick into the target PC"
 	@echo "       2) Enter firmware setup (F2/F12/Del at power-on)"
