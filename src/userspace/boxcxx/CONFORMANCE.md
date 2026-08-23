@@ -40,9 +40,9 @@ C++26 feature is *not* implemented keeps its C++23 value.
 | Standard headers provided | **109** — 104 of the 105 C++23 [headers] name (1 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
 | Internal implementation leaves (`include/std/__bits/`) | 165 |
 | Header source | ~119 000 lines |
-| Feature-test macros defined | 238 — 166 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 239 — 166 at their C++23 value, 73 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 33 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 253 phases (234 of them the numbered `PhaseN` series), 6 615 runtime checks, 2 059 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 256 phases (237 of them the numbered `PhaseN` series), 6 665 runtime checks, 2 069 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
