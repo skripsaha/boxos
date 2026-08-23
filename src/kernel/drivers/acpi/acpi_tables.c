@@ -42,7 +42,48 @@ bool acpi_validate_table(const acpi_sdt_header_t* header) {
  * referenced for the kernel lifetime (shutdown needs the FADT, MADT-
  * derived state stays live too).
  */
+/* Physical address -> the mapping we already made for it.
+ *
+ * An ACPI table is immortal: it is mapped at boot, never unmapped, and its
+ * contents never move. So the mapping should be made once — and until now it
+ * was made again on every visit. acpi_find_table() walks the root table and
+ * maps EVERY entry until a signature matches, and map_and_validate_table()
+ * maps twice per visit (header first, then the declared length). A dozen
+ * lookups across a machine with thirty tables is several hundred fresh MMIO
+ * mappings, each burning kernel virtual address space and the page-table
+ * pages under it, none of which is ever reclaimed. QEMU publishes six tables
+ * and hid the cost; a real board publishes three times as many.
+ *
+ * Cached on the miss too. A table whose checksum fails will fail it again.
+ */
+static acpi_sdt_header_t* map_and_validate_table_uncached(uintptr_t phys);
+
+#define ACPI_MAP_CACHE_SIZE 64
+static struct {
+    uintptr_t          phys;
+    acpi_sdt_header_t* hdr;
+} g_map_cache[ACPI_MAP_CACHE_SIZE];
+static uint8_t g_map_cache_used = 0;
+
 static acpi_sdt_header_t* map_and_validate_table(uintptr_t phys) {
+    for (uint8_t i = 0; i < g_map_cache_used; i++)
+        if (g_map_cache[i].phys == phys)
+            return g_map_cache[i].hdr;
+
+    acpi_sdt_header_t* result = map_and_validate_table_uncached(phys);
+
+    /* Past the cache size we still answer correctly, just without the saving.
+     * Sixty-four is comfortably more tables than any firmware publishes; a
+     * machine that exceeds it gets the old behaviour, not a wrong one. */
+    if (g_map_cache_used < ACPI_MAP_CACHE_SIZE) {
+        g_map_cache[g_map_cache_used].phys = phys;
+        g_map_cache[g_map_cache_used].hdr  = result;
+        g_map_cache_used++;
+    }
+    return result;
+}
+
+static acpi_sdt_header_t* map_and_validate_table_uncached(uintptr_t phys) {
     acpi_sdt_header_t* hdr = (acpi_sdt_header_t*)acpi_map_physical(
         phys, sizeof(acpi_sdt_header_t));
     if (!hdr) {

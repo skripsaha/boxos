@@ -88,6 +88,43 @@ static erst_entry_t* erst_entries(uint32_t* count) {
     return (erst_entry_t*)((uint8_t*)g_erst + sizeof(acpi_erst_t));
 }
 
+/* SystemMemory GAS registers, mapped once each.
+ *
+ * gas_read and gas_write used to call vmm_map_mmio on every access and never
+ * unmap. That is a leak anywhere; inside erst_run_action it is a weapon: the
+ * interpreter runs up to 262144 instructions, every one of which may touch a
+ * register, so firmware with a long enough action could ask the kernel for a
+ * quarter of a million permanent MMIO mappings and the page-table pages under
+ * them. An ERST action addresses a handful of distinct registers, so a handful
+ * of slots is all it takes to make the mapping happen once.
+ *
+ * Not freed, deliberately: these registers are firmware-owned and live for the
+ * kernel's lifetime, exactly like the ACPI tables themselves. */
+/* Longest STALL this interpreter will honour, in microseconds. Same value
+ * Linux uses, and for the same reason: past it the table is wrong. */
+#define ERST_MAX_STALL_US 32000u
+
+#define GAS_MAP_SLOTS 8
+static struct {
+    uint64_t       phys;
+    volatile void* virt;
+} g_gas_map[GAS_MAP_SLOTS];
+static uint8_t g_gas_map_used = 0;
+
+static volatile void* gas_map(uint64_t phys) {
+    for (uint8_t i = 0; i < g_gas_map_used; i++)
+        if (g_gas_map[i].phys == phys)
+            return g_gas_map[i].virt;
+
+    volatile void* p = vmm_map_mmio((uintptr_t)phys, 8, VMM_FLAGS_KERNEL_RW);
+    if (p && g_gas_map_used < GAS_MAP_SLOTS) {
+        g_gas_map[g_gas_map_used].phys = phys;
+        g_gas_map[g_gas_map_used].virt = p;
+        g_gas_map_used++;
+    }
+    return p;
+}
+
 static uint64_t gas_read(const acpi_gas_t* g) {
     if (g->address == 0) return 0;
     uint64_t addr = g->address;
@@ -101,8 +138,7 @@ static uint64_t gas_read(const acpi_gas_t* g) {
         }
     }
     if (g->address_space == GAS_AS_SYSTEM_MEMORY) {
-        volatile void* p = vmm_map_mmio((uintptr_t)addr, 8,
-                                         VMM_FLAGS_KERNEL_RW);
+        volatile void* p = gas_map(addr);
         if (!p) return 0;
         switch (bw) {
             case 8:  return *(volatile uint8_t*)p;
@@ -128,8 +164,7 @@ static void gas_write(const acpi_gas_t* g, uint64_t v) {
         return;
     }
     if (g->address_space == GAS_AS_SYSTEM_MEMORY) {
-        volatile void* p = vmm_map_mmio((uintptr_t)addr, 8,
-                                         VMM_FLAGS_KERNEL_RW);
+        volatile void* p = gas_map(addr);
         if (!p) return;
         switch (bw) {
             case 8:  *(volatile uint8_t*)p  = (uint8_t)v;  break;
@@ -212,10 +247,26 @@ int erst_run_action(uint8_t action_id, uint64_t value_in, uint64_t* value_out) {
                 break;
             }
             case ERST_INS_STALL:
-                /* `value` is microseconds. Coarse spin via PIT/HPET-backed
-                 * uptime if we have one; else a busy loop of `outb 0x80`
-                 * which is ~1 us on legacy hardware. */
-                for (uint64_t u = 0; u < e->value; u++) outb(0x80, 0);
+                /* `value` is microseconds, and it comes from the firmware.
+                 * The interpreter's tick budget bounds how many instructions
+                 * run; it says nothing about how long ONE of them takes, and
+                 * an unbounded spin here is a table entry away from a machine
+                 * that never finishes booting. Linux caps the same instruction
+                 * at 32 ms for the same reason (FIRMWARE_MAX_STALL); a stall
+                 * longer than that is a malformed table, not a slow register.
+                 *
+                 * The spin itself is `outb 0x80`, which is roughly a
+                 * microsecond on legacy hardware and only roughly anything on
+                 * modern hardware — but ERST stalls exist to let a firmware
+                 * register settle, and erring long is the safe direction. */
+                if (e->value > ERST_MAX_STALL_US) {
+                    debug_printf("[ERST] STALL of %lu us at pc=%u exceeds the "
+                                 "%u us cap — table is malformed, skipping\n",
+                                 (unsigned long)e->value, pc,
+                                 (unsigned)ERST_MAX_STALL_US);
+                } else {
+                    for (uint64_t u = 0; u < e->value; u++) outb(0x80, 0);
+                }
                 break;
             case ERST_INS_STALL_WHILE_TRUE: {
                 uint32_t guard = 1000000;
