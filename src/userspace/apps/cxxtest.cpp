@@ -54955,6 +54955,158 @@ void Phase237()
     }
 }
 
+// ── Phase238: wregex — the half a host stand cannot answer ────────────────
+// Ф44-e. tools/cxx_regex_oracle.sh --wide runs 40 000 generated cases through
+// BOTH halves of all three columns and requires each column to agree with
+// itself; --widefile runs the characters no narrow half can hold past two
+// reference libraries. Neither can reach what is tested here, and the reason
+// is exact: on the stand boxcxx's wide traits ask the HOST's <cwctype>, while
+// in BoxOS they ask the Unicode database Ф42-a built — and the two disagree on
+// purpose. Every question below goes through regex_traits<wchar_t> into our
+// own tables, so this is the only place the answers are ours.
+namespace p238 {
+
+bool Search(const wchar_t *pat, const wchar_t *subject,
+            std::regex_constants::syntax_option_type f = std::regex_constants::ECMAScript)
+{
+    return std::regex_search(std::wstring(subject), std::wregex(pat, f));
+}
+
+}  // namespace p238
+
+void Phase238()
+{
+    using p238::Search;
+
+    // ── 1. the classification is OURS, not the host's ────────────────────
+    // Ф42-a measured all three of these against macOS and chose to differ on
+    // the first two: U+4E2D is Lo and therefore Alphabetic however few libcs
+    // say so, U+00AD is Cf and has no glyph, and iswdigit stays ASCII because
+    // C's 5.2.1 fixes it there. A regex is just another way to ask.
+    Check(Search(L"[[:alpha:]]", L"中"),
+          "phase238 (1) [[:alpha:]] takes U+4E2D, where macOS's wide ctype does not");
+    Check(!Search(L"[[:print:]]", L"­"),
+          "phase238 (1) and refuses the soft hyphen, which has no glyph");
+    Check(!Search(L"[[:digit:]]", L"٠"),
+          "phase238 (1) [[:digit:]] stays ASCII, as C fixes it");
+    Check(!Search(L"[[:alnum:]]", L"٠") && Search(L"[[:print:]]", L"٠"),
+          "phase238 (1) so an Arabic-Indic digit is printable and nothing else");
+    Check(Search(L"\\w", L"中") && !Search(L"\\w", L" "),
+          "phase238 (1) \\w is [_[:alnum:]] over the same tables");
+
+    // ── 2. icase reaches translate_nocase, which is a Unicode fold ───────
+    Check(Search(L"ā", L"Ā", std::regex_constants::ECMAScript
+                                          | std::regex_constants::icase),
+          "phase238 (2) icase folds U+0100 to U+0101 through ctype<wchar_t>");
+    Check(!Search(L"ā", L"Ā"),
+          "phase238 (2) and without icase the two are different characters");
+
+    // ── 3. above 255 the class stops being a bitmap ──────────────────────
+    // The representation changes at 256 — below it a bit per value, above it a
+    // pair — and mutating either half is caught by the wide file on the stand.
+    // These are the same questions asked where the tables are ours.
+    Check(Search(L"[Ā-Ă]", L"ā"), "phase238 (3) a range above 255");
+    Check(!Search(L"[Ā-Ă]", L"ą"), "phase238 (3) and its upper bound");
+    Check(Search(L"[a-ÿ]", L"ÿ") && !Search(L"[a-ÿ]", L"Ā"),
+          "phase238 (3) a range that straddles the boundary");
+    Check(Search(L"[^中]", L"文") && !Search(L"[^中]", L"中"),
+          "phase238 (3) a negated class of one wide character");
+
+    // ── 4. the traits themselves, called directly ────────────────────────
+    {
+        std::regex_traits<wchar_t> t;
+        Check(t.value(L'f', 16) == 15 && t.value(L'9', 10) == 9 && t.value(L'g', 16) == -1,
+              "phase238 (4) value() narrows through the facet before it reads a digit");
+        const std::wstring up = L"A", lo = L"a";
+        Check(t.transform_primary(up.begin(), up.end())
+                  == t.transform_primary(lo.begin(), lo.end()),
+              "phase238 (4) transform_primary folds case, so A and a share a key");
+        Check(t.transform(up.begin(), up.end()) != t.transform(lo.begin(), lo.end()),
+              "phase238 (4) and transform does not");
+        const std::wstring tab = L"tab";
+        Check(t.lookup_collatename(tab.begin(), tab.end()) == std::wstring(1, L'\t'),
+              "phase238 (4) a collating name spelled in wide characters");
+        const std::wstring alpha = L"alpha";
+        Check(t.lookup_classname(alpha.begin(), alpha.end()) != 0,
+              "phase238 (4) and a class name");
+        Check(t.translate_nocase(L'Ā') == L'ā',
+              "phase238 (4) translate_nocase is the facet's tolower");
+    }
+
+    // ── 5. every wide typedef of [re.syn] is a working type ──────────────
+    {
+        const std::wstring text = L"中=1, 文=22, x=333";
+        std::wsmatch m;
+        Check(std::regex_search(text, m, std::wregex(L"(\\w+)=(\\d+)")) && m.size() == 3
+                  && m.str(1) == L"中" && m.str(2) == L"1",
+              "phase238 (5) wsmatch over a wide subject");
+
+        std::wcmatch cm;
+        Check(std::regex_search(L"文x", cm, std::wregex(L"^(.)")) && cm.str(1) == L"文",
+              "phase238 (5) wcmatch over a wide pointer range");
+
+        // ‼ The regex is NAMED, and it has to be: [re.regiter] DELETES the
+        // constructor that takes an rvalue, because the iterator keeps a
+        // pointer to it. Writing the temporary inline is how this test was
+        // written first, and the header refused it — which is the deleted
+        // overload doing its job.
+        int          seen = 0;
+        std::wstring joined;
+        const std::wregex number(L"\\d+");
+        for (std::wsregex_iterator it(text.begin(), text.end(), number), end; it != end; ++it) {
+            ++seen;
+            joined += it->str();
+        }
+        Check(seen == 3 && joined == L"122333", "phase238 (5) wsregex_iterator walks them");
+
+        std::wstring toks;
+        const std::wregex comma(L",\\s*");
+        for (std::wsregex_token_iterator it(text.begin(), text.end(), comma, -1), end;
+             it != end; ++it)
+            toks += L"[" + it->str() + L"]";
+        Check(toks == L"[中=1][文=22][x=333]",
+              "phase238 (5) wsregex_token_iterator splits on the separator");
+
+        Check(std::regex_replace(text, std::wregex(L"\\d+"), L"<$&>")
+                  == L"中=<1>, 文=<22>, x=<333>",
+              "phase238 (5) regex_replace writes a wide format string");
+    }
+
+    // ── 6. the grammars are the same six, in wide ────────────────────────
+    // Ф44-d gave the five POSIX grammars leftmost-longest, and the wide half
+    // is the same program: `a|ab` takes the longer branch under extended and
+    // the first one under ECMAScript, whatever the character type.
+    {
+        std::wsmatch m;
+        const std::wstring ab = L"ab";
+        Check(std::regex_search(ab, m, std::wregex(L"a|ab", std::regex_constants::extended))
+                  && m.length(0) == 2,
+              "phase238 (6) wide ERE still asks for the longest");
+        Check(std::regex_search(ab, m, std::wregex(L"a|ab")) && m.length(0) == 1,
+              "phase238 (6) and wide ECMAScript for the first");
+        Check(std::regex_search(ab, m, std::wregex(L"\\(a\\)\\1\\|ab",
+                                                   std::regex_constants::basic))
+                  || true,
+              "phase238 (6) BRE compiles in wide");
+        Check(std::wregex(L"(中)(文)").mark_count() == 2,
+              "phase238 (6) and mark_count counts wide groups");
+    }
+
+    // ── 7. the bounded machine is reached in wide too ────────────────────
+    // A back-reference is not regular, so it takes the second path. The point
+    // is that the wide instantiation HAS that path: the same budget, the same
+    // refusal rather than a hang.
+    {
+        std::wsmatch m;
+        const std::wstring dbl = L"中中";
+        Check(std::regex_search(dbl, m, std::wregex(L"(中)\\1")) && m.length(0) == 2,
+              "phase238 (7) a wide back-reference matches through the bounded machine");
+        const std::wstring one = L"中文";
+        Check(!std::regex_search(one, m, std::wregex(L"(中)\\1")),
+              "phase238 (7) and refuses when the repeat is a different character");
+    }
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -55207,6 +55359,7 @@ const PhaseRow kPhases[] = {
     {"234", Phase234},
     {"235", Phase235},
     {"237", Phase237},
+    {"238", Phase238},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.

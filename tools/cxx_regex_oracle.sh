@@ -22,6 +22,16 @@
 #                                             verdicts — what a parse sweep
 #                                             cannot see is what a program
 #                                             does once it runs
+#   tools/cxx_regex_oracle.sh --wide          the SAME generated cases through
+#                                             BOTH halves of each column: for
+#                                             an ASCII case the narrow half is
+#                                             the oracle for the wide one, and
+#                                             a column disagreeing with ITSELF
+#                                             needs no second library to be
+#                                             wrong
+#   tools/cxx_regex_oracle.sh --widefile      three columns over
+#                                             tools/regex_oracle_wide.txt, the
+#                                             characters no narrow half holds
 #   tools/cxx_regex_oracle.sh --adversarial   time the blowup shapes, one
 #                                             process per case under a clock
 #   tools/cxx_regex_oracle.sh --repin         overwrite the pin with today's set
@@ -61,6 +71,8 @@ case "${1:-}" in
     --match) MODE=match ;;
     --posixmatch) MODE=posixmatch ;;
     --posix) MODE=posix ;;
+    --wide) MODE=wide ;;
+    --widefile) MODE=widefile ;;
     --adversarial) MODE=adv ;;
     --repin) MODE=repin ;;
 esac
@@ -114,14 +126,57 @@ three_way() {
             if (alone) exit 1
         }'
 }
+WIDE="$TOOLS/regex_oracle_wide.txt"
 BUDGET=${BUDGET:-15}
+
+# A column that answers differently about the same characters depending on the
+# WIDTH of the type it stored them in has a defect, and saying so needs no
+# second library. Every column is asked about itself first; then the three are
+# diffed as usual, because a library can also be consistently wrong.
+if [ "$MODE" = wide ]; then
+    build_stand
+    shift
+    FROM=${1:-1}; TO=${2:-40000}; DEPTH=${3:-1}; FAN=${4:-2}
+    echo "--- both halves, cases [$FROM,$TO)"
+    "$OUT/or_gnu"  wgen   "$FROM" "$TO" "$DEPTH" "$FAN" > "$OUT/x_gnu.txt"  2>/dev/null
+    "$OUT/or_llvm" wgen   "$FROM" "$TO" "$DEPTH" "$FAN" > "$OUT/x_llvm.txt" 2>/dev/null
+    "$OUT/stand"   wmatch "$FROM" "$TO" "$DEPTH" "$FAN" > "$OUT/x_box.txt"  2>/dev/null
+    rc=0
+    for col in gnu llvm box; do
+        n=$(grep -c 'WIDTH-DIFF' "$OUT/x_$col.txt" 2>/dev/null || true)
+        printf '  %-6s narrow-vs-its-own-wide: %s
+' "$col" "$n"
+        [ "$n" != 0 ] && { grep 'WIDTH-DIFF' "$OUT/x_$col.txt" | head -5; rc=1; }
+    done
+    # ‼ No cross-column diff here on purpose. Where the three columns disagree
+    # about ASCII is --match's question, and its answer is the 54 known cells
+    # of Ф44-b (forward back-references, and a back-reference to a group that
+    # did not participate). Re-printing them under a WIDTH heading would bury
+    # the one number this mode exists for under noise it already reported.
+    exit $rc
+fi
+
+if [ "$MODE" = widefile ]; then
+    build_stand
+    [ -f "$WIDE" ] || { echo "no $WIDE" >&2; exit 2; }
+    echo "--- wide-only cases, three columns"
+    "$OUT/or_gnu"  wfile  "$WIDE" > "$OUT/x_gnu.txt"  2>/dev/null
+    "$OUT/or_llvm" wfile  "$WIDE" > "$OUT/x_llvm.txt" 2>/dev/null
+    "$OUT/stand"   wmfile "$WIDE" > "$OUT/x_box.txt"  2>/dev/null
+    three_way wide ECMAScript "$OUT/x_box.txt" "$OUT/x_gnu.txt" "$OUT/x_llvm.txt"
+    exit $?
+fi
 
 if [ "$MODE" = adv ]; then
     [ -f "$ADV" ] || { echo "no $ADV" >&2; exit 2; }
+    build_stand
     echo "--- blowup shapes, ${BUDGET}s budget per case. Correct answer is always no-match."
+    # ‼ Three columns, not two. The table this feeds in CONFORMANCE §3 compares
+    # our engine against theirs, and a row where two numbers are measured and
+    # the third is asserted is not a measurement.
     while IFS="$(printf '\t')" read -r pat n; do
         case "$pat" in ''|\#*) continue ;; esac
-        for bin in or_gnu or_llvm; do
+        for bin in or_gnu or_llvm stand; do
             if ! timeout "$BUDGET" "$OUT/$bin" adv "$pat" "$n"; then
                 printf '%-10s n=%-4s %-9s HUNG  >%ss (killed)\n' "$pat" "$n" "$bin" "$BUDGET"
             fi
