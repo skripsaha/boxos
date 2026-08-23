@@ -26972,19 +26972,23 @@ void Phase124()
 // ── phase125 fixtures: the clock time_points ([time.format]) ────────────
 // Ф30f-2 c3. The tai and gps columns are the epoch shifts the standard writes
 // out itself (1970-01-01 − 1958-01-01 and 1980-01-06 − 1970-01-01), so they are
-// exact and match libstdc++ byte for byte despite BoxOS having no leap-second
-// table. The utc column deliberately equals the sys one: clock_cast is the
-// identity here, so a utc_time renders as the sys_time with the same count —
-// libstdc++, which has the table, shows 22 s more at 1e9 s. The file column
-// equals sys too, because file_clock's epoch is implementation-defined and
-// BoxOS puts it at the Unix epoch.
-struct P125Clock { long long s; const char *sys; const char *tai; const char *gps; };
+// exact and match libstdc++ byte for byte. The utc column USED to equal the sys
+// one, with a note here explaining that clock_cast was the identity because
+// BoxOS had no leap-second table and that libstdc++ "shows 22 s more at 1e9 s".
+// Ф45 baked the table, so it now shows the same 22 s, and this row is what
+// caught the formatter that had not been told — every expectation below was
+// re-measured against libstdc++ reading tzdata 2026c. The file column equals
+// sys, because file_clock's epoch is implementation-defined and BoxOS puts it
+// at the Unix epoch.
+struct P125Clock {
+    long long s; const char *sys; const char *utc; const char *tai; const char *gps;
+};
 inline constexpr P125Clock kP125Clocks[] = {
-    {0LL,          "1970-01-01 00:00:00", "1958-01-01 00:00:00", "1980-01-06 00:00:00"},
-    {1LL,          "1970-01-01 00:00:01", "1958-01-01 00:00:01", "1980-01-06 00:00:01"},
-    {1000000000LL, "2001-09-09 01:46:40", "1989-09-09 01:46:40", "2011-09-14 01:46:40"},
-    {-86400LL,     "1969-12-31 00:00:00", "1957-12-31 00:00:00", "1980-01-05 00:00:00"},
-    {951782400LL,  "2000-02-29 00:00:00", "1988-02-29 00:00:00", "2010-03-05 00:00:00"},
+    {0LL,          "1970-01-01 00:00:00", "1970-01-01 00:00:00", "1958-01-01 00:00:00", "1980-01-06 00:00:00"},
+    {1LL,          "1970-01-01 00:00:01", "1970-01-01 00:00:01", "1958-01-01 00:00:01", "1980-01-06 00:00:01"},
+    {1000000000LL, "2001-09-09 01:46:40", "2001-09-09 01:46:18", "1989-09-09 01:46:40", "2011-09-14 01:46:40"},
+    {-86400LL,     "1969-12-31 00:00:00", "1969-12-31 00:00:00", "1957-12-31 00:00:00", "1980-01-05 00:00:00"},
+    {951782400LL,  "2000-02-29 00:00:00", "2000-02-28 23:59:38", "1988-02-29 00:00:00", "2010-03-05 00:00:00"},
 };
 
 // Ф30f-2 c3: utc/tai/gps/file/local time_points, their %Z and %z, and
@@ -27012,7 +27016,7 @@ void Phase125()
                 {"sys",   std::vformat(kSpec, std::make_format_args(sy)),
                           std::string(c.sys) + "|UTC|+0000|+00:00"},
                 {"utc",   std::vformat(kSpec, std::make_format_args(u)),
-                          std::string(c.sys) + "|UTC|+0000|+00:00"},
+                          std::string(c.utc) + "|UTC|+0000|+00:00"},
                 {"tai",   std::vformat(kSpec, std::make_format_args(t)),
                           std::string(c.tai) + "|TAI|+0000|+00:00"},
                 {"gps",   std::vformat(kSpec, std::make_format_args(g)),
@@ -29640,9 +29644,7 @@ void Phase131()
 #ifdef __cpp_lib_char8_t
 #  error "phase131: __cpp_lib_char8_t must stay undefined"
 #endif
-#ifdef __cpp_lib_chrono
-#  error "phase131: __cpp_lib_chrono must stay undefined"
-#endif
+static_assert(__cpp_lib_chrono == 201907L, "phase131: __cpp_lib_chrono — closed by Ф45");
 static_assert(__cpp_lib_constexpr_bitset == 202207L, "phase131: __cpp_lib_constexpr_bitset — closed by Ф39");
 #ifdef __cpp_lib_constexpr_cmath
 #  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
@@ -53625,6 +53627,318 @@ void Phase231()
     Check(true, "phase231 (14) <regex> runs");
 }
 
+// ── phase232: [time.zone] — the IANA database, zoned_time, leap seconds ──
+//
+// Every expected value below was PRINTED by the host stand, not written from
+// memory: the stand compiles the same <__bits/tzdb_read> this runs and was
+// measured against libstdc++ and tzcode's own zdump over 919 417 instants and
+// 800 872 local readings. What this phase checks is the layer the stand cannot
+// reach — that the standard's shape sits on those numbers correctly.
+namespace p232 {
+
+bool Database()
+{
+    const auto &db = std::chrono::get_tzdb();
+    if (db.version != "2026c") return false;
+    if (db.zones.size() != 341) return false;
+    if (db.links.size() != 257) return false;
+    if (db.leap_seconds.size() != 27) return false;
+    // The list holds exactly one database, and reload finds nothing newer
+    // behind the TagFS door until something is laid there.
+    if (std::chrono::remote_version() != db.version) return false;
+    if (&std::chrono::reload_tzdb() != &db) return false;
+    auto &list = std::chrono::get_tzdb_list();
+    if (&list.front() != &db) return false;
+    if (++list.begin() != list.end()) return false;
+    return true;
+}
+
+bool Naming()
+{
+    using namespace std::chrono;
+    const time_zone *ny = locate_zone("America/New_York");
+    if (ny->name() != "America/New_York") return false;
+    // A Link resolves to its target and hands back the SAME object, because
+    // locate_zone returns a pointer into tzdb::zones and a link owns no zone.
+    if (locate_zone("US/Eastern") != ny) return false;
+    if (locate_zone("Etc/UTC")->name() != "Etc/UTC") return false;
+    bool threw = false;
+    try {
+        (void)locate_zone("Mars/Olympus_Mons");
+    } catch (const std::runtime_error &) {
+        threw = true;
+    }
+    if (!threw) return false;
+    // Links are listed with their targets, not silently flattened.
+    const auto &db = get_tzdb();
+    bool found = false;
+    for (const auto &l : db.links)
+        if (l.name() == "US/Eastern" && l.target() == "America/New_York")
+            found = true;
+    return found;
+}
+
+bool SysInfo()
+{
+    using namespace std::chrono;
+    struct Case {
+        const char *zone;
+        long long   at;       // sys seconds
+        long long   offset;
+        long long   save_min;
+        const char *abbrev;
+    };
+    static const Case cases[] = {
+        {"Europe/Moscow",    1787356800, 10800,     0, "MSK"},
+        {"America/New_York", 1768435200, -18000,    0, "EST"},
+        {"America/New_York", 1784073600, -14400,   60, "EDT"},
+        {"Pacific/Auckland", 1768435200,  46800,   60, "NZDT"},
+        {"Pacific/Auckland", 1784073600,  43200,    0, "NZST"},
+        // +13:45 is a real offset and not a rounding of one.
+        {"Pacific/Chatham",  1768435200,  49500,   60, "+1345"},
+        {"Etc/UTC",          1787356800,      0,    0, "UTC"},
+        {"Asia/Kolkata",     1787356800,  19800,    0, "IST"},
+    };
+    for (const Case &c : cases) {
+        const sys_info i = locate_zone(c.zone)->get_info(sys_seconds(seconds(c.at)));
+        if (i.offset.count() != c.offset) return false;
+        if (i.save.count() != c.save_min) return false;
+        if (i.abbrev != c.abbrev) return false;
+    }
+    // The interval boundaries are the ones the transition list holds: Moscow
+    // has not moved its clocks since 2014-10-26, and nothing after that is a
+    // transition, so the interval runs to the end of representable time.
+    const sys_info msk = locate_zone("Europe/Moscow")
+                             ->get_info(sys_seconds(seconds(1787356800)));
+    if (msk.begin != sys_seconds(seconds(1414274400))) return false;
+    if (msk.end != sys_seconds::max()) return false;
+    // A zone that never changed offset spans everything in both directions.
+    const sys_info utc = locate_zone("Etc/UTC")
+                             ->get_info(sys_seconds(seconds(1787356800)));
+    return utc.begin == sys_seconds::min() && utc.end == sys_seconds::max();
+}
+
+bool LocalInfo()
+{
+    using namespace std::chrono;
+    const time_zone *ny = locate_zone("America/New_York");
+
+    // 2026-03-08 02:30 never happened: the clock went 01:59:59 -> 03:00:00.
+    const local_seconds gap{seconds(1772937000)};
+    const local_info g = ny->get_info(gap);
+    if (g.result != local_info::nonexistent) return false;
+    if (g.first.offset.count() != -18000 || g.second.offset.count() != -14400)
+        return false;
+    if (g.first.end != sys_seconds(seconds(1772953200))) return false;
+
+    // 2026-11-01 01:30 happened twice, and `first` is the earlier reading of it.
+    const local_seconds fold{seconds(1793496600)};
+    const local_info f = ny->get_info(fold);
+    if (f.result != local_info::ambiguous) return false;
+    if (f.first.offset.count() != -14400 || f.second.offset.count() != -18000)
+        return false;
+
+    // Everything else is unique, including a zone with no DST at all.
+    const local_info u = locate_zone("Europe/Moscow")
+                             ->get_info(local_seconds{seconds(1780315200)});
+    return u.result == local_info::unique && u.first.offset.count() == 10800;
+}
+
+bool ToSys()
+{
+    using namespace std::chrono;
+    const time_zone *ny = locate_zone("America/New_York");
+    const local_seconds gap{seconds(1772937000)};
+    const local_seconds fold{seconds(1793496600)};
+
+    bool gap_threw = false, fold_threw = false;
+    try { (void)ny->to_sys(gap); }
+    catch (const nonexistent_local_time &) { gap_threw = true; }
+    try { (void)ny->to_sys(fold); }
+    catch (const ambiguous_local_time &) { fold_threw = true; }
+    if (!gap_threw || !fold_threw) return false;
+
+    // With a choose, neither throws. A gap has ONE answer under either choice
+    // — the instant the jump landed on — and a fold has two.
+    if (ny->to_sys(gap, choose::earliest) != sys_seconds(seconds(1772953200)))
+        return false;
+    if (ny->to_sys(gap, choose::latest) != sys_seconds(seconds(1772953200)))
+        return false;
+    if (ny->to_sys(fold, choose::earliest)
+        != sys_seconds(seconds(1793496600 + 14400)))
+        return false;
+    if (ny->to_sys(fold, choose::latest)
+        != sys_seconds(seconds(1793496600 + 18000)))
+        return false;
+
+    // A plain reading round-trips through both directions.
+    const sys_seconds st{seconds(1784073600)};
+    return ny->to_sys(ny->to_local(st)) == st;
+}
+
+bool ZonedTime()
+{
+    using namespace std::chrono;
+    const sys_seconds st{seconds(1784073600)};   // 2026-07-15, EDT in New York
+
+    zoned_seconds z{"America/New_York", st};
+    if (z.get_sys_time() != st) return false;
+    if (z.get_local_time().time_since_epoch().count() != 1784073600 - 14400)
+        return false;
+    if (z.get_info().abbrev != "EDT") return false;
+    if (z.get_time_zone() != locate_zone("America/New_York")) return false;
+
+    // Constructed from a local reading, it converts the other way.
+    zoned_seconds w{"Europe/Moscow", local_seconds{seconds(1780315200)}};
+    if (w.get_sys_time() != sys_seconds(seconds(1780315200 - 10800)))
+        return false;
+
+    // Default zone is UTC, and the conversion operator is the sys time.
+    zoned_seconds d{st};
+    if (sys_seconds(d) != st) return false;
+    if (d.get_local_time().time_since_epoch().count() != 1784073600)
+        return false;
+
+    // Two zoned_times of the same zone and instant compare equal.
+    return z == zoned_seconds{"America/New_York", st};
+}
+
+bool CurrentZone()
+{
+    // Nothing has laid a `clock:zone` object in TagFS, and the honest answer
+    // for a machine with no configured zone is UTC — the same fact <ctime>
+    // records when it says localtime IS gmtime.
+    return std::chrono::current_zone()->name() == "Etc/UTC";
+}
+
+bool Leaps()
+{
+    using namespace std::chrono;
+    const auto &ls = get_tzdb().leap_seconds;
+    if (ls.size() != 27) return false;
+    if (ls.front().date() != sys_seconds(seconds(78796800))) return false;
+    if (ls.front().value() != seconds(1)) return false;
+    if (ls.back().date() != sys_seconds(seconds(1483228800))) return false;
+
+    // The comparisons [time.zone.leap] gives against a sys_time.
+    if (!(ls.front() < sys_seconds(seconds(78796801)))) return false;
+    if (!(sys_seconds(seconds(78796799)) < ls.front())) return false;
+    if (!(ls.front() == sys_seconds(seconds(78796800)))) return false;
+    if (!(ls.front() < ls.back())) return false;
+
+    // 27 seconds have been inserted by 2026, so UTC runs that far ahead of the
+    // count sys_time keeps — which is the whole reason utc_time is a separate
+    // clock rather than a typedef.
+    const sys_seconds now{seconds(1787356800)};
+    const auto u = utc_clock::from_sys(now);
+    if (u.time_since_epoch().count() != 1787356800 + 27) return false;
+    if (utc_clock::to_sys(u) != now) return false;
+
+    // Inside an inserted second there is no sys_time to return, and the answer
+    // is the last one before the insertion.
+    const utc_seconds during{seconds(1483228800 + 26)};
+    const leap_second_info info = get_leap_second_info(during);
+    if (!info.is_leap_second) return false;
+    if (info.elapsed.count() != 27) return false;
+    if (utc_clock::to_sys(during) != sys_seconds(seconds(1483228799)))
+        return false;
+
+    // A second either side of it is an ordinary second.
+    if (get_leap_second_info(utc_seconds{seconds(1483228800 + 25)}).is_leap_second)
+        return false;
+    return !get_leap_second_info(utc_seconds{seconds(1483228800 + 27)})
+                .is_leap_second;
+}
+
+bool Clocks()
+{
+    using namespace std::chrono;
+    const sys_seconds st{seconds(1787356800)};
+    const auto u = clock_cast<utc_clock>(st);
+    if (u.time_since_epoch().count() != 1787356800 + 27) return false;
+    if (clock_cast<system_clock>(u) != st) return false;
+
+    // TAI and GPS are fixed offsets from UTC and need no table.
+    const auto tai = clock_cast<tai_clock>(u);
+    if (tai.time_since_epoch().count()
+        != u.time_since_epoch().count() + 378691210)
+        return false;
+    const auto gps = clock_cast<gps_clock>(u);
+    if (gps.time_since_epoch().count()
+        != u.time_since_epoch().count() - 315964809)
+        return false;
+
+    // Routes that go through two clocks work as well as direct ones.
+    if (clock_cast<system_clock>(clock_cast<tai_clock>(st)) != st) return false;
+    if (clock_cast<gps_clock>(tai) != gps) return false;
+    // file_clock shares the epoch, so the conversion is exact both ways.
+    return clock_cast<system_clock>(clock_cast<file_clock>(st)) == st;
+}
+
+
+bool Rendering()
+{
+    using namespace std::chrono;
+    const time_zone *ny = locate_zone("America/New_York");
+    const sys_seconds noon{seconds(1784073600)};        // 2026-07-15 00:00 UTC
+    zoned_seconds z{ny, noon + hours{13}};
+
+    // Every expected string below came out of libstdc++ reading the same
+    // release, not out of memory.
+    if (std::format("{}", z) != "2026-07-15 09:00:00 EDT") return false;
+    if (std::format("{:%F %T %Z %z}", z) != "2026-07-15 09:00:00 EDT -0400")
+        return false;
+
+    std::ostringstream o;
+    o << ny->get_info(noon);
+    if (o.str() != "[2026-03-08 07:00:00,2026-11-01 06:00:00,-04:00:00,60min,EDT]")
+        return false;
+
+    std::ostringstream o2;
+    o2 << ny->get_info(local_seconds{seconds(1793496600)});
+    if (o2.str().find("ambiguous local time between") == std::string::npos)
+        return false;
+
+    std::ostringstream o3;
+    o3 << z;
+    if (o3.str() != "2026-07-15 09:00:00 EDT") return false;
+
+    // ‼ The regression Ф45 itself created: before the leap-second table a
+    // utc_time and a sys_time held the same count, so the formatter rendered
+    // the count directly. With the table it must convert, or every UTC instant
+    // prints 27 seconds late.
+    const auto u = utc_clock::from_sys(sys_seconds(seconds(1787356800)));
+    if (std::format("{:%F %T}", u) != "2026-08-22 00:00:00") return false;
+
+    // And the second only UTC has.
+    const utc_seconds during{seconds(1483228800 + 26)};
+    return std::format("{:%T}", during) == "23:59:60";
+}
+
+} // namespace p232
+
+void Phase232()
+{
+    Check(p232::Database(), "phase232 tzdb 2026c: 341 zones, 257 links, 27 leaps");
+    Check(p232::Naming(), "phase232 locate_zone, links resolve to their target");
+    Check(p232::SysInfo(), "phase232 get_info(sys_time) offsets, saves, abbrevs, edges");
+    Check(p232::LocalInfo(), "phase232 get_info(local_time): unique, gap, fold");
+    Check(p232::ToSys(), "phase232 to_sys throws, and choose answers instead");
+    Check(p232::ZonedTime(), "phase232 zoned_time both directions");
+    Check(p232::CurrentZone(), "phase232 current_zone is Etc/UTC until clock:zone is set");
+    Check(p232::Rendering(), "phase232 zoned_time and the info structs render as the standard says");
+    Check(p232::Leaps(), "phase232 leap seconds and utc_clock across an insertion");
+    Check(p232::Clocks(), "phase232 clock_cast: utc, tai, gps, file, and via-routes");
+
+    // The pin that used to stand here said __cpp_lib_chrono was absent and
+    // owed to chrono::parse. Ф45's parser paid it, so the pin is now its
+    // opposite: the macro is claimed, at the C++23 value, and 202306L would be
+    // an overclaim because it stands for hashing the chrono value classes and
+    // boxcxx does not hash them.
+    static_assert(__cpp_lib_chrono == 201907L, "phase232 __cpp_lib_chrono");
+}
+
+
 // ── Phase233: <regex> — the walk, and the other question ──────────────────
 // Ф44-d finishes the header: the five POSIX grammars stop being a spelling of
 // the ECMAScript one, and the three algorithms that walk a sequence rather
@@ -53782,6 +54096,231 @@ void Phase233()
 // library can be asked about every shape the grammar builds. So most of this
 // phase renders a value and requires the parser to give it back — a defect in
 // either half shows up as a round trip that does not close.
+namespace p234 {
+
+template <class T>
+bool RoundTrip(const char *fmt, const T &value)
+{
+    const std::string text = std::vformat(std::string("{:") + fmt + "}",
+                                          std::make_format_args(value));
+    std::istringstream in(text);
+    T got{};
+    in >> std::chrono::parse(fmt, got);
+    return !in.fail() && got == value;
+}
+
+bool Basics()
+{
+    using namespace std::chrono;
+    // Whole seconds through the four shapes that carry a full date and time.
+    const sys_seconds tp = sys_seconds(sys_days(year{2026} / August / 22))
+                         + hours{13} + minutes{45} + seconds{7};
+    if (!RoundTrip("%F %T", tp)) return false;
+    if (!RoundTrip("%Y-%m-%d %H:%M:%S", tp)) return false;
+    if (!RoundTrip("%D %T", tp)) return false;
+    if (!RoundTrip("%F %R:%S", tp)) return false;
+
+    // A date before the epoch, and one before 1900 — which is where a parser
+    // built on `tm` alone would stop being able to say what year it read.
+    if (!RoundTrip("%F", sys_seconds(sys_days(year{1858} / November / 17))))
+        return false;
+    if (!RoundTrip("%F", sys_seconds(sys_days(year{1601} / January / 1))))
+        return false;
+    return true;
+}
+
+bool Calendar()
+{
+    using namespace std::chrono;
+    if (!RoundTrip("%d", day{17})) return false;
+    if (!RoundTrip("%m", month{7})) return false;
+    if (!RoundTrip("%Y", year{2026})) return false;
+    if (!RoundTrip("%Y", year{-44})) return false;
+    if (!RoundTrip("%m/%d", month_day{month{2}, day{29}})) return false;
+    if (!RoundTrip("%Y/%m", year_month{year{2026}, month{2}})) return false;
+    if (!RoundTrip("%F", year_month_day{year{2026}, month{2}, day{29}}))
+        return false;
+
+    // A weekday comes back from its own name, which is the locale's answer and
+    // not this parser's — the point of the delegation.
+    std::istringstream in("Wednesday");
+    weekday w{};
+    in >> parse("%A", w);
+    if (in.fail() || w != Wednesday) return false;
+
+    std::istringstream in2("Mar");
+    month m{};
+    in2 >> parse("%b", m);
+    return !in2.fail() && m == March;
+}
+
+bool Durations()
+{
+    using namespace std::chrono;
+    std::istringstream in("01:02:03");
+    seconds d{};
+    in >> parse("%T", d);
+    if (in.fail() || d != hours{1} + minutes{2} + seconds{3}) return false;
+
+    std::istringstream in2("90");
+    minutes m{};
+    in2 >> parse("%Q", m);
+    if (in2.fail() || m != minutes{90}) return false;
+
+    // %Q with %q reads the unit the value is counted in, so the same digits
+    // mean different durations.
+    std::istringstream in3("90min");
+    seconds s{};
+    in3 >> parse("%Q%q", s);
+    return !in3.fail() && s == seconds{5400};
+}
+
+bool Subseconds()
+{
+    using namespace std::chrono;
+    // The fraction is read at the TARGET's precision, not the text's: a
+    // millisecond target reading ".5" must land on 500 ms rather than on zero,
+    // and reading ".0005" must land on 0 rather than on 5.
+    std::istringstream in("00:00:01.5");
+    milliseconds ms{};
+    sys_time<milliseconds> tp{};
+    std::istringstream in2("1970-01-01 00:00:01.5");
+    in2 >> parse("%F %T", tp);
+    if (in2.fail() || tp.time_since_epoch() != milliseconds{1500}) return false;
+
+    std::istringstream in3("1970-01-01 00:00:01.0005");
+    sys_time<milliseconds> tp2{};
+    in3 >> parse("%F %T", tp2);
+    if (in3.fail() || tp2.time_since_epoch() != milliseconds{1000}) return false;
+
+    (void)ms; (void)in;
+    return true;
+}
+
+bool ZoneFields()
+{
+    using namespace std::chrono;
+    // %z hands the offset back through the argument the caller passed, and a
+    // sys_time is UTC — so the offset comes OFF the reading.
+    minutes off{};
+    sys_seconds tp{};
+    std::istringstream in("2026-08-22 13:45:00 +0300");
+    in >> parse("%F %T %z", tp, off);
+    if (in.fail()) return false;
+    if (off != minutes{180}) return false;
+    if (tp != sys_seconds(sys_days(year{2026} / August / 22)) + hours{10}
+              + minutes{45})
+        return false;
+
+    // A local_time keeps what it read: that is the only difference between the
+    // two overloads, and it is the whole reason local_time exists.
+    local_seconds lt{};
+    minutes off2{};
+    std::istringstream in2("2026-08-22 13:45:00 +0300");
+    in2 >> parse("%F %T %z", lt, off2);
+    if (in2.fail()) return false;
+    if (lt.time_since_epoch()
+        != (sys_days(year{2026} / August / 22).time_since_epoch() + hours{13}
+            + minutes{45}))
+        return false;
+
+    // %Z is text, and it is handed back the same way.
+    std::string abbrev;
+    sys_seconds tp3{};
+    std::istringstream in3("2026-08-22 13:45:00 MSK");
+    in3 >> parse("%F %T %Z", tp3, abbrev);
+    return !in3.fail() && abbrev == "MSK";
+}
+
+bool Failure()
+{
+    using namespace std::chrono;
+    // [time.parse]/3: a parse that cannot produce the value sets failbit and
+    // leaves the argument alone. Both halves of that are checked, because a
+    // parser that reports failure and writes anyway is the worse of the two.
+    const sys_seconds sentinel = sys_seconds(sys_days(year{2000} / 1 / 1));
+
+    sys_seconds tp = sentinel;
+    std::istringstream in("not a date");
+    in >> parse("%F", tp);
+    if (!in.fail() || tp != sentinel) return false;
+
+    // The literal text of the format must match.
+    sys_seconds tp2 = sentinel;
+    std::istringstream in2("2026/08/22");
+    in2 >> parse("%Y-%m-%d", tp2);
+    if (!in2.fail() || tp2 != sentinel) return false;
+
+    // A format that names no date cannot make a sys_time out of a time alone.
+    sys_seconds tp3 = sentinel;
+    std::istringstream in3("13:45:00");
+    in3 >> parse("%T", tp3);
+    if (!in3.fail() || tp3 != sentinel) return false;
+
+    // Twelve-hour text with no half named is a failure, not a guess at morning.
+    sys_seconds tp4 = sentinel;
+    std::istringstream in4("2026-08-22 01:45:00");
+    in4 >> parse("%F %I:%M:%S", tp4);
+    return in4.fail() && tp4 == sentinel;
+}
+
+bool Whitespace()
+{
+    using namespace std::chrono;
+    // Whitespace in the format matches any run of it, including none — so one
+    // space in the format reads three in the text.
+    sys_seconds tp{};
+    std::istringstream in("2026-08-22    13:45:00");
+    in >> parse("%F %T", tp);
+    if (in.fail()) return false;
+
+    // %n and %t are whitespace too, and %% is a literal per cent.
+    year y{};
+    std::istringstream in2("%2026");
+    in2 >> parse("%%%Y", y);
+    return !in2.fail() && y == year{2026};
+}
+
+bool TwoDigitYear()
+{
+    using namespace std::chrono;
+    // [time.parse]/6 puts the pivot at 68: 68 is 2068 and 69 is 1969.
+    year y1{}, y2{}, y3{};
+    std::istringstream a("68"); a >> parse("%y", y1);
+    std::istringstream b("69"); b >> parse("%y", y2);
+    std::istringstream c("20 26"); c >> parse("%C %y", y3);
+    if (a.fail() || b.fail() || c.fail()) return false;
+    return y1 == year{2068} && y2 == year{1969} && y3 == year{2026};
+}
+
+bool Clocks()
+{
+    using namespace std::chrono;
+    // A utc_time read back is a utc_time: the 27 inserted seconds are what
+    // separates it from the sys_time printed from the same text.
+    utc_seconds ut{};
+    std::istringstream in("2026-08-22 00:00:00");
+    in >> parse("%F %T", ut);
+    if (in.fail()) return false;
+    const sys_seconds back = utc_clock::to_sys(ut);
+    return back == sys_seconds(sys_days(year{2026} / August / 22));
+}
+
+} // namespace p234
+
+void Phase234()
+{
+    Check(p234::Basics(), "phase234 sys_time round-trips through the formatter");
+    Check(p234::Calendar(), "phase234 every calendar type, names read by the locale");
+    Check(p234::Durations(), "phase234 durations, %Q and %q");
+    Check(p234::Subseconds(), "phase234 fractions land at the target's precision");
+    Check(p234::ZoneFields(), "phase234 %z comes off a sys_time and stays on a local_time");
+    Check(p234::Failure(), "phase234 a failed parse sets failbit and writes nothing");
+    Check(p234::Whitespace(), "phase234 whitespace, %n, %t and %%");
+    Check(p234::TwoDigitYear(), "phase234 the 68/69 pivot");
+    Check(p234::Clocks(), "phase234 utc_time read back is a utc_time");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -54029,7 +54568,9 @@ const PhaseRow kPhases[] = {
     {"229", Phase229},
     {"230", Phase230},
     {"231", Phase231},
+    {"232", Phase232},
     {"233", Phase233},
+    {"234", Phase234},
     {"2", Phase2},
 };
 

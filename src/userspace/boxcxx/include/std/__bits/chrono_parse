@@ -1,0 +1,969 @@
+// __bits/chrono_parse — [time.parse]: reading back what <chrono> writes.
+// Included by <chrono>.
+//
+// The formatter could render every calendar type and every clock, and nothing
+// could read one back. That asymmetry is why `__cpp_lib_chrono` stayed
+// undefined through Ф45's zone work: the macro stands for the whole of [time],
+// and a library that can only write half a conversation does not have it.
+//
+// ── What this does NOT contain ──────────────────────────────────────────────
+// A second parser for locale text. `%a`, `%A`, `%b`, `%B`, `%h`, `%c`, `%x`,
+// `%X`, `%p` and `%r` all name things the LOCALE decides, and Ф43-d-3 built
+// the facet that decides them — `time_get`, which reads one conversion into a
+// `std::tm`. Those ten go to it. [time.parse] asks for exactly that ("the
+// locale's time_get facet"), so delegating is both the conforming answer and
+// the one that keeps a single source of truth for what "Mar" means.
+//
+// What is here is everything `tm` cannot hold: a year outside 1900±, a
+// fractional second at the target's own precision, `%z` as an offset the
+// caller may want back, `%Z` as text, the ISO week-year triple, and the
+// duration-only `%Q`/`%q`.
+//
+// ── Failure ─────────────────────────────────────────────────────────────────
+// Every path that cannot produce the value the caller asked for sets
+// `failbit`, and none of them throws. [time.parse]/3 makes that the contract:
+// a parse that fails leaves the argument untouched and says so through the
+// stream, because the caller is in the middle of reading a file and an
+// exception is not what a malformed date deserves.
+#ifndef BOXCXX_BITS_CHRONO_PARSE
+#define BOXCXX_BITS_CHRONO_PARSE
+
+#include <__bits/chrono_calendar>
+#include <__bits/chrono_clock>
+#include <__bits/chrono_duration>
+#include <__bits/chrono_zone>
+#include <ios>
+#include <istream>
+#include <locale>
+#include <string>
+#include <type_traits>
+
+namespace std {
+namespace chrono {
+
+namespace __parse {
+
+inline constexpr int kNone = -32768;
+
+// Everything a format string can state, before anything is assembled from it.
+struct Fields {
+    int  year    = kNone;   // %Y, or %C and %y together
+    int  century = kNone;   // %C
+    int  y2      = kNone;   // %y
+    int  month   = kNone;   // 1..12
+    int  day     = kNone;   // 1..31
+    int  wday    = kNone;   // 0..6, Sunday == 0
+    int  yday    = kNone;   // 1..366
+    int  iso_year = kNone;  // %G
+    int  iso_y2   = kNone;  // %g
+    int  iso_week = kNone;  // %V
+    int  week_sun = kNone;  // %U
+    int  week_mon = kNone;  // %W
+
+    int  hour   = kNone;    // %H
+    int  hour12 = kNone;    // %I
+    int  minute = kNone;    // %M
+    long long second = kNone;   // whole seconds from %S
+    long long frac_num = 0;     // fractional part, as numerator ...
+    long long frac_den = 1;     // ... over this power of ten
+    int  ampm   = kNone;    // 0 = am, 1 = pm
+
+    long long q_value = kNone;  // %Q
+    long long q_unit_num = kNone;   // %q, as a ratio against seconds
+    long long q_unit_den = kNone;
+
+    bool negative = false;      // a leading '-' on a duration
+    bool offset_seen = false;
+    minutes offset{};
+
+    bool bad = false;
+};
+
+// ── character work ──────────────────────────────────────────────────────────
+
+template <class charT>
+constexpr bool IsSpace(charT c)
+{
+    return c == charT(' ') || c == charT('\t') || c == charT('\n')
+        || c == charT('\v') || c == charT('\f') || c == charT('\r');
+}
+
+template <class charT>
+constexpr int DigitOf(charT c)
+{
+    const auto v = static_cast<unsigned>(c) - static_cast<unsigned>(charT('0'));
+    return v <= 9u ? static_cast<int>(v) : -1;
+}
+
+// A reader over the stream that never reads a character it does not consume.
+// [time.parse] is written in terms of "the next character", and a parser that
+// peeks with `get` and pushes back with `unget` fails on a streambuf that
+// cannot put back — istreambuf_iterator's sgetc/sbumpc pair cannot.
+template <class charT, class traits>
+class Reader {
+    basic_istream<charT, traits> &is_;
+
+public:
+    explicit Reader(basic_istream<charT, traits> &is) noexcept : is_(is) {}
+
+    bool eof() const
+    {
+        return traits::eq_int_type(is_.rdbuf()->sgetc(), traits::eof());
+    }
+
+    // The next character without consuming it; 0 at end of input.
+    charT peek() const
+    {
+        const auto c = is_.rdbuf()->sgetc();
+        return traits::eq_int_type(c, traits::eof()) ? charT(0)
+                                                     : traits::to_char_type(c);
+    }
+
+    charT take()
+    {
+        const auto c = is_.rdbuf()->sbumpc();
+        return traits::eq_int_type(c, traits::eof()) ? charT(0)
+                                                     : traits::to_char_type(c);
+    }
+
+    void skip_space()
+    {
+        while (!eof() && IsSpace(peek())) take();
+    }
+
+    // A signed decimal of at most `width` digits. Returns kNone on no digits.
+    long long number(int width, bool allow_sign = false)
+    {
+        long long v = 0;
+        int n = 0;
+        bool neg = false;
+        if (allow_sign && !eof() && (peek() == charT('-') || peek() == charT('+'))) {
+            neg = take() == charT('-');
+        }
+        while (n < width && !eof()) {
+            const int d = DigitOf(peek());
+            if (d < 0) break;
+            take();
+            v = v * 10 + d;
+            ++n;
+        }
+        if (n == 0) return kNone;
+        return neg ? -v : v;
+    }
+
+    basic_istream<charT, traits> &stream() noexcept { return is_; }
+};
+
+// ── the conversions the locale owns ─────────────────────────────────────────
+// One trip through time_get per conversion, into a tm it fills and we read
+// back out. The tm is zeroed each time so a field it does not touch cannot be
+// mistaken for one it did.
+template <class charT, class traits>
+bool ViaFacet(Reader<charT, traits> &r, char conv, char modifier, Fields &f)
+{
+    using Iter = istreambuf_iterator<charT, traits>;
+    auto &is = r.stream();
+    // The locale is held by value on purpose: getloc() returns one, and a
+    // reference to a facet of a temporary locale dangles the moment the
+    // full-expression ends. GCC says so with -Wdangling-reference, and it is
+    // right — the facet's lifetime is the locale's.
+    const locale loc = is.getloc();
+    const auto  &tg  = use_facet<time_get<charT, Iter>>(loc);
+
+    tm t{};
+    t.tm_year = kNone;
+    t.tm_mon  = kNone;
+    t.tm_mday = kNone;
+    t.tm_wday = kNone;
+    t.tm_hour = kNone;
+    t.tm_min  = kNone;
+    t.tm_sec  = kNone;
+
+    ios_base::iostate err = ios_base::goodbit;
+    tg.get(Iter(is.rdbuf()), Iter(), is, err, &t, conv, modifier);
+    if ((err & (ios_base::failbit | ios_base::badbit)) != ios_base::goodbit)
+        return false;
+
+    if (t.tm_year != kNone) f.year  = t.tm_year + 1900;
+    if (t.tm_mon  != kNone) f.month = t.tm_mon + 1;
+    if (t.tm_mday != kNone) f.day   = t.tm_mday;
+    if (t.tm_wday != kNone) f.wday  = t.tm_wday;
+    if (t.tm_hour != kNone) f.hour  = t.tm_hour;
+    if (t.tm_min  != kNone) f.minute = t.tm_min;
+    if (t.tm_sec  != kNone) f.second = t.tm_sec;
+    return true;
+}
+
+// ── %Z and %z ───────────────────────────────────────────────────────────────
+
+template <class charT, class traits, class String>
+bool ReadAbbrev(Reader<charT, traits> &r, String *abbrev)
+{
+    // [time.parse]: the abbreviation is a run of alphanumerics, '_', '/', '-'
+    // or '+' — which is what tzdata's own names and abbreviations are made of.
+    String got;
+    while (!r.eof()) {
+        const charT c = r.peek();
+        const bool ok = (c >= charT('a') && c <= charT('z'))
+                     || (c >= charT('A') && c <= charT('Z'))
+                     || (c >= charT('0') && c <= charT('9'))
+                     || c == charT('_') || c == charT('/')
+                     || c == charT('-') || c == charT('+');
+        if (!ok) break;
+        got.push_back(r.take());
+    }
+    if (got.empty()) return false;
+    if (abbrev) *abbrev = got;
+    return true;
+}
+
+template <class charT, class traits>
+bool ReadOffset(Reader<charT, traits> &r, char modifier, Fields &f)
+{
+    if (r.eof()) return false;
+    const charT sign = r.peek();
+    if (sign != charT('+') && sign != charT('-')) {
+        // [time.parse]: "Z" alone means UTC.
+        if (sign == charT('Z') || sign == charT('z')) {
+            r.take();
+            f.offset = minutes{0};
+            f.offset_seen = true;
+            return true;
+        }
+        return false;
+    }
+    r.take();
+    const long long h = r.number(2);
+    if (h == kNone) return false;
+    long long m = 0;
+    if (!r.eof() && r.peek() == charT(':')) {
+        // The modified form writes hh:mm; the plain one writes hhmm. Accepting
+        // the colon in both is deliberate: a reader that rejects `+03:00` for
+        // want of an `E` is useless against real ISO 8601 text, and no valid
+        // input becomes ambiguous by allowing it.
+        r.take();
+        m = r.number(2);
+        if (m == kNone) return false;
+    } else if (!r.eof() && DigitOf(r.peek()) >= 0) {
+        m = r.number(2);
+        if (m == kNone) return false;
+    }
+    (void)modifier;
+    const long long total = h * 60 + m;
+    f.offset = minutes{sign == charT('-') ? -total : total};
+    f.offset_seen = true;
+    return true;
+}
+
+// ── the format walk ─────────────────────────────────────────────────────────
+
+template <class charT, class traits, class String>
+void Run(basic_istream<charT, traits> &is, const charT *fmt, Fields &f,
+         String *abbrev, minutes *offset)
+{
+    Reader<charT, traits> r(is);
+
+    for (; *fmt; ++fmt) {
+        const charT c = *fmt;
+
+        if (IsSpace(c)) {
+            // Whitespace in the format matches any run of it, including none.
+            r.skip_space();
+            continue;
+        }
+        if (c != charT('%')) {
+            if (r.eof() || r.take() != c) { f.bad = true; return; }
+            continue;
+        }
+
+        ++fmt;
+        if (!*fmt) { f.bad = true; return; }
+
+        // An optional field width, then an optional E/O modifier.
+        int width = 0;
+        while (DigitOf(*fmt) >= 0) {
+            width = width * 10 + DigitOf(*fmt);
+            ++fmt;
+            if (!*fmt) { f.bad = true; return; }
+        }
+        char modifier = 0;
+        if (*fmt == charT('E') || *fmt == charT('O')) {
+            modifier = static_cast<char>(*fmt);
+            ++fmt;
+            if (!*fmt) { f.bad = true; return; }
+        }
+        const char conv = static_cast<char>(*fmt);
+
+        auto num = [&](int deflt) {
+            return r.number(width ? width : deflt);
+        };
+
+        switch (conv) {
+        // ── the locale's business ───────────────────────────────────────
+        case 'a': case 'A': case 'b': case 'B': case 'h':
+        case 'c': case 'x': case 'X': case 'p': case 'r':
+            if (!ViaFacet(r, conv, modifier, f)) { f.bad = true; return; }
+            break;
+
+        // ── whitespace ──────────────────────────────────────────────────
+        case 'n': case 't':
+            r.skip_space();
+            break;
+
+        case '%':
+            if (r.eof() || r.take() != charT('%')) { f.bad = true; return; }
+            break;
+
+        // ── date ────────────────────────────────────────────────────────
+        case 'Y': {
+            const long long v = r.number(width ? width : 6, true);
+            if (v == kNone) { f.bad = true; return; }
+            f.year = static_cast<int>(v);
+            break;
+        }
+        case 'C': {
+            const long long v = r.number(width ? width : 2, true);
+            if (v == kNone) { f.bad = true; return; }
+            f.century = static_cast<int>(v);
+            break;
+        }
+        case 'y': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.y2 = static_cast<int>(v);
+            break;
+        }
+        case 'm': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.month = static_cast<int>(v);
+            break;
+        }
+        case 'd': case 'e': {
+            r.skip_space();                       // %e writes a leading blank
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.day = static_cast<int>(v);
+            break;
+        }
+        case 'j': {
+            const long long v = num(3);
+            if (v == kNone) { f.bad = true; return; }
+            f.yday = static_cast<int>(v);
+            break;
+        }
+        case 'u': {
+            const long long v = num(1);
+            if (v == kNone || v < 1 || v > 7) { f.bad = true; return; }
+            f.wday = static_cast<int>(v % 7);     // ISO Monday..Sunday = 1..7
+            break;
+        }
+        case 'w': {
+            const long long v = num(1);
+            if (v == kNone || v > 6) { f.bad = true; return; }
+            f.wday = static_cast<int>(v);
+            break;
+        }
+        case 'G': {
+            const long long v = r.number(width ? width : 6, true);
+            if (v == kNone) { f.bad = true; return; }
+            f.iso_year = static_cast<int>(v);
+            break;
+        }
+        case 'g': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.iso_y2 = static_cast<int>(v);
+            break;
+        }
+        case 'V': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.iso_week = static_cast<int>(v);
+            break;
+        }
+        case 'U': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.week_sun = static_cast<int>(v);
+            break;
+        }
+        case 'W': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.week_mon = static_cast<int>(v);
+            break;
+        }
+
+        // ── composites, spelled out rather than recursed ────────────────
+        case 'D': {   // %m/%d/%y
+            const long long m = r.number(2);
+            if (m == kNone || r.take() != charT('/')) { f.bad = true; return; }
+            const long long d = r.number(2);
+            if (d == kNone || r.take() != charT('/')) { f.bad = true; return; }
+            const long long y = r.number(2);
+            if (y == kNone) { f.bad = true; return; }
+            f.month = static_cast<int>(m);
+            f.day   = static_cast<int>(d);
+            f.y2    = static_cast<int>(y);
+            break;
+        }
+        case 'F': {   // %Y-%m-%d
+            const long long y = r.number(6, true);
+            if (y == kNone || r.take() != charT('-')) { f.bad = true; return; }
+            const long long m = r.number(2);
+            if (m == kNone || r.take() != charT('-')) { f.bad = true; return; }
+            const long long d = r.number(2);
+            if (d == kNone) { f.bad = true; return; }
+            f.year  = static_cast<int>(y);
+            f.month = static_cast<int>(m);
+            f.day   = static_cast<int>(d);
+            break;
+        }
+
+        // ── time ────────────────────────────────────────────────────────
+        case 'H': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.hour = static_cast<int>(v);
+            break;
+        }
+        case 'I': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.hour12 = static_cast<int>(v);
+            break;
+        }
+        case 'M': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.minute = static_cast<int>(v);
+            break;
+        }
+        case 'S': {
+            const long long v = num(2);
+            if (v == kNone) { f.bad = true; return; }
+            f.second = v;
+            // A fractional part is read at whatever precision the text gives;
+            // the assembler is what rounds it to the target's.
+            if (!r.eof() && r.peek() == charT('.')) {
+                r.take();
+                long long numr = 0, den = 1;
+                while (!r.eof() && DigitOf(r.peek()) >= 0 && den < 1000000000000000000LL) {
+                    numr = numr * 10 + DigitOf(r.take());
+                    den *= 10;
+                }
+                if (den == 1) { f.bad = true; return; }   // '.' with no digits
+                f.frac_num = numr;
+                f.frac_den = den;
+            }
+            break;
+        }
+        case 'R': {   // %H:%M
+            const long long h = r.number(2);
+            if (h == kNone || r.take() != charT(':')) { f.bad = true; return; }
+            const long long m = r.number(2);
+            if (m == kNone) { f.bad = true; return; }
+            f.hour = static_cast<int>(h);
+            f.minute = static_cast<int>(m);
+            break;
+        }
+        case 'T': {   // %H:%M:%S
+            const long long h = r.number(2);
+            if (h == kNone || r.take() != charT(':')) { f.bad = true; return; }
+            const long long m = r.number(2);
+            if (m == kNone || r.take() != charT(':')) { f.bad = true; return; }
+            const long long s = r.number(2);
+            if (s == kNone) { f.bad = true; return; }
+            f.hour = static_cast<int>(h);
+            f.minute = static_cast<int>(m);
+            f.second = s;
+            if (!r.eof() && r.peek() == charT('.')) {
+                r.take();
+                long long numr = 0, den = 1;
+                while (!r.eof() && DigitOf(r.peek()) >= 0 && den < 1000000000000000000LL) {
+                    numr = numr * 10 + DigitOf(r.take());
+                    den *= 10;
+                }
+                if (den == 1) { f.bad = true; return; }
+                f.frac_num = numr;
+                f.frac_den = den;
+            }
+            break;
+        }
+
+        // ── zone ────────────────────────────────────────────────────────
+        case 'z':
+            if (!ReadOffset(r, modifier, f)) { f.bad = true; return; }
+            if (offset) *offset = f.offset;
+            break;
+        case 'Z':
+            if (!ReadAbbrev(r, abbrev)) { f.bad = true; return; }
+            break;
+
+        // ── durations only ──────────────────────────────────────────────
+        case 'Q': {
+            const long long v = r.number(width ? width : 19, true);
+            if (v == kNone) { f.bad = true; return; }
+            f.q_value = v;
+            break;
+        }
+        case 'q': {
+            // ‼ Dispatched on the first character rather than tried against a
+            // list. The list version failed on the first candidate that did
+            // not match instead of moving to the next, so `min` was rejected
+            // by `as` — caught in the guest on the first run of phase234, and
+            // it is the shape of the bug that matters: a streambuf cannot put
+            // characters back, so a parser that speculates has to be right the
+            // first time. One character of lookahead is enough here, and the
+            // only ambiguity — `m` starting both `ms` and `min` — is resolved
+            // by the one after it.
+            auto want = [&](char ch) {
+                if (r.eof() || r.peek() != charT(ch)) return false;
+                r.take();
+                return true;
+            };
+            auto unit = [&](long long num, long long den) {
+                f.q_unit_num = num;
+                f.q_unit_den = den;
+            };
+            if (r.eof()) { f.bad = true; return; }
+            switch (static_cast<char>(r.peek())) {
+            case 'a': r.take(); if (!want('s')) { f.bad = true; return; }
+                      unit(1, 1000000000000000000LL); break;
+            case 'f': r.take(); if (!want('s')) { f.bad = true; return; }
+                      unit(1, 1000000000000000LL); break;
+            case 'p': r.take(); if (!want('s')) { f.bad = true; return; }
+                      unit(1, 1000000000000LL); break;
+            case 'n': r.take(); if (!want('s')) { f.bad = true; return; }
+                      unit(1, 1000000000LL); break;
+            case 'u': r.take(); if (!want('s')) { f.bad = true; return; }
+                      unit(1, 1000000LL); break;
+            case 'h': r.take(); unit(3600, 1); break;
+            case 'd': r.take(); unit(86400, 1); break;
+            case 's': r.take(); unit(1, 1); break;
+            case 'm':
+                r.take();
+                if (!r.eof() && r.peek() == charT('s')) { r.take(); unit(1, 1000); }
+                else if (want('i') && want('n')) { unit(60, 1); }
+                else { f.bad = true; return; }
+                break;
+            case '[': {
+                // [time.duration.io] writes a period the named units cannot
+                // spell as `[num/den]s`, and a reader that only knew the names
+                // could not read back what the writer wrote.
+                r.take();
+                const long long n = r.number(19);
+                if (n == kNone) { f.bad = true; return; }
+                long long d = 1;
+                if (!r.eof() && r.peek() == charT('/')) {
+                    r.take();
+                    d = r.number(19);
+                    if (d == kNone) { f.bad = true; return; }
+                }
+                if (!want(']') || !want('s')) { f.bad = true; return; }
+                unit(n, d);
+                break;
+            }
+            default:
+                f.bad = true;
+                return;
+            }
+            break;
+        }
+
+        default:
+            f.bad = true;
+            return;
+        }
+    }
+
+    // %I without %p is a twelve-hour clock with no half named; the standard
+    // makes that a parse failure rather than a guess at morning.
+    if (f.hour == kNone && f.hour12 != kNone) {
+        if (f.ampm == kNone) {
+            // time_get's %p path records the half in tm_hour, so a facet-read
+            // %p has already produced a 24-hour value; a bare %I has not.
+            f.bad = true;
+            return;
+        }
+        f.hour = f.hour12 % 12 + (f.ampm ? 12 : 0);
+    }
+
+    if (f.year == kNone) {
+        if (f.century != kNone && f.y2 != kNone)
+            f.year = f.century * 100 + f.y2;
+        else if (f.y2 != kNone)
+            f.year = f.y2 + (f.y2 <= 68 ? 2000 : 1900);   // [time.parse]/6
+    }
+}
+
+// ── assembling ──────────────────────────────────────────────────────────────
+
+inline bool HasDate(const Fields &f)
+{
+    return f.year != kNone && f.month != kNone && f.day != kNone;
+}
+
+// Seconds since the epoch, from a complete set of fields. `false` when the
+// fields do not name a day.
+inline bool ToSysSeconds(const Fields &f, long long &out)
+{
+    long long days = 0;
+    if (HasDate(f)) {
+        days = __boxcxx::civil::days_from_civil(f.year, unsigned(f.month),
+                                                unsigned(f.day));
+    } else if (f.year != kNone && f.yday != kNone) {
+        days = __boxcxx::civil::days_from_civil(f.year, 1, 1) + (f.yday - 1);
+    } else {
+        return false;
+    }
+    const long long h = f.hour   == kNone ? 0 : f.hour;
+    const long long m = f.minute == kNone ? 0 : f.minute;
+    const long long s = f.second == kNone ? 0 : f.second;
+    out = days * 86400 + h * 3600 + m * 60 + s;
+    return true;
+}
+
+template <class Duration>
+Duration FractionAs(const Fields &f)
+{
+    if (f.frac_den <= 1) return Duration::zero();
+    // The text says numerator/denominator; the target says period. Multiplying
+    // before dividing keeps the answer exact whenever the target can hold it,
+    // which is the case that matters — a millisecond target reading ".5" must
+    // land on 500 ms and not on zero.
+    using Rep = typename Duration::rep;
+    using Per = typename Duration::period;
+    const long long ticks_per_second = Per::den / Per::num;
+    if (ticks_per_second <= 0) return Duration::zero();
+    return Duration(static_cast<Rep>(f.frac_num * ticks_per_second / f.frac_den));
+}
+
+} // namespace __parse
+
+// ── [time.parse] from_stream ────────────────────────────────────────────────
+
+#define BOXCXX_PARSE_PROLOGUE                                                  \
+    __parse::Fields f;                                                         \
+    typename basic_istream<charT, traits>::sentry ok(is, true);                \
+    if (!ok) return is;                                                        \
+    __parse::Run(is, fmt, f, abbrev, offset);                                  \
+    if (f.bad) { is.setstate(ios_base::failbit); return is; }
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            sys_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    BOXCXX_PARSE_PROLOGUE
+    long long secs = 0;
+    if (!__parse::ToSysSeconds(f, secs)) {
+        is.setstate(ios_base::failbit);
+        return is;
+    }
+    // A sys_time is UTC, so an offset that was read is what the text was
+    // measured against and comes back off. A local_time keeps it, which is the
+    // only difference between the two overloads.
+    if (f.offset_seen) secs -= f.offset.count() * 60;
+    tp = sys_time<Duration>(duration_cast<Duration>(seconds(secs))
+                            + __parse::FractionAs<Duration>(f));
+    return is;
+}
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            local_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    BOXCXX_PARSE_PROLOGUE
+    long long secs = 0;
+    if (!__parse::ToSysSeconds(f, secs)) {
+        is.setstate(ios_base::failbit);
+        return is;
+    }
+    tp = local_time<Duration>(duration_cast<Duration>(seconds(secs))
+                              + __parse::FractionAs<Duration>(f));
+    return is;
+}
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            utc_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    sys_time<Duration> st{};
+    from_stream(is, fmt, st, abbrev, offset);
+    if (is) tp = utc_clock::from_sys(st);
+    return is;
+}
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            tai_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    sys_time<Duration> st{};
+    from_stream(is, fmt, st, abbrev, offset);
+    if (is) tp = tai_clock::from_utc(utc_clock::from_sys(st));
+    return is;
+}
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            gps_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    sys_time<Duration> st{};
+    from_stream(is, fmt, st, abbrev, offset);
+    if (is) tp = gps_clock::from_utc(utc_clock::from_sys(st));
+    return is;
+}
+
+template <class charT, class traits, class Duration, class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            file_time<Duration> &tp,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    sys_time<Duration> st{};
+    from_stream(is, fmt, st, abbrev, offset);
+    if (is) tp = file_clock::from_sys(st);
+    return is;
+}
+
+template <class charT, class traits, class Rep, class Period,
+          class Alloc = allocator<charT>>
+basic_istream<charT, traits> &
+from_stream(basic_istream<charT, traits> &is, const charT *fmt,
+            duration<Rep, Period> &d,
+            basic_string<charT, traits, Alloc> *abbrev = nullptr,
+            minutes *offset = nullptr)
+{
+    BOXCXX_PARSE_PROLOGUE
+    using D = duration<Rep, Period>;
+
+    if (f.q_value != __parse::kNone) {
+        // %Q with %q: a number and the unit it is counted in.
+        if (f.q_unit_num == __parse::kNone) {
+            // %Q alone is the duration's own rep, which is what the writer
+            // emitted it as.
+            d = D(static_cast<Rep>(f.q_value));
+        } else {
+            // ticks = value * (unit / period). Routing that through
+            // nanoseconds was the obvious way and it loses everything finer
+            // than one: an attosecond unit divides to zero before the target
+            // ever sees it. The ratio is reduced against the target's period
+            // first, so the round trip a writer produces cancels exactly
+            // instead of merely coming close.
+            using Per = typename D::period;
+            long long un = f.q_unit_num, ud = f.q_unit_den;
+            long long pn = Per::num,     pd = Per::den;
+            const auto gcd = [](long long a, long long b) {
+                while (b) { const long long t = a % b; a = b; b = t; }
+                return a < 0 ? -a : a;
+            };
+            long long g = gcd(un, pn); un /= g; pn /= g;
+            g = gcd(ud, pd); ud /= g; pd /= g;
+            d = D(static_cast<Rep>(f.q_value * un * pd / (ud * pn)));
+        }
+        return is;
+    }
+
+    long long total = 0;
+    bool any = false;
+    if (f.hour   != __parse::kNone) { total += f.hour * 3600LL;  any = true; }
+    if (f.minute != __parse::kNone) { total += f.minute * 60LL;  any = true; }
+    if (f.second != __parse::kNone) { total += f.second;         any = true; }
+    if (f.yday   != __parse::kNone) { total += f.yday * 86400LL; any = true; }
+    if (!any) {
+        is.setstate(ios_base::failbit);
+        return is;
+    }
+    d = duration_cast<D>(seconds(total)) + __parse::FractionAs<D>(f);
+    if (f.negative) d = -d;
+    return is;
+}
+
+// ── the calendar types ──────────────────────────────────────────────────────
+
+#define BOXCXX_PARSE_CAL(TYPE, NEED, BUILD)                                    \
+    template <class charT, class traits, class Alloc = allocator<charT>>       \
+    basic_istream<charT, traits> &from_stream(                                 \
+        basic_istream<charT, traits> &is, const charT *fmt, TYPE &out,         \
+        basic_string<charT, traits, Alloc> *abbrev = nullptr,                  \
+        minutes *offset = nullptr)                                             \
+    {                                                                          \
+        BOXCXX_PARSE_PROLOGUE                                                  \
+        if (!(NEED)) { is.setstate(ios_base::failbit); return is; }            \
+        out = BUILD;                                                           \
+        return is;                                                             \
+    }
+
+BOXCXX_PARSE_CAL(chrono::day, f.day != __parse::kNone,
+                 chrono::day(unsigned(f.day)))
+BOXCXX_PARSE_CAL(chrono::month, f.month != __parse::kNone,
+                 chrono::month(unsigned(f.month)))
+BOXCXX_PARSE_CAL(chrono::year, f.year != __parse::kNone,
+                 chrono::year(f.year))
+BOXCXX_PARSE_CAL(chrono::weekday, f.wday != __parse::kNone,
+                 chrono::weekday(unsigned(f.wday)))
+BOXCXX_PARSE_CAL(chrono::month_day,
+                 f.month != __parse::kNone && f.day != __parse::kNone,
+                 chrono::month_day(chrono::month(unsigned(f.month)),
+                                   chrono::day(unsigned(f.day))))
+BOXCXX_PARSE_CAL(chrono::year_month,
+                 f.year != __parse::kNone && f.month != __parse::kNone,
+                 chrono::year_month(chrono::year(f.year),
+                                    chrono::month(unsigned(f.month))))
+BOXCXX_PARSE_CAL(chrono::year_month_day, __parse::HasDate(f),
+                 chrono::year_month_day(chrono::year(f.year),
+                                        chrono::month(unsigned(f.month)),
+                                        chrono::day(unsigned(f.day))))
+
+#undef BOXCXX_PARSE_CAL
+#undef BOXCXX_PARSE_PROLOGUE
+
+// ── [time.parse] parse() ────────────────────────────────────────────────────
+// The manipulators. Each holds what it was given and does the work in its
+// extractor, so `is >> parse("%F", ymd)` reads exactly like every other
+// extraction — which is the point of them.
+
+namespace __parse {
+
+template <class charT, class Parsable>
+struct Manip {
+    const charT *fmt;
+    Parsable    *tp;
+};
+
+template <class charT, class Parsable, class String>
+struct ManipAbbrev {
+    const charT *fmt;
+    Parsable    *tp;
+    String      *abbrev;
+};
+
+template <class charT, class Parsable>
+struct ManipOffset {
+    const charT *fmt;
+    Parsable    *tp;
+    minutes     *offset;
+};
+
+template <class charT, class Parsable, class String>
+struct ManipBoth {
+    const charT *fmt;
+    Parsable    *tp;
+    String      *abbrev;
+    minutes     *offset;
+};
+
+} // namespace __parse
+
+template <class charT, class Parsable>
+__parse::Manip<charT, Parsable> parse(const charT *fmt, Parsable &tp)
+{
+    return {fmt, &tp};
+}
+
+template <class charT, class traits, class Alloc, class Parsable>
+__parse::Manip<charT, Parsable>
+parse(const basic_string<charT, traits, Alloc> &fmt, Parsable &tp)
+{
+    return {fmt.c_str(), &tp};
+}
+
+template <class charT, class Parsable, class traits, class Alloc>
+__parse::ManipAbbrev<charT, Parsable, basic_string<charT, traits, Alloc>>
+parse(const charT *fmt, Parsable &tp, basic_string<charT, traits, Alloc> &abbrev)
+{
+    return {fmt, &tp, &abbrev};
+}
+
+template <class charT, class traits, class Alloc, class Parsable>
+__parse::ManipAbbrev<charT, Parsable, basic_string<charT, traits, Alloc>>
+parse(const basic_string<charT, traits, Alloc> &fmt, Parsable &tp,
+      basic_string<charT, traits, Alloc> &abbrev)
+{
+    return {fmt.c_str(), &tp, &abbrev};
+}
+
+template <class charT, class Parsable>
+__parse::ManipOffset<charT, Parsable>
+parse(const charT *fmt, Parsable &tp, minutes &offset)
+{
+    return {fmt, &tp, &offset};
+}
+
+template <class charT, class traits, class Alloc, class Parsable>
+__parse::ManipOffset<charT, Parsable>
+parse(const basic_string<charT, traits, Alloc> &fmt, Parsable &tp, minutes &offset)
+{
+    return {fmt.c_str(), &tp, &offset};
+}
+
+template <class charT, class Parsable, class traits, class Alloc>
+__parse::ManipBoth<charT, Parsable, basic_string<charT, traits, Alloc>>
+parse(const charT *fmt, Parsable &tp, basic_string<charT, traits, Alloc> &abbrev,
+      minutes &offset)
+{
+    return {fmt, &tp, &abbrev, &offset};
+}
+
+template <class charT, class traits, class Alloc, class Parsable>
+__parse::ManipBoth<charT, Parsable, basic_string<charT, traits, Alloc>>
+parse(const basic_string<charT, traits, Alloc> &fmt, Parsable &tp,
+      basic_string<charT, traits, Alloc> &abbrev, minutes &offset)
+{
+    return {fmt.c_str(), &tp, &abbrev, &offset};
+}
+
+template <class charT, class traits, class Parsable>
+basic_istream<charT, traits> &
+operator>>(basic_istream<charT, traits> &is, __parse::Manip<charT, Parsable> m)
+{
+    basic_string<charT, traits> *none = nullptr;
+    return from_stream(is, m.fmt, *m.tp, none, static_cast<minutes *>(nullptr));
+}
+
+template <class charT, class traits, class Parsable, class String>
+basic_istream<charT, traits> &
+operator>>(basic_istream<charT, traits> &is,
+           __parse::ManipAbbrev<charT, Parsable, String> m)
+{
+    return from_stream(is, m.fmt, *m.tp, m.abbrev, static_cast<minutes *>(nullptr));
+}
+
+template <class charT, class traits, class Parsable>
+basic_istream<charT, traits> &
+operator>>(basic_istream<charT, traits> &is,
+           __parse::ManipOffset<charT, Parsable> m)
+{
+    basic_string<charT, traits> *none = nullptr;
+    return from_stream(is, m.fmt, *m.tp, none, m.offset);
+}
+
+template <class charT, class traits, class Parsable, class String>
+basic_istream<charT, traits> &
+operator>>(basic_istream<charT, traits> &is,
+           __parse::ManipBoth<charT, Parsable, String> m)
+{
+    return from_stream(is, m.fmt, *m.tp, m.abbrev, m.offset);
+}
+
+} // namespace chrono
+} // namespace std
+
+#endif // BOXCXX_BITS_CHRONO_PARSE

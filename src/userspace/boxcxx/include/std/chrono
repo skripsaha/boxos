@@ -2,8 +2,10 @@
 //
 // boxcxx freestanding implementation. Scope: durations, time_points, the
 // system/steady/high_resolution clocks (BoxOS ClockBoard + RDTSC), the full
-// civil calendar, hh_mm_ss, and <format> integration. Out of scope (like
-// locale): time zones (zoned_time/tzdb), leap-second database, wide streams.
+// civil calendar, hh_mm_ss, <format> integration, and — since Ф45 — the IANA
+// time zone database, zoned_time and the leap seconds. The zone data is baked
+// into <__bits/tzdb_table> and reached only through src/runtime/tzdb.cpp, so a
+// program that includes this header for durations links none of it.
 #ifndef BOXCXX_CHRONO
 #define BOXCXX_CHRONO
 
@@ -11,12 +13,21 @@
 #include <__bits/chrono_duration>
 #include <__bits/chrono_clock>
 #include <__bits/chrono_calendar>
+// ‼ Order matters here, and only in one place: <__bits/chrono_zone> comes
+// BEFORE <__bits/chrono_format>, because the formatter for zoned_time needs
+// the type and the zone layer needs nothing from the formatter. The reverse
+// order compiles everything except that one specialization, and fails with
+// "zoned_time is not a member of std::chrono" from a file that never mentions
+// zones.
+#include <__bits/chrono_zone>
 #include <__bits/chrono_format>
 #include <__bits/chrono_io>
+#include <__bits/chrono_parse>
 
 // [version.syn] names this header as an owner of the macros below;
 // nothing else here is declared, so nothing else is answered for.
 #define BOXCXX_OWNS_chrono_udls
+#define BOXCXX_OWNS_chrono
 #include <__bits/version_chrono>
 
 #endif // BOXCXX_CHRONO

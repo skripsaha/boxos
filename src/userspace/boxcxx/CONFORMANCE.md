@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **107** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 153 |
+| Standard headers provided | **108** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 164 |
 | Header source | ~104 000 lines |
-| Feature-test macros defined | 237 — 165 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
+| Feature-test macros defined | 238 — 166 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 32 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 245 phases (226 of them the numbered `PhaseN` series), 6 413 runtime checks, 2 062 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 249 phases (230 of them the numbered `PhaseN` series), 6 545 runtime checks, 2 059 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -428,8 +428,12 @@ and line — is recorded there.
   carries — and `<format>` gained the six locale-taking overloads of
   [format.functions] it had never had. Details and reasoning are in §2
   `<locale>` and §2 `<format>`.
-- **Time zones and leap seconds.** `<chrono>` has no `tzdb`, no `time_zone`, no
-  `zoned_time`, and no leap-second table.
+- **Time zones and leap seconds — CLOSED as of Ф45.** This was the last flat
+  exclusion in this section. `<chrono>` now carries IANA tzdata 2026c baked
+  into the image, the whole of [time.zone], and the 27 leap seconds — see §2
+  `<chrono>` for what that cost and what it chose. `chrono::parse` and
+  `from_stream` came with it, so the library reads back every format it writes,
+  and **`__cpp_lib_chrono` is defined** at last (§1.3).
 
 ## 1.3 Feature-test macros
 
@@ -514,14 +518,25 @@ the whole set, not sampled.
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-**11 of the 248 macros [version.syn] names are not defined** — measured as a
+**10 of the 248 macros [version.syn] names are not defined** — measured as a
 set difference between the transcription and what a translation unit including
 only `<version>` reports, not counted by hand. They divide cleanly:
 
 | Why undefined | Count | Which |
 |---|---|---|
 | whole-clause requirements relaxations, unprovable by inspection | 2 | `ranges`, `algorithm_iterator_requirements` |
-| the feature is excluded or absent here | 7 | `filesystem`, `char8_t`, `chrono`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+| the feature is excluded or absent here | 6 | `filesystem`, `char8_t`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+
+**`chrono` left that row in Ф45**, and it took the whole clause to do it: the
+zone database, the leap seconds, `zoned_time`'s formatter and `chrono::parse`.
+It is claimed at **201907L**, the C++23 value. C++26 raises it to 202306L for
+hashing the chrono value classes, which boxcxx does not do — measured against
+libstdc++ 16.1, which reports 201907L at `-std=c++23` and 202306L at
+`-std=c++26`. **`is_implicit_lifetime` is not ours to define at all**:
+[meta.unary.prop] makes it a compiler question, and GCC 15.2 has no
+`__builtin_is_implicit_lifetime` (measured — `__has_builtin` reports 0). It
+belongs with the toolchain workarounds rather than here, and moves there the
+day the trait is a library decision again.
 | C++26 draft additions no implementation has | 2 | `initializer_list` (202511L), `ranges_generate_random` (202403L) |
 
 **This table had a fourth row until Ф43-f, and it was the largest of them:**
@@ -922,20 +937,60 @@ looks identical and is not; see there.
 
 ## `<chrono>`
 
-- `–` No time zones: `tzdb`, `time_zone`, `zoned_time` and `leap_second` do not
-  exist, and there is no leap-second table.
-- `~` `utc_clock`, `tai_clock`, `gps_clock`, `file_clock` and `local_t` exist as
-  **type surface only** — `rep`, `period`, `duration`, `time_point` — with no
-  `now()`. Calling `utc_clock::now()` is a compile error, which is the honest
-  answer without a leap-second database. `tai` and `gps` are exact fixed offsets
-  and need no table.
-- `!` **`utc_time` is `sys_time` with the same count.** Without a leap-second table
-  UTC differs from true UTC by the number of inserted leap seconds, and `%S` will
-  never show the 60th second. The deviation is localized: for every specifier,
-  `utc(c)` renders identically to `sys(c)`.
-- `~` `clock_cast` is identity-only. A cross-clock cast (`system_clock` →
-  `utc_clock`) does not compile — correct in the absence of
-  `clock_time_conversion`, and better than silently converting wrongly.
+- `✓` **Time zones exist as of Ф45**, and the three entries that used to stand
+  here are gone with them. They used to read: no `tzdb`, `time_zone`,
+  `zoned_time` or `leap_second`; `utc_clock` and its siblings as type surface
+  with no `now()`; `utc_time` silently equal to `sys_time`; and `clock_cast`
+  identity-only. The `!` among them was the only "silently wrong" mark this
+  header carried.
+  **What is here now:** the whole of [time.zone] — `tzdb`, `tzdb_list`,
+  `time_zone`, `time_zone_link`, `leap_second`, `sys_info`, `local_info`,
+  `zoned_time`, `zoned_traits`, `nonexistent_local_time`,
+  `ambiguous_local_time`, `locate_zone`, `current_zone`, `reload_tzdb`,
+  `remote_version` — over IANA **tzdata 2026c**: 598 names, 341 zones, 257
+  links, 16 631 transitions and 27 leap seconds. `utc_clock`, `tai_clock`,
+  `gps_clock` and `file_clock` have `now()` and their conversions, and
+  `clock_cast` joins any pair of them through `clock_time_conversion`.
+- `?` **The database is baked into the image, not read from a file.** There is
+  no `/usr/share/zoneinfo` to read and no network to fetch from, so
+  `tools/gen_tzdb.py` compiles the IANA source with `zic` on a development host
+  and emits `<__bits/tzdb_table>` — 116 KB, in exactly one object file, so a
+  program that includes `<chrono>` for durations links none of it. This is the
+  same shape `<stacktrace>`'s name table takes and for the same reason:
+  `locate_zone` makes no syscall, touches no disk and cannot fail for want of
+  a file.
+- `?` `remote_version()` returns the baked version and `reload_tzdb()` returns
+  the loaded database. [time.zone.db.remote] is written for a system that can
+  fetch a newer release; the newest one within reach here is the one in the
+  image, so saying so is the answer rather than a placeholder. The TagFS door
+  that would change that is not built yet.
+- `~` **`current_zone()` reads the `clock:zone` tag and answers `Etc/UTC` when
+  nothing has set it.** A machine that has not been told where it is has no
+  local time to report, and UTC is the same fact `<ctime>` records when it says
+  `localtime` IS `gmtime`. Every named zone still works: `locate_zone` answers
+  for all 598.
+- `✓` **`chrono::parse` and `from_stream` exist as of Ф45**, for every type
+  [time.parse] names. The ten conversions the locale decides — `%a`, `%A`,
+  `%b`, `%B`, `%h`, `%c`, `%x`, `%X`, `%p`, `%r` — are read through the
+  `time_get` facet Ф43-d-3 built, not through a second parser, which is both
+  what the clause asks for and what keeps one answer to what "Mar" means.
+- `~` **`%Ez` and `%z` both accept a colon.** The standard reserves `hh:mm` for
+  the modified form; boxcxx takes it either way, because a reader that rejects
+  `+03:00` for want of an `E` is useless against real ISO 8601 text and no
+  valid input becomes ambiguous by allowing it.
+- `!` **This header carried a regression for the length of one commit, and it
+  is recorded because of how it arrived.** `formatter<utc_time>` rendered the
+  count directly, which was exactly right while there was no leap-second table
+  and `utc_time` and `sys_time` were the same clock. Ф45 baked the table and
+  every UTC instant started printing 27 seconds late — from a file nobody had
+  edited. The code did not change; the truth under it did. It now converts,
+  and shows the 60th second inside an insertion.
+- `?` `sys_info::save` is derived from the Zone record's STDOFF in the tzdata
+  source, because TZif records only a daylight FLAG. Two other derivations were
+  tried first and measured wrong — the arithmetic one on 17 927 instants and
+  CPython's per-type heuristic on 733, `America/Coyhaique` among them with a
+  "daylight saving" of 2 565 seconds. libstdc++ reads the same Rule lines and
+  agrees; `zoneinfo` uses the heuristic and does not, on 41 zones.
 - `to_time_t` / `from_time_t` work in `std::time_t`, as [time.clock.system]/3
   requires. **This entry used to be a deviation** — they returned `long long`,
   because the name `time_t` belonged to a 20-byte BoxOS structure in
@@ -4366,6 +4421,30 @@ followed by a combining mark is segmented as **two** clusters, where GB9 joins a
 Extend to whatever precedes it — `L"\uAC00\u0301"` measures 3 columns there and 2
 everywhere else; and precision on an escaped string is **not monotone** —
 `{:.2?}` of `"你"` yields a longer answer than `{:.3?}` does.
+
+**Three more, from Ф45's zone work**, all adjudicated by `zdump` — tzcode's own
+dumper, reading the very files tzcode's own compiler produced from the release
+both sides were pinned to. Over 919 417 instants across all 598 zones, 3 066
+answers differed from ours and 3 052 of them went this way:
+
+- **A Zone record's `%s` is not re-expanded across the record boundary.**
+  Pacific/Auckland changed from NZMT to NZST on 1946-01-01, and libstdc++ keeps
+  saying `NZMT` for years afterwards. 122 instants in the Auckland family alone.
+- **A wall-clock `UNTIL` is converted with the STANDARD offset instead of the
+  one in force.** Europe/London's records meet at `1968 Oct 27`, which is
+  1968-10-26T23:00Z because Britain was on BST that day; libstdc++ places it at
+  00:00Z and reports the old record for the hour between. America/Asuncion's
+  `2024 Oct 15` misses by the same hour, Africa/Tripoli's 2013 boundary by
+  another. This is the same approximation our own generator makes and then
+  corrects by snapping each boundary to the transition zic actually emitted.
+- **Historical offsets that disagree with the compiled data outright** —
+  Africa/Algiers in 1977 comes back as WET where the file, `zdump` and
+  `zoneinfo` all say CET.
+
+The local-time question inherits all three: of 800 872 wall-clock readings, the
+8 172 where we differ are the same 262 zones, and CPython's PEP 495 machinery —
+reading our compiled tree, so the data cannot be the difference — sides with us
+in every one.
 
 **Fixed since the epic measured them against 15.2 — no superiority is claimed:**
 `{:<010p}` zero-padding despite an explicit align; `{:%F}` of `year{-43}`

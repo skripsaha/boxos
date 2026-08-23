@@ -32,6 +32,45 @@ inline constexpr bool IsCalendarStreamable = __bits::IsAnyOf<
 
 namespace chrono {
 
+// [time.zone.info] — the inserters for the two info structs. The text is the
+// standard's own format string, and it was checked against libstdc++ rather
+// than remembered: `[2026-03-08 07:00:00,2026-11-01 06:00:00,-04:00:00,60min,EDT]`
+// comes out of both, byte for byte.
+template <class charT, class traits>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const sys_info &r)
+{
+    return os << format("[{:%F %T},{:%F %T},{:%T},{:%Q%q},{}]", r.begin, r.end,
+                        r.offset, r.save, r.abbrev);
+}
+
+template <class charT, class traits>
+basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,
+                                         const local_info &r)
+{
+    // Written through the inserter above rather than through format(), because
+    // [time.zone.info] gives sys_info an inserter and no formatter — asking
+    // format() for one is how this first failed to compile.
+    os << '[';
+    if (r.result == local_info::unique) {
+        os << r.first;
+    } else {
+        os << (r.result == local_info::nonexistent ? "nonexistent" : "ambiguous")
+           << " local time between " << r.first << " and " << r.second;
+    }
+    os << ']';
+    return os;
+}
+
+template <class charT, class traits, class Duration, class TimeZonePtr>
+basic_ostream<charT, traits> &
+operator<<(basic_ostream<charT, traits> &os,
+           const zoned_time<Duration, TimeZonePtr> &zt)
+{
+    return os << format("{}", zt);
+}
+
+
 template <class charT, class traits, class T>
     requires __chrono_fmt::IsCalendarStreamable<T>
 basic_ostream<charT, traits> &operator<<(basic_ostream<charT, traits> &os,

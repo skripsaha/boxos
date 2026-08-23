@@ -42,6 +42,14 @@
 #           stdckdint_h -- leak nowhere at all, because no header in the
 #           tree includes a C-compatibility header.
 #
+#           Ф45 raised it 191 -> 192, and the delta is ONE macro:
+#           __cpp_lib_chrono, whose owner <chrono> is included by <format>'s
+#           users, <iomanip>, <syncstream> and a dozen more, so claiming it at
+#           last necessarily made it visible from all of them. Accounted for
+#           the way this comment demands: <regex> arrived in the same tree and
+#           was checked separately — no macro leaks only into it, so the new
+#           header added no leaker of its own.
+#
 #           Ф43-f raised it 172 -> 191, the largest jump the pin has ever
 #           taken, and the delta is EXACTLY the freestanding family: 26 macros
 #           arrived and 19 of them leak, because their owners are <utility>,
@@ -133,7 +141,7 @@
 # Usage:  tools/cxx_ftm_audit.sh [-v]      exit 0 iff OWNED and SYNOPSIS hold
 #                                          and the leak count has not grown
 set -u
-LEAK_BUDGET=191
+LEAK_BUDGET=192
 ROOT=$(cd "$(dirname "$0")/.." && pwd); cd "$ROOT" || exit 2
 VERBOSE=${1:-}
 
