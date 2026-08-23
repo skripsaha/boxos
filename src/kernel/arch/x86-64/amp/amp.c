@@ -9,6 +9,8 @@
 #include "atomics.h"
 #include "linker_symbols.h"
 #include "per_core.h"   // PerCpuData layout + g_per_core_active for the gs fast path
+#include "cpu_calibrate.h" // cpu_get_tsc_freq_khz() — the timebase that cannot be absent
+#include "cpuid.h"         // rdtsc()
 
 AmpLayout g_amp;
 
@@ -27,8 +29,40 @@ static uint8_t amp_index_for_lapic(uint32_t lapic_id)
 }
 
 // PIT channel 2 busy-wait delay
-static void pit_delay_us(uint32_t microseconds)
+/* A delay that cannot hang the boot.
+ *
+ * This used to be PIT channel 2 and nothing else, ending in
+ *
+ *     while (!(inb(0x61) & 0x20)) pause();
+ *
+ * — an unbounded wait on the speaker-gate output bit of the legacy 8254. Every
+ * INIT-SIPI-SIPI in this file goes through here, including the 10 ms the Intel
+ * MP sequence requires between INIT and the first SIPI, so a board where that
+ * bit never rises does not fail to boot a core: it stops, in the middle of AP
+ * bring-up, with no message and nothing further to print. And boards are
+ * entitled to lack it. The 8254 is legacy hardware Intel has been removing;
+ * "Legacy Reduced" platforms omit it, firmware can disable it, and the PC
+ * speaker circuit behind port 0x61 bit 5 is optional on machines that have no
+ * speaker to drive.
+ *
+ * The TSC is the timebase that cannot be absent on any CPU this kernel will
+ * ever run on, and cpu_calibrate_tsc() finishes long before the first AP is
+ * started (main.c sequences it two hundred lines earlier). So: TSC when it is
+ * calibrated, PIT only when it is not — and the PIT path is bounded, because a
+ * delay that is slightly wrong is a recoverable problem and a delay that never
+ * returns is not.
+ */
+static void amp_delay_us(uint32_t microseconds)
 {
+    uint32_t khz = cpu_get_tsc_freq_khz();
+    if (khz != 0) {
+        /* khz * us stays well inside 64 bits: 5 GHz for 10 ms is 5e10. */
+        uint64_t target = rdtsc() + ((uint64_t)khz * (uint64_t)microseconds) / 1000u;
+        while ((int64_t)(rdtsc() - target) < 0)
+            __asm__ volatile("pause");
+        return;
+    }
+
     uint16_t count = (uint16_t)((uint32_t)PIT_FREQUENCY * microseconds / 1000000);
     if (count < 1)
         count = 1;
@@ -42,9 +76,20 @@ static void pit_delay_us(uint32_t microseconds)
     outb(0x61, tmp & 0xFE);
     outb(0x61, tmp | 0x01);
 
-    while (!(inb(0x61) & 0x20))
-    {
+    /* Bounded. The spin count is deliberately far larger than any real gate
+     * needs — an inb from port 0x61 costs about a microsecond of bus time, so
+     * this is seconds of patience — and reaching the end means the timer is
+     * not there, which is worth saying once rather than hanging over. */
+    static bool warned = false;
+    for (uint32_t spins = 0; spins < 2000000u; spins++) {
+        if (inb(0x61) & 0x20)
+            return;
         __asm__ volatile("pause");
+    }
+    if (!warned) {
+        warned = true;
+        kprintf("[AMP] PIT channel 2 gate never asserted and no calibrated TSC "
+                "— AP timing is approximate on this board\n");
     }
 }
 
@@ -190,7 +235,7 @@ void amp_init(void)
 static void send_init_ipi(uint8_t dest_lapic_id)
 {
     lapic_icr_write((uint32_t)dest_lapic_id, LAPIC_IPI_INIT);
-    pit_delay_us(10000); // 10ms per Intel MP boot sequence
+    amp_delay_us(10000); // 10ms per Intel MP boot sequence
 }
 
 static void send_sipi(uint8_t dest_lapic_id, uint8_t vector_page)
@@ -309,21 +354,21 @@ void amp_boot_aps(void)
          * at high core counts). The poll-window between SIPIs must be at
          * least 200 µs (the SDM "BSP DELAYs (200 µSEC)" requirement); we
          * use that as the floor and bail early as soon as online flips. */
-        pit_delay_us(200);
+        amp_delay_us(200);
         send_sipi(c->lapic_id, sipi_vector);
 
         uint32_t sipi1_polls = 0;
         const uint32_t SIPI1_POLL_MAX = 1; /* >=200 µs minimum window */
         bool ap_up = amp_core_online(c);
         while (!ap_up && sipi1_polls < SIPI1_POLL_MAX) {
-            pit_delay_us(200);
+            amp_delay_us(200);
             sipi1_polls++;
             ap_up = amp_core_online(c);
         }
 
         if (!ap_up) {
             send_sipi(c->lapic_id, sipi_vector);
-            pit_delay_us(200);
+            amp_delay_us(200);
         }
 
         /* Long-wait timeout. Linux uses 1000 ms because BIOS-parked AP
@@ -341,7 +386,7 @@ void amp_boot_aps(void)
         uint32_t waited_iters = 0;
         ap_up = amp_core_online(c);
         while (!ap_up && waited_iters < LONG_WAIT_ITERATIONS) {
-            pit_delay_us(LONG_WAIT_GRANULARITY_US);
+            amp_delay_us(LONG_WAIT_GRANULARITY_US);
             waited_iters++;
             ap_up = amp_core_online(c);
         }
@@ -444,7 +489,7 @@ void amp_boot_aps(void)
                     }
                 }
                 if (!still_missing) break;
-                pit_delay_us(1000);
+                amp_delay_us(1000);
             }
         }
     }
