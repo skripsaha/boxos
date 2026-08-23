@@ -254,7 +254,15 @@ void kernel_main(void)
     VmmHelperTest();
     PmmPoisonTest();
     McePresenceTest();
-    IommuPresenceTest();
+    /* IommuPresenceTest is NOT here. It used to be, seventy lines and several
+     * subsystems ahead of iommu_init(), where the only answer it could give
+     * was "dormant" — and it gave it as "no DMAR/IVRS", which is a statement
+     * about the firmware's tables made before those tables had been read. On
+     * the first real machine BoxOS booted, that line said the board had no
+     * IOMMU while the board's DMAR was sitting in its RSDT, and the VT-d code
+     * that later found it crashed. A presence test that runs before the thing
+     * is present tests nothing and misleads twice. It now runs after
+     * iommu_init(); see below. */
     { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
     AddrWaitSelfTest();
 
@@ -329,6 +337,7 @@ void kernel_main(void)
         /* IOMMU skeleton — picks backend, runs init stub, does not
          * enable translation yet. */
         iommu_init();
+        IommuPresenceTest();  /* after init, which is the only time it means anything */
         iommu_audit_dump();   /* Phase 2G — log MemTag/Touch surface */
         /* AML interpreter skeleton — currently returns NOT_LOADED.
          * Hook here lets future implementation tie into boot. */
