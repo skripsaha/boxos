@@ -600,6 +600,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <regex>
+#include <valarray>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/bay_memory_resource.h"
@@ -54700,6 +54701,205 @@ void Phase236()
           "phase236 the door is left as it was found");
 }
 
+// ── Phase237: <valarray> — the work order, and the crew that carries it ───
+// Ф44-f. The host stand (tools/cxx_valarray_oracle.sh) is what proves the
+// SEMANTICS: 192 cases and a 22-row long-array battery over three columns,
+// with libstdc++ 16.1 and libc++ 22.1.6 agreeing with us on every one of them.
+// This phase deliberately does not repeat that sweep. It runs what the stand
+// cannot reach: the real brigade of strands instead of a pool of host threads,
+// our own correctly-rounded <cmath> under the transcendentals, and a cabin's
+// heap under arrays big enough to be split.
+namespace p237 {
+
+// ‼ Every value here is an exact integer or an exact power of two, and that is
+// load-bearing rather than tidy. A parallel reduction adds its partials in an
+// order the sequential one never uses, and in floating point a different order
+// is a different number — so a battery built on values that round would be
+// testing arithmetic instead of the split. Integers below 2^53 add to the same
+// double in any order, which is what makes "the crew got the same answer" mean
+// something.
+constexpr std::size_t kBig = 40009;  // prime: no chunk boundary is a round number
+
+double A(std::size_t i) { return double((long)(i % 1024) - 512); }
+double B(std::size_t i) { return double((long)((i * 7) % 256) - 128); }
+double C(std::size_t i) { return double(1 << (i % 8)); }
+
+double Sq(double x) { return x * x; }
+
+}  // namespace p237
+
+void Phase237()
+{
+    using p237::A;
+    using p237::B;
+    using p237::C;
+    using p237::kBig;
+
+    // ── 1. one pass over 40009 elements, checked element by element ──────
+    // The whole design is here: three operators, no temporary, one region cut
+    // into as many chunks as the cabin has strands. A chunk that computed its
+    // own bounds wrongly shows up as a wrong element, and a chunk that
+    // overlapped its neighbour shows up as a wrong sum.
+    {
+        std::valarray<double> a(kBig), b(kBig), c(kBig);
+        for (std::size_t i = 0; i < kBig; ++i) {
+            a[i] = A(i);
+            b[i] = B(i);
+            c[i] = C(i);
+        }
+        const std::valarray<double> r = a + b * c - a / 2.0;
+        bool ok = r.size() == kBig;
+        for (std::size_t i = 0; ok && i < kBig; ++i) ok = r[i] == A(i) + B(i) * C(i) - A(i) / 2.0;
+        Check(ok, "phase237 (1) a fused expression over 40009 elements, element by element");
+
+        double want = 0, lo = r[0], hi = r[0];
+        for (std::size_t i = 0; i < kBig; ++i) {
+            const double x = A(i) + B(i) * C(i) - A(i) / 2.0;
+            want += x;
+            if (x < lo) lo = x;
+            if (hi < x) hi = x;
+        }
+        Check(r.sum() == want,
+              "phase237 (1) sum() folds partials in an order the standard leaves open");
+        Check(r.min() == lo && r.max() == hi, "phase237 (1) min and max over the same crew");
+    }
+
+    // ── 2. writing THROUGH a subset, at a length that splits ─────────────
+    {
+        std::valarray<double> v(kBig);
+        for (std::size_t i = 0; i < kBig; ++i) v[i] = A(i);
+        v[std::slice(0, kBig / 2, 2)] = 3.0;
+        bool ok = true;
+        for (std::size_t i = 0; ok && i < kBig; ++i)
+            ok = (i % 2 == 0 && i / 2 < kBig / 2) ? v[i] == 3.0 : v[i] == A(i);
+        Check(ok, "phase237 (2) a strided write over half of 40009 elements");
+
+        std::valarray<double> w(kBig);
+        for (std::size_t i = 0; i < kBig; ++i) w[i] = A(i);
+        const std::valarray<bool> m = w > 0.0;
+        w[m] = -1.0;
+        double sum = 0;
+        for (std::size_t i = 0; i < kBig; ++i) sum += w[i];
+        double want = 0;
+        for (std::size_t i = 0; i < kBig; ++i) want += A(i) > 0.0 ? -1.0 : A(i);
+        Check(sum == want, "phase237 (2) and a masked write, counted the other way");
+    }
+
+    // ── 3. the aliasing the fused form has to get right ──────────────────
+    // An order reads element i to write element i, so these are safe under any
+    // chunking. They are here because that is a claim, and a claim a chunk
+    // boundary could falsify is worth running on sixteen cores.
+    {
+        std::valarray<double> v(kBig);
+        for (std::size_t i = 0; i < kBig; ++i) v[i] = A(i);
+        v += v;
+        bool ok = true;
+        for (std::size_t i = 0; ok && i < kBig; ++i) ok = v[i] == A(i) * 2.0;
+        Check(ok, "phase237 (3) v += v is elementwise and needs no temporary");
+
+        std::valarray<double> u(kBig);
+        for (std::size_t i = 0; i < kBig; ++i) u[i] = A(i);
+        u = u * 2.0 - u;
+        ok = true;
+        for (std::size_t i = 0; ok && i < kBig; ++i) ok = u[i] == A(i);
+        Check(ok, "phase237 (3) an order reading the array it is assigned to");
+    }
+
+    // ── 4. resize does not preserve, and swap is a pointer swap ──────────
+    {
+        std::valarray<double> v{1.0, 2.0, 3.0};
+        v.resize(5, 7.5);
+        Check(v.size() == 5 && v[0] == 7.5 && v[4] == 7.5,
+              "phase237 (4) resize assigns the fill to EVERY element, keeping none");
+        std::valarray<double> a{1.0, 2.0}, b{9.0};
+        a.swap(b);
+        Check(a.size() == 1 && a[0] == 9.0 && b.size() == 2 && b[1] == 2.0,
+              "phase237 (4) swap");
+    }
+
+    // ── 5. shift and cshift, including the rotation that wraps ───────────
+    {
+        const std::valarray<double> v{1, 2, 3, 4, 5, 6};
+        const std::valarray<double> s = v.shift(2);
+        Check(s[0] == 3 && s[3] == 6 && s[4] == 0 && s[5] == 0,
+              "phase237 (5) shift brings T() in from the end it left");
+        const std::valarray<double> t = v.shift(-2);
+        Check(t[0] == 0 && t[1] == 0 && t[2] == 1,
+              "phase237 (5) and from the other end for a negative count");
+        const std::valarray<double> c1 = v.cshift(2), c2 = v.cshift(-8);
+        Check(c1[0] == 3 && c1[4] == 1 && c1[5] == 2, "phase237 (5) cshift rotates left");
+        // ‼ -8 over six elements: the remainder of a negative count has the
+        // sign of the dividend in C++, so the fold has to be done once, on the
+        // count, and not inside the loop.
+        Check(c2[0] == 5 && c2[1] == 6 && c2[2] == 1,
+              "phase237 (5) a rotation by more than the length, the other way");
+    }
+
+    // ── 6. [valarray.syn]/3 — what a replacement type owes ───────────────
+    // "Any function returning a valarray<T> is permitted to return an object of
+    // another type, provided all the const member functions of valarray<T>
+    // other than begin and end are also applicable to this type." An
+    // expression here is such an object, so every one of them is called on one.
+    // ‼ libc++ 22.1.6 fails this: shift and cshift on an expression of doubles
+    // do not compile there at all (its __shift_expr indexes with `&` and `|`,
+    // which no double has). Pinned in tools/valarray_oracle_refdiff.txt.
+    {
+        const std::valarray<double> a{1, 2, 3, 4}, b{10, 20, 30, 40};
+        Check((a + b).size() == 4 && (a + b).sum() == 110, "phase237 (6) size and sum");
+        Check((a + b).min() == 11 && (a + b).max() == 44, "phase237 (6) min and max");
+        Check((a + b)[2] == 33, "phase237 (6) subscript");
+        Check((a + b).shift(1)[0] == 22 && (a + b).cshift(-1)[0] == 44,
+              "phase237 (6) shift and cshift, which libc++ cannot compile here");
+        Check((a * b).apply(p237::Sq)[1] == 1600.0, "phase237 (6) apply");
+        Check((-(a + b))[0] == -11 && (!(a - a))[0], "phase237 (6) the unary operators");
+        const std::valarray<double> sub = (a + b)[std::slice(1, 2, 2)];
+        Check(sub.size() == 2 && sub[0] == 22 && sub[1] == 44, "phase237 (6) a subset of one");
+        const std::valarray<std::size_t> ix{3, 0};
+        const std::valarray<double>      pick = (a + b)[ix];
+        Check(pick.size() == 2 && pick[0] == 44 && pick[1] == 11,
+              "phase237 (6) and an indirect subset of one");
+    }
+
+    // ── 7. the transcendentals reach OUR <cmath> ─────────────────────────
+    // The stand runs these against the host's libm; here they go through the
+    // correctly-rounded engine of Ф27e, so the values are the ones that are
+    // exact in binary and the point is the dispatch, not the digits.
+    {
+        const std::valarray<double> v{1.0, 4.0, 9.0, 16.0};
+        const std::valarray<double> r = std::sqrt(v);
+        Check(r[0] == 1 && r[1] == 2 && r[2] == 3 && r[3] == 4, "phase237 (7) sqrt");
+        const std::valarray<double> p = std::pow(v, 2.0);
+        Check(p[1] == 16 && p[3] == 256, "phase237 (7) pow with a scalar exponent");
+        const std::valarray<double> q = std::abs(-v);
+        Check(q[3] == 16, "phase237 (7) abs of an order, not of an array");
+        const std::valarray<double> e = std::sqrt(v * v);
+        Check(e[2] == 9, "phase237 (7) and a transcendental OF an expression");
+    }
+
+    // ── 8. the four subsets, read and written on a small array ───────────
+    {
+        std::valarray<double> v{1, 2, 3, 4, 5, 6};
+        const std::valarray<std::size_t> sz{2, 2}, st{3, 1};
+        const std::valarray<double>      g = v[std::gslice(0, sz, st)];
+        Check(g.size() == 4 && g[0] == 1 && g[1] == 2 && g[2] == 4 && g[3] == 5,
+              "phase237 (8) a gslice enumerates its last dimension fastest");
+        v[std::gslice(0, sz, st)] = 0.0;
+        Check(v[0] == 0 && v[2] == 3 && v[3] == 0 && v[5] == 6,
+              "phase237 (8) and writes through the same index set");
+
+        std::valarray<double>            w{1, 2, 3, 4, 5, 6};
+        const std::valarray<std::size_t> ix{5, 0};
+        w[ix] *= std::valarray<double>(10.0, 2);
+        Check(w[5] == 60 && w[0] == 10 && w[1] == 2,
+              "phase237 (8) a compound assignment through an indirect subset");
+
+        std::valarray<double> x{1, 2, 3, 4, 5, 6}, y(0.0, 6);
+        y[std::slice(0, 3, 1)] = x[std::slice(3, 3, 1)];
+        Check(y[0] == 4 && y[2] == 6 && y[3] == 0,
+              "phase237 (8) one proxy assigned from another");
+    }
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -54951,6 +55151,7 @@ const PhaseRow kPhases[] = {
     {"233", Phase233},
     {"234", Phase234},
     {"235", Phase235},
+    {"237", Phase237},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.

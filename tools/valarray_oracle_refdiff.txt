@@ -1,0 +1,6 @@
+181,182c181,182
+< req/shift                      [4.125,-3.0625,6.03125,-5.015625,0,0]
+< req/cshift                     [6.03125,-5.015625,2.5,-1.25,4.125,-3.0625]
+---
+> req/shift                      <libc++: does not compile>
+> req/cshift                     <libc++: does not compile>

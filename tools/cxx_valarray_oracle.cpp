@@ -396,6 +396,95 @@ int main(int argc, char **argv)
         v[gslice(1, sz, st)] += valarray<double>{1, 2, 3, 4};
         Pd("chain/gslice-compound", v);
     }
+    // ── orders that are not arrays ──────────────────────────────────────
+    // Everything above has a valarray on at least one side of every operator.
+    // These do not, and that is a different lookup: the replacement type is
+    // not the standard's, so whether `-(a + b)` or `sqrt(a * b)` compiles at
+    // all is a property of where an implementation put its operators.
+    { valarray<double> r = -(D6() + D6());        Pd("ord/unary-minus", r); }
+    { valarray<double> r = +(D6() * D6());        Pd("ord/unary-plus", r); }
+    { valarray<int> r = ~(I6() + I6());           Pi("ord/unary-flip", r); }
+    { valarray<bool> r = !(I6() - I6());          Pb("ord/unary-not", r); }
+    { valarray<double> r = (D6() + D6()) * 2.5;   Pd("ord/scalar-right", r); }
+    { valarray<double> r = 2.5 * (D6() + D6());   Pd("ord/scalar-left", r); }
+    { valarray<double> r = (D6() * 2.0) - (D6() / 4.0); Pd("ord/order-order", r); }
+    { valarray<bool> r = (D6() + 1.0) < (D6() * 2.0);   Pb("ord/order-cmp", r); }
+    { valarray<double> r = sqrt(abs(D6() - D6() * 3.0)); Pd("ord/nested-fn", r); }
+    { valarray<double> r = pow(D6() * D6(), 0.5);        Pd("ord/pow-order", r); }
+    { valarray<double> r = atan2(D6() + 1.0, D6() - 1.0); Pd("ord/atan2-order", r); }
+    { valarray<double> r = abs(-D6());            Pd("ord/abs-of-unary", r); }
+    { valarray<double> v = D6(); v += D6() * 2.0; Pd("ord/compound-order", v); }
+    { valarray<double> v = D6(); v[slice(0, 3, 2)] = valarray<double>{1, 2, 3} * 10.0;
+      Pd("ord/into-slice", v); }
+    { valarray<double> v = D6();
+      valarray<bool> m{true, false, true, false, true, false};
+      v[m] += valarray<double>{1, 2, 3} * 100.0;  Pd("ord/into-mask", v); }
+    // ‼ The result of + on two valarray<short> is a valarray<short>, not the
+    // valarray<int> the usual arithmetic conversions would give: the standard
+    // writes the return type as valarray<T>. An implementation that let the
+    // promotion through would still print the same digits here and stop
+    // compiling the moment someone assigned the result to a valarray<short>.
+    {
+        valarray<short> a{3, -4, 5}, b{7, 9, -2};
+        valarray<short> r = a * b;
+        printf("%-30s [%d,%d,%d]\n", "ord/no-promotion", (int)r[0], (int)r[1], (int)r[2]);
+        static_assert(sizeof(decltype(a * b)) > 0, "");
+    }
+    // ‼ [valarray.syn]/3: a function may return something other than
+    // valarray<T> only if "all the const member functions of valarray<T> other
+    // than begin and end are also applicable to this type". So every one of
+    // them is called here ON AN EXPRESSION, and an implementation whose
+    // expression type is a bare pair of size() and operator[] fails to compile
+    // this block rather than failing a comparison.
+    {
+        Ps("req/sum", (D6() + D6()).sum());
+        Ps("req/min", (D6() * 2.0).min());
+        Ps("req/max", (D6() * 2.0).max());
+        Pn("req/size", (D6() - D6()).size());
+        Ps("req/index", (D6() + D6())[3]);
+#if defined(_LIBCPP_VERSION)
+        // ‼ MEASURED DEFECT, libc++ 22.1.6: shift and cshift ON AN EXPRESSION
+        // do not compile for a floating-point element type. Its __shift_expr
+        // computes the element branchlessly --
+        //   (__expr_[(__i + __n_) & __m] & __m) | (value_type() & ~__m)
+        // -- which is only valid for integers, and `double & long` is not an
+        // expression at all. valarray<double>::shift itself is fine; it is the
+        // replacement type that is not, so libc++ fails [valarray.syn]/3 for
+        // every floating-point valarray. The placeholder keeps the columns
+        // line-for-line comparable; the divergence is pinned in
+        // tools/valarray_oracle_refdiff.txt so that a NEW one still shouts.
+        printf("%-30s %s\n", "req/shift", "<libc++: does not compile>");
+        printf("%-30s %s\n", "req/cshift", "<libc++: does not compile>");
+#else
+        Pd("req/shift", (D6() + 1.0).shift(2));
+        Pd("req/cshift", (D6() + 1.0).cshift(-2));
+#endif
+        Pd("req/apply", (D6() * 2.0).apply([](double x) { return x + 0.5; }));
+        Pd("req/unary-minus", -(D6() + 1.0));
+        Pb("req/unary-not", !(D6() - D6()));
+        Pd("req/sub-slice", (D6() * 2.0)[slice(1, 3, 2)]);
+        valarray<size_t> sz{2, 2}, st{3, 1};
+        Pd("req/sub-gslice", (D6() * 2.0)[gslice(0, sz, st)]);
+        valarray<bool> m{true, false, true, false, true, false};
+        Pd("req/sub-mask", (D6() * 2.0)[m]);
+        valarray<size_t> ix{4, 1, 0};
+        Pd("req/sub-indirect", (D6() * 2.0)[ix]);
+    }
+
+    // Copy-assignment THROUGH the proxies: `w[s] = v[s]` is the one overload
+    // that takes the proxy itself, and it is a const member returning a const
+    // reference, which is a shape nothing else in the library has.
+    {
+        valarray<double> v = D6(), w(0.0, 6);
+        w[slice(0, 3, 1)] = v[slice(3, 3, 1)];
+        Pd("ord/proxy-to-proxy", w);
+    }
+    {
+        valarray<double> v = D6(), w(0.0, 6);
+        valarray<size_t> ix{4, 2, 0};
+        w[ix] = v[ix];
+        Pd("ord/indirect-to-indirect", w);
+    }
     {
         // Writing one slice of an array from another slice OF THE SAME ARRAY.
         // The standard leaves overlapping copies alone; both references are

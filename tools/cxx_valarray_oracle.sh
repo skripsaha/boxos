@@ -30,6 +30,8 @@ HOSTPAR="$TOOLS/cxx_par_host.cpp"
 LEAVES="$ROOT/src/userspace/boxcxx/include/std/__bits"
 PIN="$TOOLS/valarray_oracle_agreed.txt"
 PIN_BIG="$TOOLS/valarray_oracle_agreed_big.txt"
+REFDIFF="$TOOLS/valarray_oracle_refdiff.txt"
+REFDIFF_BIG="$TOOLS/valarray_oracle_refdiff_big.txt"
 
 GNU=${GNU_CXX:-g++-16}
 LLVM=${LLVM_CXX:-/opt/homebrew/opt/llvm/bin/clang++}
@@ -49,6 +51,9 @@ build_ref() {
 # The third column: our leaf, built by the host compiler, reached through
 # symlinks so that boxcxx's <cmath> and <cstddef> cannot shadow the host's --
 # only the files named here are visible to it.
+# OURS_CXX picks the compiler for our column. The sanitizer builds use clang:
+# ‼ measured -- Homebrew GCC on arm64 macOS ships no libtsan, so -fsanitize=
+# thread compiles and then fails to LINK with a page of missing __tsan_ symbols.
 build_ours() {
     [ -f "$LEAVES/valarray_core" ] || return 1
     mkdir -p "$OUT/inc/__bits"
@@ -58,21 +63,43 @@ build_ours() {
     _newest=$(ls -t "$LEAVES"/valarray_core "$LEAVES"/par_engine "$SRC" "$HOSTPAR" 2>/dev/null | head -1)
     [ -x "$OUT/$1" ] && [ "$OUT/$1" -nt "$_newest" ] && return 0
     _bin=$1; shift
-    "$GNU" -std=c++20 -Wall -Wextra -DBOXCXX_COLUMN -I"$OUT/inc" \
+    ${OURS_CXX:-$GNU} -std=c++20 -Wall -Wextra -DBOXCXX_COLUMN -I"$OUT/inc" \
            "$@" "$SRC" "$HOSTPAR" -o "$OUT/$_bin" || return 2
     return 0
 }
 
+# Build our column or say WHY there is none. The first version of this script
+# printed "not in the tree" over a screenful of its own compile errors, in
+# three different places; there is one place now.
+need_ours() {
+    build_ours "$@"
+    case $? in
+      0) return 0 ;;
+      1) echo "‼ src/userspace/boxcxx/include/std/__bits/valarray_core is not in the tree yet"; exit 2 ;;
+      *) echo "‼ our column DOES NOT BUILD (errors above)"; exit 2 ;;
+    esac
+}
+
 run_and_report() {
-    _arg=$1 _pin=$2
+    _arg=$1 _pin=$2 _refdiff=$3
     build_ref va_gnu  "$GNU"
     build_ref va_llvm "$LLVM" -stdlib=libc++
     "$OUT/va_gnu"  $_arg > "$OUT/gnu.txt"  || { echo "gnu column died"; exit 1; }
     "$OUT/va_llvm" $_arg > "$OUT/llvm.txt" || { echo "llvm column died"; exit 1; }
 
-    if ! diff -q "$OUT/gnu.txt" "$OUT/llvm.txt" >/dev/null; then
+    # Where the two references differ, neither may be quoted as ground truth,
+    # so the set of those rows is pinned and only ADDITIONS are reported. A
+    # sweep that prints nothing has told you something.
+    diff "$OUT/gnu.txt" "$OUT/llvm.txt" > "$OUT/refdiff.txt"
+    if [ -f "$_refdiff" ]; then
+        if ! diff -q "$_refdiff" "$OUT/refdiff.txt" >/dev/null; then
+            echo "‼ THE REFERENCES DISAGREE somewhere new (or stopped disagreeing):"
+            diff "$_refdiff" "$OUT/refdiff.txt"
+            echo
+        fi
+    elif [ -s "$OUT/refdiff.txt" ]; then
         echo "‼ THE REFERENCES DISAGREE -- neither may be quoted on these rows:"
-        diff "$OUT/gnu.txt" "$OUT/llvm.txt"
+        cat "$OUT/refdiff.txt"
         echo
     fi
     if [ -f "$_pin" ] && ! diff -q "$OUT/gnu.txt" "$_pin" >/dev/null; then
@@ -81,38 +108,49 @@ run_and_report() {
         echo
     fi
 
-    if build_ours va_box -O2; then
-        "$OUT/va_box" $_arg > "$OUT/box.txt" || { echo "our column died"; exit 1; }
-        if diff -q "$OUT/box.txt" "$OUT/gnu.txt" >/dev/null; then
-            echo "ALL AGREE — $(wc -l < "$OUT/gnu.txt" | tr -d ' ') cases, three columns"
-        else
-            echo "boxcxx stands alone on:"
-            diff "$OUT/gnu.txt" "$OUT/box.txt" | sed 's/^</  refs :/; s/^>/  ours :/'
-            exit 1
-        fi
-    else
-        echo "two columns only — $(wc -l < "$OUT/gnu.txt" | tr -d ' ') cases agree; \
-__bits/valarray_core is not in the tree yet"
-    fi
+    # ‼ Three outcomes, not two. The first version of this script treated a
+    # column that FAILED TO COMPILE the same as a column that does not exist
+    # yet, and said "not in the tree" over a screen of our own errors. A tool
+    # that misreports why it has nothing to say is worse than one that says
+    # nothing.
+    build_ours va_box -O2
+    case $? in
+      0) "$OUT/va_box" $_arg > "$OUT/box.txt" || { echo "our column died at run time"; exit 1; }
+         if diff -q "$OUT/box.txt" "$OUT/gnu.txt" >/dev/null; then
+             echo "ALL AGREE — $(wc -l < "$OUT/gnu.txt" | tr -d ' ') cases, three columns"
+         else
+             echo "boxcxx stands alone on:"
+             diff "$OUT/gnu.txt" "$OUT/box.txt" | sed 's/^</  refs :/; s/^>/  ours :/'
+             exit 1
+         fi ;;
+      1) echo "two columns only — $(wc -l < "$OUT/gnu.txt" | tr -d ' ') cases agree; \
+__bits/valarray_core is not in the tree yet" ;;
+      *) echo "‼ our column DOES NOT BUILD (errors above)"; exit 2 ;;
+    esac
 }
 
 case "$MODE" in
-  --big)  run_and_report --big "$PIN_BIG" ;;
+  --big)  run_and_report --big "$PIN_BIG" "$REFDIFF_BIG" ;;
   --repin)
         build_ref va_gnu "$GNU"
+        build_ref va_llvm "$LLVM" -stdlib=libc++
         "$OUT/va_gnu"       > "$PIN"
         "$OUT/va_gnu" --big > "$PIN_BIG"
+        "$OUT/va_llvm" > "$OUT/llvm.txt"
+        diff "$PIN" "$OUT/llvm.txt" > "$REFDIFF"
+        "$OUT/va_llvm" --big > "$OUT/llvm_big.txt"
+        diff "$PIN_BIG" "$OUT/llvm_big.txt" > "$REFDIFF_BIG"
         echo "pinned $(wc -l < "$PIN" | tr -d ' ') + $(wc -l < "$PIN_BIG" | tr -d ' ') cases"
         ;;
   --san)
-        build_ours va_box_san -O1 -g -fsanitize=address,undefined \
-            -fno-omit-frame-pointer || { echo "our column is not in the tree yet"; exit 2; }
-        "$OUT/va_box_san" && "$OUT/va_box_san" --big && echo "ASan+UBSan: clean"
+        OURS_CXX="$LLVM" need_ours va_box_san -O1 -g -fsanitize=address,undefined \
+            -fno-omit-frame-pointer
+        "$OUT/va_box_san" >/dev/null && "$OUT/va_box_san" --big >/dev/null \
+            && echo "ASan+UBSan: clean over both batteries"
         ;;
   --tsan)
-        build_ours va_box_tsan -O1 -g -fsanitize=thread \
-            || { echo "our column is not in the tree yet"; exit 2; }
-        "$OUT/va_box_tsan" --big && echo "TSan: clean on the long arrays"
+        OURS_CXX="$LLVM" need_ours va_box_tsan -O1 -g -fsanitize=thread
+        "$OUT/va_box_tsan" --big >/dev/null && echo "TSan: clean on the long arrays"
         ;;
-  *)      run_and_report "" "$PIN" ;;
+  *)      run_and_report "" "$PIN" "$REFDIFF" ;;
 esac

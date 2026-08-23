@@ -19,6 +19,16 @@ namespace __par {
 // to put its partial somewhere), and the half-open element range it covers.
 using Chunk = void (*)(void *ctx, size_t idx, size_t begin, size_t end);
 
+// Fewer elements than this in a region and the wake, the park and the cache
+// traffic cost more than the work they save. It is a grain, not a capacity:
+// nothing is bounded by it, and a region of any size still runs.
+//
+// It lives here rather than beside the algorithms because it is a property of
+// the BRIGADE — of what a wake costs — and not of any one caller. <valarray>
+// is the second caller, and two copies of a number that means "the point at
+// which sharing pays" would be two numbers to keep in step.
+inline constexpr size_t kGrain = 2048;
+
 // How many chunks a region could be split into at most — one per strand,
 // caller included. Asking builds the brigade if it does not exist yet; asking
 // from INSIDE a region answers 1 without touching the lock the region holds.

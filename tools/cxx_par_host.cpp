@@ -15,6 +15,8 @@
 // chunks genuinely run at once, so ThreadSanitizer has something to watch.
 #include <__bits/par_engine>
 
+#include <cstdio>
+#include <cstdlib>
 #include <thread>
 #include <vector>
 
@@ -49,6 +51,13 @@ size_t RunExact(Chunk fn, void *ctx, size_t n, size_t chunks)
         if (outer) t_inside = false;
         return 1;
     }
+    // ‼ BOXCXX_PAR_TRACE says how the work was actually divided. A stand that
+    // cannot show whether it exercised the path it exists for is a stand that
+    // agrees with the references for the wrong reason -- everything running on
+    // one thread also agrees.
+    if (getenv("BOXCXX_PAR_TRACE"))
+        fprintf(stderr, "[par] n=%zu chunks=%zu\n", n, chunks);
+
     vector<thread> crew;
     crew.reserve(chunks - 1);
     for (size_t i = 1; i < chunks; ++i) {

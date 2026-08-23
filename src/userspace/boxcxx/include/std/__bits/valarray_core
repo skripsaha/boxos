@@ -1,0 +1,1244 @@
+// boxcxx — <__bits/valarray_core>
+//
+// [numarray]: valarray, its four subset proxies, and the operators over them.
+//
+// ── What is different here ──────────────────────────────────────────────
+// An expression is a WORK ORDER, and the order is carried out by the brigade.
+//
+// `d = a + b * c` can be evaluated two ways. The obvious way is three trips:
+// multiply b by c into a temporary, drive it back, add a into a second
+// temporary, drive that back, copy into d. Three passes over memory, two
+// arrays allocated and freed, and the arithmetic — the part anyone asked for —
+// is the cheapest thing in the list. Both reference libraries avoid that with
+// expression templates, and so does this one: an operator returns a small
+// object describing what to compute, and nothing is computed until something
+// asks for the elements. [valarray.overview]/4 blesses exactly this, which is
+// why the standard writes the return types as valarray<T> and then says an
+// implementation may return something else.
+//
+// What neither reference does is hand the order to a CREW. Every
+// materialisation here goes through __par (src/runtime/par_engine.cpp), the
+// same brigade of strands std::execution::par runs on, so one pass over a long
+// array is one pass by as many strands as the cabin has. Fusing and splitting
+// are the same decision made twice: a fused expression is one region instead of
+// three, which matters more with a crew than without one, because each region
+// also costs a wake and a barrier.
+//
+// The brigade is asked for only when the work is worth it. Below 2 * kGrain
+// elements the loop runs on the calling strand WITHOUT calling __par at all —
+// not merely without splitting. __par::Plan asks Width(), Width() builds the
+// brigade on first use, and a program whose only valarray is six elements long
+// should not acquire a crew of strands to add them up.
+//
+// ── The two hazards, named ──────────────────────────────────────────────
+// 1. `auto x = a + b;` gives the ORDER, not an array, and it dangles if `a`
+//    outlives... does not outlive x. This is the standard's own hazard
+//    ([valarray.syn]/2 warns of it) and both references have it. Write
+//    `valarray<double> x = a + b;` and the order is carried out on the spot.
+// 2. An order reads element i to write element i, so `v = v * 2.0` and
+//    `v += v` are safe under any chunking. Anything that PERMUTES indices —
+//    shift, cshift, and every subset read — materialises eagerly instead of
+//    returning an order, which is both what the standard's declared return
+//    type says and the only way a self-referencing permutation cannot depend
+//    on where a chunk boundary happened to fall.
+//
+// ── What T must be ──────────────────────────────────────────────────────
+// [numeric.requirements] says T is a numeric type and "if any operation on T
+// throws an exception the effects are undefined". So there is no exception
+// plumbing here: the only thing that can throw is the allocation, which
+// happens before a single element is constructed.
+//
+// The leaf is self-contained on purpose — <cmath>, <cstdlib>, <cstddef>,
+// <initializer_list>, <new>, <type_traits> and the brigade declarations, and
+// nothing of boxcxx's own containers. That is what lets the host stand build
+// it beside libstdc++ and libc++ through symlinks
+// (tools/cxx_valarray_oracle.sh) and iterate in a second, and it also keeps
+// <valarray> from dragging <vector> into every translation unit that includes
+// it. The partial-per-chunk of the reduction below is raw storage for the same
+// reason, where <numeric>'s is a vector<optional<T>>.
+#ifndef BOXCXX_BITS_VALARRAY_CORE
+#define BOXCXX_BITS_VALARRAY_CORE
+
+#include <__bits/par_engine>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdlib>
+#include <initializer_list>
+#include <new>
+#include <type_traits>
+
+namespace std {
+
+template <class T> class valarray;
+class slice;
+template <class T> class slice_array;
+class gslice;
+template <class T> class gslice_array;
+template <class T> class mask_array;
+template <class T> class indirect_array;
+
+// ‼ The five order types live in std, not in __va, and that is forced rather
+// than chosen. [valarray.syn]/4 says an implementation with replacement types
+// shall add "identical functions taking the replacement types" for every
+// function taking a const valarray<T>& — identical means std::sqrt and
+// std::pow, so a caller writing std::sqrt(a * b) is entitled to compile.
+// Qualified lookup does not consider __va, and argument-dependent lookup
+// associates only the innermost enclosing namespace of an operand's class, so
+// with the orders in __va there is no placement of the operators that serves
+// both `std::sqrt(a * b)` and an unqualified `-(a + b)`. Both references put
+// their expression types directly in std; measured here twice — once by a
+// stand that could not compile `sqrt(a * b)`, once by a cross-compile that
+// could not compile `std::abs(-v)` — the reason they do is this paragraph.
+// The machinery that is never an operand (the functors, the index maps, the
+// crew, Sel) stays in __va where it belongs.
+template <class R, class Op, class A> struct __va_un;
+
+namespace __va {
+
+// ── what an order is ────────────────────────────────────────────────────
+// A type with value_type, size() and operator[](size_t) const. Membership is
+// by a member typedef rather than by a base class so that every order stays an
+// aggregate and an operator can build one with braces and no constructor.
+template <class E, class = void> struct IsOrderT : false_type {};
+template <class E> struct IsOrderT<E, void_t<typename E::__va_order>> : true_type {};
+template <class E> inline constexpr bool IsOrder = IsOrderT<remove_cv_t<remove_reference_t<E>>>::value;
+
+// The orders name __va_un and Fold before either is defined, and both are reached
+// only through a dependent type, so a declaration is enough. The functors are
+// a different matter -- `Plus{}` is not dependent on anything and has to be a
+// complete type where it is written, which is why the operations below sit
+// above the orders rather than beside the operators that use them.
+template <class T, class E, class Op> inline T Fold(const E &e, size_t n, Op op);
+
+// ── the operations ──────────────────────────────────────────────────────
+// Stateless, so the orders above hold no copy of them and Op{} costs nothing.
+#define BOXCXX_VA_UNOP(NAME, EXPR)                                            \
+    struct NAME {                                                             \
+        template <class X> auto operator()(const X &x) const { return EXPR; } \
+    };
+BOXCXX_VA_UNOP(Pos, +x)
+BOXCXX_VA_UNOP(Neg, -x)
+BOXCXX_VA_UNOP(Flip, ~x)
+BOXCXX_VA_UNOP(LogNot, !x)
+#undef BOXCXX_VA_UNOP
+
+#define BOXCXX_VA_BINOP(NAME, OP)                                             \
+    struct NAME {                                                             \
+        template <class X, class Y>                                           \
+        auto operator()(const X &x, const Y &y) const                         \
+        {                                                                     \
+            return x OP y;                                                    \
+        }                                                                     \
+    };
+BOXCXX_VA_BINOP(Plus, +)
+BOXCXX_VA_BINOP(Minus, -)
+BOXCXX_VA_BINOP(Times, *)
+BOXCXX_VA_BINOP(Over, /)
+BOXCXX_VA_BINOP(Rem, %)
+BOXCXX_VA_BINOP(BitAnd, &)
+BOXCXX_VA_BINOP(BitOr, |)
+BOXCXX_VA_BINOP(BitXor, ^)
+BOXCXX_VA_BINOP(Shl, <<)
+BOXCXX_VA_BINOP(Shr, >>)
+BOXCXX_VA_BINOP(Eq, ==)
+BOXCXX_VA_BINOP(Ne, !=)
+BOXCXX_VA_BINOP(Lt, <)
+BOXCXX_VA_BINOP(Gt, >)
+BOXCXX_VA_BINOP(Le, <=)
+BOXCXX_VA_BINOP(Ge, >=)
+BOXCXX_VA_BINOP(LogAnd, &&)
+BOXCXX_VA_BINOP(LogOr, ||)
+#undef BOXCXX_VA_BINOP
+
+// The transcendentals call the function unqualified, so that std::abs(int)
+// from <cstdlib> and std::sqrt(double) from <cmath> are both found, and so is
+// an abs() a user's own numeric type declares in its own namespace — which is
+// what [valarray.transcend] means by "the corresponding function".
+#define BOXCXX_VA_FN1(NAME, FN)                                               \
+    struct NAME {                                                             \
+        template <class X> auto operator()(const X &x) const { return FN(x); }\
+    };
+BOXCXX_VA_FN1(FAbs, abs)
+BOXCXX_VA_FN1(FAcos, acos)
+BOXCXX_VA_FN1(FAsin, asin)
+BOXCXX_VA_FN1(FAtan, atan)
+BOXCXX_VA_FN1(FCos, cos)
+BOXCXX_VA_FN1(FCosh, cosh)
+BOXCXX_VA_FN1(FExp, exp)
+BOXCXX_VA_FN1(FLog, log)
+BOXCXX_VA_FN1(FLog10, log10)
+BOXCXX_VA_FN1(FSin, sin)
+BOXCXX_VA_FN1(FSinh, sinh)
+BOXCXX_VA_FN1(FSqrt, sqrt)
+BOXCXX_VA_FN1(FTan, tan)
+BOXCXX_VA_FN1(FTanh, tanh)
+#undef BOXCXX_VA_FN1
+
+#define BOXCXX_VA_FN2(NAME, FN)                                               \
+    struct NAME {                                                             \
+        template <class X, class Y>                                           \
+        auto operator()(const X &x, const Y &y) const                         \
+        {                                                                     \
+            return FN(x, y);                                                  \
+        }                                                                     \
+    };
+BOXCXX_VA_FN2(FAtan2, atan2)
+BOXCXX_VA_FN2(FPow, pow)
+#undef BOXCXX_VA_FN2
+
+struct Ident {
+    template <class X> const X &operator()(const X &x) const { return x; }
+};
+
+// ‼ [valarray.syn]/3 is the reason this macro exists, and a one-line probe
+// against the cross compiler is what found it missing: a function returning
+// valarray<T> may return something else ONLY IF "all the const member
+// functions of valarray<T> other than begin and end are also applicable to
+// this type". An order with nothing but size() and a subscript is not a
+// permitted replacement type -- it is a library returning the wrong type. So
+// every order carries the whole const surface: the unary operators, the three
+// reductions, the two shifts, both applies and the four subset subscripts.
+// `(a + b).sum()` is a conformance requirement, not a courtesy.
+//
+// The ones that need every element in one place materialise first, through a
+// NAMED const temporary -- `valarray<T>(*this)[s]` would bind a slice_array to
+// an array that dies at the semicolon, which is the shape of bug this whole
+// header is arranged to avoid.
+#define BOXCXX_VA_ORDER_CONST_MEMBERS(SELF)                                                \
+    using __va_order = void;                                                               \
+    using __va_self  = SELF;                                                               \
+    auto operator+() const { return __va_un<value_type, __va::Pos, __va_self>{*this}; }               \
+    auto operator-() const { return __va_un<value_type, __va::Neg, __va_self>{*this}; }               \
+    auto operator~() const { return __va_un<value_type, __va::Flip, __va_self>{*this}; }              \
+    auto operator!() const { return __va_un<bool, __va::LogNot, __va_self>{*this}; }                  \
+    auto sum() const { return __va::Fold<value_type>(*this, size(), __va::Plus{}); }                   \
+    auto min() const                                                                       \
+    {                                                                                      \
+        return __va::Fold<value_type>(*this, size(),                                             \
+                                [](const value_type &x, const value_type &y) {             \
+                                    return y < x ? y : x;                                  \
+                                });                                                        \
+    }                                                                                      \
+    auto max() const                                                                       \
+    {                                                                                      \
+        return __va::Fold<value_type>(*this, size(),                                             \
+                                [](const value_type &x, const value_type &y) {             \
+                                    return x < y ? y : x;                                  \
+                                });                                                        \
+    }                                                                                      \
+    auto shift(int k) const { return valarray<value_type>(*this).shift(k); }               \
+    auto cshift(int k) const { return valarray<value_type>(*this).cshift(k); }             \
+    auto apply(value_type f(value_type)) const                                             \
+    {                                                                                      \
+        return valarray<value_type>(*this).apply(f);                                       \
+    }                                                                                      \
+    auto apply(value_type f(const value_type &)) const                                     \
+    {                                                                                      \
+        return valarray<value_type>(*this).apply(f);                                       \
+    }                                                                                      \
+    auto operator[](const slice &s) const                                                  \
+    {                                                                                      \
+        const valarray<value_type> whole(*this);                                           \
+        return whole[s];                                                                   \
+    }                                                                                      \
+    auto operator[](const gslice &g) const                                                 \
+    {                                                                                      \
+        const valarray<value_type> whole(*this);                                           \
+        return whole[g];                                                                   \
+    }                                                                                      \
+    auto operator[](const valarray<bool> &m) const                                         \
+    {                                                                                      \
+        const valarray<value_type> whole(*this);                                           \
+        return whole[m];                                                                   \
+    }                                                                                      \
+    auto operator[](const valarray<size_t> &ix) const                                      \
+    {                                                                                      \
+        const valarray<value_type> whole(*this);                                           \
+        return whole[ix];                                                                  \
+    }
+
+} // namespace __va
+
+template <class T> struct __va_ref {
+    using value_type = T;
+    BOXCXX_VA_ORDER_CONST_MEMBERS(__va_ref)
+    const T *p;
+    size_t   n;
+    size_t size() const { return n; }
+    const T &operator[](size_t i) const { return p[i]; }
+};
+
+// The scalar side of a mixed operator. Its length is "as long as the other
+// side needs", so that __va_bin::size() can be a plain minimum and no operator has
+// to know which of its operands is the array.
+template <class T> struct __va_same {
+    using value_type = T;
+    BOXCXX_VA_ORDER_CONST_MEMBERS(__va_same)
+    T v;
+    size_t size() const { return ~size_t(0); }
+    const T &operator[](size_t) const { return v; }
+};
+
+template <class R, class Op, class A> struct __va_un {
+    using value_type = R;
+    BOXCXX_VA_ORDER_CONST_MEMBERS(__va_un)
+    A a;
+    size_t size() const { return a.size(); }
+    R operator[](size_t i) const { return static_cast<R>(Op{}(a[i])); }
+};
+
+template <class R, class Op, class A, class B> struct __va_bin {
+    using value_type = R;
+    BOXCXX_VA_ORDER_CONST_MEMBERS(__va_bin)
+    A a;
+    B b;
+    // ‼ The minimum, where the standard says the operands must be the same
+    // length and leaves an unequal pair undefined. A conforming program never
+    // sees the difference; a program with the bug reads its own array short
+    // instead of reading past the end of one.
+    size_t size() const
+    {
+        size_t x = a.size(), y = b.size();
+        return x < y ? x : y;
+    }
+    R operator[](size_t i) const { return static_cast<R>(Op{}(a[i], b[i])); }
+};
+
+
+namespace __va {
+
+// ── where the elements are ──────────────────────────────────────────────
+// An index map turns a position in a subset into a position in the array. The
+// four subsets differ in nothing else, which is why one Sel below serves all
+// four of the standard's proxy classes.
+struct SliceMap {
+    size_t start, count, stride;
+    size_t size() const { return count; }
+    size_t operator[](size_t i) const { return start + i * stride; }
+};
+
+// Borrowed indices: indirect_array's own valarray<size_t>, which the caller
+// owns and the standard expects to outlive the proxy.
+struct ListMap {
+    const size_t *idx;
+    size_t        count;
+    size_t size() const { return count; }
+    size_t operator[](size_t i) const { return idx[i]; }
+};
+
+// A mask has to be counted before it can be indexed — the k-th selected
+// element is not at a computable position — so mask_array owns its list. This
+// is the one subset that allocates, and it allocates once per subscript rather
+// than once per element.
+struct OwnMap {
+    size_t *idx   = nullptr;
+    size_t  count = 0;
+    OwnMap() = default;
+    explicit OwnMap(size_t n)
+        : idx(n ? static_cast<size_t *>(::operator new(n * sizeof(size_t))) : nullptr), count(n)
+    {
+    }
+    OwnMap(const OwnMap &o) : OwnMap(o.count)
+    {
+        for (size_t i = 0; i < count; ++i) idx[i] = o.idx[i];
+    }
+    OwnMap &operator=(const OwnMap &) = delete;
+    ~OwnMap() { ::operator delete(idx); }
+    size_t size() const { return count; }
+    size_t operator[](size_t i) const { return idx[i]; }
+};
+
+// A gslice needs no list: a position decomposes into one coordinate per
+// dimension, last varying fastest ([class.gslice]/1's own example), which is
+// O(rank) arithmetic and random access — so the crew can start anywhere.
+struct GsliceMap {
+    size_t        start;
+    const size_t *len;
+    const size_t *str;
+    size_t        rank;
+    size_t        count;
+    size_t size() const { return count; }
+    size_t operator[](size_t i) const
+    {
+        size_t at = start, p = i;
+        for (size_t j = rank; j-- > 0;) {
+            size_t q = p / len[j];
+            at += (p - q * len[j]) * str[j];
+            p = q;
+        }
+        return at;
+    }
+};
+
+// ── the crew ────────────────────────────────────────────────────────────
+// f(begin, end) over [0, n). Below two grains the region is not worth a wake,
+// and asking __par would build the brigade to be told so.
+template <class F>
+inline void Region(size_t n, F f)
+{
+    if (n == 0) return;
+    if (n < 2 * __par::kGrain) {
+        f(size_t(0), n);
+        return;
+    }
+    __par::Run([](void *ctx, size_t, size_t b, size_t e) { (*static_cast<F *>(ctx))(b, e); },
+               static_cast<void *>(&f), n, __par::kGrain);
+}
+
+// Constructs [dst, dst + n) from an order. Nothing is destroyed on the way out
+// because nothing here can throw ([numeric.requirements]).
+template <class T, class E>
+inline void BuildFrom(T *dst, const E &e, size_t n)
+{
+    Region(n, [&](size_t b, size_t en) {
+        for (size_t i = b; i < en; ++i) ::new (static_cast<void *>(dst + i)) T(e[i]);
+    });
+}
+
+template <class T, class E>
+inline void StoreFrom(T *dst, const E &e, size_t n)
+{
+    Region(n, [&](size_t b, size_t en) {
+        for (size_t i = b; i < en; ++i) dst[i] = e[i];
+    });
+}
+
+template <class T>
+inline void Destroy(T *p, size_t n)
+{
+    if constexpr (!is_trivially_destructible_v<T>)
+        for (size_t i = 0; i < n; ++i) p[i].~T();
+    else
+        (void)p, (void)n;
+}
+
+template <class T>
+inline T *Alloc(size_t n)
+{
+    return n ? static_cast<T *>(::operator new(n * sizeof(T))) : nullptr;
+}
+
+// A partial per chunk, folded in chunk order. [valarray.members] says sum()
+// combines the elements "in an unspecified order", which is what makes a
+// parallel reduction conforming here and not merely fast — and it is why the
+// long-array battery in the stand is built from values that are exact in
+// binary: with values that round, a different order is a different number and
+// the diff would be reporting arithmetic rather than a defect.
+template <class T, class E, class Op>
+inline T Fold(const E &e, size_t n, Op op)
+{
+    size_t chunks = (n < 2 * __par::kGrain) ? 1 : __par::Plan(n, __par::kGrain);
+    if (chunks < 2) {
+        T acc = e[0];
+        for (size_t i = 1; i < n; ++i) acc = op(acc, e[i]);
+        return acc;
+    }
+    struct Ctx {
+        const E *e;
+        T       *part;
+        Op      *op;
+    };
+    T  *part = Alloc<T>(chunks);
+    Ctx ctx{&e, part, &op};
+    // ‼ Fold over what RunExact actually USED, not over what Plan asked for: a
+    // brigade being torn down answers with fewer chunks, and the partials of
+    // the ones that never ran were never constructed.
+    const size_t used = __par::RunExact(
+        [](void *p, size_t idx, size_t b, size_t en) {
+            Ctx *c   = static_cast<Ctx *>(p);
+            T    acc = (*c->e)[b];
+            for (size_t i = b + 1; i < en; ++i) acc = (*c->op)(acc, (*c->e)[i]);
+            ::new (static_cast<void *>(c->part + idx)) T(acc);
+        },
+        &ctx, n, chunks);
+    T acc = part[0];
+    for (size_t i = 1; i < used; ++i) acc = op(acc, part[i]);
+    Destroy(part, used);
+    ::operator delete(part);
+    return acc;
+}
+
+template <class T> inline __va_ref<T> MakeRef(const valarray<T> &v)
+{
+    return __va_ref<T>{v.size() ? &v[0] : nullptr, v.size()};
+}
+
+} // namespace __va
+
+// ── [class.slice] ───────────────────────────────────────────────────────
+class slice {
+public:
+    slice() noexcept : start_(0), size_(0), stride_(0) {}
+    slice(size_t s, size_t l, size_t d) : start_(s), size_(l), stride_(d) {}
+
+    size_t start() const { return start_; }
+    size_t size() const { return size_; }
+    size_t stride() const { return stride_; }
+
+    friend bool operator==(const slice &a, const slice &b)
+    {
+        return a.start_ == b.start_ && a.size_ == b.size_ && a.stride_ == b.stride_;
+    }
+
+private:
+    size_t start_, size_, stride_;
+};
+
+// ── [template.valarray] ─────────────────────────────────────────────────
+template <class T>
+class valarray {
+public:
+    using value_type = T;
+
+    valarray() noexcept : p_(nullptr), n_(0) {}
+
+    explicit valarray(size_t n) : p_(__va::Alloc<T>(n)), n_(n)
+    {
+        T *d = p_;
+        __va::Region(n_, [d](size_t b, size_t e) {
+            for (size_t i = b; i < e; ++i) ::new (static_cast<void *>(d + i)) T();
+        });
+    }
+
+    valarray(const T &v, size_t n) : p_(__va::Alloc<T>(n)), n_(n)
+    {
+        __va::BuildFrom(p_, __va_same<T>{v}, n_);
+    }
+
+    valarray(const T *first, size_t n) : p_(__va::Alloc<T>(n)), n_(n)
+    {
+        __va::BuildFrom(p_, __va_ref<T>{first, n}, n_);
+    }
+
+    valarray(const valarray &o) : p_(__va::Alloc<T>(o.n_)), n_(o.n_)
+    {
+        __va::BuildFrom(p_, __va_ref<T>{o.p_, o.n_}, n_);
+    }
+
+    valarray(valarray &&o) noexcept : p_(o.p_), n_(o.n_)
+    {
+        o.p_ = nullptr;
+        o.n_ = 0;
+    }
+
+    valarray(initializer_list<T> il) : p_(__va::Alloc<T>(il.size())), n_(il.size())
+    {
+        __va::BuildFrom(p_, __va_ref<T>{il.begin(), n_}, n_);
+    }
+
+    valarray(const slice_array<T> &s);
+    valarray(const gslice_array<T> &s);
+    valarray(const mask_array<T> &s);
+    valarray(const indirect_array<T> &s);
+
+    // The order-taking constructor is not explicit: `valarray<double> r = a + b`
+    // is the whole point, and it is where an order stops being an order.
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>
+    valarray(const E &e) : p_(__va::Alloc<T>(e.size())), n_(e.size())
+    {
+        __va::BuildFrom(p_, e, n_);
+    }
+
+    ~valarray() { Clear(); }
+
+    valarray &operator=(const valarray &o)
+    {
+        if (this != &o) Put(__va_ref<T>{o.p_, o.n_}, o.n_);
+        return *this;
+    }
+
+    valarray &operator=(valarray &&o) noexcept
+    {
+        if (this != &o) {
+            Clear();
+            p_   = o.p_;
+            n_   = o.n_;
+            o.p_ = nullptr;
+            o.n_ = 0;
+        }
+        return *this;
+    }
+
+    valarray &operator=(const T &v)
+    {
+        __va::StoreFrom(p_, __va_same<T>{v}, n_);
+        return *this;
+    }
+
+    valarray &operator=(initializer_list<T> il)
+    {
+        Put(__va_ref<T>{il.begin(), il.size()}, il.size());
+        return *this;
+    }
+
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>
+    valarray &operator=(const E &e)
+    {
+        Put(e, e.size());
+        return *this;
+    }
+
+    valarray &operator=(const slice_array<T> &s);
+    valarray &operator=(const gslice_array<T> &s);
+    valarray &operator=(const mask_array<T> &s);
+    valarray &operator=(const indirect_array<T> &s);
+
+    // ── [valarray.access] ───────────────────────────────────────────────
+    const T &operator[](size_t i) const { return p_[i]; }
+    T       &operator[](size_t i) { return p_[i]; }
+
+    // ── [valarray.sub] ──────────────────────────────────────────────────
+    // The const forms materialise. Their declared return type IS valarray<T>,
+    // and a permutation that stayed lazy could read an element the same
+    // statement had already written.
+    valarray operator[](slice s) const;
+    slice_array<T> operator[](slice s);
+    valarray operator[](const gslice &g) const;
+    gslice_array<T> operator[](const gslice &g);
+    valarray operator[](const valarray<bool> &m) const;
+    mask_array<T> operator[](const valarray<bool> &m);
+    valarray operator[](const valarray<size_t> &ix) const;
+    indirect_array<T> operator[](const valarray<size_t> &ix);
+
+    // ── [valarray.unary] ────────────────────────────────────────────────
+    __va_un<T, __va::Pos, __va_ref<T>> operator+() const { return {{p_, n_}}; }
+    __va_un<T, __va::Neg, __va_ref<T>> operator-() const { return {{p_, n_}}; }
+    __va_un<T, __va::Flip, __va_ref<T>> operator~() const { return {{p_, n_}}; }
+    __va_un<bool, __va::LogNot, __va_ref<T>> operator!() const { return {{p_, n_}}; }
+
+    // ── [valarray.cassign] ──────────────────────────────────────────────
+#define BOXCXX_VA_CASSIGN(OP, FN)                                             \
+    valarray &operator OP(const valarray &o)                                  \
+    {                                                                         \
+        return Combine<__va::FN>(__va_ref<T>{o.p_, o.n_});                   \
+    }                                                                         \
+    valarray &operator OP(const T &v) { return Combine<__va::FN>(__va_same<T>{v}); } \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>                \
+    valarray &operator OP(const E &e)                                         \
+    {                                                                         \
+        return Combine<__va::FN>(e);                                          \
+    }
+    BOXCXX_VA_CASSIGN(*=, Times)
+    BOXCXX_VA_CASSIGN(/=, Over)
+    BOXCXX_VA_CASSIGN(%=, Rem)
+    BOXCXX_VA_CASSIGN(+=, Plus)
+    BOXCXX_VA_CASSIGN(-=, Minus)
+    BOXCXX_VA_CASSIGN(^=, BitXor)
+    BOXCXX_VA_CASSIGN(&=, BitAnd)
+    BOXCXX_VA_CASSIGN(|=, BitOr)
+    BOXCXX_VA_CASSIGN(<<=, Shl)
+    BOXCXX_VA_CASSIGN(>>=, Shr)
+#undef BOXCXX_VA_CASSIGN
+
+    // ── [valarray.members] ──────────────────────────────────────────────
+    void swap(valarray &o) noexcept
+    {
+        T     *tp = p_;
+        size_t tn = n_;
+        p_        = o.p_;
+        n_        = o.n_;
+        o.p_      = tp;
+        o.n_      = tn;
+    }
+
+    size_t size() const { return n_; }
+
+    T sum() const { return __va::Fold<T>(__va_ref<T>{p_, n_}, n_, __va::Plus{}); }
+
+    T min() const
+    {
+        return __va::Fold<T>(__va_ref<T>{p_, n_}, n_,
+                             [](const T &a, const T &b) { return b < a ? b : a; });
+    }
+
+    T max() const
+    {
+        return __va::Fold<T>(__va_ref<T>{p_, n_}, n_,
+                             [](const T &a, const T &b) { return a < b ? b : a; });
+    }
+
+    valarray shift(int n) const
+    {
+        valarray r;
+        r.p_ = __va::Alloc<T>(n_);
+        r.n_ = n_;
+        const T      *src = p_;
+        const size_t  len = n_;
+        T            *dst = r.p_;
+        const ptrdiff_t k = n;
+        __va::Region(len, [src, dst, len, k](size_t b, size_t e) {
+            for (size_t i = b; i < e; ++i) {
+                ptrdiff_t at = static_cast<ptrdiff_t>(i) + k;
+                if (at >= 0 && static_cast<size_t>(at) < len)
+                    ::new (static_cast<void *>(dst + i)) T(src[at]);
+                else
+                    ::new (static_cast<void *>(dst + i)) T();
+            }
+        });
+        return r;
+    }
+
+    valarray cshift(int n) const
+    {
+        valarray r;
+        r.p_ = __va::Alloc<T>(n_);
+        r.n_ = n_;
+        if (n_ == 0) return r;
+        const size_t len = n_;
+        // ‼ The remainder of a negative count has the sign of the dividend in
+        // C++, so a rotation by -8 over six elements would address -2 without
+        // this. The count is folded into [0, len) once, here, and never again
+        // inside the loop.
+        ptrdiff_t k = static_cast<ptrdiff_t>(n) % static_cast<ptrdiff_t>(len);
+        if (k < 0) k += static_cast<ptrdiff_t>(len);
+        const size_t  off = static_cast<size_t>(k);
+        const T      *src = p_;
+        T            *dst = r.p_;
+        __va::Region(len, [src, dst, len, off](size_t b, size_t e) {
+            for (size_t i = b; i < e; ++i) {
+                size_t at = i + off;
+                if (at >= len) at -= len;
+                ::new (static_cast<void *>(dst + i)) T(src[at]);
+            }
+        });
+        return r;
+    }
+
+    // apply() is eager: the standard fixes no number of calls, and an order
+    // would call a user's function again every time an element was read.
+    // ‼ It is also SPLIT, so the function may run on several strands at once.
+    // [valarray.members] says only that each element is assigned the value of
+    // applying the argument to the corresponding element — no order, no count,
+    // no thread. A function with state of its own is the caller's business,
+    // and CONFORMANCE records this as a deviation from both references, which
+    // call it once per element on one thread.
+    valarray apply(T func(T)) const { return ApplyWith(func); }
+    valarray apply(T func(const T &)) const { return ApplyWith(func); }
+
+    void resize(size_t n, T v = T())
+    {
+        Clear();
+        p_ = __va::Alloc<T>(n);
+        n_ = n;
+        __va::BuildFrom(p_, __va_same<T>{v}, n_);
+    }
+
+private:
+    template <class F>
+    valarray ApplyWith(F f) const
+    {
+        valarray r;
+        r.p_            = __va::Alloc<T>(n_);
+        r.n_            = n_;
+        const T *src    = p_;
+        T       *dst    = r.p_;
+        __va::Region(n_, [src, dst, f](size_t b, size_t e) {
+            for (size_t i = b; i < e; ++i) ::new (static_cast<void *>(dst + i)) T(f(src[i]));
+        });
+        return r;
+    }
+
+    void Clear()
+    {
+        __va::Destroy(p_, n_);
+        ::operator delete(p_);
+        p_ = nullptr;
+        n_ = 0;
+    }
+
+    // Assignment from anything with a length: same length assigns in place,
+    // a different one reallocates ([valarray.assign]/2 resizes rather than
+    // truncating). ‼ The new storage is FILLED BEFORE the old is released,
+    // because the order on the right may be reading the array on the left.
+    template <class E>
+    void Put(const E &e, size_t m)
+    {
+        if (m == n_) {
+            __va::StoreFrom(p_, e, n_);
+            return;
+        }
+        T *np = __va::Alloc<T>(m);
+        __va::BuildFrom(np, e, m);
+        Clear();
+        p_ = np;
+        n_ = m;
+    }
+
+    template <class Op, class E>
+    valarray &Combine(const E &e)
+    {
+        T           *d = p_;
+        const size_t m = e.size() < n_ ? e.size() : n_;
+        __va::Region(m, [d, &e](size_t b, size_t en) {
+            for (size_t i = b; i < en; ++i) d[i] = static_cast<T>(Op{}(d[i], e[i]));
+        });
+        return *this;
+    }
+
+    template <class U> friend class slice_array;
+    template <class U> friend class gslice_array;
+    template <class U> friend class mask_array;
+    template <class U> friend class indirect_array;
+
+    T     *p_;
+    size_t n_;
+};
+
+// ── [class.gslice] ──────────────────────────────────────────────────────
+// Declared after valarray because its lengths and strides ARE valarrays.
+class gslice {
+public:
+    gslice() : start_(0) {}
+    gslice(size_t s, const valarray<size_t> &l, const valarray<size_t> &d)
+        : start_(s), size_(l), stride_(d)
+    {
+    }
+
+    size_t           start() const { return start_; }
+    valarray<size_t> size() const { return size_; }
+    valarray<size_t> stride() const { return stride_; }
+
+private:
+    template <class T> friend class valarray;
+    __va::GsliceMap Map() const
+    {
+        size_t rank  = size_.size() < stride_.size() ? size_.size() : stride_.size();
+        size_t count = rank ? 1 : 0;
+        for (size_t j = 0; j < rank; ++j) count *= size_[j];
+        return __va::GsliceMap{start_, rank ? &size_[0] : nullptr,
+                               rank ? &stride_[0] : nullptr, rank, count};
+    }
+
+    size_t           start_;
+    valarray<size_t> size_, stride_;
+};
+
+
+namespace __va {
+
+// Reading a subset is an order like any other: position i of the subset is
+// position m[i] of the array. It is what makes the const subscripts one line
+// each and what a proxy hands to valarray when it is asked to become one.
+} // namespace __va
+
+template <class T, class Map> struct __va_gather {
+    using value_type = T;
+    BOXCXX_VA_ORDER_CONST_MEMBERS(__va_gather)
+    const T   *p;
+    const Map *m;
+    size_t size() const { return m->size(); }
+    const T &operator[](size_t i) const { return p[(*m)[i]]; }
+};
+
+namespace __va {
+
+// The body of all four proxy classes. They differ in their index map and in
+// nothing else, so what the standard spells out four times is written once
+// here and inherited PRIVATELY, which keeps each class's public surface
+// exactly the set of members [class.slice.array] and its siblings declare.
+//
+// The members are public because the class is not: it is reachable only as a
+// private base, and valarray -- a friend of the four -- reads its selection
+// through GatherOrder.
+template <class T, class Map>
+class Sel {
+public:
+    Sel(T *p, const Map &m) : p_(p), m_(m) {}
+    Sel(T *p, Map &&m) : p_(p), m_(static_cast<Map &&>(m)) {}
+    Sel(const Sel &) = default;
+
+    __va_gather<T, Map> GatherOrder() const { return {p_, &m_}; }
+    size_t         Count() const { return m_.size(); }
+
+    template <class E> void Put(const E &e) const
+    {
+        const size_t n = Len(e.size());
+        T           *p = p_;
+        const Map   *m = &m_;
+        Region(n, [p, m, &e](size_t b, size_t en) {
+            for (size_t i = b; i < en; ++i) p[(*m)[i]] = e[i];
+        });
+    }
+
+    template <class Op, class E> void Combine(const E &e) const
+    {
+        const size_t n = Len(e.size());
+        T           *p = p_;
+        const Map   *m = &m_;
+        Region(n, [p, m, &e](size_t b, size_t en) {
+            for (size_t i = b; i < en; ++i) {
+                T &t = p[(*m)[i]];
+                t    = static_cast<T>(Op{}(t, e[i]));
+            }
+        });
+    }
+
+private:
+    size_t Len(size_t other) const
+    {
+        const size_t n = m_.size();
+        return other < n ? other : n;
+    }
+
+    T  *p_;
+    Map m_;
+};
+
+#undef BOXCXX_VA_ORDER_CONST_MEMBERS
+
+// The positions a mask selects, counted before they can be indexed.
+inline OwnMap MaskMap(const valarray<bool> &m, size_t n)
+{
+    const size_t len = m.size() < n ? m.size() : n;
+    size_t       cnt = 0;
+    for (size_t i = 0; i < len; ++i)
+        if (m[i]) ++cnt;
+    OwnMap om(cnt);
+    size_t k = 0;
+    for (size_t i = 0; i < len; ++i)
+        if (m[i]) om.idx[k++] = i;
+    return om;
+}
+
+} // namespace __va
+
+// ── the four proxies ────────────────────────────────────────────────────
+// One macro for the ten compound assignments and their order-taking twins,
+// written once and undefined at the end of the fourth class. The alternative
+// is eighty near-identical member functions, and the standard's own synopsis
+// is the place to read which ones exist.
+//
+// ‼ There is deliberately NO scalar overload of the compound assignments.
+// [slice.arr.comp.assign] declares them for const valarray<T>& only -- a
+// scalar is accepted by plain `=` and by nothing else -- and both references
+// reject `v[m] += 1.0` for exactly that reason. Adding the missing overload
+// would make code compile here that compiles nowhere else.
+#define BOXCXX_VA_PROXY_OPS(CLASS)                                                     \
+    void operator=(const valarray<T> &v) const { this->Put(__va::MakeRef(v)); }        \
+    void operator=(const T &v) const { this->Put(__va_same<T>{v}); }                  \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>                         \
+    void operator=(const E &e) const                                                   \
+    {                                                                                  \
+        this->Put(e);                                                                  \
+    }                                                                                  \
+    const CLASS &operator=(const CLASS &o) const                                       \
+    {                                                                                  \
+        this->Put(o.GatherOrder());                                                    \
+        return *this;                                                                  \
+    }                                                                                  \
+    BOXCXX_VA_PROXY_OP(*=, Times)                                                      \
+    BOXCXX_VA_PROXY_OP(/=, Over)                                                       \
+    BOXCXX_VA_PROXY_OP(%=, Rem)                                                        \
+    BOXCXX_VA_PROXY_OP(+=, Plus)                                                       \
+    BOXCXX_VA_PROXY_OP(-=, Minus)                                                      \
+    BOXCXX_VA_PROXY_OP(^=, BitXor)                                                     \
+    BOXCXX_VA_PROXY_OP(&=, BitAnd)                                                     \
+    BOXCXX_VA_PROXY_OP(|=, BitOr)                                                      \
+    BOXCXX_VA_PROXY_OP(<<=, Shl)                                                       \
+    BOXCXX_VA_PROXY_OP(>>=, Shr)
+
+#define BOXCXX_VA_PROXY_OP(OP, FN)                                                     \
+    void operator OP(const valarray<T> &v) const                                       \
+    {                                                                                  \
+        this->template Combine<__va::FN>(__va::MakeRef(v));                            \
+    }                                                                                  \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>                         \
+    void operator OP(const E &e) const                                                 \
+    {                                                                                  \
+        this->template Combine<__va::FN>(e);                                           \
+    }
+
+template <class T>
+class slice_array : private __va::Sel<T, __va::SliceMap> {
+    using Base = __va::Sel<T, __va::SliceMap>;
+    slice_array(T *p, const __va::SliceMap &m) : Base(p, m) {}
+    template <class U> friend class valarray;
+
+public:
+    using value_type = T;
+    slice_array(const slice_array &) = default;
+    ~slice_array()                   = default;
+    slice_array()                    = delete;
+
+    BOXCXX_VA_PROXY_OPS(slice_array)
+};
+
+template <class T>
+class gslice_array : private __va::Sel<T, __va::GsliceMap> {
+    using Base = __va::Sel<T, __va::GsliceMap>;
+    gslice_array(T *p, const __va::GsliceMap &m) : Base(p, m) {}
+    template <class U> friend class valarray;
+
+public:
+    using value_type = T;
+    gslice_array(const gslice_array &) = default;
+    ~gslice_array()                    = default;
+    gslice_array()                     = delete;
+
+    BOXCXX_VA_PROXY_OPS(gslice_array)
+};
+
+template <class T>
+class mask_array : private __va::Sel<T, __va::OwnMap> {
+    using Base = __va::Sel<T, __va::OwnMap>;
+    mask_array(T *p, __va::OwnMap &&m) : Base(p, static_cast<__va::OwnMap &&>(m)) {}
+    template <class U> friend class valarray;
+
+public:
+    using value_type = T;
+    mask_array(const mask_array &) = default;
+    ~mask_array()                  = default;
+    mask_array()                   = delete;
+
+    BOXCXX_VA_PROXY_OPS(mask_array)
+};
+
+template <class T>
+class indirect_array : private __va::Sel<T, __va::ListMap> {
+    using Base = __va::Sel<T, __va::ListMap>;
+    indirect_array(T *p, const __va::ListMap &m) : Base(p, m) {}
+    template <class U> friend class valarray;
+
+public:
+    using value_type = T;
+    indirect_array(const indirect_array &) = default;
+    ~indirect_array()                      = default;
+    indirect_array()                       = delete;
+
+    BOXCXX_VA_PROXY_OPS(indirect_array)
+};
+
+#undef BOXCXX_VA_PROXY_OP
+#undef BOXCXX_VA_PROXY_OPS
+
+// ── valarray, the parts that needed the proxies ─────────────────────────
+template <class T>
+valarray<T>::valarray(const slice_array<T> &s) : valarray(s.GatherOrder())
+{
+}
+template <class T>
+valarray<T>::valarray(const gslice_array<T> &s) : valarray(s.GatherOrder())
+{
+}
+template <class T>
+valarray<T>::valarray(const mask_array<T> &s) : valarray(s.GatherOrder())
+{
+}
+template <class T>
+valarray<T>::valarray(const indirect_array<T> &s) : valarray(s.GatherOrder())
+{
+}
+
+template <class T> valarray<T> &valarray<T>::operator=(const slice_array<T> &s)
+{
+    Put(s.GatherOrder(), s.Count());
+    return *this;
+}
+template <class T> valarray<T> &valarray<T>::operator=(const gslice_array<T> &s)
+{
+    Put(s.GatherOrder(), s.Count());
+    return *this;
+}
+template <class T> valarray<T> &valarray<T>::operator=(const mask_array<T> &s)
+{
+    Put(s.GatherOrder(), s.Count());
+    return *this;
+}
+template <class T> valarray<T> &valarray<T>::operator=(const indirect_array<T> &s)
+{
+    Put(s.GatherOrder(), s.Count());
+    return *this;
+}
+
+template <class T> valarray<T> valarray<T>::operator[](slice s) const
+{
+    const __va::SliceMap m{s.start(), s.size(), s.stride()};
+    return valarray(__va_gather<T, __va::SliceMap>{p_, &m});
+}
+template <class T> slice_array<T> valarray<T>::operator[](slice s)
+{
+    return slice_array<T>(p_, __va::SliceMap{s.start(), s.size(), s.stride()});
+}
+
+template <class T> valarray<T> valarray<T>::operator[](const gslice &g) const
+{
+    const __va::GsliceMap m = g.Map();
+    return valarray(__va_gather<T, __va::GsliceMap>{p_, &m});
+}
+template <class T> gslice_array<T> valarray<T>::operator[](const gslice &g)
+{
+    return gslice_array<T>(p_, g.Map());
+}
+
+template <class T> valarray<T> valarray<T>::operator[](const valarray<bool> &mask) const
+{
+    const __va::OwnMap m = __va::MaskMap(mask, n_);
+    return valarray(__va_gather<T, __va::OwnMap>{p_, &m});
+}
+template <class T> mask_array<T> valarray<T>::operator[](const valarray<bool> &mask)
+{
+    return mask_array<T>(p_, __va::MaskMap(mask, n_));
+}
+
+template <class T> valarray<T> valarray<T>::operator[](const valarray<size_t> &ix) const
+{
+    const __va::ListMap m{ix.size() ? &ix[0] : nullptr, ix.size()};
+    return valarray(__va_gather<T, __va::ListMap>{p_, &m});
+}
+template <class T> indirect_array<T> valarray<T>::operator[](const valarray<size_t> &ix)
+{
+    return indirect_array<T>(p_, __va::ListMap{ix.size() ? &ix[0] : nullptr, ix.size()});
+}
+
+// ── [valarray.binary], [valarray.comparison], [valarray.transcend] ──────
+// Eight forms of each operator, because either side may be an array, an order
+// or a scalar, and the standard's three are only the array ones —
+// [valarray.syn]/4 asks for "every combination of const valarray<T>& and
+// replacement types". They are all in std, for the reason given where the
+// order types are defined. The result element type is T for arithmetic and
+// bool for the comparisons: `a == b` on two valarray<double> is a
+// valarray<bool>, and `a + b` on two valarray<char> is a valarray<char>
+// rather than the valarray<int> the promotion would give.
+//
+// The operator LIST is written once and handed to the form-generating macro.
+namespace __va {
+template <class R, class Op, class A, class B>
+inline __va_bin<R, Op, A, B> Make(const A &a, const B &b)
+{
+    return __va_bin<R, Op, A, B>{a, b};
+}
+} // namespace __va
+
+#define BOXCXX_VA_SELF(T) T
+#define BOXCXX_VA_BOOL(T) bool
+#define BOXCXX_VA_ELEM(E) typename E::value_type
+
+#define BOXCXX_VA_FORMS(OP, FN, RES)                                                       \
+    template <class T> inline auto OP(const valarray<T> &a, const valarray<T> &b)          \
+    {                                                                                      \
+        return __va::Make<RES(T), __va::FN>(__va::MakeRef(a), __va::MakeRef(b));           \
+    }                                                                                      \
+    template <class T> inline auto OP(const valarray<T> &a, const T &v)                    \
+    {                                                                                      \
+        return __va::Make<RES(T), __va::FN>(__va::MakeRef(a), __va_same<T>{v});            \
+    }                                                                                      \
+    template <class T> inline auto OP(const T &v, const valarray<T> &b)                    \
+    {                                                                                      \
+        return __va::Make<RES(T), __va::FN>(__va_same<T>{v}, __va::MakeRef(b));            \
+    }                                                                                      \
+    template <class E, class F,                                                            \
+              enable_if_t<__va::IsOrder<E> && __va::IsOrder<F>, int> = 0>                  \
+    inline auto OP(const E &a, const F &b)                                                 \
+    {                                                                                      \
+        return __va::Make<RES(BOXCXX_VA_ELEM(E)), __va::FN>(a, b);                         \
+    }                                                                                      \
+    template <class E, class T, enable_if_t<__va::IsOrder<E>, int> = 0>                    \
+    inline auto OP(const E &a, const valarray<T> &b)                                       \
+    {                                                                                      \
+        return __va::Make<RES(T), __va::FN>(a, __va::MakeRef(b));                          \
+    }                                                                                      \
+    template <class T, class F, enable_if_t<__va::IsOrder<F>, int> = 0>                    \
+    inline auto OP(const valarray<T> &a, const F &b)                                       \
+    {                                                                                      \
+        return __va::Make<RES(T), __va::FN>(__va::MakeRef(a), b);                          \
+    }                                                                                      \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>                             \
+    inline auto OP(const E &a, const BOXCXX_VA_ELEM(E) & v)                                \
+    {                                                                                      \
+        return __va::Make<RES(BOXCXX_VA_ELEM(E)), __va::FN>(                               \
+            a, __va_same<BOXCXX_VA_ELEM(E)>{v});                                           \
+    }                                                                                      \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0>                             \
+    inline auto OP(const BOXCXX_VA_ELEM(E) & v, const E &b)                                \
+    {                                                                                      \
+        return __va::Make<RES(BOXCXX_VA_ELEM(E)), __va::FN>(                               \
+            __va_same<BOXCXX_VA_ELEM(E)>{v}, b);                                           \
+    }
+
+#define BOXCXX_VA_ARITH(OP, FN) BOXCXX_VA_FORMS(operator OP, FN, BOXCXX_VA_SELF)
+#define BOXCXX_VA_CMP(OP, FN) BOXCXX_VA_FORMS(operator OP, FN, BOXCXX_VA_BOOL)
+
+BOXCXX_VA_ARITH(*, Times)
+BOXCXX_VA_ARITH(/, Over)
+BOXCXX_VA_ARITH(%, Rem)
+BOXCXX_VA_ARITH(+, Plus)
+BOXCXX_VA_ARITH(-, Minus)
+BOXCXX_VA_ARITH(^, BitXor)
+BOXCXX_VA_ARITH(&, BitAnd)
+BOXCXX_VA_ARITH(|, BitOr)
+BOXCXX_VA_ARITH(<<, Shl)
+BOXCXX_VA_ARITH(>>, Shr)
+
+BOXCXX_VA_CMP(==, Eq)
+BOXCXX_VA_CMP(!=, Ne)
+BOXCXX_VA_CMP(<, Lt)
+BOXCXX_VA_CMP(>, Gt)
+BOXCXX_VA_CMP(<=, Le)
+BOXCXX_VA_CMP(>=, Ge)
+BOXCXX_VA_CMP(&&, LogAnd)
+BOXCXX_VA_CMP(||, LogOr)
+
+BOXCXX_VA_FORMS(atan2, FAtan2, BOXCXX_VA_SELF)
+BOXCXX_VA_FORMS(pow, FPow, BOXCXX_VA_SELF)
+
+#undef BOXCXX_VA_ARITH
+#undef BOXCXX_VA_CMP
+#undef BOXCXX_VA_FORMS
+
+#define BOXCXX_VA_TRANSCEND(NAME, FN)                                                      \
+    template <class T> inline auto NAME(const valarray<T> &v)                              \
+    {                                                                                      \
+        return __va_un<T, __va::FN, __va_ref<T>>{__va::MakeRef(v)};                        \
+    }                                                                                      \
+    template <class E, enable_if_t<__va::IsOrder<E>, int> = 0> inline auto NAME(const E &e)\
+    {                                                                                      \
+        return __va_un<BOXCXX_VA_ELEM(E), __va::FN, E>{e};                                 \
+    }
+
+BOXCXX_VA_TRANSCEND(abs, FAbs)
+BOXCXX_VA_TRANSCEND(acos, FAcos)
+BOXCXX_VA_TRANSCEND(asin, FAsin)
+BOXCXX_VA_TRANSCEND(atan, FAtan)
+BOXCXX_VA_TRANSCEND(cos, FCos)
+BOXCXX_VA_TRANSCEND(cosh, FCosh)
+BOXCXX_VA_TRANSCEND(exp, FExp)
+BOXCXX_VA_TRANSCEND(log, FLog)
+BOXCXX_VA_TRANSCEND(log10, FLog10)
+BOXCXX_VA_TRANSCEND(sin, FSin)
+BOXCXX_VA_TRANSCEND(sinh, FSinh)
+BOXCXX_VA_TRANSCEND(sqrt, FSqrt)
+BOXCXX_VA_TRANSCEND(tan, FTan)
+BOXCXX_VA_TRANSCEND(tanh, FTanh)
+
+#undef BOXCXX_VA_TRANSCEND
+#undef BOXCXX_VA_SELF
+#undef BOXCXX_VA_BOOL
+#undef BOXCXX_VA_ELEM
+
+// ── [valarray.special] and [valarray.range] ─────────────────────────────
+template <class T> inline void swap(valarray<T> &a, valarray<T> &b) noexcept
+{
+    a.swap(b);
+}
+
+template <class T> inline T *begin(valarray<T> &v)
+{
+    return v.size() ? &v[0] : nullptr;
+}
+template <class T> inline const T *begin(const valarray<T> &v)
+{
+    return v.size() ? &v[0] : nullptr;
+}
+template <class T> inline T *end(valarray<T> &v)
+{
+    return begin(v) + v.size();
+}
+template <class T> inline const T *end(const valarray<T> &v)
+{
+    return begin(v) + v.size();
+}
+
+} // namespace std
+
+#endif // BOXCXX_BITS_VALARRAY_CORE

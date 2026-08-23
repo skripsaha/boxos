@@ -37,12 +37,12 @@ C++26 feature is *not* implemented keeps its C++23 value.
 
 | | |
 |---|---|
-| Standard headers provided | **108** — 102 of the 105 C++23 [headers] name (3 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
-| Internal implementation leaves (`include/std/__bits/`) | 164 |
-| Header source | ~118 000 lines |
+| Standard headers provided | **109** — 104 of the 105 C++23 [headers] name (1 absent, §1), plus `<stdatomic.h>` and four of C++26: `<inplace_vector>`, `<debugging>`, `<stdbit.h>`, `<stdckdint.h>` |
+| Internal implementation leaves (`include/std/__bits/`) | 165 |
+| Header source | ~119 000 lines |
 | Feature-test macros defined | 238 — 166 at their C++23 value, 72 carrying a later one (measured against libstdc++ 16.1 at `-std=c++23`) |
 | BoxOS-native headers (`include/box/cxx/`) | 33 (§5) |
-| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 252 phases (233 of them the numbered `PhaseN` series), 6 586 runtime checks, 2 066 `static_assert`s |
+| In-tree conformance suite | `src/userspace/apps/cxxtest.cpp` — 253 phases (234 of them the numbered `PhaseN` series), 6 615 runtime checks, 2 059 `static_assert`s |
 | Gate run on every commit | BIOS and UEFI × 1 and 16 cores, `-cpu max` |
 
 The four counted rows drifted three times before the rule was written down, so
@@ -54,10 +54,11 @@ directory); macros are `#define __cpp_lib_` lines from `-dM -E` on a
 translation unit containing only `#include <version>`; phases are ROWS OF THE
 `kPhases` TABLE in `cxxtest.cpp` (see the drift note below); checks are
 occurrences of `Check(`, `CheckText(` and `CheckTextW(` in `cxxtest.cpp` and
-`static_assert`s are occurrences of the bare token `static_assert` (which is 24
+`static_assert`s are occurrences of the bare token `static_assert` (which is 17
 more than `static_assert(`, the difference being the times the keyword is
 named in a comment — the two rows were never counted the same way, and saying
-so is cheaper than renumbering both). `tools/cxx_ftm_audit.sh` re-derives the
+so is cheaper than renumbering both; the difference was 24 at Ф45 and is
+re-derived, not carried forward, every time this row moves). `tools/cxx_ftm_audit.sh` re-derives the
 macro count and checks it against [version.syn] on every run.
 
 The phase count has drifted four times, in both directions, so it is stated
@@ -72,6 +73,14 @@ maintained. That is **252** — 233 purely numbered, 18 suffixed (`Phase4a`,
 Ф43: `Phase225`, `Phase226` and `Phase227` are new, and `phase2` — the compile-time header
 torture, which used to be an unnumbered tail call after the loop — became an
 ordinary row.
+
+**The sixth drift was the header row against its own breakdown, and Ф44-f
+found it by counting the files.** The row said 108 while the words beside it
+said 102 + 5, which is 107, and the tree held 108 — the total had been
+corrected at Ф45 and the breakdown that produces it had not. Both are re-derived
+here, and they now agree at 109 because `<regex>` and `<valarray>` are in the
+tree: the reversal of an exclusion has to move six numbers, and Ф44 shipped
+`<regex>` three commits before this document admitted it existed.
 
 **The fifth drift was this paragraph against the table again, and Ф45's door
 found it by re-deriving both.** The table said 249 phases while this paragraph
@@ -131,14 +140,14 @@ the library itself; there is no "no-exceptions" configuration.
 
 # 1. What is absent entirely
 
-## 1.1 Headers that do not exist (3)
+## 1.1 Headers that do not exist (1)
 
 **These counts are now derived, not maintained by hand.** The two tables of
-[headers] name 105 headers in C++23; 102 of them are in the tree and 3 are not,
+[headers] name 105 headers in C++23; 104 of them are in the tree and 1 is not,
 which accounts for the whole list apart from the deprecated `<codecvt>`. Five
 more files sit beside them: `<stdatomic.h>`, which C++23 specifies outside
 those tables ([stdatomic.h.syn]), and four C++26 headers — `<inplace_vector>`,
-`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 102 + 5 = the 107 files in
+`<debugging>`, `<stdbit.h>`, `<stdckdint.h>` (all §2). 104 + 5 = the 109 files in
 `include/std`.
 
 Deriving them found something a hand-maintained list had been hiding since the
@@ -232,13 +241,42 @@ in `std` and then makes them visible unqualified, which [headers]/5 explicitly
 leaves free — so ported code that calls `isdigit(c)` compiles; code that
 `#include <ctype.h>` does not.
 
-### Excluded by decision — 3
+### Excluded by decision — 1
 
 | Header | Why |
 |---|---|
 | `<filesystem>` | There is no hierarchical path namespace to model. TagFS is tag-addressed: a file is found by the tags it carries, not by where it sits. This is also why `<fstream>`'s `filesystem::path` overloads are absent (§2 `<fstream>`). |
-| `<regex>` | Excluded by plan. |
-| `<valarray>` | Excluded by plan. |
+
+**`<regex>` and `<valarray>` were on that list until Ф44, and what stood in the
+"why" column for both of them was the sentence "Excluded by plan".** That is
+not a reason; it is a record that nobody had written one. The entry beside them
+is a reason — TagFS is addressed by tags, so there is no path to model, and no
+amount of work would make `<filesystem>` mean anything here. Ф0 excluded five
+headers in one line in June, and by Ф43 three of the five had been reversed
+(`<fstream>`/`<iostream>` in Ф36, the wide streams in Ф42, the locale facets in
+Ф43), each time because the stated reason turned out to be about something
+else. These two were the remainder.
+
+**What made `<regex>` cheap was paid for by other phases.** Its cost was never
+the engine: `regex_traits` sits on `ctype` and `collate`, and `wregex` on the
+whole wide layer, and at Ф0 neither existed. By Ф44 both did.
+
+**The engine is a Pike VM, and that is the interesting part.** Both reference
+libraries hand the application a backtracking matcher, which is the `timeout`
+paradigm in the world of strings: it hopes it will finish. Measured against
+them, `/(a+)+b/` doubles per character in libstdc++ — 26 characters take five
+seconds and there is no ceiling at all — while libc++ refuses with
+`error_complexity` at thirteen characters on a question whose answer is a
+trivial *no*. Here the linear machine answers both in microseconds, because the
+time a match takes is set by the shape of the input rather than by luck; only
+back-references, which are not regular, take the second path, a bounded
+backtracker with an explicit step budget that reports `error_complexity` when
+it is spent rather than hanging. [re.err] names that error for exactly this.
+See §2 `<regex>` for the normative forks that were decided from the text
+against both libraries.
+
+**`<valarray>` is in the tree as of Ф44-f, and is the only header here whose
+arithmetic is run by a crew** — see §2 `<valarray>`.
 
 **`<iostream>` and `<fstream>` used to be on that list, and no longer are.**
 The entry for them read, in substance, that BoxOS does not have the Unix
@@ -449,7 +487,7 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **237** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **238** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled.
 
 > This section said **201** until Ф41, and the number at the top of the document
@@ -466,7 +504,7 @@ the whole set, not sampled.
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 237 macros × 107 headers by
+  checked over the full cross-product of 238 macros × 109 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -495,7 +533,7 @@ the whole set, not sampled.
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 161 of the 201 macros are also
+- **The converse does not hold, and cannot.** 192 of the 238 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -529,6 +567,17 @@ the whole set, not sampled.
   includes `<fstream>`. Ф37 did not move it either, for the same reason:
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
+
+  **The accounting stops at Ф37 and the pin does not.** It stands at 192 today,
+  re-pinned by the phases in between without the delta being written down here
+  — the same failure the counted table above records five times, in a different
+  column. The RULE is unchanged and is stated in the audit script: a growth has
+  to be accounted for by NEW macros whose owning header is widely included,
+  never by a header that started including more than it used to. What is
+  missing is the arithmetic for 161 → 192, not the rule. Ф44-f added
+  `<valarray>` and did **not** move the pin, which is what the rule predicts:
+  the header owns no macro of its own, and the ones it inherits from `<cmath>`
+  and `<type_traits>` already reach everywhere.
 
 **10 of the 248 macros [version.syn] names are not defined** — measured as a
 set difference between the transcription and what a translation unit including
@@ -4231,6 +4280,68 @@ functions over `__builtin_*_overflow`. Two things are worth recording.
   valid for a mutable copy, `++cw<1>` is `cw<2>`, and asking is a question. This
   is why the macro reads 202606 and not 202603.
 
+## `<valarray>`
+
+Provided as of Ф44-f. Until then it sat in §1.1 with "Excluded by plan" written
+where the reason goes.
+
+**An expression is a work order, and a crew carries it out.** `d = a + b * c`
+computes nothing when it is written: the operators return small objects that
+describe the arithmetic, and the pass over memory happens once, where the order
+is written into an array. [valarray.syn]/3 permits exactly that, and both
+reference libraries do it too. What neither of them does is hand the pass to
+the strands `std::execution::par` runs on, which is what happens here once an
+array is long enough to be worth a wake — twice the brigade's grain, 4096
+elements. Below that the loop runs on the calling strand without asking `__par`
+at all, so a program whose only valarray is six elements long never acquires a
+crew of strands to add them up.
+
+Fusing and splitting are the same decision made twice: three operators become
+one region instead of three, and a region costs a wake and a barrier as well as
+a pass over memory.
+
+- `~` **`sum()` folds one partial per chunk, in chunk order.**
+  [valarray.members] says the result is computed "in an unspecified order", so a
+  parallel reduction is conforming here rather than merely faster — but for
+  values that round, a parallel fold and a left-to-right fold are different
+  doubles, and both references do the latter. Code that needs the sequential
+  answer bit for bit should not ask a valarray for it. `min()` and `max()` split
+  the same way and cannot differ, being order-independent.
+- `~` **`apply()` may call its argument on several strands at once**, where both
+  references call it once per element on one thread. [valarray.members] fixes
+  neither the order nor the thread — only that each element is assigned the
+  value of applying the function to the corresponding element. A function with
+  state of its own is the caller's business.
+- `?` **An overlapping self-assignment through a subset is unspecified, and here
+  it additionally depends on where a chunk boundary fell.** `v[slice(0,3,2)] = v * 2.0`
+  writes elements it has not read yet; the standard says nothing about the
+  order, the references do it left to right, and a crew does it in pieces.
+  Elementwise self-assignment — `v += v`, `v = v * 2.0` — is safe under any
+  chunking, because an order reads element *i* to write element *i*, and that
+  is checked on sixteen cores by `phase237`.
+- `?` **`shift`, `cshift` and the four const subset subscripts materialise**
+  rather than returning an order. Their declared return type is `valarray<T>`,
+  and a permutation that stayed lazy could read an element the same statement
+  had already written.
+- `~` **`auto x = a + b;` gives you the order, not an array**, and it dangles if
+  what it reads goes away. This is the standard's own hazard and both references
+  have it; name the type and the order is carried out on the spot.
+- `+` **The replacement types carry the whole const surface [valarray.syn]/3
+  requires** — the unary operators, `sum`, `min`, `max`, `shift`, `cshift`, both
+  `apply`s and the four subset subscripts, so `(a + b).sum()` and
+  `(a * b)[mask]` compile. libc++ 22.1.6 does not manage this for floating-point
+  elements (§4).
+- `?` **The four subset proxies take a scalar for `=` and for nothing else.**
+  `v[m] = 1.0` compiles and `v[m] += 1.0` does not, because
+  [slice.arr.comp.assign] and its three siblings declare the compound
+  assignments for `const valarray<T>&` alone. The asymmetry is the standard's;
+  it is recorded here because it looks like an omission in this library until
+  you check that no other library accepts it either.
+- `?` **`slice`, `gslice`, and the proxies' index maps are borrowed, not owned**,
+  except a mask's — which cannot be indexed without being counted first, so
+  `v[mask]` allocates its position list once per subscript. Every proxy is
+  transient by design, and the standard's model is the same.
+
 ## `<variant>`
 
 - `?` `visit` is an O(N) constant-evaluated index match, not an O(1) function-pointer
@@ -4465,6 +4576,24 @@ This was found by a failing test, not by reading.
 Present in 16.1.0 (`__GLIBCXX__ 20260430`), all reproduced today: the six rows of
 the flat-container table in §3, `{:#.0f}` of `1e308`, and the ignored precision on
 floating-point-rep durations.
+
+**One from Ф44-f, and it is a whole clause of [valarray.syn] rather than a
+value:** `shift` and `cshift` **on an expression do not compile for a
+floating-point element type.** [valarray.syn]/3 permits a replacement type only
+if "all the const member functions of valarray<T> other than begin and end are
+also applicable" to it, and libc++'s `__shift_expr` computes its element
+branchlessly —
+
+```
+(__expr_[(__i + __n_) & __m] & __m) | (value_type() & ~__m)
+```
+
+— which is arithmetic no `double` has. `valarray<double>::shift` itself is
+fine; it is the replacement type that is not, so every floating-point valarray
+expression in libc++ fails that paragraph. `(a + 1.0).shift(2)` is rejected at
+compile time, which is why the stand's own case prints a placeholder in that
+column (pinned in `tools/valarray_oracle_refdiff.txt`) rather than pretending
+the columns agree.
 
 **Two more, from Ф43-e-2's grapheme work** (§3 has the table): a Hangul syllable
 followed by a combining mark is segmented as **two** clusters, where GB9 joins any
