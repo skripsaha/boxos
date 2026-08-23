@@ -1,0 +1,33 @@
+// boxcxx — <valarray>  ([numarray])
+//
+// The array of numbers you write arithmetic on. Everything is in
+// <__bits/valarray_core>, and that split is not cosmetic: the leaf is
+// self-contained — the brigade declarations, <cmath>, <cstdlib>, <cstddef>,
+// <initializer_list>, <new>, <type_traits>, and nothing of boxcxx's own
+// containers — so the host stand can build it beside libstdc++ and libc++
+// through symlinks and answer a question in a second instead of in a boot
+// (tools/cxx_valarray_oracle.sh).
+//
+// Two things about this implementation are worth knowing before you use it,
+// and both are in the leaf's own header comment at length:
+//
+//   * An expression is a WORK ORDER. `a + b * c` computes nothing; the pass
+//     happens where the order is written into an array, so three operators
+//     cost one pass over memory and no temporaries. [valarray.overview]/4
+//     allows this, and both reference libraries do the same. `auto x = a + b`
+//     therefore gives you the order, not an array — name the type, or the
+//     order outlives what it reads.
+//   * The pass is run by the BRIGADE — the strands std::execution::par uses —
+//     when the array is long enough to be worth a wake. Neither reference
+//     does that; on this system a long valarray expression is the cheapest
+//     way there is to put every core to work. See §2 <valarray> in
+//     CONFORMANCE.md for what that changes about apply() and sum().
+//
+// [version.syn] gives <valarray> no feature-test macro of its own, so this
+// header declares none.
+#ifndef BOXCXX_VALARRAY
+#define BOXCXX_VALARRAY
+
+#include <__bits/valarray_core>
+
+#endif // BOXCXX_VALARRAY

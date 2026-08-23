@@ -59,7 +59,10 @@ tools/cxx_phase_matrix.sh "cxxtest $SEL" "$MARKER" "$CFG"
 rc=$?
 t2=$(date +%s)
 
-passed=$(grep -c '^\[CXX\] PASS phase' build/serial.log 2>/dev/null)
-echo "[gate] cfg=$CFG  selector='${SEL:-<all>}'  phases-passed=$passed  build=$((t1-t0))s  run=$((t2-t1))s  total=$((t2-t0))s"
+# ‼ The suite PRINTS its own count -- "SUBSET PASS: 1 of 253 phases" -- and this
+# line used to ignore it and grep for '[CXX] PASS phase', which the suite has
+# never emitted. Every gate run said phases-passed=0, including the green ones.
+passed=$(grep -oE '\[CXX\] (SUBSET PASS: [0-9]+ of [0-9]+|ALL PASS)' build/serial.log 2>/dev/null | tail -1)
+echo "[gate] cfg=$CFG  selector='${SEL:-<all>}'  ${passed:-<no verdict line>}  build=$((t1-t0))s  run=$((t2-t1))s  total=$((t2-t0))s"
 [ "$rc" != 0 ] && grep -nE '\[CXX\] FAIL|\[CXX\] TOTAL FAILURES|PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL' build/serial.log 2>/dev/null | tail -25
 exit $rc

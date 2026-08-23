@@ -30,11 +30,6 @@ namespace std {
 
 namespace __par {
 
-// Fewer elements than this and the wake, the park and the cache traffic cost
-// more than the work they save. It is a grain, not a capacity: nothing is
-// bounded by it, and a range of any size still runs.
-inline constexpr size_t kGrain = 2048;
-
 template <class EP>
 inline constexpr bool WantsBrigade =
     is_same_v<remove_cvref_t<EP>, execution::parallel_policy> ||
