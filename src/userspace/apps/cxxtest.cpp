@@ -6071,10 +6071,25 @@ void Phase35()
         Check(slept >= milliseconds(12),
               "phase35 sleep_for(15ms) parks at least ~12ms");
 
+        // A non-positive duration must take sleep_for's early return rather
+        // than arm a park, and nothing counts parks, so the only witness is
+        // time. A SINGLE call is the wrong way to ask: the window is a compare
+        // and two clock reads, and one host deschedule landing inside it —
+        // ~10 ms on this host, measured while diagnosing phase41 A5 — breaks
+        // any bound tight enough to catch the regression. So ask ten thousand
+        // times and let the arithmetic separate the two answers. If each call
+        // parked a single scheduler tick (4 ms at 250 Hz) this costs 40
+        // seconds; returning early it costs about a millisecond. Half a second
+        // sits eighty times below the regression and five hundred times above
+        // the healthy answer, so it takes half a second of accumulated stall
+        // inside a one-millisecond window to fire falsely — the vCPU would
+        // have to be getting a fifth of a percent of a core.
+        constexpr int kZeroSleeps = 10000;
         box::stopwatch sw0;
-        std::this_thread::sleep_for(milliseconds(0));
-        Check(sw0.elapsed() < milliseconds(5),
-              "phase35 sleep_for(0) returns immediately");
+        for (int i = 0; i < kZeroSleeps; i++)
+            std::this_thread::sleep_for(milliseconds(0));
+        Check(sw0.elapsed() < milliseconds(500),
+              "phase35 sleep_for(0) never parks (10000 calls stay far below one tick each)");
     }
 
     // 2) Sibling strands need FSGSBASE (per-strand TLS). Without it strand_spawn
@@ -7942,38 +7957,78 @@ void Phase41()
     Check(strand_pool_test_orphan_reclaim(6) == 1,
           "phase41 crash-orphan reclaim returns every cached block to the heap");
 
-    // ── A5: fast-path speedup measurement (host-invariant ratio) ──────────────
-    // t_fast = cycles for M tight malloc(64)/free pairs (magazine hot path, lock-free).
-    // t_lock = cycles for M tight malloc_tagged(64,tag)/free pairs (tagged bypasses
-    //          the magazine on both alloc and free → forced global locked path).
-    // Both measurements scale with host load; the RATIO is stable. We assert
-    // t_lock >= t_fast + t_fast/4 (fast-path at least ~1.25x faster than the
-    // forced-lock path). malloc_tagged adds a small tag-registry lookup overhead
-    // on top of the raw lock cost, so this is a conservative lower bound.
+    // ── A5: what the magazine buys is lock ROUND-TRIPS, not wall-clock ────────
+    // This block asserted a TSC ratio until 2026-08-23: cycles/op on the
+    // magazine path had to be at least 1.25x cheaper than on the forced-lock
+    // path, on the stated ground that "both measurements scale with host load,
+    // the RATIO is stable". The ratio is not stable, and the reason is
+    // arithmetic rather than luck.
+    //
+    // cxxtest runs on an emulated vCPU, and the STRICT matrix boots -smp 16 on
+    // a host with fewer cores than that, so the thread executing this loop is
+    // descheduled BY THE HOST while rdtsc keeps counting wall time. A stall of
+    // S cycles spread over M iterations adds S/M to BOTH measurements — an
+    // ADDITIVE term — and (lock + c) / (fast + c) walks toward 1 as c grows.
+    // The bios16 run that failed says exactly that and nothing else:
+    //
+    //     fast-path   192 -> 1845   (+1653)     phase alone -> inside the suite
+    //     forced-lock 538 -> 2208   (+1670)
+    //
+    // The two offsets agree to within 1%. Neither path became slower; the vCPU
+    // stopped running twice, for about the same amount. That was then confirmed
+    // the only way a timing claim can be: the failure was REPRODUCED ON DEMAND
+    // by loading the host — twelve spinners, this phase alone, nothing else in
+    // the guest — and came back as fast 795 against lock 591, the "fast" path
+    // measuring SLOWER than the locked one. Remove the load and the same binary
+    // reports 205 against 872.
+    //
+    // So A5 asserts the thing the magazine actually promises, which is countable
+    // and cannot be descheduled: a hot request takes the global lock ZERO times
+    // where a tagged one takes it TWICE, once to allocate and once to free. The
+    // counters are bumped INSIDE that lock, which is what makes them evidence —
+    // the same oracle A2 uses one block up, and the reason the design of this
+    // phase was written "host-invariant, NOT wall-clock" before A5 existed.
+    // "1.25x" was a number chosen from nothing. The cycles are still printed,
+    // because they are worth seeing, and no longer asserted, because they were
+    // never evidence.
     {
         constexpr int M = 20000;
         const char *kBench = "p41bench";
         for (int i = 0; i < 32; i++) { void *p = malloc(64); if (p) free(p); }
 
+        heap_stats_t s0{};
+        heap_get_stats(&s0);
         uint64_t t0 = __builtin_ia32_rdtsc();
         for (int i = 0; i < M; i++) {
             void *p = malloc(64);
             if (p) free(p);
         }
         uint64_t t1 = __builtin_ia32_rdtsc();
+        heap_stats_t s1{};
+        heap_get_stats(&s1);
 
         for (int i = 0; i < M; i++) {
             void *p = malloc_tagged(64, kBench);
             if (p) free(p);
         }
         uint64_t t2 = __builtin_ia32_rdtsc();
+        heap_stats_t s2{};
+        heap_get_stats(&s2);
 
-        uint64_t t_fast = (t1 - t0) / (uint64_t)M;
-        uint64_t t_lock = (t2 - t1) / (uint64_t)M;
-        printf("[CXX] phase41 A5: fast-path %llu cycles/op  forced-lock %llu cycles/op\n",
-               (unsigned long long)t_fast, (unsigned long long)t_lock);
-        Check(t_lock >= t_fast + t_fast / 4,
-              "phase41 A5 fast-path at least 1.25x faster than forced-lock path");
+        std::uint32_t fast_m = s1.malloc_calls - s0.malloc_calls;
+        std::uint32_t fast_f = s1.free_calls   - s0.free_calls;
+        std::uint32_t lock_m = s2.malloc_calls - s1.malloc_calls;
+        std::uint32_t lock_f = s2.free_calls   - s1.free_calls;
+
+        printf("[CXX] note phase41 A5: %d pairs — magazine %u locked mallocs / %u "
+               "locked frees (%llu cycles/op), tagged %u / %u (%llu cycles/op)\n",
+               M, fast_m, fast_f, (unsigned long long)((t1 - t0) / (uint64_t)M),
+               lock_m, lock_f, (unsigned long long)((t2 - t1) / (uint64_t)M));
+
+        Check(fast_m == 0 && fast_f == 0,
+              "phase41 A5 the magazine serves 20000 hot pairs without one global-lock round-trip");
+        Check(lock_m == static_cast<std::uint32_t>(M) && lock_f == static_cast<std::uint32_t>(M),
+              "phase41 A5 and the tagged path takes the lock exactly twice per pair");
     }
 
     // ── A3: concurrent per-strand isolation (FSGSBASE-gated) ──────────────────
@@ -7985,7 +8040,7 @@ void Phase41()
     if (!cpu_has_fsgsbase()) {
         printf("[CXX] phase41 A3 SKIP (no FSGSBASE — concurrent isolation not exercised here)\n");
         printf("[CXX] PASS phase41: per-strand StrandPool "
-               "(A1 correctness + A2 contention drop + A4 orphan reclaim + A5 speedup; A3 skipped)\n");
+               "(A1 correctness + A2 contention drop + A4 orphan reclaim + A5 lock traffic; A3 skipped)\n");
         return;
     }
 
@@ -8008,7 +8063,7 @@ void Phase41()
     printf("[CXX] phase41 A3 RAN (4 strands, concurrent per-strand isolation verified)\n");
 
     printf("[CXX] PASS phase41: per-strand StrandPool "
-           "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim + A5 speedup)\n");
+           "(A1 correctness + A2 contention drop + A3 concurrent isolation + A4 orphan reclaim + A5 lock traffic)\n");
 }
 
 // ── Phase42 — box::strand / box::park / box::wake / box::strand_watch ─────────
