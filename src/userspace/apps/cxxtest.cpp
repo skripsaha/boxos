@@ -29709,9 +29709,13 @@ void Phase131()
 #endif
 static_assert(__cpp_lib_chrono == 201907L, "phase131: __cpp_lib_chrono — closed by Ф45");
 static_assert(__cpp_lib_constexpr_bitset == 202207L, "phase131: __cpp_lib_constexpr_bitset — closed by Ф39");
-#ifdef __cpp_lib_constexpr_cmath
-#  error "phase131: __cpp_lib_constexpr_cmath must stay undefined"
-#endif
+static_assert(__cpp_lib_constexpr_cmath == 202202L,
+              "phase131: __cpp_lib_constexpr_cmath — closed by Ф47. It was an "
+              "absence guard through the whole epic, and it did its job: the "
+              "commit that claimed the macro had to come here and delete it. "
+              "202202L is P0533R9's C++23 value; C++26's 202306L (P1383R2, "
+              "constexpr sqrt/sin/exp/log/pow) is not claimed because those are "
+              "not constant expressions here");
 static_assert(__cpp_lib_constexpr_string == 201907L, "phase131: __cpp_lib_constexpr_string — closed by Ф39");
 static_assert(__cpp_lib_constexpr_vector == 201907L, "phase131: __cpp_lib_constexpr_vector — closed by Ф39");
     // The guards below name a header boxcxx does not ship at all, so the
@@ -55264,6 +55268,359 @@ void Phase239()
            "runs\n");
 }
 
+// ── Phase240: the two halves of a constexpr <cmath> must be one answer ─────
+// Ф47. P0533R9 makes most of [cmath.syn] constexpr, and on this target that
+// cannot be a matter of adding a keyword: every long double function is x87
+// assembly, which no constant evaluation may execute. Each therefore has a twin
+// -- `if consteval` takes __builtin_*l, which GCC folds with MPFR at the
+// target's own 80-bit format, and the assembly stays for run time, where the
+// builtin would emit a call to a libm this target does not have.
+//
+// A twin is a second implementation, so it is a second chance to be wrong, and
+// the oracle for it is the library's own run-time half. Every function P0533R9
+// lists computes an EXACT result -- a remainder, a rounding, a scaling by a
+// power of two, an exponent -- so there is no rounding choice for the halves to
+// differ over legitimately: they must agree BIT FOR BIT, sign of zero and NaN
+// payload included. Comparing values would let -0.0 pass for 0.0; comparing
+// bits does not.
+//
+// The run-time side is forced through `volatile`, without which the compiler
+// folds the call and both sides become the same constant evaluation -- a test
+// that would pass no matter how badly the assembly was wrong.
+namespace p240 {
+
+constexpr std::uint32_t Raw(float v) { return __builtin_bit_cast(std::uint32_t, v); }
+constexpr std::uint64_t Raw(double v) { return __builtin_bit_cast(std::uint64_t, v); }
+// The 80-bit format occupies ten bytes of a sixteen-byte object; the other six
+// are padding and hold whatever was there. Masking them off is not tidiness --
+// comparing them would make this test fail at random.
+constexpr unsigned __int128 Raw(long double v)
+{
+    // ‼ The low half must be an all-ones SIXTY-FOUR bit value widened, not
+    // ~(unsigned __int128)0, which is all ONE HUNDRED AND TWENTY-EIGHT bits and
+    // therefore masks nothing at all. Written that way this function compared
+    // the six padding bytes too, and the first run of this phase reported seven
+    // long double failures that were entirely its own.
+    constexpr unsigned __int128 kPayload =
+        ((unsigned __int128)0xFFFFu << 64) | (unsigned __int128)~(std::uint64_t)0;
+    return __builtin_bit_cast(unsigned __int128, v) & kPayload;
+}
+
+// A value used as a template argument must be a constant expression, so this
+// answers "is this call one?" without needing the call to compile at all.
+//
+// ‼ Every question below is asked through a concept PARAMETERISED on the type,
+// never as a bare `requires { Force<double, std::logb(0.0)>{}; }`. Spelled that
+// way it is a HARD ERROR rather than a false requires-expression -- the call is
+// not dependent, so the failure is reported outside the immediate context and
+// the translation unit stops. Ф46 met the same trap one phase earlier with
+// make_format_args and it bit again here, in five pins at once; the fix is the
+// same both times, and the rule is: a requires-expression only answers a
+// question it could have deduced.
+template <class T, T V> struct Force {};
+
+template <class T> concept LogbAtZeroIsConstant = requires { Force<T, std::logb(T(0))>{}; };
+template <class T> concept FmodByZeroIsConstant = requires { Force<T, std::fmod(T(1), T(0))>{}; };
+template <class T> concept FmodIsConstant       = requires { Force<T, std::fmod(T(5), T(2))>{}; };
+template <class T> concept LogbIsConstant       = requires { Force<T, std::logb(T(8))>{}; };
+template <class T> concept RintIsConstant       = requires { Force<T, std::rint(T(3) / T(2))>{}; };
+template <class T> concept NearbyintIsConstant  = requires { Force<T, std::nearbyint(T(3) / T(2))>{}; };
+template <class T> concept SqrtIsConstant       = requires { Force<T, std::sqrt(T(4))>{}; };
+
+constexpr double kD[] = {0.0,  -0.0,  1.0,   -1.0,  0.5,   -0.5,  1.5,   -1.5,
+                         2.5,  -2.5,  3.0,   -3.0,  5.0,   -5.0,  0.1,   -0.1,
+                         1e10, -1e10, 1e-10, -1e-10, 1234.5678, -1234.5678,
+                         4.9406564584124654e-324,          // smallest subnormal
+                         2.2250738585072014e-308,          // smallest normal
+                         1.7976931348623157e308};          // largest finite
+constexpr float kF[] = {0.0f, -0.0f, 1.0f, -1.0f, 0.5f, -0.5f, 1.5f, -1.5f,
+                        2.5f, -2.5f, 3.0f, -3.0f, 5.0f, -5.0f, 0.1f, -0.1f,
+                        1e10f, -1e10f, 1e-10f, -1e-10f, 1234.5678f, -1234.5678f,
+                        1.4012984643e-45f, 1.1754943508e-38f, 3.4028234664e38f};
+constexpr long double kL[] = {0.0L, -0.0L, 1.0L, -1.0L, 0.5L, -0.5L, 1.5L, -1.5L,
+                              2.5L, -2.5L, 3.0L, -3.0L, 5.0L, -5.0L, 0.1L, -0.1L,
+                              1e10L, -1e10L, 1e-10L, -1e-10L, 1234.5678L, -1234.5678L,
+                              3.36210314311209350626e-4932L,   // smallest normal
+                              1.18973149535723176502e4932L};   // largest finite
+
+}  // namespace p240
+
+// One argument in, one out. The compile-time column is built once as a
+// constexpr array; the run-time column is recomputed through volatile.
+#define P240_UNARY(FN, TYPE, TABLE)                                              \
+    {                                                                            \
+        constexpr auto ce = [] {                                                 \
+            std::array<TYPE, sizeof(TABLE) / sizeof(TABLE[0])> r{};              \
+            for (std::size_t i = 0; i < r.size(); i++) r[i] = std::FN(TABLE[i]); \
+            return r;                                                            \
+        }();                                                                     \
+        bool ok = true;                                                          \
+        for (std::size_t i = 0; i < ce.size(); i++) {                            \
+            volatile TYPE vx = TABLE[i];                                         \
+            TYPE           rt = std::FN(static_cast<TYPE>(vx));                  \
+            if (p240::Raw(rt) != p240::Raw(ce[i])) ok = false;                   \
+        }                                                                        \
+        Check(ok, "phase240 " #FN "(" #TYPE ") agrees bit for bit across "       \
+                  "translation time and run time");                              \
+    }
+
+// The same sweep, started past the leading +-0 of each table: logb has a POLE
+// there, so logb(0) is not a constant expression at all -- section 7 pins that
+// deliberately, and feeding it here would only stop the translation unit.
+#define P240_UNARY_FROM(FN, TYPE, TABLE, FIRST)                                  \
+    {                                                                            \
+        constexpr std::size_t n = sizeof(TABLE) / sizeof(TABLE[0]);              \
+        constexpr auto ce = [] {                                                 \
+            std::array<TYPE, n> r{};                                             \
+            for (std::size_t i = FIRST; i < n; i++) r[i] = std::FN(TABLE[i]);    \
+            return r;                                                            \
+        }();                                                                     \
+        bool ok = true;                                                          \
+        for (std::size_t i = FIRST; i < n; i++) {                                \
+            volatile TYPE vx = TABLE[i];                                         \
+            TYPE           rt = std::FN(static_cast<TYPE>(vx));                  \
+            if (p240::Raw(rt) != p240::Raw(ce[i])) ok = false;                   \
+        }                                                                        \
+        Check(ok, "phase240 " #FN "(" #TYPE ") agrees bit for bit across "       \
+                  "translation time and run time");                              \
+    }
+
+// Two arguments: every ordered pair of the table, minus the ones the standard
+// says are errors -- those are not constant expressions at all, which is the
+// point of the last block below.
+#define P240_BINARY(FN, TYPE, TABLE)                                             \
+    {                                                                            \
+        constexpr std::size_t n = sizeof(TABLE) / sizeof(TABLE[0]);              \
+        constexpr auto ce = [] {                                                 \
+            std::array<TYPE, n * n> r{};                                         \
+            for (std::size_t i = 0; i < n; i++)                                  \
+                for (std::size_t j = 0; j < n; j++)                              \
+                    r[i * n + j] = (TABLE[j] == static_cast<TYPE>(0) ||       \
+                                    !std::isfinite(TABLE[i]))                    \
+                                       ? static_cast<TYPE>(0)                    \
+                                       : std::FN(TABLE[i], TABLE[j]);            \
+            return r;                                                            \
+        }();                                                                     \
+        bool ok = true;                                                          \
+        for (std::size_t i = 0; i < n; i++)                                      \
+            for (std::size_t j = 0; j < n; j++) {                                \
+                if (TABLE[j] == static_cast<TYPE>(0) ||                          \
+                    !std::isfinite(TABLE[i]))                                    \
+                    continue;                                                    \
+                volatile TYPE vx = TABLE[i], vy = TABLE[j];                      \
+                TYPE rt = std::FN(static_cast<TYPE>(vx), static_cast<TYPE>(vy)); \
+                if (p240::Raw(rt) != p240::Raw(ce[i * n + j])) ok = false;       \
+            }                                                                    \
+        Check(ok, "phase240 " #FN "(" #TYPE ", " #TYPE ") agrees bit for bit "   \
+                  "across translation time and run time");                       \
+    }
+
+void Phase240()
+{
+    // ── 1. every rounding, at every width ────────────────────────────────
+    P240_UNARY(trunc, double, p240::kD)
+    P240_UNARY(trunc, float, p240::kF)
+    P240_UNARY(trunc, long double, p240::kL)
+    P240_UNARY(floor, double, p240::kD)
+    P240_UNARY(floor, float, p240::kF)
+    P240_UNARY(floor, long double, p240::kL)
+    P240_UNARY(ceil, double, p240::kD)
+    P240_UNARY(ceil, float, p240::kF)
+    P240_UNARY(ceil, long double, p240::kL)
+    P240_UNARY(round, double, p240::kD)
+    P240_UNARY(round, float, p240::kF)
+    P240_UNARY(round, long double, p240::kL)
+
+    // ── 2. sign, magnitude and exponent ──────────────────────────────────
+    P240_UNARY(fabs, double, p240::kD)
+    P240_UNARY(fabs, float, p240::kF)
+    P240_UNARY(fabs, long double, p240::kL)
+    P240_UNARY_FROM(logb, double, p240::kD, 2)
+    P240_UNARY_FROM(logb, float, p240::kF, 2)
+    P240_UNARY_FROM(logb, long double, p240::kL, 2)
+
+    // ── 3. the binary ones, over every ordered pair ──────────────────────
+    P240_BINARY(fmod, double, p240::kD)
+    P240_BINARY(fmod, float, p240::kF)
+    P240_BINARY(fmod, long double, p240::kL)
+    P240_BINARY(remainder, double, p240::kD)
+    P240_BINARY(remainder, float, p240::kF)
+    P240_BINARY(remainder, long double, p240::kL)
+    P240_BINARY(copysign, double, p240::kD)
+    P240_BINARY(copysign, float, p240::kF)
+    P240_BINARY(copysign, long double, p240::kL)
+    P240_BINARY(nextafter, double, p240::kD)
+    P240_BINARY(nextafter, float, p240::kF)
+    P240_BINARY(nextafter, long double, p240::kL)
+    P240_BINARY(fdim, double, p240::kD)
+    P240_BINARY(fmax, double, p240::kD)
+    P240_BINARY(fmin, double, p240::kD)
+
+    // ── 4. the pointer-taking three, whose out-parameter is also an answer ─
+    {
+        bool ok = true;
+        constexpr auto ce = [] {
+            std::array<long double, 24> r{};
+            for (int i = 0; i < 12; i++) {
+                int e = 0;
+                r[i * 2]     = std::frexp(p240::kL[i], &e);
+                r[i * 2 + 1] = static_cast<long double>(e);
+            }
+            return r;
+        }();
+        for (int i = 0; i < 12; i++) {
+            volatile long double vx = p240::kL[i];
+            int                  e  = 0;
+            long double          m  = std::frexp(static_cast<long double>(vx), &e);
+            if (p240::Raw(m) != p240::Raw(ce[i * 2]) ||
+                static_cast<long double>(e) != ce[i * 2 + 1])
+                ok = false;
+        }
+        Check(ok, "phase240 frexp(long double) agrees on BOTH answers, the "
+                  "significand and the exponent it wrote through the pointer");
+    }
+    {
+        bool ok = true;
+        constexpr auto ce = [] {
+            std::array<long double, 24> r{};
+            for (int i = 0; i < 12; i++) {
+                long double ip = 0;
+                r[i * 2]     = std::modf(p240::kL[i], &ip);
+                r[i * 2 + 1] = ip;
+            }
+            return r;
+        }();
+        for (int i = 0; i < 12; i++) {
+            volatile long double vx = p240::kL[i];
+            long double          ip = 0;
+            long double          f  = std::modf(static_cast<long double>(vx), &ip);
+            if (p240::Raw(f) != p240::Raw(ce[i * 2]) ||
+                p240::Raw(ip) != p240::Raw(ce[i * 2 + 1]))
+                ok = false;
+        }
+        Check(ok, "phase240 modf(long double) agrees on the fraction and the "
+                  "integral part alike");
+    }
+    {
+        bool ok = true;
+        constexpr auto ce = [] {
+            std::array<long double, 22> r{};
+            int k = 0;
+            for (int i = 2; i < 13; i++) {
+                int q = 0;
+                r[k++] = std::remquo(p240::kL[i], 3.0L, &q);
+                r[k++] = static_cast<long double>(q);
+            }
+            return r;
+        }();
+        int k = 0;
+        for (int i = 2; i < 13; i++) {
+            volatile long double vx = p240::kL[i], vy = 3.0L;
+            int                  q  = 0;
+            long double r = std::remquo(static_cast<long double>(vx),
+                                        static_cast<long double>(vy), &q);
+            if (p240::Raw(r) != p240::Raw(ce[k]) ||
+                static_cast<long double>(q) != ce[k + 1])
+                ok = false;
+            k += 2;
+        }
+        Check(ok, "phase240 remquo(long double) agrees on the remainder and on "
+                  "the three quotient bits");
+    }
+
+    // ── 5. scaling by a power of two, which must be exact at every width ──
+    {
+        bool ok = true;
+        constexpr auto ce = [] {
+            std::array<long double, 12 * 9> r{};
+            int k = 0;
+            for (int i = 0; i < 12; i++)
+                for (int n = -4; n <= 4; n++) r[k++] = std::scalbn(p240::kL[i], n);
+            return r;
+        }();
+        int k = 0;
+        for (int i = 0; i < 12; i++)
+            for (int n = -4; n <= 4; n++) {
+                volatile long double vx = p240::kL[i];
+                volatile int         vn = n;
+                if (p240::Raw(std::scalbn(static_cast<long double>(vx), vn)) !=
+                    p240::Raw(ce[k]))
+                    ok = false;
+                k++;
+            }
+        Check(ok, "phase240 scalbn(long double) agrees across both halves");
+    }
+
+    // ── 6. the defect this phase found ───────────────────────────────────
+    // nextafter(float) read `float(nextafter(double(x), double(y)))`, and the
+    // next double after 1.0 rounds back to 1.0f -- so it returned its own
+    // argument and had done since the header was written. No run-time test in
+    // the suite had ever asked; a static_assert could, the moment the function
+    // became constexpr. Pinned here at all three widths so it cannot come back.
+    static_assert(std::nextafter(1.0f, 2.0f) > 1.0f,
+                  "phase240 (6) the float step must happen in float");
+    static_assert(std::nextafter(1.0f, 2.0f) == __builtin_nextafterf(1.0f, 2.0f),
+                  "phase240 (6) and land exactly where the builtin does");
+    static_assert(std::nextafterf(1.0f, 2.0f) == __builtin_nextafterf(1.0f, 2.0f),
+                  "phase240 (6) nextafterf carried the same defect through long double");
+    static_assert(std::nexttoward(1.0f, 2.0L) == __builtin_nextafterf(1.0f, 2.0f),
+                  "phase240 (6) and nexttoward(float) reached it through nextafter");
+    static_assert(std::nextafter(1.0, 2.0) == __builtin_nextafter(1.0, 2.0),
+                  "phase240 (6) double was always right");
+    static_assert(std::nextafter(1.0L, 2.0L) == __builtin_nextafterl(1.0L, 2.0L),
+                  "phase240 (6) and so was long double");
+
+    // ── 7. a call that would raise is NOT a constant expression ──────────
+    // [library.c] says so, and here it falls out of the implementation rather
+    // than being arranged: every error path performs the arithmetic that raises
+    // the flag, through a volatile operand, and volatile is not a constant
+    // expression. The `if consteval` twins sit AFTER those branches for exactly
+    // this reason -- hoisting a builtin above them would answer -inf or NaN
+    // quietly instead, and silence is the wrong answer.
+    static_assert(!p240::LogbAtZeroIsConstant<double>,
+                  "phase240 (7) logb(0) is a pole error, not a constant");
+    static_assert(!p240::LogbAtZeroIsConstant<long double>,
+                  "phase240 (7) at long double too");
+    static_assert(!p240::FmodByZeroIsConstant<double>,
+                  "phase240 (7) fmod by zero is a domain error, not a constant");
+    static_assert(!p240::FmodByZeroIsConstant<long double>,
+                  "phase240 (7) at long double too");
+    // and the ordinary call right beside it IS one
+    static_assert(p240::FmodIsConstant<double>,
+                  "phase240 (7) while the call that raises nothing is a constant");
+    static_assert(p240::LogbIsConstant<long double>,
+                  "phase240 (7) and so is logb away from the pole");
+
+    // ── 8. the macro, and the half of the paper that was already here ────
+    static_assert(__cpp_lib_constexpr_cmath == 202202L,
+                  "phase240 (8) P0533R9's C++23 value, not C++26's 202306L: "
+                  "sqrt/sin/exp/log/pow are not constant expressions here");
+    static_assert(std::div(7, 2).quot == 3 && std::div(7, 2).rem == 1,
+                  "phase240 (8) <cstdlib>'s half was constexpr before Ф47 -- and "
+                  "is not in libstdc++ 16.1 at any -std, which is why it claims "
+                  "this macro nowhere");
+    static_assert(std::abs(-3) == 3 && std::labs(-3L) == 3L && std::llabs(-3LL) == 3LL,
+                  "phase240 (8) with the integral abs family");
+    static_assert(std::ldiv(7L, 2L).quot == 3L && std::lldiv(7LL, 2LL).rem == 1LL,
+                  "phase240 (8) and both wider div forms");
+
+    // ── 9. what C++23 deliberately leaves out ────────────────────────────
+    // nearbyint/rint/lrint/llrint read the CURRENT rounding mode, and a constant
+    // evaluation has none to read -- it would answer round-to-nearest whatever
+    // the program had set, which is a different function. [cmath.syn] leaves
+    // them out of the list and so does this library. The pin is here so that a
+    // later sweep marking "everything in <cmath>" constexpr has to fail.
+    static_assert(!p240::RintIsConstant<double>,
+                  "phase240 (9) rint reads the rounding mode and is not constexpr");
+    static_assert(!p240::NearbyintIsConstant<double>,
+                  "phase240 (9) nor is nearbyint");
+    static_assert(!p240::SqrtIsConstant<double>,
+                  "phase240 (9) sqrt is C++26's P1383R2, which is not claimed");
+
+    printf("[CXX] PASS phase240: constexpr <cmath> — the twin and the assembly "
+           "are one answer\n");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -55518,6 +55875,7 @@ const PhaseRow kPhases[] = {
     {"237", Phase237},
     {"238", Phase238},
     {"239", Phase239},
+    {"240", Phase240},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.

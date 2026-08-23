@@ -487,7 +487,7 @@ and line — is recorded there.
 
 ## 1.3 Feature-test macros
 
-boxcxx defines **238** `__cpp_lib_*` macros. Two properties were verified across
+boxcxx defines **239** `__cpp_lib_*` macros. Two properties were verified across
 the whole set, not sampled.
 
 > This section said **201** until Ф41, and the number at the top of the document
@@ -504,7 +504,7 @@ the whole set, not sampled.
   plus every macro it does not define there at all.
 - **Every one is visible both from `<version>` and from every header
   [version.syn] names as an owner**, as [support.limits.general] requires —
-  checked over the full cross-product of 238 macros × 109 headers by
+  checked over the full cross-product of 239 macros × 109 headers by
   `tools/cxx_ftm_audit.sh`, against a transcription of [version.syn]'s ownership
   lists kept beside it in `tools/version_syn_owners.txt`.
 
@@ -533,7 +533,7 @@ the whole set, not sampled.
   (`BOXCXX_OWNS_<stem>`) and each `__bits/version_*` leaf defines only what the
   including header declared.
 
-- **The converse does not hold, and cannot.** 192 of the 238 macros are also
+- **The converse does not hold, and cannot.** 193 of the 239 macros are also
   reachable from some header that does not own them. That is not a conformance
   defect — [support.limits.general] sets a floor, not a ceiling — and it is not
   fixable by gating: a header that includes another inherits its macros, so
@@ -568,7 +568,7 @@ the whole set, not sampled.
   `__cpp_lib_stacktrace` is owned by `<stacktrace>`, and nothing includes
   `<stacktrace>`.
 
-  **The accounting stops at Ф37 and the pin does not.** It stands at 192 today,
+  **The accounting stops at Ф37 and the pin does not.** It stands at 193 today,
   re-pinned by the phases in between without the delta being written down here
   — the same failure the counted table above records five times, in a different
   column. The RULE is unchanged and is stated in the audit script: a growth has
@@ -577,16 +577,34 @@ the whole set, not sampled.
   missing is the arithmetic for 161 → 192, not the rule. Ф44-f added
   `<valarray>` and did **not** move the pin, which is what the rule predicts:
   the header owns no macro of its own, and the ones it inherits from `<cmath>`
-  and `<type_traits>` already reach everywhere.
+  and `<type_traits>` already reach everywhere. Ф47 DID move it, 192 → 193, and
+  the delta is accounted for the way the rule demands: one new macro,
+  `__cpp_lib_constexpr_cmath`, whose owner `<cmath>` is included by `<complex>`,
+  `<valarray>` and `<random>` — measured, visible from all three, none of which
+  owns it. Ф46 moved nothing, because it raised a value and added no macro.
 
-**10 of the 248 macros [version.syn] names are not defined** — measured as a
+**9 of the 248 macros [version.syn] names are not defined** — measured as a
 set difference between the transcription and what a translation unit including
 only `<version>` reports, not counted by hand. They divide cleanly:
 
 | Why undefined | Count | Which |
 |---|---|---|
 | whole-clause requirements relaxations, unprovable by inspection | 2 | `ranges`, `algorithm_iterator_requirements` |
-| the feature is excluded or absent here | 6 | `filesystem`, `char8_t`, `constexpr_cmath`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+| the feature is excluded or absent here | 5 | `filesystem`, `char8_t`, `result_of_sfinae`, `is_implicit_lifetime`, `modules` |
+
+**`constexpr_cmath` left it in Ф47, and it was the last C++23 LIBRARY FEATURE
+this document had to record as absent.** Of the five names still in that row,
+`filesystem` is a decision (§1.1) and `char8_t` is blocked by it, and
+`is_implicit_lifetime` and `modules` are the compiler's to answer, not the
+library's. What is left in the row is nothing anyone here can build.
+
+Half of P0533R9 was already done and nobody had noticed: `<__bits/c_arith>` has
+had `abs`, `labs`, `llabs`, `div`, `ldiv`, `lldiv` and the three `*div_t` as
+`inline constexpr` since it was written. **libstdc++ 16.1 does not** — measured,
+`static_assert(std::div(7,2).quot == 3)` does not compile there at any `-std`,
+while its whole `<cmath>` is constant-evaluable — and that is precisely why it
+defines this macro nowhere. Neither does libc++ 22. See §2 `<cmath>` for what
+the other half cost.
 
 **`chrono` left that row in Ф45**, and it took the whole clause to do it: the
 zone database, the leap seconds, `zoned_time`'s formatter and `chrono::parse`.
@@ -1258,6 +1276,60 @@ The header that made an old claim checkable, and the claim did not survive.
 
 ## `<cmath>`
 
+- `✓` Closed in Ф47: **P0533R9 — `constexpr` for `<cmath>` and `<cstdlib>`.**
+  `__cpp_lib_constexpr_cmath` is defined at 202202L, the C++23 value (§1.3), and
+  on this target it could not be a matter of adding a keyword. Every `long
+  double` function here is x87 assembly, which no constant evaluation may
+  execute, so each carries a twin: `if consteval` takes the `__builtin_*l` form,
+  which GCC folds with MPFR at the target's own 80-bit format, and the assembly
+  stays for run time — where the builtin would emit a call to a libm this target
+  does not have (measured: `__builtin_fmodl` compiles to `call fmodl` at `-O2`).
+
+  **The twin sits AFTER the error branches, never before**, and that is what
+  makes [library.c] come out right for free. Every error path performs the
+  arithmetic that raises the flag, through a `volatile` operand, and `volatile`
+  is not a constant expression — so `logb(0.0L)` and `fmod(1.0, 0.0)` are
+  ill-formed in a constant expression, exactly as the standard requires of a
+  call that would raise. Hoisting a builtin above them would have answered
+  `-inf` or NaN quietly instead.
+
+  **A twin is a second implementation, so phase240 makes the library's own
+  run-time half the oracle for it.** Every function P0533R9 lists computes an
+  exact result — a remainder, a rounding, a scaling by a power of two, an
+  exponent — so there is no rounding choice to differ over legitimately: the two
+  halves must agree BIT FOR BIT, sign of zero included, over tables that run from
+  the smallest subnormal to the largest finite at all three widths, with the
+  run-time side forced through `volatile` so the compiler cannot fold it into the
+  same evaluation. 99 call shapes are constant expressions, including
+  [cmath.syn]/2's promoting overloads and all five extended floating-point types.
+
+  **Three defects fell out of it, and none of them could have been asked about
+  before.**
+  - `nextafter(float, float)` read `float(nextafter(double(x), double(y)))` and
+    **returned its own argument**: the next `double` after 1.0 rounds back to
+    `1.0f`. `nextafterf` carried the same fault through `long double`. Both step
+    in `float` now. The boundary of the defect is worth stating, because every
+    other `f`-suffixed wrapper here takes the same wide detour and is fine: their
+    results are exact, so narrowing is one rounding. `nextafter` is the one
+    function whose answer is the SPACING of the narrow type, and a wider type
+    does not have it.
+  - `fmod` doubled its divisor as `d + d <= r`, which overflows on the largest
+    finite value. At run time that is harmless — the comparison against infinity
+    answers false and the loop ends correctly, which is why it stood — but an
+    overflow is not a constant expression. It now asks `d <= r - d`, the same
+    question without computing `2d`; `r - d` cannot overflow and is exact where
+    the answer is close, by Sterbenz.
+  - `remquo` reached `rint`, and **`rint` must not become `constexpr`**: it reads
+    the current rounding mode, which a constant evaluation has none of and would
+    answer round-to-nearest whatever the program had set. [cmath.syn] leaves
+    `rint`, `nearbyint`, `lrint` and `llrint` out of P0533R9's list for that
+    reason; `remquo` takes the builtin at translation time instead, and phase240
+    pins all four as *not* constant expressions so a later sweep cannot quietly
+    add them.
+
+  C++26's 202306L (P1383R2, `constexpr` `sqrt`/`sin`/`exp`/`log`/`pow`) is **not**
+  claimed: those are not constant expressions here, and phase240 pins `sqrt` as
+  one of the absences.
 - `✓` **Closed in Ф41-c-2: `math_errhandling` used to overpromise.** It expands
   to `MATH_ERREXCEPT` — "errors are reported by raising the IEEE-754 flags" —
   and until `<cfenv>` existed nothing could check it. The measurement (§2
@@ -1299,7 +1371,9 @@ The header that made an old claim checkable, and the claim did not survive.
   [sf.cmath]/2 applies the same rule to the special functions, and they were
   affected identically — `std::riemann_zeta(2)` was ambiguous too.
 - `~` `std::abs` for `int`, `long` and `long long` is declared in `<cmath>`.
-  [c.math.abs] puts those three in `<cstdlib>`, which BoxOS does not have (§1.1);
+  [c.math.abs] puts those three in `<cstdlib>`, which they also reach through
+  `<__bits/c_arith>` — the sentence here said "which BoxOS does not have" until
+  Ф47, and had been untrue since Ф41-e built the header;
   they are provided here rather than left to the promotion rule, because promoting
   would turn `std::abs(-3)` from the `int` `3` every program expects into `3.0`.
   Unsigned arguments remain ill-formed, which is what [c.math.abs]/3 asks for.

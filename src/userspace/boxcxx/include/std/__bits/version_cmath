@@ -2,8 +2,8 @@
 //
 // The feature-test macro [version.syn] owned by <cmath> that boxcxx can
 // honour: all twenty mathematical special functions, each in its double,
-// float and long double form. hypot (3-arg), interpolate (lerp) and
-// constexpr_cmath are NOT defined -- see <version>'s list.
+// float and long double form, plus hypot (3-arg), interpolate (lerp) and,
+// since Ф47, constexpr_cmath.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -32,3 +32,25 @@
 #  define __cpp_lib_interpolate 201902L
 #endif
 #undef BOXCXX_OWNS_interpolate
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_constexpr_cmath)) && \
+    !defined(__cpp_lib_constexpr_cmath)
+// P0533R9, claimed in Ф47 and co-owned with <cstdlib>. 202202L is the C++23
+// value; C++26's 202306L (P1383R2, which adds sqrt/sin/exp/log/pow) is NOT
+// claimed, because those are not constant expressions here.
+//
+// The claim covers BOTH halves of the paper. <cstdlib>'s -- abs, labs, llabs,
+// div, ldiv, lldiv and the three *div_t -- has been constexpr in
+// <__bits/c_arith> since that leaf was written; measured against libstdc++
+// 16.1, whose div/ldiv/lldiv are NOT usable in a constant expression at any
+// -std, which is why it defines this macro nowhere. <cmath>'s half is Ф47's
+// work: every function [cmath.syn] marks constexpr, at all three widths, at the
+// five extended floating-point types and through [cmath.syn]/2's promoting
+// overloads -- 99 measured call shapes, none of them the transcendentals, which
+// the C++23 list deliberately leaves out along with nearbyint/rint/lrint/llrint
+// (they read the current rounding mode, which a constant evaluation has none of).
+//
+// Neither libstdc++ 16.1 nor libc++ 22 defines this macro at any -std. That is
+// measured, not assumed.
+#  define __cpp_lib_constexpr_cmath 202202L
+#endif
+#undef BOXCXX_OWNS_constexpr_cmath

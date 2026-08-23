@@ -7,7 +7,9 @@
 #include <__bits/math_fenv_defs>
 #include <__bits/cmath_coeffs>
 #include <type_traits>   // conditional_t / is_same_v / is_arithmetic_v — [cmath.syn]/2's promoting overloads at the foot of this file
-// Everything here is transplanted verbatim into src/runtime/cmath*.cpp.
+// Header-only in fact as well as in name: there is no src/runtime/cmath*.cpp,
+// and the line that used to say everything here was transplanted into one sent
+// a reader to a file that does not exist. Ф47 removed it while editing beside it.
 
 namespace std {
 
@@ -17,10 +19,10 @@ using i32 = int32_t;
 using i64 = int64_t;
 
 // ── bit casts ────────────────────────────────────────────────────────────
-inline u64    dbits(double x)  { return __builtin_bit_cast(u64, x); }
-inline double dfrom(u64 b)     { return __builtin_bit_cast(double, b); }
-inline u32    fbits(float x)   { return __builtin_bit_cast(u32, x); }
-inline float  ffrom(u32 b)     { return __builtin_bit_cast(float, b); }
+inline constexpr u64    dbits(double x)  { return __builtin_bit_cast(u64, x); }
+inline constexpr double dfrom(u64 b)     { return __builtin_bit_cast(double, b); }
+inline constexpr u32    fbits(float x)   { return __builtin_bit_cast(u32, x); }
+inline constexpr float  ffrom(u32 b)     { return __builtin_bit_cast(float, b); }
 
 // ── constants (compile-time builtins, no libm) ─────────────────────────────
 constexpr double kInf   = __builtin_huge_val();
@@ -91,24 +93,24 @@ constexpr double kLog10e  = 0.434294481903251827651128918917;
 enum { FP_NAN_ = 0, FP_INFINITE_ = 1, FP_ZERO_ = 2, FP_SUBNORMAL_ = 3, FP_NORMAL_ = 4 };
 
 // ── classification (double) ────────────────────────────────────────────────
-inline bool isnan(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) >  0x7ff0000000000000ULL; }
-inline bool isinf(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL; }
-inline bool isfinite(double x){return (dbits(x) & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
-inline bool signbit(double x){ return (dbits(x) >> 63) != 0; }
-inline bool isnormal(double x){ u64 e = (dbits(x) >> 52) & 0x7ff; return e != 0 && e != 0x7ff; }
-inline int  fpclassify(double x) {
+inline constexpr bool isnan(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) >  0x7ff0000000000000ULL; }
+inline constexpr bool isinf(double x)  { return (dbits(x) & 0x7fffffffffffffffULL) == 0x7ff0000000000000ULL; }
+inline constexpr bool isfinite(double x){return (dbits(x) & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
+inline constexpr bool signbit(double x){ return (dbits(x) >> 63) != 0; }
+inline constexpr bool isnormal(double x){ u64 e = (dbits(x) >> 52) & 0x7ff; return e != 0 && e != 0x7ff; }
+inline constexpr int  fpclassify(double x) {
     u64 b = dbits(x), e = (b >> 52) & 0x7ff, m = b & 0xfffffffffffffULL;
     if (e == 0)     return m ? FP_SUBNORMAL_ : FP_ZERO_;
     if (e == 0x7ff) return m ? FP_NAN_ : FP_INFINITE_;
     return FP_NORMAL_;
 }
 // classification (float)
-inline bool isnan(float x)  { return (fbits(x) & 0x7fffffffU) >  0x7f800000U; }
-inline bool isinf(float x)  { return (fbits(x) & 0x7fffffffU) == 0x7f800000U; }
-inline bool isfinite(float x){return (fbits(x) & 0x7f800000U) != 0x7f800000U; }
-inline bool signbit(float x){ return (fbits(x) >> 31) != 0; }
-inline bool isnormal(float x){ u32 e = (fbits(x) >> 23) & 0xff; return e != 0 && e != 0xff; }
-inline int  fpclassify(float x) {
+inline constexpr bool isnan(float x)  { return (fbits(x) & 0x7fffffffU) >  0x7f800000U; }
+inline constexpr bool isinf(float x)  { return (fbits(x) & 0x7fffffffU) == 0x7f800000U; }
+inline constexpr bool isfinite(float x){return (fbits(x) & 0x7f800000U) != 0x7f800000U; }
+inline constexpr bool signbit(float x){ return (fbits(x) >> 31) != 0; }
+inline constexpr bool isnormal(float x){ u32 e = (fbits(x) >> 23) & 0xff; return e != 0 && e != 0xff; }
+inline constexpr int  fpclassify(float x) {
     u32 b = fbits(x), e = (b >> 23) & 0xff, m = b & 0x7fffffU;
     if (e == 0)    return m ? FP_SUBNORMAL_ : FP_ZERO_;
     if (e == 0xff) return m ? FP_NAN_ : FP_INFINITE_;
@@ -116,17 +118,17 @@ inline int  fpclassify(float x) {
 }
 
 // ── fabs / copysign (intrinsics → andpd / and-or; no libm) ─────────────────
-inline double fabs(double x)            { return __builtin_fabs(x); }
-inline float  fabs(float x)             { return __builtin_fabsf(x); }
-inline double copysign(double x,double y){ return __builtin_copysign(x, y); }
-inline float  copysign(float x,float y) { return __builtin_copysignf(x, y); }
+inline constexpr double fabs(double x)            { return __builtin_fabs(x); }
+inline constexpr float  fabs(float x)             { return __builtin_fabsf(x); }
+inline constexpr double copysign(double x,double y){ return __builtin_copysign(x, y); }
+inline constexpr float  copysign(float x,float y) { return __builtin_copysignf(x, y); }
 
 // ── sqrt (hardware sqrtsd/sqrtss; requires -fno-math-errno to inline) ──────
 inline double sqrt(double x) { double r; __asm__("sqrtsd %1,%0":"=x"(r):"x"(x)); return r; }
 inline float  sqrt(float x)  { float r; __asm__("sqrtss %1,%0":"=x"(r):"x"(x)); return r; }
 
 // ── trunc / floor / ceil / round (SSE2 bit-twiddling, no SSE4.1 roundsd) ───
-inline double trunc(double x) {
+inline constexpr double trunc(double x) {
     u64 b = dbits(x);
     int e = int((b >> 52) & 0x7ff) - 1023;        // unbiased exponent
     if (e < 0)  return dfrom(b & 0x8000000000000000ULL);          // |x|<1 → ±0
@@ -134,15 +136,15 @@ inline double trunc(double x) {
     u64 mask = (1ULL << (52 - e)) - 1;
     return dfrom(b & ~mask);
 }
-inline double floor(double x) {
+inline constexpr double floor(double x) {
     double t = trunc(x);
     return (t > x) ? t - 1.0 : t;                  // NaN: comparisons false → t
 }
-inline double ceil(double x) {
+inline constexpr double ceil(double x) {
     double t = trunc(x);
     return (t < x) ? t + 1.0 : t;
 }
-inline double round(double x) {                    // round-half-away-from-zero
+inline constexpr double round(double x) {                    // round-half-away-from-zero
     double t = trunc(x);
     double d = x - t;                               // fractional part, |d|<1 (NaN→NaN)
     if (d >= 0.5)  return t + 1.0;
@@ -150,10 +152,10 @@ inline double round(double x) {                    // round-half-away-from-zero
     return t;                                        // inf: d=NaN → both false → t=inf
 }
 // float variants via exact double round-trip (double holds all float integers)
-inline float trunc(float x) { return float(trunc(double(x))); }
-inline float floor(float x) { return float(floor(double(x))); }
-inline float ceil(float x)  { return float(ceil(double(x))); }
-inline float round(float x) { return float(round(double(x))); }
+inline constexpr float trunc(float x) { return float(trunc(double(x))); }
+inline constexpr float floor(float x) { return float(floor(double(x))); }
+inline constexpr float ceil(float x)  { return float(ceil(double(x))); }
+inline constexpr float round(float x) { return float(round(double(x))); }
 
 // ── nearbyint / rint : round to current mode (default RN-even) ─────────────
 // (x ± 2^52) ∓ 2^52 rounds per the active MXCSR mode and is exact for |x|<2^52.
@@ -170,14 +172,22 @@ inline float  rint(float x)       { return float(rint(double(x))); }
 inline float  nearbyint(float x)  { return float(rint(double(x))); }
 
 // ── fmod : exact, shift-and-subtract (each step exact by Sterbenz) ─────────
-inline double fmod(double x, double y) {
+inline constexpr double fmod(double x, double y) {
     if (isnan(x) || isnan(y)) return kQNaN;              // propagation, not error
     if (isinf(x) || y == 0.0) return raise_domain();     // F.10.7.1 domain error
     if (isinf(y)) return x;
     double r = fabs(x), dy = fabs(y);
     if (r < dy) return x;
     double d = dy;
-    while (d + d <= r) d += d;                      // largest dy*2^k ≤ r
+    // `d <= r - d`, not `d + d <= r`. The two ask the same question -- 2d <= r --
+    // but the second COMPUTES 2d, and on the largest finite value that overflows
+    // to infinity. At run time the comparison then answers false and the loop
+    // ends correctly, which is why this stood for as long as it did; in a
+    // constant expression the overflow is simply not one, and fmod(DBL_MAX, y)
+    // stopped compiling the moment Ф47 made the function constexpr. `r - d` can
+    // never overflow (d <= r throughout) and is exact wherever the answer is
+    // close, by Sterbenz: near the boundary d ~ r/2, so r/2 <= d <= 2r.
+    while (d <= r - d) d += d;                      // largest dy*2^k ≤ r
     for (;;) {
         if (r >= d) r -= d;                         // exact: d/2 < r ≤ ... → Sterbenz
         if (d == dy) break;
@@ -185,10 +195,10 @@ inline double fmod(double x, double y) {
     }
     return copysign(r, x);
 }
-inline float fmod(float x, float y) { return float(fmod(double(x), double(y))); }
+inline constexpr float fmod(float x, float y) { return float(fmod(double(x), double(y))); }
 
 // ── remainder : round-to-nearest-even quotient ─────────────────────────────
-inline double remainder(double x, double y) {
+inline constexpr double remainder(double x, double y) {
     if (isnan(x) || isnan(y)) return kQNaN;
     if (isinf(x) || y == 0.0) return raise_domain();     // F.10.7.2 domain error
     if (isinf(y)) return x;
@@ -202,20 +212,20 @@ inline double remainder(double x, double y) {
     }
     return signbit(x) ? -r : r;
 }
-inline float remainder(float x, float y) { return float(remainder(double(x), double(y))); }
+inline constexpr float remainder(float x, float y) { return float(remainder(double(x), double(y))); }
 
 // ── two-product / two-sum (Dekker, FMA-free) — used by hypot/fma ───────────
-inline void two_sum(double a, double b, double &s, double &e) {
+inline constexpr void two_sum(double a, double b, double &s, double &e) {
     s = a + b;
     double bb = s - a;
     e = (a - (s - bb)) + (b - bb);
 }
-inline void split(double a, double &hi, double &lo) {
+inline constexpr void split(double a, double &hi, double &lo) {
     const double c = 134217729.0 * a;              // 2^27+1
     hi = c - (c - a);
     lo = a - hi;
 }
-inline void two_prod(double a, double b, double &p, double &e) {
+inline constexpr void two_prod(double a, double b, double &p, double &e) {
     p = a * b;
     double ah, al, bh, bl;
     split(a, ah, al);
@@ -261,16 +271,16 @@ inline float hypot(float x, float y) {
 }
 
 // ── scalbn / ldexp : x * 2^n (musl staged-multiplier scheme, no libm) ──────
-inline double scalbn(double x, int n) {
+inline constexpr double scalbn(double x, int n) {
     if (n > 1023) { x *= 0x1p1023; n -= 1023;
         if (n > 1023) { x *= 0x1p1023; n -= 1023; if (n > 1023) n = 1023; } }
     else if (n < -1022) { x *= 0x1p-1022 * 0x1p53; n += 1022 - 53;
         if (n < -1022) { x *= 0x1p-1022 * 0x1p53; n += 1022 - 53; if (n < -1022) n = -1022; } }
     return x * dfrom((u64)(0x3ff + n) << 52);
 }
-inline double ldexp(double x, int n) { return scalbn(x, n); }
-inline float  scalbn(float x, int n) { return float(scalbn(double(x), n)); }
-inline float  ldexp(float x, int n)  { return float(scalbn(double(x), n)); }
+inline constexpr double ldexp(double x, int n) { return scalbn(x, n); }
+inline constexpr float  scalbn(float x, int n) { return float(scalbn(double(x), n)); }
+inline constexpr float  ldexp(float x, int n)  { return float(scalbn(double(x), n)); }
 
 // ── e^r − 1 = Σ_{n≥1} rⁿ/n!  (reciprocal factorials; accurate for |r|<~0.7) ─
 inline double expm1_series(double r) {
@@ -910,7 +920,7 @@ inline float lgamma(float x) { return float(lgamma(double(x))); }
 // ════════════════════════════════════════════════════════════════════════
 //  FP manipulation, rounding-to-integer, fdim/fmax/fmin, software fma.
 // ════════════════════════════════════════════════════════════════════════
-inline double frexp(double x, int *e) {
+inline constexpr double frexp(double x, int *e) {
     u64 b = dbits(x); int ex = (int)((b >> 52) & 0x7ff);
     if (ex == 0x7ff || x == 0.0) { *e = 0; return x; }
     int add = 0;
@@ -918,12 +928,12 @@ inline double frexp(double x, int *e) {
     *e = ex - 1022 + add;
     return dfrom((b & 0x800fffffffffffffULL) | ((u64)1022 << 52));
 }
-inline double modf(double x, double *ip) {
+inline constexpr double modf(double x, double *ip) {
     if (isinf(x)) { *ip = x; return copysign(0.0, x); }
     double i = trunc(x); *ip = i;
     return isnan(x) ? x : copysign(x - i, x);
 }
-inline int ilogb(double x) {
+inline constexpr int ilogb(double x) {
     u64 b = dbits(x) & 0x7fffffffffffffffULL;
     if (b == 0) return (-2147483647 - 1);                          // FP_ILOGB0
     int e = (int)(b >> 52);
@@ -931,17 +941,17 @@ inline int ilogb(double x) {
     if (e == 0) { int n = 0; u64 m = b; while (!(m & 0x0010000000000000ULL)) { m <<= 1; ++n; } return -1022 - n; }
     return e - 1023;
 }
-inline double logb(double x) {
+inline constexpr double logb(double x) {
     if (x == 0.0) return raise_pole(-1.0);            // F.10.3.11 pole error
     if (isinf(x)) return kInf;
     if (isnan(x)) return x;
     return (double)ilogb(x);
 }
-inline double scalbln(double x, long n) {
+inline constexpr double scalbln(double x, long n) {
     if (n > 100000) n = 100000; else if (n < -100000) n = -100000;
     return scalbn(x, (int)n);
 }
-inline double nextafter(double x, double y) {
+inline constexpr double nextafter(double x, double y) {
     if (isnan(x) || isnan(y)) return x + y;
     u64 ux = dbits(x), uy = dbits(y);
     if (ux == uy) return y;
@@ -951,60 +961,82 @@ inline double nextafter(double x, double y) {
     else ux++;
     return dfrom(ux);
 }
-inline double nexttoward(double x, double y) { return nextafter(x, y); }   // long double = double
-inline double remquo(double x, double y, int *quo) {
+inline constexpr double nexttoward(double x, double y) { return nextafter(x, y); }   // long double = double
+inline constexpr double remquo(double x, double y, int *quo) {
     if (isnan(x) || isnan(y)) { *quo = 0; return kQNaN; }
     if (isinf(x) || y == 0.0) { *quo = 0; return raise_domain(); }
     if (isinf(y)) { *quo = 0; return x; }
+    // rint reads the CURRENT rounding mode, so it is not constexpr and must not
+    // become one: a constant evaluation has no MXCSR to read and would answer
+    // round-to-nearest whatever the program had set. [cmath.syn] leaves rint
+    // out of P0533R9's list for exactly that reason. The builtin computes the
+    // whole thing instead, and phase240 requires it to agree bit for bit.
+    if consteval { return __builtin_remquo(x, y, quo); }
     double r = remainder(x, y);
     double n = rint((x - r) / y);                                    // integer quotient (snap)
     int iq = (int)fmod(fabs(n), 8.0);                                // low 3 bits suffice
     *quo = (signbit(x) ^ signbit(y)) ? -iq : iq;
     return r;
 }
-inline long      lround(double x)  { return (long)round(x); }
-inline long long llround(double x) { return (long long)round(x); }
+inline constexpr long      lround(double x)  { return (long)round(x); }
+inline constexpr long long llround(double x) { return (long long)round(x); }
 inline long      lrint(double x)   { return (long)rint(x); }
 inline long long llrint(double x)  { return (long long)rint(x); }
-inline double fdim(double x, double y) {
+inline constexpr double fdim(double x, double y) {
     if (isnan(x) || isnan(y)) return kQNaN;
     return (x > y) ? x - y : 0.0;
 }
-inline double fmax(double x, double y) {
+inline constexpr double fmax(double x, double y) {
     if (isnan(x)) return y;
     if (isnan(y)) return x;
     if (x == y) return signbit(x) ? y : x;                           // fmax(+0,−0)=+0
     return x < y ? y : x;
 }
-inline double fmin(double x, double y) {
+inline constexpr double fmin(double x, double y) {
     if (isnan(x)) return y;
     if (isnan(y)) return x;
     if (x == y) return signbit(x) ? x : y;                           // fmin(+0,−0)=−0
     return x < y ? x : y;
 }
 // fma : exact a·b via Dekker two_prod, then double-double sum with c (≤1 ULP, no -mfma).
-inline double fma(double a, double b, double c) {
+inline constexpr double fma(double a, double b, double c) {
     if (!isfinite(a) || !isfinite(b) || !isfinite(c) || a == 0.0 || b == 0.0)
         return a * b + c;                                            // inf/nan/zero edge cases
     double p, e; two_prod(a, b, p, e);                              // a·b = p+e exact
     double s, t; two_sum(p, c, s, t);                              // p+c = s+t exact
     return s + (t + e);
 }
-inline float  frexp(float x, int *e)        { return float(frexp(double(x), e)); }
-inline float  modf(float x, float *ip)      { double i; float r = float(modf(double(x), &i)); *ip = (float)i; return r; }
-inline int    ilogb(float x)                { return ilogb(double(x)); }
-inline float  logb(float x)                 { return float(logb(double(x))); }
-inline float  scalbln(float x, long n)      { return float(scalbln(double(x), n)); }
-inline float  nextafter(float x, float y)   { return float(nextafter(double(x), double(y))); }
-inline float  remquo(float x, float y, int *q){ return float(remquo(double(x), double(y), q)); }
-inline long      lround(float x)  { return lround(double(x)); }
-inline long long llround(float x) { return llround(double(x)); }
+inline constexpr float  frexp(float x, int *e)        { return float(frexp(double(x), e)); }
+inline constexpr float  modf(float x, float *ip)      { double i; float r = float(modf(double(x), &i)); *ip = (float)i; return r; }
+inline constexpr int    ilogb(float x)                { return ilogb(double(x)); }
+inline constexpr float  logb(float x)                 { return float(logb(double(x))); }
+inline constexpr float  scalbln(float x, long n)      { return float(scalbln(double(x), n)); }
+// ‼ This used to read `float(nextafter(double(x), double(y)))`, and it did not
+// step at all. The next double after 1.0 is 1.0000000000000002, and converting
+// that back to float rounds it to 1.0f -- so nextafter(1.0f, 2.0f) returned
+// 1.0f, its own argument, and had done since the header was written. A wider
+// type cannot take a narrower type's step: the step has to happen in the
+// representation that owns it. Ф47 found it because constexpr let a
+// static_assert ask the question, which no run-time test in the suite had.
+inline constexpr float nextafter(float x, float y) {
+    if (isnan(x) || isnan(y)) return x + y;
+    u32 ux = fbits(x), uy = fbits(y);
+    if (ux == uy) return y;
+    u32 ax = ux & 0x7fffffffU, ay = uy & 0x7fffffffU;
+    if (ax == 0) { if (ay == 0) return y; ux = (uy & 0x80000000U) | 1; }
+    else if (ax > ay || ((ux ^ uy) & 0x80000000U)) ux--;
+    else ux++;
+    return ffrom(ux);
+}
+inline constexpr float  remquo(float x, float y, int *q){ return float(remquo(double(x), double(y), q)); }
+inline constexpr long      lround(float x)  { return lround(double(x)); }
+inline constexpr long long llround(float x) { return llround(double(x)); }
 inline long      lrint(float x)   { return lrint(double(x)); }
 inline long long llrint(float x)  { return llrint(double(x)); }
-inline float  fdim(float x, float y) { return float(fdim(double(x), double(y))); }
-inline float  fmax(float x, float y) { return float(fmax(double(x), double(y))); }
-inline float  fmin(float x, float y) { return float(fmin(double(x), double(y))); }
-inline float  fma(float x, float y, float z) { return float(fma(double(x), double(y), double(z))); }
+inline constexpr float  fdim(float x, float y) { return float(fdim(double(x), double(y))); }
+inline constexpr float  fmax(float x, float y) { return float(fmax(double(x), double(y))); }
+inline constexpr float  fmin(float x, float y) { return float(fmin(double(x), double(y))); }
+inline constexpr float  fma(float x, float y, float z) { return float(fma(double(x), double(y), double(z))); }
 
 // ── hypot, three-argument ([c.math.hypot3], C++17) ────────────────────────
 // sqrt(x²+y²+z²) without squaring first, which would overflow for arguments
@@ -1083,16 +1115,16 @@ constexpr long double lerp(long double a, long double b, long double t) noexcept
 //  (masked). Errno-free like the double paths: return kQNaNL/kInfL/signed-zero
 //  directly, never set errno, never raise. float/double overloads unchanged.
 // ════════════════════════════════════════════════════════════════════════
-inline unsigned __int128 ldbits(long double x){ return __builtin_bit_cast(unsigned __int128, x); }
-inline unsigned ld_exp(long double x){ return (unsigned)(uint16_t)(ldbits(x) >> 64) & 0x7FFFu; }
-inline u64      ld_man(long double x){ return (u64)ldbits(x); }
+inline constexpr unsigned __int128 ldbits(long double x){ return __builtin_bit_cast(unsigned __int128, x); }
+inline constexpr unsigned ld_exp(long double x){ return (unsigned)(uint16_t)(ldbits(x) >> 64) & 0x7FFFu; }
+inline constexpr u64      ld_man(long double x){ return (u64)ldbits(x); }
 
-inline bool signbit(long double x){ return ((ldbits(x) >> 79) & 1) != 0; }
-inline bool isnan(long double x){ return ld_exp(x) == 0x7FFF && (ld_man(x) & 0x7FFFFFFFFFFFFFFFull) != 0; }
-inline bool isinf(long double x){ return ld_exp(x) == 0x7FFF && ld_man(x) == 0x8000000000000000ull; }
-inline bool isfinite(long double x){ return ld_exp(x) != 0x7FFF; }
-inline bool isnormal(long double x){ unsigned e = ld_exp(x); return e != 0 && e != 0x7FFF; }
-inline int  fpclassify(long double x){
+inline constexpr bool signbit(long double x){ return ((ldbits(x) >> 79) & 1) != 0; }
+inline constexpr bool isnan(long double x){ return ld_exp(x) == 0x7FFF && (ld_man(x) & 0x7FFFFFFFFFFFFFFFull) != 0; }
+inline constexpr bool isinf(long double x){ return ld_exp(x) == 0x7FFF && ld_man(x) == 0x8000000000000000ull; }
+inline constexpr bool isfinite(long double x){ return ld_exp(x) != 0x7FFF; }
+inline constexpr bool isnormal(long double x){ unsigned e = ld_exp(x); return e != 0 && e != 0x7FFF; }
+inline constexpr int  fpclassify(long double x){
     unsigned e = ld_exp(x); u64 m = ld_man(x);
     if (e == 0x7FFF) return (m & 0x7FFFFFFFFFFFFFFFull) ? FP_NAN_ : FP_INFINITE_;
     if (e == 0)      return (m == 0) ? FP_ZERO_ : FP_SUBNORMAL_;
@@ -1133,9 +1165,35 @@ inline uint16_t x87_getcw(){ uint16_t cw; __asm__ volatile("fnstcw %0" : "=m"(cw
 inline void     x87_setcw(uint16_t cw){ __asm__ volatile("fldcw %0" :: "m"(cw)); }
 
 // ── direct x87 ops (each sequence is stack-balanced: every push is popped) ──
-inline long double fabs(long double x){ long double r; __asm__("fabs" : "=t"(r) : "0"(x)); return r; }
+// ── x87 at run time, the builtin at translation time ───────────────────────
+// P0533R9 makes the functions below constexpr, and every one of them is
+// implemented here in x87 assembly, which no constant evaluation may execute.
+// Each therefore carries a twin: `if consteval` takes the __builtin_*l form,
+// which GCC folds with MPFR at the target's own 80-bit format (measured on
+// x86_64-elf-g++ 15.2 under this build's flags), and everything else keeps the
+// instruction that was measured and tuned for it. At run time nothing changed:
+// the builtin would emit a call to a libm this target does not have -- measured,
+// __builtin_fmodl compiles to `call fmodl` at -O2 -- which is why the assembly
+// was written in the first place.
+//
+// Two rules hold the twins honest, and phase240 enforces both.
+//   * Every function here computes an EXACT result -- a remainder, a rounding,
+//     a scaling by a power of two, an exponent. There is no rounding choice to
+//     disagree about, so the two halves must agree BIT FOR BIT, sign of zero
+//     included. That is the oracle: the library's own run-time half.
+//   * The `if consteval` sits AFTER the error branches, never before. Those
+//     branches raise an IEEE flag through a volatile operation, which is not a
+//     constant expression -- so `logb(0.0L)` in a constant expression is
+//     ill-formed, exactly as [library.c] requires of a call that would raise.
+//     Hoisting the builtin above them would answer -inf quietly instead, and
+//     silence is the one thing that must not happen here.
+
+inline constexpr long double fabs(long double x){
+    if consteval { return __builtin_fabsl(x); }
+    long double r; __asm__("fabs" : "=t"(r) : "0"(x)); return r;
+}
 inline long double sqrt(long double x){ long double r; __asm__("fsqrt" : "=t"(r) : "0"(x)); return r; }
-inline long double copysign(long double x, long double y){
+inline constexpr long double copysign(long double x, long double y){
     unsigned __int128 s = (unsigned __int128)1 << 79;
     return __builtin_bit_cast(long double, (ldbits(x) & ~s) | (ldbits(y) & s));
 }
@@ -1151,12 +1209,21 @@ inline long double x87_round_mode(long double x, uint16_t rc){
                      : "=t"(r) : "0"(x), [nw]"m"(nw), [cw]"m"(cw));
     return r;
 }
-inline long double trunc(long double x){ return isfinite(x) ? x87_round_mode(x, 3) : x; }
-inline long double floor(long double x){ return isfinite(x) ? x87_round_mode(x, 1) : x; }
-inline long double ceil (long double x){ return isfinite(x) ? x87_round_mode(x, 2) : x; }
+inline constexpr long double trunc(long double x){
+    if consteval { return __builtin_truncl(x); }
+    return isfinite(x) ? x87_round_mode(x, 3) : x;
+}
+inline constexpr long double floor(long double x){
+    if consteval { return __builtin_floorl(x); }
+    return isfinite(x) ? x87_round_mode(x, 1) : x;
+}
+inline constexpr long double ceil (long double x){
+    if consteval { return __builtin_ceill(x); }
+    return isfinite(x) ? x87_round_mode(x, 2) : x;
+}
 inline long double rint (long double x){ if (!isfinite(x)) return x; long double r; __asm__("frndint" : "=t"(r) : "0"(x)); return r; }
 inline long double nearbyint(long double x){ return rint(x); }   // no fetestexcept in boxcxx: identical to rint
-inline long double round(long double x){                         // round half away from zero
+inline constexpr long double round(long double x){                         // round half away from zero
     if (!isfinite(x)) return x;
     long double t = trunc(x), d = x - t;
     if (d >=  0.5L) return t + 1.0L;
@@ -1164,26 +1231,28 @@ inline long double round(long double x){                         // round half a
     return t;
 }
 
-inline long double scalbn(long double x, int n){
+inline constexpr long double scalbn(long double x, int n){
     if (!isfinite(x) || x == 0.0L) return x;
+    if consteval { return __builtin_scalbnl(x, n); }
     long double ln = (long double)n, r;
     __asm__("fscale\n\tfstp %%st(1)" : "=t"(r) : "0"(x), "u"(ln));
     return r;
 }
-inline long double ldexp(long double x, int n){ return scalbn(x, n); }
-inline long double scalbln(long double x, long n){
+inline constexpr long double ldexp(long double x, int n){ return scalbn(x, n); }
+inline constexpr long double scalbln(long double x, long n){
     int ni = (n > 100000) ? 100000 : (n < -100000 ? -100000 : (int)n);
     return scalbn(x, ni);
 }
 
-inline long double logb(long double x){
+inline constexpr long double logb(long double x){
     if (x == 0.0L) return raise_pole_l(-1.0L);           // F.10.3.11 pole error
     if (isinf(x))  return kInfL;
     if (isnan(x))  return x;
+    if consteval { return __builtin_logbl(x); }
     long double e; __asm__("fxtract\n\tfstp %%st(0)" : "=t"(e) : "0"(x) : "st(1)");
     return e;                                             // fxtract: st0=significand, st1=exponent
 }
-inline int ilogb(long double x){
+inline constexpr int ilogb(long double x){
     unsigned e = ld_exp(x); u64 m = ld_man(x);
     if (e == 0){
         if (m == 0) return FP_ILOGB0;
@@ -1193,8 +1262,9 @@ inline int ilogb(long double x){
     if (e == 0x7FFF) return (m & 0x7FFFFFFFFFFFFFFFull) ? FP_ILOGBNAN : 2147483647;   // NaN : Inf
     return (int)e - 16383;
 }
-inline long double frexp(long double x, int *e){
+inline constexpr long double frexp(long double x, int *e){
     if (!isfinite(x) || x == 0.0L) { *e = 0; return x; }
+    if consteval { return __builtin_frexpl(x, e); }
     long double sig, expo;
     __asm__("fxtract" : "=t"(sig), "=u"(expo) : "0"(x));
     *e = (int)expo + 1;
@@ -1210,18 +1280,18 @@ inline long double frexp(long double x, int *e){
 // Dekker primitives, reused by the Ф27d2 erf/gamma paths further below.
 struct LdDd { long double hi, lo; };
 
-inline void two_sum_l(long double a, long double b, long double &s, long double &e){
+inline constexpr void two_sum_l(long double a, long double b, long double &s, long double &e){
     s = a + b;
     long double bb = s - a;
     e = (a - (s - bb)) + (b - bb);
 }
-inline void split_l(long double a, long double &hi, long double &lo){
+inline constexpr void split_l(long double a, long double &hi, long double &lo){
     const long double SPLIT = 4294967297.0L;         // 2^32 + 1 splits a 64-bit mantissa
     long double c = SPLIT * a;
     hi = c - (c - a);
     lo = a - hi;
 }
-inline void two_prod_l(long double a, long double b, long double &p, long double &e){
+inline constexpr void two_prod_l(long double a, long double b, long double &p, long double &e){
     p = a * b;
     long double ah, al, bh, bl;
     split_l(a, ah, al);
@@ -1783,28 +1853,31 @@ inline long double tan(long double x){
     return neg ? -v : v;
 }
 
-inline long double fmod(long double x, long double y){
+inline constexpr long double fmod(long double x, long double y){
     if (isnan(x) || isnan(y)) return kQNaNL;
     if (isinf(x) || y == 0.0L) return raise_domain_l();  // domain error
     if (isinf(y)) return x;
+    if consteval { return __builtin_fmodl(x, y); }
     long double r;
     __asm__("1:\n\tfprem\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
             : "=t"(r) : "0"(x), "u"(y) : "ax", "cc");
     return r;
 }
-inline long double remainder(long double x, long double y){
+inline constexpr long double remainder(long double x, long double y){
     if (isnan(x) || isnan(y)) return kQNaNL;
     if (isinf(x) || y == 0.0L) return raise_domain_l();  // domain error
     if (isinf(y)) return x;
+    if consteval { return __builtin_remainderl(x, y); }
     long double r;
     __asm__("1:\n\tfprem1\n\tfnstsw %%ax\n\ttestb $0x04, %%ah\n\tjnz 1b\n\tfstp %%st(1)"
             : "=t"(r) : "0"(x), "u"(y) : "ax", "cc");
     return r;
 }
-inline long double remquo(long double x, long double y, int *quo){
+inline constexpr long double remquo(long double x, long double y, int *quo){
     if (isnan(x) || isnan(y)) { *quo = 0; return kQNaNL; }
     if (isinf(x) || y == 0.0L) { *quo = 0; return raise_domain_l(); }
     if (isinf(y)) { *quo = 0; return x; }
+    if consteval { return __builtin_remquol(x, y, quo); }
     long double r = remainder(x, y);                     // IEEE remainder via fprem1
     long double n = rint((x - r) / y);                   // exact integer quotient (snap)
     int iq = (int)fmod(fabs(n), 8.0L);                   // low 3 quotient bits
@@ -1812,24 +1885,24 @@ inline long double remquo(long double x, long double y, int *quo){
     return r;
 }
 
-inline long double fdim(long double x, long double y){
+inline constexpr long double fdim(long double x, long double y){
     if (isnan(x) || isnan(y)) return kQNaNL;
     return (x > y) ? x - y : 0.0L;
 }
-inline long double fmax(long double x, long double y){
+inline constexpr long double fmax(long double x, long double y){
     if (isnan(x)) return y;
     if (isnan(y)) return x;
     if (x == y) return signbit(x) ? y : x;               // fmax(+0,−0)=+0
     return x < y ? y : x;
 }
-inline long double fmin(long double x, long double y){
+inline constexpr long double fmin(long double x, long double y){
     if (isnan(x)) return y;
     if (isnan(y)) return x;
     if (x == y) return signbit(x) ? x : y;               // fmin(+0,−0)=−0
     return x < y ? x : y;
 }
 
-inline long double nextafter(long double x, long double y){
+inline constexpr long double nextafter(long double x, long double y){
     if (isnan(x) || isnan(y)) return x + y;
     if (x == y) return y;
     unsigned __int128 bx = ldbits(x);
@@ -1852,16 +1925,16 @@ inline long double nextafter(long double x, long double y){
     unsigned __int128 res = ((unsigned __int128)nse << 64) | nm;
     return __builtin_bit_cast(long double, res);
 }
-inline long double nexttoward(long double x, long double y){ return nextafter(x, y); }
+inline constexpr long double nexttoward(long double x, long double y){ return nextafter(x, y); }
 
-inline long double modf(long double x, long double *ip){
+inline constexpr long double modf(long double x, long double *ip){
     if (isinf(x)) { *ip = x; return copysign(0.0L, x); }
     long double i = trunc(x); *ip = i;
     return isnan(x) ? x : copysign(x - i, x);
 }
 
 // ── C-named (f / l) wrappers over the 80-bit primaries ─────────────────────
-inline float fabsf(float x){ return (float)fabs((long double)x); }              inline long double fabsl(long double x){ return fabs(x); }
+inline constexpr float fabsf(float x){ return (float)fabs((long double)x); }              inline long double fabsl(long double x){ return fabs(x); }
 inline float sqrtf(float x){ return (float)sqrt((long double)x); }              inline long double sqrtl(long double x){ return sqrt(x); }
 inline float sinf(float x){ return (float)sin((long double)x); }                inline long double sinl(long double x){ return sin(x); }
 inline float cosf(float x){ return (float)cos((long double)x); }                inline long double cosl(long double x){ return cos(x); }
@@ -1873,55 +1946,58 @@ inline float logf(float x){ return (float)log((long double)x); }               i
 inline float log2f(float x){ return (float)log2((long double)x); }             inline long double log2l(long double x){ return log2(x); }
 inline float log10f(float x){ return (float)log10((long double)x); }           inline long double log10l(long double x){ return log10(x); }
 inline float log1pf(float x){ return (float)log1p((long double)x); }           inline long double log1pl(long double x){ return log1p(x); }
-inline float ceilf(float x){ return (float)ceil((long double)x); }             inline long double ceill(long double x){ return ceil(x); }
-inline float floorf(float x){ return (float)floor((long double)x); }           inline long double floorl(long double x){ return floor(x); }
-inline float truncf(float x){ return (float)trunc((long double)x); }           inline long double truncl(long double x){ return trunc(x); }
-inline float roundf(float x){ return (float)round((long double)x); }           inline long double roundl(long double x){ return round(x); }
+inline constexpr float ceilf(float x){ return (float)ceil((long double)x); }             inline long double ceill(long double x){ return ceil(x); }
+inline constexpr float floorf(float x){ return (float)floor((long double)x); }           inline long double floorl(long double x){ return floor(x); }
+inline constexpr float truncf(float x){ return (float)trunc((long double)x); }           inline long double truncl(long double x){ return trunc(x); }
+inline constexpr float roundf(float x){ return (float)round((long double)x); }           inline long double roundl(long double x){ return round(x); }
 inline float nearbyintf(float x){ return (float)nearbyint((long double)x); }    inline long double nearbyintl(long double x){ return nearbyint(x); }
 inline float rintf(float x){ return (float)rint((long double)x); }             inline long double rintl(long double x){ return rint(x); }
-inline float logbf(float x){ return (float)logb((long double)x); }             inline long double logbl(long double x){ return logb(x); }
+inline constexpr float logbf(float x){ return (float)logb((long double)x); }             inline long double logbl(long double x){ return logb(x); }
 inline float atan2f(float y, float x){ return (float)atan2((long double)y,(long double)x); }              inline long double atan2l(long double y,long double x){ return atan2(y,x); }
-inline float fmodf(float x, float y){ return (float)fmod((long double)x,(long double)y); }                inline long double fmodl(long double x,long double y){ return fmod(x,y); }
-inline float remainderf(float x, float y){ return (float)remainder((long double)x,(long double)y); }      inline long double remainderl(long double x,long double y){ return remainder(x,y); }
-inline float fdimf(float x, float y){ return (float)fdim((long double)x,(long double)y); }                inline long double fdiml(long double x,long double y){ return fdim(x,y); }
-inline float fmaxf(float x, float y){ return (float)fmax((long double)x,(long double)y); }                inline long double fmaxl(long double x,long double y){ return fmax(x,y); }
-inline float fminf(float x, float y){ return (float)fmin((long double)x,(long double)y); }                inline long double fminl(long double x,long double y){ return fmin(x,y); }
-inline float copysignf(float x, float y){ return (float)copysign((long double)x,(long double)y); }        inline long double copysignl(long double x,long double y){ return copysign(x,y); }
-inline float nextafterf(float x, float y){ return (float)nextafter((long double)x,(long double)y); }      inline long double nextafterl(long double x,long double y){ return nextafter(x,y); }
+inline constexpr float fmodf(float x, float y){ return (float)fmod((long double)x,(long double)y); }                inline long double fmodl(long double x,long double y){ return fmod(x,y); }
+inline constexpr float remainderf(float x, float y){ return (float)remainder((long double)x,(long double)y); }      inline long double remainderl(long double x,long double y){ return remainder(x,y); }
+inline constexpr float fdimf(float x, float y){ return (float)fdim((long double)x,(long double)y); }                inline long double fdiml(long double x,long double y){ return fdim(x,y); }
+inline constexpr float fmaxf(float x, float y){ return (float)fmax((long double)x,(long double)y); }                inline long double fmaxl(long double x,long double y){ return fmax(x,y); }
+inline constexpr float fminf(float x, float y){ return (float)fmin((long double)x,(long double)y); }                inline long double fminl(long double x,long double y){ return fmin(x,y); }
+inline constexpr float copysignf(float x, float y){ return (float)copysign((long double)x,(long double)y); }        inline long double copysignl(long double x,long double y){ return copysign(x,y); }
+// nextafterf goes to the float overload directly, NOT through long double:
+// see the note at nextafter(float, float) for what the wide detour cost.
+inline constexpr float nextafterf(float x, float y){ return nextafter(x, y); }
+inline constexpr long double nextafterl(long double x, long double y){ return nextafter(x, y); }
 
-inline float scalbnf(float x, int n){ return (float)scalbn((long double)x, n); }    inline long double scalbnl(long double x, int n){ return scalbn(x, n); }
-inline float ldexpf(float x, int n){ return (float)scalbn((long double)x, n); }     inline long double ldexpl(long double x, int n){ return scalbn(x, n); }
-inline float scalblnf(float x, long n){ return (float)scalbln((long double)x, n); } inline long double scalblnl(long double x, long n){ return scalbln(x, n); }
-inline float frexpf(float x, int *e){ return (float)frexp((long double)x, e); }     inline long double frexpl(long double x, int *e){ return frexp(x, e); }
-inline float modff(float x, float *ip){ long double i; float r = (float)modf((long double)x, &i); *ip = (float)i; return r; }  inline long double modfl(long double x, long double *ip){ return modf(x, ip); }
-inline float remquof(float x, float y, int *q){ return (float)remquo((long double)x,(long double)y,q); }  inline long double remquol(long double x,long double y,int *q){ return remquo(x,y,q); }
-inline int   ilogbf(float x){ return ilogb((double)x); }   inline int ilogbl(long double x){ return ilogb(x); }
-inline long lround(long double x){ return (long)round(x); } inline long lroundf(float x){ return (long)round((long double)x); } inline long lroundl(long double x){ return (long)round(x); }
-inline long long llround(long double x){ return (long long)round(x); } inline long long llroundf(float x){ return (long long)round((long double)x); } inline long long llroundl(long double x){ return (long long)round(x); }
+inline constexpr float scalbnf(float x, int n){ return (float)scalbn((long double)x, n); }    inline long double scalbnl(long double x, int n){ return scalbn(x, n); }
+inline constexpr float ldexpf(float x, int n){ return (float)scalbn((long double)x, n); }     inline long double ldexpl(long double x, int n){ return scalbn(x, n); }
+inline constexpr float scalblnf(float x, long n){ return (float)scalbln((long double)x, n); } inline long double scalblnl(long double x, long n){ return scalbln(x, n); }
+inline constexpr float frexpf(float x, int *e){ return (float)frexp((long double)x, e); }     inline long double frexpl(long double x, int *e){ return frexp(x, e); }
+inline constexpr float modff(float x, float *ip){ long double i; float r = (float)modf((long double)x, &i); *ip = (float)i; return r; }  inline long double modfl(long double x, long double *ip){ return modf(x, ip); }
+inline constexpr float remquof(float x, float y, int *q){ return (float)remquo((long double)x,(long double)y,q); }  inline long double remquol(long double x,long double y,int *q){ return remquo(x,y,q); }
+inline constexpr int   ilogbf(float x){ return ilogb((double)x); }   inline int ilogbl(long double x){ return ilogb(x); }
+inline constexpr long lround(long double x){ return (long)round(x); } inline long lroundf(float x){ return (long)round((long double)x); } inline long lroundl(long double x){ return (long)round(x); }
+inline constexpr long long llround(long double x){ return (long long)round(x); } inline long long llroundf(float x){ return (long long)round((long double)x); } inline long long llroundl(long double x){ return (long long)round(x); }
 inline long lrint(long double x){ return (long)rint(x); } inline long lrintf(float x){ return (long)rint((long double)x); } inline long lrintl(long double x){ return (long)rint(x); }
 inline long long llrint(long double x){ return (long long)rint(x); } inline long long llrintf(float x){ return (long long)rint((long double)x); } inline long long llrintl(long double x){ return (long long)rint(x); }
-inline double nexttoward(double x, long double y){       // step a double one ULP toward the true LD y
+inline constexpr double nexttoward(double x, long double y){       // step a double one ULP toward the true LD y
     if (isnan(x) || isnan(y)) return x + (double)y;
     long double lx = (long double)x;
     if (lx == y) return (double)y;
     return nextafter(x, (lx < y) ? kInf : -kInf);
 }
-inline float nexttoward(float x, long double y){
+inline constexpr float nexttoward(float x, long double y){
     if (isnan(x) || isnan(y)) return x + (float)y;
     long double lx = (long double)x;
     if (lx == y) return (float)y;
     return nextafter(x, (lx < y) ? kInfF : -kInfF);
 }
-inline float nexttowardf(float x, long double y){ return nexttoward(x, y); }
-inline long double nexttowardl(long double x, long double y){ return nexttoward(x, y); }
-inline double abs(double x){return fabs(x);} inline float abs(float x){return fabs(x);} inline long double abs(long double x){return fabs(x);}
+inline constexpr float nexttowardf(float x, long double y){ return nexttoward(x, y); }
+inline constexpr long double nexttowardl(long double x, long double y){ return nexttoward(x, y); }
+inline constexpr double abs(double x){return fabs(x);} inline constexpr float abs(float x){return fabs(x);} inline constexpr long double abs(long double x){return fabs(x);}
 inline double nan(const char*){return __builtin_nan("");} inline float nanf(const char*){return __builtin_nanf("");} inline long double nanl(const char*){return __builtin_nanl("");}
-inline bool isgreater(double x,double y){return __builtin_isgreater(x,y);}
-inline bool isgreaterequal(double x,double y){return __builtin_isgreaterequal(x,y);}
-inline bool isless(double x,double y){return __builtin_isless(x,y);}
-inline bool islessequal(double x,double y){return __builtin_islessequal(x,y);}
-inline bool islessgreater(double x,double y){return __builtin_islessgreater(x,y);}
-inline bool isunordered(double x,double y){return __builtin_isunordered(x,y);}
+inline constexpr bool isgreater(double x,double y){return __builtin_isgreater(x,y);}
+inline constexpr bool isgreaterequal(double x,double y){return __builtin_isgreaterequal(x,y);}
+inline constexpr bool isless(double x,double y){return __builtin_isless(x,y);}
+inline constexpr bool islessequal(double x,double y){return __builtin_islessequal(x,y);}
+inline constexpr bool islessgreater(double x,double y){return __builtin_islessgreater(x,y);}
+inline constexpr bool isunordered(double x,double y){return __builtin_isunordered(x,y);}
 
 // ════════════════════════════════════════════════════════════════════════
 //  long double composed elementary functions (Ф27d1b): genuine 80-bit,
@@ -2235,7 +2311,7 @@ inline long double pow(long double x, long double y){
     return exp2_dd_core(P.hi, P.lo);
 }
 // fma : exact fused a·b+c via Veltkamp/Dekker at 64-bit-mantissa width (no -mfma).
-inline long double fma(long double a, long double b, long double c){
+inline constexpr long double fma(long double a, long double b, long double c){
     if (!isfinite(a) || !isfinite(b) || !isfinite(c) || a == 0.0L || b == 0.0L)
         return a * b + c;                               // inf/nan/zero: no split needed
     const long double SPLIT = 4294967297.0L;            // 2^32 + 1 (splits a 64-bit mantissa)
@@ -2262,7 +2338,7 @@ inline long double atanhl(long double x){ return atanh(x); }  inline float atanh
 inline long double cbrtl(long double x){ return cbrt(x); }    inline float cbrtf(float x){ return (float)cbrt((long double)x); }
 inline long double hypotl(long double x, long double y){ return hypot(x, y); }  inline float hypotf(float x, float y){ return (float)hypot((long double)x, (long double)y); }
 inline long double powl(long double x, long double y){ return pow(x, y); }      inline float powf(float x, float y){ return (float)pow((long double)x, (long double)y); }
-inline long double fmal(long double a, long double b, long double c){ return fma(a, b, c); }  inline float fmaf(float a, float b, float c){ return (float)fma((long double)a, (long double)b, (long double)c); }
+inline constexpr long double fmal(long double a, long double b, long double c){ return fma(a, b, c); }  inline float fmaf(float a, float b, float c){ return (float)fma((long double)a, (long double)b, (long double)c); }
 
 // ════════════════════════════════════════════════════════════════════════
 //  erf / erfc / tgamma / lgamma at genuine 80-bit (Ф27d2).
@@ -2539,14 +2615,14 @@ constexpr auto Back(R r)
 #define BOXCXX_MATH_EXT1(NAME)                                                \
     template <class T>                                                        \
         requires __math::NarrowExt<T>                                         \
-    inline auto NAME(T x)                                                     \
+    inline constexpr auto NAME(T x)                                                     \
     {                                                                         \
         return __math::Back<T>(NAME(static_cast<typename __math::Via<T>::type>(x))); \
     }
 #define BOXCXX_MATH_EXT2(NAME)                                                \
     template <class T>                                                        \
         requires __math::NarrowExt<T>                                         \
-    inline auto NAME(T x, T y)                                                \
+    inline constexpr auto NAME(T x, T y)                                                \
     {                                                                         \
         using V = typename __math::Via<T>::type;                              \
         return __math::Back<T>(NAME(static_cast<V>(x), static_cast<V>(y)));   \
@@ -2554,7 +2630,7 @@ constexpr auto Back(R r)
 #define BOXCXX_MATH_EXT3(NAME)                                                \
     template <class T>                                                        \
         requires __math::NarrowExt<T>                                         \
-    inline auto NAME(T x, T y, T z)                                           \
+    inline constexpr auto NAME(T x, T y, T z)                                           \
     {                                                                         \
         using V = typename __math::Via<T>::type;                              \
         return __math::Back<T>(                                               \
@@ -2563,7 +2639,7 @@ constexpr auto Back(R r)
 #define BOXCXX_MATH_EXT_XN(NAME, NTYPE)                                       \
     template <class T>                                                        \
         requires __math::NarrowExt<T>                                         \
-    inline T NAME(T x, NTYPE n)                                               \
+    inline constexpr T NAME(T x, NTYPE n)                                               \
     {                                                                         \
         return static_cast<T>(NAME(static_cast<typename __math::Via<T>::type>(x), n)); \
     }
@@ -2673,68 +2749,68 @@ _Float128 nexttoward(_Float128, long double) = delete;
 
 #if defined(__STDCPP_FLOAT128_T__)
 // ── float128_t: the algebraic and classifying half, and only that ────────
-inline _Float128 fabs(_Float128 x) { return __quad::Fabs(x); }
-inline _Float128 abs(_Float128 x) { return __quad::Fabs(x); }
-inline _Float128 ceil(_Float128 x) { return __quad::Ceil(x); }
-inline _Float128 floor(_Float128 x) { return __quad::Floor(x); }
-inline _Float128 trunc(_Float128 x) { return __quad::Trunc(x); }
-inline _Float128 round(_Float128 x) { return __quad::Round(x); }
+inline constexpr _Float128 fabs(_Float128 x) { return __quad::Fabs(x); }
+inline constexpr _Float128 abs(_Float128 x) { return __quad::Fabs(x); }
+inline constexpr _Float128 ceil(_Float128 x) { return __quad::Ceil(x); }
+inline constexpr _Float128 floor(_Float128 x) { return __quad::Floor(x); }
+inline constexpr _Float128 trunc(_Float128 x) { return __quad::Trunc(x); }
+inline constexpr _Float128 round(_Float128 x) { return __quad::Round(x); }
 inline _Float128 rint(_Float128 x) { return __quad::Rint(x); }
 inline _Float128 nearbyint(_Float128 x) { return __quad::Rint(x); }
 inline _Float128 sqrt(_Float128 x) { return __quad::Sqrt(x); }
 inline _Float128 cbrt(_Float128 x) { return __quad::Cbrt(x); }
-inline _Float128 logb(_Float128 x) { return __quad::Logb(x); }
+inline constexpr _Float128 logb(_Float128 x) { return __quad::Logb(x); }
 
-inline int ilogb(_Float128 x) { return __quad::Ilogb(x); }
+inline constexpr int ilogb(_Float128 x) { return __quad::Ilogb(x); }
 inline long lrint(_Float128 x) { return (long)__quad::Rint(x); }
 inline long long llrint(_Float128 x) { return (long long)__quad::Rint(x); }
-inline long lround(_Float128 x) { return (long)__quad::Round(x); }
-inline long long llround(_Float128 x) { return (long long)__quad::Round(x); }
+inline constexpr long lround(_Float128 x) { return (long)__quad::Round(x); }
+inline constexpr long long llround(_Float128 x) { return (long long)__quad::Round(x); }
 
-inline int fpclassify(_Float128 x)
+inline constexpr int fpclassify(_Float128 x)
 {
     if (__quad::IsNan(x)) return FP_NAN_;
     if (__quad::IsInf(x)) return FP_INFINITE_;
     if (__quad::IsZero(x)) return FP_ZERO_;
     return __quad::IsNormal(x) ? FP_NORMAL_ : FP_SUBNORMAL_;
 }
-inline bool isfinite(_Float128 x) { return __quad::IsFinite(x); }
-inline bool isinf(_Float128 x) { return __quad::IsInf(x); }
-inline bool isnan(_Float128 x) { return __quad::IsNan(x); }
-inline bool isnormal(_Float128 x) { return __quad::IsNormal(x); }
-inline bool signbit(_Float128 x) { return __quad::SignBit(x); }
+inline constexpr bool isfinite(_Float128 x) { return __quad::IsFinite(x); }
+inline constexpr bool isinf(_Float128 x) { return __quad::IsInf(x); }
+inline constexpr bool isnan(_Float128 x) { return __quad::IsNan(x); }
+inline constexpr bool isnormal(_Float128 x) { return __quad::IsNormal(x); }
+inline constexpr bool signbit(_Float128 x) { return __quad::SignBit(x); }
 
-inline _Float128 copysign(_Float128 x, _Float128 y) { return __quad::CopySign(x, y); }
-inline _Float128 fdim(_Float128 x, _Float128 y) { return __quad::Fdim(x, y); }
-inline _Float128 fmax(_Float128 x, _Float128 y) { return __quad::Fmax(x, y); }
-inline _Float128 fmin(_Float128 x, _Float128 y) { return __quad::Fmin(x, y); }
-inline _Float128 fmod(_Float128 x, _Float128 y) { return __quad::Fmod(x, y); }
+inline constexpr _Float128 copysign(_Float128 x, _Float128 y) { return __quad::CopySign(x, y); }
+inline constexpr _Float128 fdim(_Float128 x, _Float128 y) { return __quad::Fdim(x, y); }
+inline constexpr _Float128 fmax(_Float128 x, _Float128 y) { return __quad::Fmax(x, y); }
+inline constexpr _Float128 fmin(_Float128 x, _Float128 y) { return __quad::Fmin(x, y); }
+inline constexpr _Float128 fmod(_Float128 x, _Float128 y) { return __quad::Fmod(x, y); }
 inline _Float128 hypot(_Float128 x, _Float128 y) { return __quad::Hypot(x, y); }
-inline _Float128 nextafter(_Float128 x, _Float128 y) { return __quad::NextAfter(x, y); }
-inline _Float128 remainder(_Float128 x, _Float128 y) { return __quad::Remainder(x, y); }
-inline _Float128 fma(_Float128 x, _Float128 y, _Float128 z) { return __quad::Fma(x, y, z); }
+inline constexpr _Float128 nextafter(_Float128 x, _Float128 y) { return __quad::NextAfter(x, y); }
+inline constexpr _Float128 remainder(_Float128 x, _Float128 y) { return __quad::Remainder(x, y); }
+inline constexpr _Float128 fma(_Float128 x, _Float128 y, _Float128 z) { return __quad::Fma(x, y, z); }
 inline _Float128 hypot(_Float128 x, _Float128 y, _Float128 z)
 {
     return __quad::Hypot(__quad::Hypot(x, y), z);
 }
 
-inline bool isgreater(_Float128 x, _Float128 y) { return __builtin_isgreater(x, y); }
-inline bool isgreaterequal(_Float128 x, _Float128 y) { return __builtin_isgreaterequal(x, y); }
-inline bool isless(_Float128 x, _Float128 y) { return __builtin_isless(x, y); }
-inline bool islessequal(_Float128 x, _Float128 y) { return __builtin_islessequal(x, y); }
-inline bool islessgreater(_Float128 x, _Float128 y) { return __builtin_islessgreater(x, y); }
-inline bool isunordered(_Float128 x, _Float128 y) { return __builtin_isunordered(x, y); }
+inline constexpr bool isgreater(_Float128 x, _Float128 y) { return __builtin_isgreater(x, y); }
+inline constexpr bool isgreaterequal(_Float128 x, _Float128 y) { return __builtin_isgreaterequal(x, y); }
+inline constexpr bool isless(_Float128 x, _Float128 y) { return __builtin_isless(x, y); }
+inline constexpr bool islessequal(_Float128 x, _Float128 y) { return __builtin_islessequal(x, y); }
+inline constexpr bool islessgreater(_Float128 x, _Float128 y) { return __builtin_islessgreater(x, y); }
+inline constexpr bool isunordered(_Float128 x, _Float128 y) { return __builtin_isunordered(x, y); }
 
-inline _Float128 ldexp(_Float128 x, int n) { return __quad::Ldexp(x, n); }
-inline _Float128 scalbn(_Float128 x, int n) { return __quad::Ldexp(x, n); }
-inline _Float128 scalbln(_Float128 x, long n)
+inline constexpr _Float128 ldexp(_Float128 x, int n) { return __quad::Ldexp(x, n); }
+inline constexpr _Float128 scalbn(_Float128 x, int n) { return __quad::Ldexp(x, n); }
+inline constexpr _Float128 scalbln(_Float128 x, long n)
 {
     const int c = n > 60000 ? 60000 : (n < -60000 ? -60000 : (int)n);
     return __quad::Ldexp(x, c);
 }
-inline _Float128 frexp(_Float128 x, int *e) { return __quad::Frexp(x, e); }
-inline _Float128 modf(_Float128 x, _Float128 *ip) { return __quad::Modf(x, ip); }
-inline _Float128 remquo(_Float128 x, _Float128 y, int *q)
+inline constexpr _Float128 frexp(_Float128 x, int *e) { return __quad::Frexp(x, e); }
+inline constexpr _Float128 modf(_Float128 x, _Float128 *ip) { return __quad::Modf(x, ip); }
+inline constexpr _Float128 remquo(_Float128 x, _Float128 y, int *q)
 {
     // [c.math]: q receives at least the low three bits of the integral
     // quotient, with the sign of x/y.
@@ -2897,14 +2973,14 @@ concept Needs3 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
 #define BOXCXX_MATH_PROMOTE1(NAME)                                            \
     template <class T>                                                        \
         requires __math::Needs1<T>                                            \
-    inline auto NAME(T x)                                                     \
+    inline constexpr auto NAME(T x)                                                     \
     {                                                                         \
         return NAME(static_cast<__math::P1<T>>(x));                           \
     }
 #define BOXCXX_MATH_PROMOTE2(NAME)                                            \
     template <class T, class U>                                               \
         requires __math::Needs2<T, U>                                         \
-    inline auto NAME(T x, U y)                                                \
+    inline constexpr auto NAME(T x, U y)                                                \
     {                                                                         \
         using P = __math::P2<T, U>;                                           \
         return NAME(static_cast<P>(x), static_cast<P>(y));                    \
@@ -2912,7 +2988,7 @@ concept Needs3 = is_arithmetic_v<T> && is_arithmetic_v<U> &&
 #define BOXCXX_MATH_PROMOTE3(NAME)                                            \
     template <class T, class U, class V>                                      \
         requires __math::Needs3<T, U, V>                                      \
-    inline auto NAME(T x, U y, V z)                                           \
+    inline constexpr auto NAME(T x, U y, V z)                                           \
     {                                                                         \
         using P = __math::P3<T, U, V>;                                        \
         return NAME(static_cast<P>(x), static_cast<P>(y),                     \
@@ -2977,7 +3053,7 @@ constexpr auto lerp(T a, U b, V t)
 #define BOXCXX_MATH_PROMOTE_XN(NAME, NTYPE)                                   \
     template <class T>                                                        \
         requires __math::Needs1<T>                                            \
-    inline auto NAME(T x, NTYPE n)                                            \
+    inline constexpr auto NAME(T x, NTYPE n)                                            \
     {                                                                         \
         return NAME(static_cast<__math::P1<T>>(x), n);                        \
     }
@@ -3014,18 +3090,18 @@ inline auto nexttoward(T x, long double y)
 // long doubles to double before comparing them would answer questions about
 // values the caller never had, so they get their own widths rather than
 // leaning on the templates above.
-inline bool isgreater(float x, float y) { return __builtin_isgreater(x, y); }
-inline bool isgreaterequal(float x, float y) { return __builtin_isgreaterequal(x, y); }
-inline bool isless(float x, float y) { return __builtin_isless(x, y); }
-inline bool islessequal(float x, float y) { return __builtin_islessequal(x, y); }
-inline bool islessgreater(float x, float y) { return __builtin_islessgreater(x, y); }
-inline bool isunordered(float x, float y) { return __builtin_isunordered(x, y); }
-inline bool isgreater(long double x, long double y) { return __builtin_isgreater(x, y); }
-inline bool isgreaterequal(long double x, long double y) { return __builtin_isgreaterequal(x, y); }
-inline bool isless(long double x, long double y) { return __builtin_isless(x, y); }
-inline bool islessequal(long double x, long double y) { return __builtin_islessequal(x, y); }
-inline bool islessgreater(long double x, long double y) { return __builtin_islessgreater(x, y); }
-inline bool isunordered(long double x, long double y) { return __builtin_isunordered(x, y); }
+inline constexpr bool isgreater(float x, float y) { return __builtin_isgreater(x, y); }
+inline constexpr bool isgreaterequal(float x, float y) { return __builtin_isgreaterequal(x, y); }
+inline constexpr bool isless(float x, float y) { return __builtin_isless(x, y); }
+inline constexpr bool islessequal(float x, float y) { return __builtin_islessequal(x, y); }
+inline constexpr bool islessgreater(float x, float y) { return __builtin_islessgreater(x, y); }
+inline constexpr bool isunordered(float x, float y) { return __builtin_isunordered(x, y); }
+inline constexpr bool isgreater(long double x, long double y) { return __builtin_isgreater(x, y); }
+inline constexpr bool isgreaterequal(long double x, long double y) { return __builtin_isgreaterequal(x, y); }
+inline constexpr bool isless(long double x, long double y) { return __builtin_isless(x, y); }
+inline constexpr bool islessequal(long double x, long double y) { return __builtin_islessequal(x, y); }
+inline constexpr bool islessgreater(long double x, long double y) { return __builtin_islessgreater(x, y); }
+inline constexpr bool isunordered(long double x, long double y) { return __builtin_isunordered(x, y); }
 
 #undef BOXCXX_MATH_PROMOTE1
 #undef BOXCXX_MATH_PROMOTE2
@@ -3047,6 +3123,7 @@ inline bool isunordered(long double x, long double y) { return __builtin_isunord
 #define BOXCXX_OWNS_hypot
 #define BOXCXX_OWNS_interpolate
 #define BOXCXX_OWNS_math_special_functions
+#define BOXCXX_OWNS_constexpr_cmath
 #include <__bits/version_cmath>
 
 // [version.syn] gives __cpp_lib_freestanding_cstdlib two owners, because the
