@@ -11,7 +11,7 @@
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
  *   7. Allocate 32 KB for page tables after kernel_end + guard page
  *   8. Build identity + higher-half page tables (2 MB pages)
- *   9. Fill boot_info_t (v2) at 0x9000
+ *   9. Fill boot_info_t (v2) at BOOT_INFO_ADDR
  *  10. ExitBootServices
  *  11. Enable PAE, load CR3, enable EFER.LME+NXE, enable paging
  *  12. Jump to 0x100000
@@ -53,7 +53,15 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * Mismatch → bootloader refuses to launch the kernel. */
 #define KERNEL_HEADER_VERSION 1U
 #define KERNEL_MAX_SIZE       0x2000000ULL  /* 32 MB */
-#define BOOT_INFO_ADDR        0x9000ULL
+#define BOOT_INFO_ADDR        0xA000ULL
+
+/* Same block, same address, third file to say so. The build passes the value
+ * it wrote into the image layout; disagreeing with it means the kernel would
+ * read this structure from somewhere TagBoot never wrote. */
+#ifdef BOOT_INFO_ADDR_FROM_BUILD
+_Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
+               "TagBoot writes boot_info somewhere the build does not expect");
+#endif
 #define E820_COUNT_ADDR       0x500ULL
 #define E820_SIZE_ADDR        0x502ULL
 #define E820_MAP_ADDR         0x504ULL
@@ -101,7 +109,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
 #define E820_ACPI_NVS  4U
 
 /* =========================================================================
- * boot_info_t v2 layout at 0x9000
+ * boot_info_t v2 layout at BOOT_INFO_ADDR
  * Matches src/include/boot_info.h extended with v2 fields.
  * ========================================================================= */
 
@@ -1872,7 +1880,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     /* ----- 9. Fill boot_info_t v4 (includes RSDP + ESRT — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
 
-    Print("TagBoot: boot_info at 0x9000 (v4, method=UEFI)\r\n");
+    Print("TagBoot: boot_info at 0xA000 (v4, method=UEFI)\r\n");
 
     /* ----- 10. ExitBootServices -----
      *

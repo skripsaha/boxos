@@ -38,9 +38,15 @@ _start:
     mov gs, ax
 
     ; Read stack address from boot_info structure (identity address, boot tables active)
-    ; boot_info at 0x9000, stack_base at offset +32
+    ; stack_base is at offset +32. BOOT_INFO_ADDR comes from the build, which
+    ; is the only place it is written down; it used to be spelled here as a
+    ; bare 0x9000, and moving the block would have left this line reading the
+    ; kernel's stack pointer out of whatever was at the old address.
+%ifndef BOOT_INFO_ADDR
+  %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
+%endif
     xor rsp, rsp
-    mov esp, [0x9000 + 32]
+    mov esp, [BOOT_INFO_ADDR + 32]
     mov rbp, rsp
 
     mov al, 'S'
