@@ -316,6 +316,26 @@ static size_t SymbolsHarvest(const Image *Img, Symbol **Out)
         if (!Executable)
             continue;
 
+        /* The address must actually lie inside the section the symbol claims.
+         *
+         * A linker script computes addresses as well as placing code, and an
+         * assignment like `_kernel_phys_start = . - KERNEL_VMA;` inherits
+         * whatever output section is current — so it arrives here untyped, in
+         * an executable section, holding a number that is nowhere near it. The
+         * BoxOS kernel has two such symbols, sitting at 0x100000 while .text
+         * begins at 0xffffffff80100000, and admitting them made the table
+         * "span more than 4 GiB of code" for an image whose code is 386 KB.
+         *
+         * A nameplate names code. A symbol whose address is outside its own
+         * section is not a code address; it is arithmetic that happened to be
+         * written down in the middle of one. */
+        {
+            const Elf64Shdr *Sec = &Sections[Sym->st_shndx];
+            if (Sym->st_value < Sec->sh_addr ||
+                Sym->st_value > Sec->sh_addr + Sec->sh_size)
+                continue;
+        }
+
         List[Kept].Address = Sym->st_value;
         List[Kept].Length  = Sym->st_size;
         List[Kept].Name    = Name;

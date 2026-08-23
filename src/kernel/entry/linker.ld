@@ -43,6 +43,22 @@ SECTIONS
         __uaccess_fixup_end = .;
     } :rodata
 
+    /* Nameplate — the kernel's own "address -> name" table, generated from
+     * this very link and linked back in by a second pass. It sits here, after
+     * .rodata and before .data, for the same reason the userspace one does:
+     * pass two moves .data and .bss and not a single function, so the
+     * addresses the table names are still the addresses the functions have.
+     * `nameplate verify` proves that on every build rather than trusting it.
+     *
+     * SHF_ALLOC, so it is simply part of the image the loader already brings
+     * in. A panic that had to read a file to name a frame would be useless
+     * for every fault that happens inside the filesystem, or before it. */
+    .nameplate ALIGN(8) : AT(ADDR(.nameplate) - KERNEL_VMA) {
+        __nameplate_start = .;
+        KEEP(*(.nameplate))
+        __nameplate_end = .;
+    } :rodata
+
     _rodata_end = ALIGN(512);
 
     .data ALIGN(512) : AT(ADDR(.data) - KERNEL_VMA) {
