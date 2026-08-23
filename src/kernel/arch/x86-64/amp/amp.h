@@ -20,6 +20,13 @@ typedef struct {
      * C11 atomic builtins — `volatile` would only suppress the compiler's
      * scheduler, not provide cross-CPU ordering. */
     uint8_t  online;
+    /* counted_at_boot: set by the BSP when this AP answered inside its wait
+     * window. It exists to tell "came up on time" apart from "came up late",
+     * which the online flag alone cannot — a core that misses its window and
+     * arrives a moment later is not dead, and BoxOS no longer treats it as
+     * though it were. Written and read only by the BSP during amp_boot_aps,
+     * so it needs no atomics. */
+    uint8_t  counted_at_boot;
 } CoreDescriptor;
 
 typedef struct {
