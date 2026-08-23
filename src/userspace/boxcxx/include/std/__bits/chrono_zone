@@ -1,0 +1,538 @@
+// __bits/chrono_zone — [time.zone]: time zones, zoned_time, leap seconds.
+// Included by <chrono>.
+//
+// This leaf is deliberately THIN. Every question that needs the baked IANA
+// table goes through the four functions in `__detail` below, which are defined
+// in src/runtime/tzdb.cpp — the only translation unit in the library that
+// includes <__bits/tzdb_table>. That is what keeps the promise the table was
+// designed around: 116 KB of zone data lands in the image only for a program
+// that actually asks a zone something. A program that includes <chrono> for
+// durations pays nothing, because nothing it references pulls that object out
+// of the archive.
+//
+// The reader those functions call is <__bits/tzdb_read>, which speaks seconds
+// and `const char*` and no std types at all, so it can be — and is — compiled
+// on a development host and measured against libstdc++ and against zdump over
+// nine hundred thousand instants. What lives HERE is the shape the standard
+// asks for: the strings, the vectors, the exceptions and zoned_time.
+#ifndef BOXCXX_BITS_CHRONO_ZONE
+#define BOXCXX_BITS_CHRONO_ZONE
+
+#include <__bits/chrono_calendar>
+#include <__bits/chrono_clock>
+#include <__bits/chrono_duration>
+#include <compare>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <vector>
+
+namespace std {
+namespace chrono {
+
+class time_zone;
+class time_zone_link;
+class leap_second;
+struct tzdb;
+
+// ── [time.zone.info] ────────────────────────────────────────────────────
+struct sys_info {
+    sys_seconds begin{};
+    sys_seconds end{};
+    seconds     offset{};
+    minutes     save{};
+    string      abbrev;
+};
+
+struct local_info {
+    static constexpr int unique      = 0;
+    static constexpr int nonexistent = 1;
+    static constexpr int ambiguous   = 2;
+
+    int      result{};
+    sys_info first;
+    sys_info second;
+};
+
+// ── the boundary to the table ───────────────────────────────────────────
+// Four functions and no more. Each takes an index into the baked name table,
+// which is what a `time_zone` is.
+namespace __detail {
+
+int         zone_find(string_view name) noexcept;   // -1 when there is no such zone
+string_view zone_name(int idx) noexcept;
+sys_info    zone_info_sys(int idx, sys_seconds t);
+local_info  zone_info_local(int idx, local_seconds t);
+
+// The text of the two exceptions, built where <format> is already linked
+// rather than in a header every <chrono> user parses.
+string nonexistent_text(local_seconds tp, const local_info &i);
+string ambiguous_text(local_seconds tp, const local_info &i);
+
+} // namespace __detail
+
+// ── [time.zone.exception] ───────────────────────────────────────────────
+class nonexistent_local_time : public runtime_error {
+public:
+    template <class Duration>
+    nonexistent_local_time(const local_time<Duration> &tp, const local_info &i)
+        : runtime_error(__detail::nonexistent_text(
+              time_point_cast<seconds>(tp), i))
+    {
+    }
+};
+
+class ambiguous_local_time : public runtime_error {
+public:
+    template <class Duration>
+    ambiguous_local_time(const local_time<Duration> &tp, const local_info &i)
+        : runtime_error(__detail::ambiguous_text(
+              time_point_cast<seconds>(tp), i))
+    {
+    }
+};
+
+// ── [time.zone.timezone] ────────────────────────────────────────────────
+enum class choose { earliest, latest };
+
+class time_zone {
+    int idx_ = -1;
+
+public:
+    // Not part of the synopsis: the library builds these, nobody else can.
+    // [time.zone.timezone] leaves the default constructor unspecified and
+    // gives users only the move operations.
+    explicit time_zone(int idx) noexcept : idx_(idx) {}
+
+    time_zone(time_zone &&) = default;
+    time_zone &operator=(time_zone &&) = default;
+
+    string_view name() const noexcept { return __detail::zone_name(idx_); }
+
+    template <class Duration>
+    sys_info get_info(const sys_time<Duration> &st) const
+    {
+        return __detail::zone_info_sys(idx_, time_point_cast<seconds>(st));
+    }
+
+    template <class Duration>
+    local_info get_info(const local_time<Duration> &tp) const
+    {
+        return __detail::zone_info_local(idx_, time_point_cast<seconds>(tp));
+    }
+
+    template <class Duration>
+    sys_time<common_type_t<Duration, seconds>>
+    to_sys(const local_time<Duration> &tp) const
+    {
+        const local_info i = get_info(tp);
+        if (i.result == local_info::nonexistent)
+            throw nonexistent_local_time(tp, i);
+        if (i.result == local_info::ambiguous)
+            throw ambiguous_local_time(tp, i);
+        using D = common_type_t<Duration, seconds>;
+        return sys_time<D>(tp.time_since_epoch() - i.first.offset);
+    }
+
+    template <class Duration>
+    sys_time<common_type_t<Duration, seconds>>
+    to_sys(const local_time<Duration> &tp, choose z) const
+    {
+        const local_info i = get_info(tp);
+        using D = common_type_t<Duration, seconds>;
+        // [time.zone.members]/8: a nonexistent local time has ONE answer under
+        // either choice — the instant the jump landed on — because both sides
+        // of a gap name the same point on the sys timeline.
+        if (i.result == local_info::nonexistent)
+            return sys_time<D>(i.first.end);
+        const sys_info &pick = (i.result == local_info::ambiguous
+                                && z == choose::latest) ? i.second : i.first;
+        return sys_time<D>(tp.time_since_epoch() - pick.offset);
+    }
+
+    template <class Duration>
+    local_time<common_type_t<Duration, seconds>>
+    to_local(const sys_time<Duration> &st) const
+    {
+        using D = common_type_t<Duration, seconds>;
+        return local_time<D>(st.time_since_epoch() + get_info(st).offset);
+    }
+
+    int __index() const noexcept { return idx_; }
+};
+
+inline bool operator==(const time_zone &x, const time_zone &y) noexcept
+{
+    return x.name() == y.name();
+}
+
+inline strong_ordering operator<=>(const time_zone &x, const time_zone &y) noexcept
+{
+    return x.name().compare(y.name()) <=> 0;
+}
+
+// ── [time.zone.link] ────────────────────────────────────────────────────
+class time_zone_link {
+    int idx_ = -1;
+    int target_ = -1;
+
+public:
+    explicit time_zone_link(int idx, int target) noexcept
+        : idx_(idx), target_(target) {}
+
+    time_zone_link(time_zone_link &&) = default;
+    time_zone_link &operator=(time_zone_link &&) = default;
+
+    string_view name() const noexcept { return __detail::zone_name(idx_); }
+    string_view target() const noexcept { return __detail::zone_name(target_); }
+};
+
+inline bool operator==(const time_zone_link &x, const time_zone_link &y) noexcept
+{
+    return x.name() == y.name();
+}
+
+inline strong_ordering operator<=>(const time_zone_link &x,
+                                   const time_zone_link &y) noexcept
+{
+    return x.name().compare(y.name()) <=> 0;
+}
+
+// ── [time.zone.leap] ────────────────────────────────────────────────────
+class leap_second {
+    sys_seconds date_{};
+    seconds     value_{};
+
+public:
+    constexpr leap_second(sys_seconds d, seconds v) noexcept
+        : date_(d), value_(v) {}
+
+    leap_second(const leap_second &) = default;
+    leap_second &operator=(const leap_second &) = default;
+
+    constexpr sys_seconds date() const noexcept { return date_; }
+    constexpr seconds value() const noexcept { return value_; }
+
+    // ‼ [time.zone.leap.nonmembers] spells these at namespace scope; here they
+    // are hidden friends, and the difference is not style. The synopsis
+    // constrains the sys_time `<=>` with three_way_comparable_with, and its
+    // FIRST parameter is a concrete leap_second — which deduces vacuously, so
+    // the constraint is checked before anything asks whether a sys_time could
+    // ever be one. Checking it needs `<` between two sys_times, which finds
+    // this operator again: the constraint ends up depending on itself, and the
+    // compiler says so. As friends they are reachable only by argument-
+    // dependent lookup, so a comparison of two sys_times never considers them
+    // and the cycle has nowhere to form. Every call the standard specifies
+    // still resolves, because a leap_second is one of the arguments in each.
+    friend constexpr bool operator==(const leap_second &x,
+                                     const leap_second &y) noexcept
+    {
+        return x.date() == y.date();
+    }
+
+    friend constexpr strong_ordering operator<=>(const leap_second &x,
+                                                 const leap_second &y) noexcept
+    {
+        return x.date() <=> y.date();
+    }
+
+    template <class Duration>
+    friend constexpr bool operator==(const leap_second &x,
+                                     const sys_time<Duration> &y)
+    {
+        return x.date() == y;
+    }
+
+    template <class Duration>
+    friend constexpr bool operator<(const leap_second &x,
+                                    const sys_time<Duration> &y)
+    {
+        return x.date() < y;
+    }
+
+    template <class Duration>
+    friend constexpr bool operator<(const sys_time<Duration> &x,
+                                    const leap_second &y)
+    {
+        return x < y.date();
+    }
+
+    template <class Duration>
+    friend constexpr bool operator>(const leap_second &x,
+                                    const sys_time<Duration> &y)
+    {
+        return y < x;
+    }
+
+    template <class Duration>
+    friend constexpr bool operator>(const sys_time<Duration> &x,
+                                    const leap_second &y)
+    {
+        return y < x;
+    }
+
+    template <class Duration>
+    friend constexpr bool operator<=(const leap_second &x,
+                                     const sys_time<Duration> &y)
+    {
+        return !(y < x);
+    }
+
+    template <class Duration>
+    friend constexpr bool operator<=(const sys_time<Duration> &x,
+                                     const leap_second &y)
+    {
+        return !(y < x);
+    }
+
+    template <class Duration>
+    friend constexpr bool operator>=(const leap_second &x,
+                                     const sys_time<Duration> &y)
+    {
+        return !(x < y);
+    }
+
+    template <class Duration>
+    friend constexpr bool operator>=(const sys_time<Duration> &x,
+                                     const leap_second &y)
+    {
+        return !(x < y);
+    }
+
+    template <class Duration>
+        requires three_way_comparable_with<sys_seconds, sys_time<Duration>>
+    friend constexpr auto operator<=>(const leap_second &x,
+                                      const sys_time<Duration> &y)
+    {
+        return x.date() <=> y;
+    }
+};
+
+// ── [time.zone.db] ──────────────────────────────────────────────────────
+struct tzdb {
+    string                 version;
+    vector<time_zone>      zones;
+    vector<time_zone_link> links;
+    vector<leap_second>    leap_seconds;
+
+    const time_zone *locate_zone(string_view tz_name) const;
+    const time_zone *current_zone() const;
+};
+
+// [time.zone.db.list]. One database, and a list that holds it — the standard's
+// shape for "a program can reload while another thread is reading". BoxOS
+// reloads from the TagFS door rather than from a network, and the front entry
+// is the one the image was built with until something opens that door.
+class tzdb_list {
+public:
+    tzdb_list(const tzdb_list &) = delete;
+    tzdb_list &operator=(const tzdb_list &) = delete;
+
+    class const_iterator;
+
+    const tzdb &front() const noexcept;
+    const_iterator erase_after(const_iterator p);
+
+    const_iterator begin() const noexcept;
+    const_iterator end() const noexcept;
+    const_iterator cbegin() const noexcept;
+    const_iterator cend() const noexcept;
+
+    // Not in the synopsis: only get_tzdb_list() may make one.
+    struct __private_tag {};
+    explicit tzdb_list(__private_tag) noexcept {}
+};
+
+class tzdb_list::const_iterator {
+    const tzdb *p_ = nullptr;
+
+public:
+    using iterator_category = forward_iterator_tag;
+    using value_type        = tzdb;
+    using difference_type   = ptrdiff_t;
+    using pointer           = const tzdb *;
+    using reference         = const tzdb &;
+
+    const_iterator() = default;
+    explicit const_iterator(const tzdb *p) noexcept : p_(p) {}
+
+    reference operator*() const noexcept { return *p_; }
+    pointer operator->() const noexcept { return p_; }
+
+    const_iterator &operator++() noexcept { p_ = nullptr; return *this; }
+    const_iterator operator++(int) noexcept
+    {
+        const_iterator t = *this;
+        ++*this;
+        return t;
+    }
+
+    bool operator==(const const_iterator &) const noexcept = default;
+};
+
+tzdb_list &get_tzdb_list();
+const tzdb &get_tzdb();
+const tzdb &reload_tzdb();
+string      remote_version();
+
+const time_zone *locate_zone(string_view tz_name);
+const time_zone *current_zone();
+
+// ── [time.zone.zonedtraits] ─────────────────────────────────────────────
+template <class T>
+struct zoned_traits {};
+
+template <>
+struct zoned_traits<const time_zone *> {
+    static const time_zone *default_zone() { return chrono::locate_zone("UTC"); }
+    static const time_zone *locate_zone(string_view name)
+    {
+        return chrono::locate_zone(name);
+    }
+};
+
+// ── [time.zone.zonedtime] ───────────────────────────────────────────────
+template <class Duration, class TimeZonePtr = const time_zone *>
+class zoned_time {
+public:
+    using duration = common_type_t<Duration, seconds>;
+
+private:
+    TimeZonePtr zone_{};
+    sys_time<duration> tp_{};
+
+    using traits = zoned_traits<TimeZonePtr>;
+
+public:
+    zoned_time()
+        requires requires { traits::default_zone(); }
+        : zone_(traits::default_zone()) {}
+
+    zoned_time(const zoned_time &) = default;
+    zoned_time &operator=(const zoned_time &) = default;
+
+    zoned_time(const sys_time<Duration> &st)
+        requires requires { traits::default_zone(); }
+        : zone_(traits::default_zone()), tp_(st) {}
+
+    explicit zoned_time(TimeZonePtr z) : zone_(std::move(z)) {}
+
+    explicit zoned_time(string_view name)
+        requires requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+        : zone_(traits::locate_zone(name)) {}
+
+    template <class Duration2>
+        requires is_convertible_v<sys_time<Duration2>, sys_time<Duration>>
+    zoned_time(const zoned_time<Duration2, TimeZonePtr> &zt) noexcept
+        : zone_(zt.get_time_zone()), tp_(zt.get_sys_time()) {}
+
+    zoned_time(TimeZonePtr z, const sys_time<Duration> &st)
+        : zone_(std::move(z)), tp_(st) {}
+
+    zoned_time(string_view name, const sys_time<Duration> &st)
+        requires requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+        : zoned_time(traits::locate_zone(name), st) {}
+
+    zoned_time(TimeZonePtr z, const local_time<Duration> &tp)
+        : zone_(std::move(z)), tp_(zone_->to_sys(tp)) {}
+
+    zoned_time(string_view name, const local_time<Duration> &tp)
+        requires requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+        : zoned_time(traits::locate_zone(name), tp) {}
+
+    zoned_time(TimeZonePtr z, const local_time<Duration> &tp, choose c)
+        : zone_(std::move(z)), tp_(zone_->to_sys(tp, c)) {}
+
+    zoned_time(string_view name, const local_time<Duration> &tp, choose c)
+        requires requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+        : zoned_time(traits::locate_zone(name), tp, c) {}
+
+    template <class Duration2, class TimeZonePtr2>
+        requires is_convertible_v<sys_time<Duration2>, sys_time<Duration>>
+    zoned_time(TimeZonePtr z, const zoned_time<Duration2, TimeZonePtr2> &zt)
+        : zone_(std::move(z)), tp_(zt.get_sys_time()) {}
+
+    template <class Duration2, class TimeZonePtr2>
+        requires is_convertible_v<sys_time<Duration2>, sys_time<Duration>>
+    zoned_time(TimeZonePtr z, const zoned_time<Duration2, TimeZonePtr2> &zt,
+               choose)
+        : zoned_time(std::move(z), zt) {}
+
+    template <class Duration2, class TimeZonePtr2>
+        requires is_convertible_v<sys_time<Duration2>, sys_time<Duration>>
+             && requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+    zoned_time(string_view name, const zoned_time<Duration2, TimeZonePtr2> &zt)
+        : zoned_time(traits::locate_zone(name), zt) {}
+
+    template <class Duration2, class TimeZonePtr2>
+        requires is_convertible_v<sys_time<Duration2>, sys_time<Duration>>
+             && requires { TimeZonePtr{traits::locate_zone(string_view{})}; }
+    zoned_time(string_view name, const zoned_time<Duration2, TimeZonePtr2> &zt,
+               choose c)
+        : zoned_time(traits::locate_zone(name), zt, c) {}
+
+    zoned_time &operator=(const sys_time<Duration> &st)
+    {
+        tp_ = st;
+        return *this;
+    }
+
+    zoned_time &operator=(const local_time<Duration> &lt)
+    {
+        tp_ = zone_->to_sys(lt);
+        return *this;
+    }
+
+    operator sys_time<duration>() const { return get_sys_time(); }
+    explicit operator local_time<duration>() const { return get_local_time(); }
+
+    TimeZonePtr get_time_zone() const { return zone_; }
+
+    local_time<duration> get_local_time() const { return zone_->to_local(tp_); }
+    sys_time<duration> get_sys_time() const { return tp_; }
+    sys_info get_info() const { return zone_->get_info(tp_); }
+};
+
+zoned_time(const char *) -> zoned_time<seconds>;
+
+template <class Duration>
+zoned_time(sys_time<Duration>)
+    -> zoned_time<common_type_t<Duration, seconds>>;
+
+template <class TimeZonePtrOrName>
+using __time_zone_representation =
+    conditional_t<is_convertible_v<TimeZonePtrOrName, string_view>,
+                  const time_zone *, remove_cvref_t<TimeZonePtrOrName>>;
+
+template <class TimeZonePtrOrName, class Duration>
+zoned_time(TimeZonePtrOrName &&, sys_time<Duration>)
+    -> zoned_time<common_type_t<Duration, seconds>,
+                  __time_zone_representation<TimeZonePtrOrName>>;
+
+template <class TimeZonePtrOrName, class Duration>
+zoned_time(TimeZonePtrOrName &&, local_time<Duration>,
+           choose = choose::earliest)
+    -> zoned_time<common_type_t<Duration, seconds>,
+                  __time_zone_representation<TimeZonePtrOrName>>;
+
+template <class TimeZonePtrOrName, class Duration, class TimeZonePtr2>
+zoned_time(TimeZonePtrOrName &&, zoned_time<Duration, TimeZonePtr2>,
+           choose = choose::earliest)
+    -> zoned_time<common_type_t<Duration, seconds>,
+                  __time_zone_representation<TimeZonePtrOrName>>;
+
+using zoned_seconds = zoned_time<seconds>;
+
+template <class Duration1, class Duration2, class TimeZonePtr>
+bool operator==(const zoned_time<Duration1, TimeZonePtr> &x,
+                const zoned_time<Duration2, TimeZonePtr> &y)
+{
+    return x.get_time_zone() == y.get_time_zone()
+        && x.get_sys_time() == y.get_sys_time();
+}
+
+} // namespace chrono
+} // namespace std
+
+#endif // BOXCXX_BITS_CHRONO_ZONE

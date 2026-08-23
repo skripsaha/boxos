@@ -1,8 +1,18 @@
 // boxcxx — <__bits/version_chrono>
 //
-// The feature-test macro [version.syn] owned by <chrono> that boxcxx can
-// honour. __cpp_lib_chrono itself is NOT defined -- <chrono> excludes time
-// zones by design (see <version>'s list).
+// The feature-test macros [version.syn] owns through <chrono>.
+//
+// __cpp_lib_chrono is defined as of Ф45, and it took two things rather than
+// one: the time zone database (which the comment here used to say was excluded
+// by design) and chrono::parse. The macro stands for the WHOLE of [time], so
+// it stayed undefined through the zone work while the library could still only
+// write a date and not read one back — pinned absent by phase232 so that the
+// commit adding the parser had to remove the pin in the same breath.
+//
+// The value is the C++23 one. C++26 raises it to 202306L for hashing support
+// on the chrono value classes (P2592R3), which boxcxx does not have; measured
+// against libstdc++ 16.1, which reports 201907L at -std=c++23 and 202306L at
+// -std=c++26.
 //
 // Every block below is gated on BOXCXX_OWNS_<stem>, and this file has NO
 // include guard: it is meant to be included once per owning header, each time
@@ -18,3 +28,9 @@
 #  define __cpp_lib_chrono_udls 201304L
 #endif
 #undef BOXCXX_OWNS_chrono_udls
+
+#if (defined(BOXCXX_OWNS_ALL) || defined(BOXCXX_OWNS_chrono)) && \
+    !defined(__cpp_lib_chrono)
+#  define __cpp_lib_chrono 201907L
+#endif
+#undef BOXCXX_OWNS_chrono

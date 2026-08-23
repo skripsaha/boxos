@@ -126,11 +126,23 @@ for cfg in $CONFIGS; do
     done
     bad=$(count_bad)
 
+    # ‼ Keep this config's log before the next one overwrites it.
+    # Every config writes build/serial.log, so a failure used to destroy its own
+    # evidence the moment the run moved on: by the time anyone read "[bios1]
+    # FAIL", build/serial.log held bios16's output and the lines that explained
+    # the failure were gone. Measured 2026-08-22, chasing exactly that.
+    cp build/serial.log "build/serial-$cfg.log" 2>/dev/null || true
+
     if [ "$hit" = 1 ] && [ "$bad" = 0 ]; then
         echo "[$cfg] PASS (marker matched; no PANIC/EXCEPTION/FATAL/FAILURES)"
     else
-        echo "[$cfg] FAIL (marker_hit=$hit  bad_lines=$bad)"
+        echo "[$cfg] FAIL (marker_hit=$hit  bad_lines=$bad)  log: build/serial-$cfg.log"
+        # ‼ `phase9a4` is a LANDMARK in this pattern, not a symptom. It prints
+        # on every failure because the suite always reaches it, and reading its
+        # presence as "the run stopped there" has sent at least one
+        # investigation down the wrong road.
         grep -nE 'PANIC|\[EXCEPTION\]|\[boxcxx\] FATAL|\[CXX\] (TOTAL FAILURES|FAIL)|phase9a4' build/serial.log 2>/dev/null | tail -20
+        echo "[$cfg] last line seen: $(tail -1 build/serial.log 2>/dev/null | cut -c1-100)"
         FAILED=1
     fi
     make run-stop >/dev/null 2>&1 || true

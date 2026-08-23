@@ -72,40 +72,14 @@ struct steady_clock {
 
 using high_resolution_clock = steady_clock;
 
-// ── tag clocks (no timezone/leap-second database in BoxOS) ───────────────
-// local_t marks a calendar instant with no associated zone. utc/tai/gps/file
-// clocks expose the type surface but intentionally have no now() — calling it
-// is a compile error, which is correct without a tz/leap database.
-struct local_t {};
-
-struct utc_clock {
-    using rep        = system_clock::rep;
-    using period     = system_clock::period;
-    using duration   = chrono::duration<rep, period>;
-    using time_point = chrono::time_point<utc_clock>;
-    static constexpr bool is_steady = false;
-};
-struct tai_clock {
-    using rep        = system_clock::rep;
-    using period     = system_clock::period;
-    using duration   = chrono::duration<rep, period>;
-    using time_point = chrono::time_point<tai_clock>;
-    static constexpr bool is_steady = false;
-};
-struct gps_clock {
-    using rep        = system_clock::rep;
-    using period     = system_clock::period;
-    using duration   = chrono::duration<rep, period>;
-    using time_point = chrono::time_point<gps_clock>;
-    static constexpr bool is_steady = false;
-};
-struct file_clock {
-    using rep        = system_clock::rep;
-    using period     = system_clock::period;
-    using duration   = chrono::duration<rep, period>;
-    using time_point = chrono::time_point<file_clock>;
-    static constexpr bool is_steady = false;
-};
+// The four tag clocks are declared before the aliases because their own
+// members are spelled in terms of them: utc_clock::to_sys returns a sys_time,
+// and an alias template needs its clock declared, not defined.
+struct utc_clock;
+struct tai_clock;
+struct gps_clock;
+struct file_clock;
+struct local_t;
 
 // ── clock-tagged time_point aliases ─────────────────────────────────────
 template <class Duration> using sys_time = time_point<system_clock, Duration>;
@@ -124,13 +98,359 @@ template <class Duration> using gps_time = time_point<gps_clock, Duration>;
 using gps_seconds = gps_time<seconds>;
 template <class Duration> using file_time = time_point<file_clock, Duration>;
 
-// ── clock_cast — identity only (no cross-clock conversion table) ─────────
-template <class DestClock, class SourceClock, class Duration>
-    requires is_same_v<DestClock, SourceClock>
-constexpr time_point<DestClock, Duration>
-clock_cast(const time_point<SourceClock, Duration> &t)
+
+// ── the other clocks ────────────────────────────────────────────────────
+// local_t marks a calendar instant with no associated zone; it is a tag and
+// has no now(), which is the whole point of it.
+//
+// utc, tai, gps and file used to be type surface with no now() at all, because
+// without a leap-second table a utc_clock cannot say what time it is without
+// lying by up to 27 seconds. Ф45 baked the table, so they answer now — and the
+// arithmetic behind them lives in <__bits/tzdb_read>, where it was measured
+// against libstdc++ at every second around every insertion the database
+// records.
+struct local_t {};
+
+struct utc_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<utc_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now();
+
+    template <class Duration>
+    static sys_time<common_type_t<Duration, seconds>>
+    to_sys(const utc_time<Duration> &t);
+
+    template <class Duration>
+    static utc_time<common_type_t<Duration, seconds>>
+    from_sys(const sys_time<Duration> &t);
+};
+struct tai_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<tai_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now();
+
+    template <class Duration>
+    static utc_time<common_type_t<Duration, seconds>>
+    to_utc(const tai_time<Duration> &t) noexcept;
+
+    template <class Duration>
+    static tai_time<common_type_t<Duration, seconds>>
+    from_utc(const utc_time<Duration> &t) noexcept;
+};
+struct gps_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<gps_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now();
+
+    template <class Duration>
+    static utc_time<common_type_t<Duration, seconds>>
+    to_utc(const gps_time<Duration> &t) noexcept;
+
+    template <class Duration>
+    static gps_time<common_type_t<Duration, seconds>>
+    from_utc(const utc_time<Duration> &t) noexcept;
+};
+struct file_clock {
+    using rep        = system_clock::rep;
+    using period     = system_clock::period;
+    using duration   = chrono::duration<rep, period>;
+    using time_point = chrono::time_point<file_clock>;
+    static constexpr bool is_steady = false;
+
+    static time_point now();
+
+    template <class Duration>
+    static sys_time<Duration> to_sys(const file_time<Duration> &t) noexcept;
+
+    template <class Duration>
+    static file_time<Duration> from_sys(const sys_time<Duration> &t) noexcept;
+};
+
+// ── leap seconds ────────────────────────────────────────────────────────
+struct leap_second_info {
+    bool    is_leap_second;
+    seconds elapsed;
+};
+
+namespace __detail {
+// Defined in src/runtime/tzdb.cpp, which owns the table.
+long long leap_elapsed_at_sys(long long t) noexcept;
+void      leap_at_utc(long long u, bool &is_leap, long long &elapsed) noexcept;
+} // namespace __detail
+
+template <class Duration>
+leap_second_info get_leap_second_info(const utc_time<Duration> &ut)
 {
-    return t;
+    bool is_leap = false;
+    long long elapsed = 0;
+    __detail::leap_at_utc(
+        duration_cast<seconds>(ut.time_since_epoch()).count(), is_leap, elapsed);
+    return leap_second_info{is_leap, seconds(elapsed)};
+}
+
+// ── utc_clock members ───────────────────────────────────────────────────
+template <class Duration>
+utc_time<common_type_t<Duration, seconds>>
+utc_clock::from_sys(const sys_time<Duration> &t)
+{
+    using D = common_type_t<Duration, seconds>;
+    const long long inserted = __detail::leap_elapsed_at_sys(
+        duration_cast<seconds>(t.time_since_epoch()).count());
+    return utc_time<D>(t.time_since_epoch() + seconds(inserted));
+}
+
+template <class Duration>
+sys_time<common_type_t<Duration, seconds>>
+utc_clock::to_sys(const utc_time<Duration> &t)
+{
+    using D = common_type_t<Duration, seconds>;
+    // [time.clock.utc.members]/4: during an inserted leap second there is no
+    // sys_time to map to, and the answer is the last one before the insertion.
+    // `elapsed` already counts the second being inserted, so the subtraction
+    // lands there without a special case.
+    const leap_second_info i = get_leap_second_info(t);
+    return sys_time<D>(t.time_since_epoch() - i.elapsed);
+}
+
+inline utc_clock::time_point utc_clock::now()
+{
+    return from_sys(system_clock::now());
+}
+
+// ── tai_clock / gps_clock members ───────────────────────────────────────
+// Both are fixed offsets from UTC and need no table: TAI ran 10 s ahead of UTC
+// at its 1958-01-01 epoch, GPS started at 1980-01-06 with 19 s of TAI-UTC
+// already accumulated.
+template <class Duration>
+utc_time<common_type_t<Duration, seconds>>
+tai_clock::to_utc(const tai_time<Duration> &t) noexcept
+{
+    using D = common_type_t<Duration, seconds>;
+    return utc_time<D>(t.time_since_epoch()) - seconds(378691210);
+}
+
+template <class Duration>
+tai_time<common_type_t<Duration, seconds>>
+tai_clock::from_utc(const utc_time<Duration> &t) noexcept
+{
+    using D = common_type_t<Duration, seconds>;
+    return tai_time<D>(t.time_since_epoch()) + seconds(378691210);
+}
+
+inline tai_clock::time_point tai_clock::now()
+{
+    return from_utc(utc_clock::now());
+}
+
+template <class Duration>
+utc_time<common_type_t<Duration, seconds>>
+gps_clock::to_utc(const gps_time<Duration> &t) noexcept
+{
+    using D = common_type_t<Duration, seconds>;
+    return utc_time<D>(t.time_since_epoch()) + seconds(315964809);
+}
+
+template <class Duration>
+gps_time<common_type_t<Duration, seconds>>
+gps_clock::from_utc(const utc_time<Duration> &t) noexcept
+{
+    using D = common_type_t<Duration, seconds>;
+    return gps_time<D>(t.time_since_epoch()) - seconds(315964809);
+}
+
+inline gps_clock::time_point gps_clock::now()
+{
+    return from_utc(utc_clock::now());
+}
+
+// ── file_clock members ──────────────────────────────────────────────────
+// [time.clock.file] leaves the epoch implementation-defined; BoxOS uses the
+// same one as everything else here, so the conversion is the identity and a
+// file_time renders like a sys_time. libstdc++ chose 1601 and pays for it in
+// every conversion; there is no reason to.
+template <class Duration>
+sys_time<Duration> file_clock::to_sys(const file_time<Duration> &t) noexcept
+{
+    return sys_time<Duration>(t.time_since_epoch());
+}
+
+template <class Duration>
+file_time<Duration> file_clock::from_sys(const sys_time<Duration> &t) noexcept
+{
+    return file_time<Duration>(t.time_since_epoch());
+}
+
+inline file_clock::time_point file_clock::now()
+{
+    return from_sys(system_clock::now());
+}
+
+// ── [time.clock.cast] ───────────────────────────────────────────────────
+template <class DestClock, class SourceClock>
+struct clock_time_conversion {};
+
+template <class Clock>
+struct clock_time_conversion<Clock, Clock> {
+    template <class Duration>
+    time_point<Clock, Duration>
+    operator()(const time_point<Clock, Duration> &t) const
+    {
+        return t;
+    }
+};
+
+template <>
+struct clock_time_conversion<system_clock, system_clock> {
+    template <class Duration>
+    sys_time<Duration> operator()(const sys_time<Duration> &t) const
+    {
+        return t;
+    }
+};
+
+template <>
+struct clock_time_conversion<utc_clock, utc_clock> {
+    template <class Duration>
+    utc_time<Duration> operator()(const utc_time<Duration> &t) const
+    {
+        return t;
+    }
+};
+
+template <>
+struct clock_time_conversion<utc_clock, system_clock> {
+    template <class Duration>
+    utc_time<common_type_t<Duration, seconds>>
+    operator()(const sys_time<Duration> &t) const
+    {
+        return utc_clock::from_sys(t);
+    }
+};
+
+template <>
+struct clock_time_conversion<system_clock, utc_clock> {
+    template <class Duration>
+    sys_time<common_type_t<Duration, seconds>>
+    operator()(const utc_time<Duration> &t) const
+    {
+        return utc_clock::to_sys(t);
+    }
+};
+
+// The four generic joins. Each constraint sits on the MEMBER template, not in
+// the member's return type: a return type naming SourceClock::to_sys is looked
+// up when the CLASS is instantiated, and a clock without that member turns
+// what should be "this route does not exist" into a hard error. clock_cast
+// asks all four routes on purpose, so three of them must be allowed to say no.
+template <class SourceClock>
+struct clock_time_conversion<system_clock, SourceClock> {
+    template <class Duration>
+        requires requires(const time_point<SourceClock, Duration> &t) {
+            SourceClock::to_sys(t);
+        }
+    auto operator()(const time_point<SourceClock, Duration> &t) const
+    {
+        return SourceClock::to_sys(t);
+    }
+};
+
+template <class DestClock>
+struct clock_time_conversion<DestClock, system_clock> {
+    template <class Duration>
+        requires requires(const sys_time<Duration> &t) {
+            DestClock::from_sys(t);
+        }
+    auto operator()(const sys_time<Duration> &t) const
+    {
+        return DestClock::from_sys(t);
+    }
+};
+
+template <class SourceClock>
+struct clock_time_conversion<utc_clock, SourceClock> {
+    template <class Duration>
+        requires requires(const time_point<SourceClock, Duration> &t) {
+            SourceClock::to_utc(t);
+        }
+    auto operator()(const time_point<SourceClock, Duration> &t) const
+    {
+        return SourceClock::to_utc(t);
+    }
+};
+
+template <class DestClock>
+struct clock_time_conversion<DestClock, utc_clock> {
+    template <class Duration>
+        requires requires(const utc_time<Duration> &t) {
+            DestClock::from_utc(t);
+        }
+    auto operator()(const utc_time<Duration> &t) const
+    {
+        return DestClock::from_utc(t);
+    }
+};
+
+namespace __detail {
+
+template <class DestClock, class SourceClock, class Duration>
+concept __direct_castable = requires(const time_point<SourceClock, Duration> &t) {
+    clock_time_conversion<DestClock, SourceClock>{}(t);
+};
+
+template <class DestClock, class SourceClock, class Duration>
+concept __sys_castable = requires(const time_point<SourceClock, Duration> &t) {
+    clock_time_conversion<DestClock, system_clock>{}(
+        clock_time_conversion<system_clock, SourceClock>{}(t));
+};
+
+template <class DestClock, class SourceClock, class Duration>
+concept __utc_castable = requires(const time_point<SourceClock, Duration> &t) {
+    clock_time_conversion<DestClock, utc_clock>{}(
+        clock_time_conversion<utc_clock, SourceClock>{}(t));
+};
+
+} // namespace __detail
+
+// [time.clock.cast.fn]: try the direct conversion, then through sys_time, then
+// through utc_time, then through both. Exactly one of them must work, and the
+// order is the standard's — a pair of clocks that can be joined two ways must
+// not depend on which one the library happened to pick.
+template <class DestClock, class SourceClock, class Duration>
+    requires __detail::__direct_castable<DestClock, SourceClock, Duration>
+auto clock_cast(const time_point<SourceClock, Duration> &t)
+{
+    return clock_time_conversion<DestClock, SourceClock>{}(t);
+}
+
+template <class DestClock, class SourceClock, class Duration>
+    requires (!__detail::__direct_castable<DestClock, SourceClock, Duration>)
+          && __detail::__sys_castable<DestClock, SourceClock, Duration>
+auto clock_cast(const time_point<SourceClock, Duration> &t)
+{
+    return clock_time_conversion<DestClock, system_clock>{}(
+        clock_time_conversion<system_clock, SourceClock>{}(t));
+}
+
+template <class DestClock, class SourceClock, class Duration>
+    requires (!__detail::__direct_castable<DestClock, SourceClock, Duration>)
+          && (!__detail::__sys_castable<DestClock, SourceClock, Duration>)
+          && __detail::__utc_castable<DestClock, SourceClock, Duration>
+auto clock_cast(const time_point<SourceClock, Duration> &t)
+{
+    return clock_time_conversion<DestClock, utc_clock>{}(
+        clock_time_conversion<utc_clock, SourceClock>{}(t));
 }
 
 } // namespace chrono

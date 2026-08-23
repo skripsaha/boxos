@@ -1,0 +1,69 @@
+// boxcxx — <__bits/civil_days>
+//
+// Howard Hinnant's public-domain civil-date algorithms, and nothing else: no
+// std types, no includes, no policy about what a date means.
+//
+// This leaf exists for the same reason <__bits/unicode_runs> does. Two readers
+// need these three formulas — <__bits/chrono_calendar>, which builds [time.cal]
+// out of them, and <__bits/tzdb_read>, which needs them to evaluate the POSIX
+// rule at the end of a zone's transition list ("the last Sunday in October" is
+// a civil date before it is an instant). A copy in each would be two copies of
+// a formula whose signedness comment took a bug to write.
+#ifndef BOXCXX_BITS_CIVIL_DAYS
+#define BOXCXX_BITS_CIVIL_DAYS
+
+namespace std::__boxcxx::civil {
+
+constexpr long long floor_div(long long a, long long b) noexcept
+{
+    long long q = a / b, r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) --q;
+    return q;
+}
+
+constexpr long long days_from_civil(long long y, unsigned m, unsigned d) noexcept
+{
+    y -= m <= 2;
+    const long long era = (y >= 0 ? y : y - 399) / 400;
+    const long long yoe = y - era * 400; // 0..399
+    const long long mp  = m > 2 ? (long long)m - 3 : (long long)m + 9;
+    // Signed throughout: day 0 of March gives doy == -1, and an unsigned doy
+    // only wraps back through doe when yoe != 0 — for a year that is a multiple
+    // of 400 there is nothing to absorb it and the 2^32 survives into the
+    // result. [time.cal.ymd] specifies the conversion whenever the year and
+    // month are ok(), so that case is not an unspecified one.
+    const long long doy = (153 * mp + 2) / 5 + (long long)d - 1;
+    const long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097LL + doe - 719468LL;
+}
+
+constexpr void civil_from_days(long long z, long long &y, unsigned &m,
+                               unsigned &d) noexcept
+{
+    z += 719468;
+    const long long era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned  doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned  yoe =
+        (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
+    const long long yy  = static_cast<long long>(yoe) + era * 400;
+    const unsigned  doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
+    const unsigned  mp  = (5u * doy + 2u) / 153u;
+    d = doy - (153u * mp + 2u) / 5u + 1u;
+    m = mp < 10u ? mp + 3u : mp - 9u;
+    y = yy + (m <= 2u);
+}
+
+// 0 == Sunday, matching both POSIX's Mm.w.d and [time.cal.wd].
+constexpr unsigned weekday_from_days(long long z) noexcept
+{
+    return static_cast<unsigned>(z >= -4 ? (z + 4) % 7 : (z + 5) % 7 + 6);
+}
+
+constexpr bool is_leap(long long y) noexcept
+{
+    return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+}
+
+}  // namespace std::__boxcxx::civil
+
+#endif

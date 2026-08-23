@@ -1276,11 +1276,16 @@ struct formatter<chrono::sys_time<Duration>, CharT>
     }
 };
 
-// A utc_time renders as the sys_time holding the same count. BoxOS has no
-// leap-second table (clock_cast is the identity), so the two differ by however
-// many leap seconds have been inserted, and %S never shows the 60th second of
-// an insertion — a documented deviation, not an approximation of the shift the
-// standard specifies for tai and gps below (those are exact).
+// ‼ A utc_time is NOT the sys_time holding the same count, and this entry used
+// to say it was — correctly, while there was no leap-second table and the two
+// clocks were the same clock. Ф45 baked the table, and the moment it did, this
+// formatter started printing every UTC instant 27 seconds into the future.
+// That is what a regression looks like when it arrives through a header nobody
+// edited: the code did not change, the truth underneath it did.
+//
+// What it does now is what [time.format] asks: render the sys_time this UTC
+// reading corresponds to, and during an inserted second show the 60 that only
+// UTC has.
 template <class Duration, class CharT>
     requires __format::FmtCharT<CharT>
 struct formatter<chrono::utc_time<Duration>, CharT>
@@ -1288,9 +1293,13 @@ struct formatter<chrono::utc_time<Duration>, CharT>
                                __chrono_fmt::kZone, CharT> {
     void format(const chrono::utc_time<Duration> &tp, __format::Ctx<CharT> &ctx) const
     {
-        __chrono_fmt::emit_clock(ctx, this->spec_, this->chrono_,
-                                 string_view("%F %T"),
-                                 chrono::sys_time<Duration>{tp.time_since_epoch()},
+        using Common = common_type_t<Duration, chrono::seconds>;
+        const chrono::leap_second_info li = chrono::get_leap_second_info(tp);
+        auto parts = __chrono_fmt::sys_parts(
+            chrono::sys_time<Common>{tp.time_since_epoch() - li.elapsed});
+        if (li.is_leap_second) parts.s = 60;
+        __chrono_fmt::emit_parts(ctx, this->spec_, this->chrono_,
+                                 string_view("%F %T"), parts,
                                  __chrono_fmt::kZoneUtc);
     }
 };
@@ -1447,6 +1456,31 @@ struct formatter<chrono::duration<Rep, Period>, CharT>
             __chrono_fmt::render(body, this->chrono_, p);
             __chrono_fmt::emit(ctx, this->spec_, body);
         }
+    }
+};
+
+// [time.format] — a zoned_time renders its LOCAL reading, with the zone's own
+// abbreviation and offset behind %Z and %z. Nothing new is computed here: the
+// zone answers with a sys_info, and the two fields that used to be a constant
+// "UTC"/+0000 become that answer.
+template <class Duration, class TimeZonePtr, class CharT>
+    requires __format::FmtCharT<CharT>
+struct formatter<chrono::zoned_time<Duration, TimeZonePtr>, CharT>
+    : __chrono_fmt::SpecParser<__chrono_fmt::kDate | __chrono_fmt::kTime |
+                               __chrono_fmt::kZone, CharT> {
+    void format(const chrono::zoned_time<Duration, TimeZonePtr> &zt,
+                __format::Ctx<CharT> &ctx) const
+    {
+        const chrono::sys_info info = zt.get_info();
+        const auto local = zt.get_local_time();
+        __chrono_fmt::ZoneInfo z{string_view(info.abbrev.data(), info.abbrev.size()),
+                                 true, true, info.offset.count()};
+        __chrono_fmt::emit_parts(
+            ctx, this->spec_, this->chrono_, string_view("%F %T %Z"),
+            __chrono_fmt::sys_parts(
+                chrono::sys_time<typename chrono::zoned_time<Duration, TimeZonePtr>
+                                     ::duration>{local.time_since_epoch()}),
+            z);
     }
 };
 
