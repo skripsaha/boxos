@@ -158,8 +158,9 @@ ISR_NOERROR 128  ; kernel_notify syscall
 ; Completion IRQ (INT 0x81)
 ISR_NOERROR 129  ; workflow completion notification
 
-; MSI vector (INT 0x70) — AHCI message-signalled interrupt
-ISR_NOERROR 112  ; AHCI MSI
+; MSI vectors — message-signalled interrupts, delivered straight to the LAPIC
+ISR_NOERROR 112  ; AHCI MSI  (0x70)
+ISR_NOERROR 113  ; xHCI MSI  (0x71)
 
 ; LAPIC special vectors
 ISR_NOERROR 254  ; LAPIC timer
@@ -416,8 +417,17 @@ isr_table:
     times 56 dq isr13
     ; AHCI MSI (112 = 0x70)
     dq isr112
-    ; Unimplemented (113-127) - use GPF handler
-    times 15 dq isr13
+    ; xHCI MSI (113 = 0x71)
+    ;
+    ; A vector with no stub of its own is not an unused vector — every entry in
+    ; the unimplemented runs below points at isr13, the General Protection
+    ; Fault handler. So the first interrupt the xHCI controller delivered
+    ; arrived as a #GP panic, and the panic named vector 13 rather than the
+    ; vector that was actually raised. Adding a vector to irqchip.h and an
+    ; IDT entry in idt.c is two thirds of the work; this is the third.
+    dq isr113
+    ; Unimplemented (114-127) - use GPF handler
+    times 14 dq isr13
     ; Syscall (128)
     dq isr128
     ; Completion IRQ (129)

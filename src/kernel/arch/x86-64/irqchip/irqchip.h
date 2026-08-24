@@ -21,6 +21,7 @@
 // straight to the LAPIC (acked with LAPIC EOI, not the IOAPIC) so these sit
 // outside the IOAPIC GSI range (32-55). Dispatched explicitly in irq_handler.
 #define AHCI_MSI_VECTOR         0x70    // 112 — AHCI controller
+#define XHCI_MSI_VECTOR         0x71    // 113 — USB xHCI controller
 
 // AMP inter-processor interrupt vectors
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
