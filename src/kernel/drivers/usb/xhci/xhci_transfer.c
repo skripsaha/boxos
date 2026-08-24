@@ -113,7 +113,23 @@ int xhci_control_transfer_sync(xhci_controller_t* ctrl, xhci_device_slot_t* slot
     }
 
     uint32_t residual = 0;
-    return xhci_ep_wait(ctrl, slot, 1, timeout_ms, &residual);
+    int code = xhci_ep_wait(ctrl, slot, 1, timeout_ms, &residual);
+
+    /*
+     * A device is allowed to say no, and the way it says no is to halt the pipe
+     * the question came down.
+     *
+     * Enumeration knows this and clears the halt before its next step. Nothing
+     * that called this did, so the first optional request any device refused
+     * left EP0 halted and every request after it — from any driver, for the
+     * rest of that device's life — failed against a pipe nobody had reopened.
+     * The hub class asks a great many questions a hub is entitled to refuse.
+     */
+    if (code == TRB_COMPLETION_STALL) {
+        xhci_ep_recover(ctrl, slot, 1);
+        xhci_command_wait_idle(ctrl, timeout_ms);
+    }
+    return code;
 }
 
 void xhci_free_ep0_ring(xhci_device_slot_t* slot) {
