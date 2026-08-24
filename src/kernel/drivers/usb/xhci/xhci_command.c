@@ -35,6 +35,8 @@ static int find_cmd_by_trb_phys(uint64_t trb_phys) {
  * mark POSTED as one critical section. cmd_sequence is also bumped under
  * the lock so two posters cannot get the same sequence number. */
 static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_id) {
+    uint8_t trb_type = (uint8_t)TRB_GET_TYPE(trb->control);
+
     spin_lock(&pending_cmds_lock);
 
     int cmd_idx = -1;
@@ -61,6 +63,7 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_i
     pending_cmds[cmd_idx].timestamp_posted = rdtsc();
     pending_cmds[cmd_idx].sequence = ++cmd_sequence;
     pending_cmds[cmd_idx].slot_id = slot_id;
+    pending_cmds[cmd_idx].trb_type = trb_type;
     pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
     pending_cmds[cmd_idx].completion_code = 0;
     pending_cmds[cmd_idx].completion_param = 0;
@@ -131,6 +134,59 @@ int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uin
     return post_command(ctrl, &trb, slot_id);
 }
 
+int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t dci) {
+    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots ||
+        dci == 0 || dci > 31) {
+        return -1;
+    }
+
+    xhci_trb_t trb = {0};
+    trb.control = TRB_SET_TYPE(TRB_TYPE_RESET_ENDPOINT) |
+                  ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
+
+    return post_command(ctrl, &trb, slot_id);
+}
+
+int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
+                                 uint8_t dci, uint64_t dequeue_ptr_with_dcs) {
+    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots ||
+        dci == 0 || dci > 31) {
+        return -1;
+    }
+
+    xhci_trb_t trb = {0};
+    trb.parameter = dequeue_ptr_with_dcs;
+    trb.control = TRB_SET_TYPE(TRB_TYPE_SET_TR_DEQUEUE) |
+                  ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
+
+    return post_command(ctrl, &trb, slot_id);
+}
+
+/* Which commands are steps of enumeration.
+ *
+ * Every command completion used to be handed to the enumeration state machine,
+ * which was harmless only while enumeration was the sole thing issuing
+ * commands. It is not any more: an endpoint reset on a device that is already
+ * running would arrive as an unexplained completion for a slot in a settled
+ * state, and a state machine driven by events it did not ask for is a state
+ * machine that will eventually take the wrong branch. */
+static bool cmd_is_enumeration_step(uint8_t trb_type) {
+    switch (trb_type) {
+        case TRB_TYPE_ENABLE_SLOT:
+        case TRB_TYPE_ADDRESS_DEVICE:
+        case TRB_TYPE_CONFIGURE_ENDPOINT:
+        case TRB_TYPE_EVALUATE_CONTEXT:
+        /* Clearing a stalled control pipe is part of enumeration when it is
+         * enumeration that stalled. On a slot that has finished, the state
+         * machine has no case for these and says so quietly. */
+        case TRB_TYPE_RESET_ENDPOINT:
+        case TRB_TYPE_SET_TR_DEQUEUE:
+            return true;
+        default:
+            return false;
+    }
+}
+
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) {
     if (!ctrl || !event) {
         return;
@@ -152,13 +208,17 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) 
     pending_cmds[cmd_idx].completion_param = event->status;
     pending_cmds[cmd_idx].state = (completion_code == TRB_COMPLETION_SUCCESS)
                                    ? CMD_STATE_COMPLETED : CMD_STATE_ERROR;
+    uint8_t trb_type = pending_cmds[cmd_idx].trb_type;
     spin_unlock(&pending_cmds_lock);
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        debug_printf("[xHCI CMD] Command failed: slot=%u code=%u\n", slot_id, completion_code);
+        kprintf("[xHCI] command %u on slot %u failed with completion code %u\n",
+                trb_type, slot_id, completion_code);
     }
 
-    xhci_enum_advance_state(ctrl, slot_id, completion_code);
+    if (cmd_is_enumeration_step(trb_type)) {
+        xhci_enum_advance_state(ctrl, slot_id, completion_code);
+    }
 
     spin_lock(&pending_cmds_lock);
     pending_cmds[cmd_idx].state = CMD_STATE_IDLE;

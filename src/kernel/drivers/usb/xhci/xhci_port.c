@@ -5,107 +5,213 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
+/*
+ * PORTSC is a register where writing back what you read is destructive.
+ *
+ * Seven of its bits are write-one-to-clear changes: a read-modify-write that
+ * does not mask them off first clears whichever happened to be set at the
+ * moment of the read, silently discarding a connect, a reset completion or an
+ * over-current report that nothing will ever mention again. Three more are
+ * write-one-to-act: PED disables the port, PR and WPR start a reset, LWS
+ * commits a link state. Writing those back unchanged does not preserve them —
+ * it performs them.
+ *
+ * Every write in this file goes through portsc_write for that reason, and no
+ * other function in the driver writes PORTSC at all.
+ */
+static uint32_t portsc_read(xhci_controller_t* ctrl, uint8_t port)
+{
+    return ctrl->ports[port - 1].portsc;
+}
+
+/* The part of the current PORTSC that is safe to write back: everything the
+ * driver wants to preserve, with every write-one-to-act and write-one-to-clear
+ * bit stripped out. Whatever the caller actually intends to do is then OR'd on
+ * top, explicitly, one bit at a time. */
+static uint32_t portsc_base(xhci_controller_t* ctrl, uint8_t port)
+{
+    return portsc_read(ctrl, port) & ~XHCI_PORTSC_RMW_CLEAR;
+}
+
+/* Write PORTSC. The value must already be a portsc_base with the intended
+ * action bits OR'd in — this does not filter, because filtering here is what
+ * removed the reset bit from the write whose entire purpose was to set it. */
+static void portsc_write(xhci_controller_t* ctrl, uint8_t port, uint32_t value)
+{
+    ctrl->ports[port - 1].portsc = value;
+}
+
+static bool port_valid(xhci_controller_t* ctrl, uint8_t port)
+{
+    return ctrl && ctrl->initialized && ctrl->ports &&
+           port != 0 && port <= ctrl->max_ports;
+}
+
 uint32_t xhci_get_port_status(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
+    if (!port_valid(ctrl, port)) {
         return 0;
     }
-
-    xhci_port_regs_t* port_regs = &ctrl->ports[port - 1];
-    return port_regs->portsc;
+    return portsc_read(ctrl, port);
 }
 
 bool xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
+    if (!port_valid(ctrl, port)) {
         return false;
     }
-
-    uint32_t portsc = xhci_get_port_status(ctrl, port);
-    return (portsc & XHCI_PORTSC_CCS) != 0;
+    return (portsc_read(ctrl, port) & XHCI_PORTSC_CCS) != 0;
 }
 
 uint8_t xhci_get_port_speed(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
+    if (!port_valid(ctrl, port)) {
         return 0;
     }
-
-    uint32_t portsc = xhci_get_port_status(ctrl, port);
-    return (portsc & XHCI_PORTSC_SPEED_MASK) >> 10;
+    return (uint8_t)XHCI_PORTSC_SPEED(portsc_read(ctrl, port));
 }
 
 void xhci_port_clear_change_bits(xhci_controller_t* ctrl, uint8_t port, uint32_t bits) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
+    if (!port_valid(ctrl, port)) {
         return;
     }
 
-    xhci_port_regs_t* port_regs = &ctrl->ports[port - 1];
-
-    uint32_t portsc = port_regs->portsc & ~XHCI_PORTSC_W1C_MASK;
-    portsc |= (bits & XHCI_PORTSC_W1C_MASK);
-    port_regs->portsc = portsc;
+    portsc_write(ctrl, port, portsc_base(ctrl, port) |
+                             (bits & XHCI_PORTSC_W1C_MASK));
 }
 
-int xhci_reset_port(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
-        return -1;
+uint8_t xhci_port_protocol(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!ctrl || port == 0 || port >= XHCI_PORT_MAP_ENTRIES) {
+        return 0;
+    }
+    return ctrl->port_major[port];
+}
+
+/*
+ * Port power.
+ *
+ * When the controller reports Port Power Control in HCCPARAMS1, its root ports
+ * come out of reset with the power off and stay that way until software says
+ * otherwise. An unpowered port reports no device however much hardware is
+ * plugged into it — so on such a controller, skipping this is not a
+ * degradation, it is a machine with no USB at all. QEMU powers its ports
+ * itself, which is the whole reason a driver that never wrote this bit looked
+ * like it worked.
+ *
+ * USB 2.0 §7.2.4.1 gives a device up to 100 ms after power is applied before
+ * it has to be ready to answer; the wait below is that debounce, paid once for
+ * all ports rather than once per port.
+ */
+void xhci_power_ports(xhci_controller_t* ctrl)
+{
+    if (!ctrl || !ctrl->ports || !ctrl->cap_regs) {
+        return;
     }
 
-    xhci_port_regs_t* port_regs = &ctrl->ports[port - 1];
+    if ((ctrl->cap_regs->hccparams1 & XHCI_HCC1_PPC) == 0) {
+        debug_printf("[xHCI Port] controller powers its own ports\n");
+        return;
+    }
 
-    debug_printf("[xHCI Port] Resetting port %u...\n", port);
-
-    uint32_t portsc = port_regs->portsc & ~XHCI_PORTSC_W1C_MASK;
-    portsc |= XHCI_PORTSC_PR;
-    port_regs->portsc = portsc;
-
-    // Poll for reset completion using TSC (non-blocking spin, ~100ms timeout)
-    uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(100);
-    while (rdtsc() < timeout_tsc) {
-        portsc = port_regs->portsc;
-        if (!(portsc & XHCI_PORTSC_PR)) {
-            break;
+    unsigned switched = 0;
+    for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
+        if (portsc_read(ctrl, port) & XHCI_PORTSC_PP) {
+            continue;                   /* already powered */
         }
+        portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_PP);
+        switched++;
+    }
+
+    if (switched == 0) {
+        return;
+    }
+
+    kprintf("[xHCI] powered %u root port(s)\n", switched);
+
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_POWER_SETTLE_MS);
+    while ((int64_t)(rdtsc() - deadline) < 0) {
         cpu_pause();
     }
+}
 
-    portsc = port_regs->portsc;
-    if (portsc & XHCI_PORTSC_PR) {
-        debug_printf("[xHCI Port] WARNING: Port %u reset timed out after 100ms\n", port);
+/*
+ * Beginning a port reset, and then leaving.
+ *
+ * A USB 2 port has to be driven through a reset before the device on it will
+ * answer to anything. That reset takes tens of milliseconds, and the old code
+ * spent them spinning — inside the interrupt handler, once per port, with
+ * every other interrupt on the core waiting behind it. Nothing about the
+ * hardware requires that: the controller raises a port-status change when the
+ * reset finishes and sets PRC to say which one it was. So this asserts the
+ * reset and returns, and xhci_port_reset_finished picks the story up when the
+ * hardware says it is time.
+ *
+ * A USB 3 port needs nothing: the link trains itself on connect and arrives
+ * already Enabled. Driving a software reset at it is not harmless — it drops a
+ * link that was working and starts the negotiation over.
+ *
+ * Returns 1 when the port is already usable and the caller should proceed
+ * immediately, 0 when a reset was started and the event will follow, and
+ * negative on error.
+ */
+int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!port_valid(ctrl, port)) {
         return -1;
     }
 
-    if (portsc & XHCI_PORTSC_PRC) {
-        xhci_port_clear_change_bits(ctrl, port, XHCI_PORTSC_PRC);
+    uint32_t portsc = portsc_read(ctrl, port);
+    if (!(portsc & XHCI_PORTSC_CCS)) {
+        return -2;                      /* nothing connected any more */
     }
 
-    debug_printf("[xHCI Port] Port %u reset complete\n", port);
+    uint8_t major = xhci_port_protocol(ctrl, port);
+
+    if (major >= 3) {
+        if (portsc & XHCI_PORTSC_PED) {
+            debug_printf("[xHCI Port] port %u is USB 3 and already enabled\n", port);
+            return 1;
+        }
+        /* A SuperSpeed port that connected but did not enable itself has a
+         * link that failed to train. A warm reset is the one the specification
+         * defines for that case; the hot reset used on USB 2 does not
+         * re-establish a SuperSpeed link. */
+        debug_printf("[xHCI Port] port %u is USB 3 but not enabled — warm reset\n",
+                     port);
+        portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_WPR);
+        return 0;
+    }
+
+    debug_printf("[xHCI Port] resetting port %u\n", port);
+    portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_PR);
     return 0;
 }
 
-int xhci_enable_port(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
-        return -1;
+/*
+ * The reset the hardware just told us about: did it leave a usable port?
+ *
+ * PRC only says the reset ended. Whether it succeeded is PED — a port that
+ * reset and did not enable has a device that failed to answer, and enumerating
+ * into that produces a slot the controller will refuse to address.
+ */
+bool xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!port_valid(ctrl, port)) {
+        return false;
     }
 
-    xhci_port_regs_t* port_regs = &ctrl->ports[port - 1];
-
-    uint32_t portsc = port_regs->portsc & ~XHCI_PORTSC_W1C_MASK;
-    portsc |= XHCI_PORTSC_PED;
-    port_regs->portsc = portsc;
-
-    debug_printf("[xHCI Port] Port %u enabled\n", port);
-    return 0;
+    uint32_t portsc = portsc_read(ctrl, port);
+    return (portsc & XHCI_PORTSC_CCS) && (portsc & XHCI_PORTSC_PED);
 }
 
 int xhci_disable_port(xhci_controller_t* ctrl, uint8_t port) {
-    if (!ctrl || !ctrl->initialized || port == 0 || port > ctrl->max_ports) {
+    if (!port_valid(ctrl, port)) {
         return -1;
     }
 
-    xhci_port_regs_t* port_regs = &ctrl->ports[port - 1];
-
-    uint32_t portsc = port_regs->portsc & ~XHCI_PORTSC_W1C_MASK;
-    portsc &= ~XHCI_PORTSC_PED;
-    port_regs->portsc = portsc;
+    /* PED is write-one-to-DISABLE, not a normal control bit: writing zero to
+     * it does nothing at all. The old code cleared it in a read-modify-write
+     * and reported success, which meant this function had never once disabled
+     * a port. */
+    portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_PED);
 
     debug_printf("[xHCI Port] Port %u disabled\n", port);
     return 0;

@@ -8,6 +8,11 @@
 
 // Types are defined in xhci.h - include xhci.h before this header
 
+/* The per-slot scratch page every descriptor is read into. Named here because
+ * this is where it is allocated, and the enumeration state machine has to
+ * refuse a configuration descriptor larger than it rather than overrun it. */
+#define XHCI_DESC_BUFFER_BYTES 4096
+
 int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
 void xhci_free_ep0_ring(xhci_device_slot_t* slot);
 

@@ -5,17 +5,38 @@
 #include "xhci_regs.h"
 #include "xhci.h"
 
+/* Speeds as the controller reports them in PORTSC (Table 6-14). */
 #define XHCI_PORT_SPEED_FULL     1
 #define XHCI_PORT_SPEED_LOW      2
 #define XHCI_PORT_SPEED_HIGH     3
 #define XHCI_PORT_SPEED_SUPER    4
+#define XHCI_PORT_SPEED_SUPER_10 5
+
+/* USB 2.0 §7.2.4.1: a device may take this long after power is applied
+ * before it must answer. */
+#define XHCI_PORT_POWER_SETTLE_MS 100
 
 uint32_t xhci_get_port_status(xhci_controller_t* ctrl, uint8_t port);
-int xhci_reset_port(xhci_controller_t* ctrl, uint8_t port);
-int xhci_enable_port(xhci_controller_t* ctrl, uint8_t port);
-int xhci_disable_port(xhci_controller_t* ctrl, uint8_t port);
-bool xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port);
-uint8_t xhci_get_port_speed(xhci_controller_t* ctrl, uint8_t port);
-void xhci_port_clear_change_bits(xhci_controller_t* ctrl, uint8_t port, uint32_t bits);
+bool     xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port);
+uint8_t  xhci_get_port_speed(xhci_controller_t* ctrl, uint8_t port);
+void     xhci_port_clear_change_bits(xhci_controller_t* ctrl, uint8_t port, uint32_t bits);
+
+/* USB major revision of a root port, from the Supported Protocol capability.
+ * Zero when the controller never described the port. */
+uint8_t  xhci_port_protocol(xhci_controller_t* ctrl, uint8_t port);
+
+/* Switch on every root port that is not powered, then wait out the debounce.
+ * Called once, after the controller is running. */
+void     xhci_power_ports(xhci_controller_t* ctrl);
+
+/* Start a port reset and return without waiting. Returns 1 when the port is
+ * already usable and no reset was needed, 0 when a reset is now in flight and
+ * a port-status change will follow, negative on error. */
+int      xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port);
+
+/* True when the port that just reported a reset came out of it usable. */
+bool     xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port);
+
+int      xhci_disable_port(xhci_controller_t* ctrl, uint8_t port);
 
 #endif

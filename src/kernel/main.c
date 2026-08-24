@@ -33,7 +33,6 @@
 #include "ready_queue.h"
 #include "irq_defer.h"
 #include "xhci.h"
-#include "xhci_input.h"
 #include "acpi.h"
 #include "ahci.h"
 #include "cabin_layout.h"
@@ -715,13 +714,7 @@ void kernel_main(void)
     serial_console_init();
 
     debug_printf("[INIT] USB xHCI Driver...\n");
-    int xhci_result = xhci_init();
-    if (xhci_result == 0)
-    {
-        debug_printf("[INIT] xHCI controller initialized successfully\n");
-        UsbInput_Enable(true); // Enable USB input devices
-    }
-    else
+    if (xhci_init() != 0)
     {
         debug_printf("[INIT] xHCI controller not found or initialization failed\n");
     }
