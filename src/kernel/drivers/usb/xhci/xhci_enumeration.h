@@ -46,6 +46,14 @@ typedef enum {
 #define XHCI_MAX_DEVICE_SLOTS 64
 
 struct xhci_device_slot {
+    /* Which controller handed out this slot.
+     *
+     * Slot numbers belong to a controller, not to the machine: two controllers
+     * each start handing them out at one. Without this, a completion for slot 1
+     * on the chipset controller and a device on slot 1 of the one on a graphics
+     * card are the same entry in this table. */
+    xhci_controller_t* ctrl;
+
     uint8_t slot_id;
     uint8_t port_num;
     uint8_t state;          /* xhci_enum_state_t */
@@ -168,7 +176,7 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
                               uint8_t hub_port, uint8_t speed);
 
 /* The slot this device's hub occupies, or NULL. */
-xhci_device_slot_t* xhci_get_device_slot_by_id(uint8_t slot_id);
+xhci_device_slot_t* xhci_get_device_slot_by_id(xhci_controller_t* ctrl, uint8_t slot_id);
 void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t completion_code);
 
 /* The port finished the reset enumeration asked for. Called from the
@@ -196,7 +204,8 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms);
 
 /* Walk every device that has finished enumerating. */
 typedef void (*xhci_slot_visitor)(void* ctx, xhci_device_slot_t* slot);
-void xhci_enum_for_each_configured(xhci_slot_visitor visit, void* ctx);
+void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
+                                   xhci_slot_visitor visit, void* ctx);
 
 /* True when a STALL at this point in enumeration is the device declining an
  * optional request rather than the conversation failing. */
@@ -205,7 +214,7 @@ bool xhci_enum_stall_is_tolerable(uint8_t state);
 /* Clear a halted EP0 and resume enumeration from where it stalled. */
 void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
 xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_id);
-xhci_device_slot_t* xhci_get_device_slot_by_port(uint8_t port);
+xhci_device_slot_t* xhci_get_device_slot_by_port(xhci_controller_t* ctrl, uint8_t port);
 
 /*
  * Unplugging is not a free().

@@ -189,10 +189,14 @@ static void halt_sync_storage(void)
 
 static void halt_stop_hardware(void)
 {
-    xhci_controller_t *ctrl = xhci_get_controller();
-    if (ctrl && ctrl->initialized)
+    for (uint8_t ci = 0; ci < xhci_controller_count(); ci++)
     {
-        kprintf("[HALT] Stopping USB controller...\n");
+        xhci_controller_t *ctrl = xhci_controller_at(ci);
+        if (!ctrl || !ctrl->initialized)
+        {
+            continue;
+        }
+        kprintf("[HALT] Stopping USB controller %u...\n", ci);
         for (uint8_t p = 1; p <= ctrl->max_ports; p++)
         {
             xhci_disable_port(ctrl, p);

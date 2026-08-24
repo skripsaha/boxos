@@ -19,13 +19,38 @@
 #include "cpu_calibrate.h"
 #include "amp.h"
 
-static xhci_controller_t global_controller = {0};
+/*
+ * Every xHCI controller on the machine, not the first one found.
+ *
+ * A desktop routinely has two: the one on the chipset, where the keyboard and
+ * the sockets on the case are, and another on a graphics card driving its
+ * USB-C port. PCI enumeration order decides which comes first and it is not
+ * the one anybody means — measured on a live board, this driver took the
+ * controller on the graphics card, reported six empty ports, and left the
+ * keyboard and the boot drive on the chipset controller untouched. There is no
+ * "the" USB controller to get hold of.
+ */
+#define XHCI_MAX_CONTROLLERS 8
 
-xhci_controller_t* xhci_get_controller(void) {
-    if (!global_controller.initialized) {
+static xhci_controller_t g_controllers[XHCI_MAX_CONTROLLERS];
+static uint8_t           g_controller_count = 0;
+
+uint8_t xhci_controller_count(void) {
+    return g_controller_count;
+}
+
+xhci_controller_t* xhci_controller_at(uint8_t index) {
+    if (index >= g_controller_count) {
         return NULL;
     }
-    return &global_controller;
+    return &g_controllers[index];
+}
+
+/* The first controller in service. Kept for the callers that genuinely want
+ * any one of them — a query, a diagnostic — and not for the ones that mean
+ * "all of them", which now say so. */
+xhci_controller_t* xhci_get_controller(void) {
+    return xhci_controller_at(0);
 }
 
 /* The specification gives the controller 16 ms to halt; some take longer, so
@@ -406,27 +431,7 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
             found, ctrl->max_ports);
 }
 
-int xhci_init(void) {
-    xhci_controller_t* ctrl = &global_controller;
-
-    debug_printf("[xHCI] Initializing xHCI driver...\n");
-
-    spinlock_init(&ctrl->event_lock);
-    xhci_command_init();
-    xhci_enumeration_init();
-
-    if (pci_find_device_by_class(0x0C, 0x03, 0x30, &ctrl->pci_dev) != 0) {
-        kprintf("[xHCI] no xHCI controller on this machine\n");
-        return -1;
-    }
-
-    /* Named, because this driver takes the first one it finds and a machine
-     * may have more than one. If the devices somebody expects are on a
-     * different controller, the only way to tell from a photograph of the
-     * screen is to know which one this was. */
-    kprintf("[xHCI] controller at %02x:%02x.%u  %04x:%04x\n",
-            ctrl->pci_dev.bus, ctrl->pci_dev.device, ctrl->pci_dev.function,
-            ctrl->pci_dev.vendor_id, ctrl->pci_dev.device_id);
+static int xhci_bring_up(xhci_controller_t* ctrl) {
 
     debug_printf("[xHCI] Found controller: %02x:%02x.%x\n",
                  ctrl->pci_dev.bus, ctrl->pci_dev.device, ctrl->pci_dev.function);
@@ -743,8 +748,6 @@ int xhci_init(void) {
             ctrl->max_slots,
             ctrl->use_polling ? "polled" : (ctrl->use_msi ? "MSI" : "INTx"));
 
-    xhci_survey_root_ports(ctrl);
-
     return 0;
 
 cleanup_resources:
@@ -771,4 +774,52 @@ cleanup_resources:
 
     ctrl->initialized = false;
     return -1;
+}
+
+int xhci_init(void)
+{
+    xhci_command_init();
+    xhci_enumeration_init();
+
+    for (uint32_t index = 0; index < XHCI_MAX_CONTROLLERS; index++) {
+        pci_device_t dev;
+        if (pci_find_nth_by_class(0x0C, 0x03, 0x30, index, &dev) != 0) {
+            break;                      /* seen them all */
+        }
+
+        xhci_controller_t* ctrl = &g_controllers[g_controller_count];
+        memset(ctrl, 0, sizeof(*ctrl));
+        ctrl->pci_dev = dev;
+        spinlock_init(&ctrl->event_lock);
+
+        /* Named on the way in, so a photograph of the screen identifies which
+         * silicon this is: a chipset controller and one on a graphics card
+         * look identical in every line that follows. */
+        kprintf("[xHCI] controller at %02x:%02x.%u  %04x:%04x\n",
+                dev.bus, dev.device, dev.function,
+                dev.vendor_id, dev.device_id);
+
+        if (xhci_bring_up(ctrl) == 0) {
+            g_controller_count++;
+        } else {
+            /* One controller failing is not the machine having no USB. */
+            kprintf("[xHCI] the controller at %02x:%02x.%u did not come up — "
+                    "carrying on with the others\n",
+                    dev.bus, dev.device, dev.function);
+        }
+    }
+
+    if (g_controller_count == 0) {
+        kprintf("[xHCI] no usable xHCI controller on this machine\n");
+        return -1;
+    }
+
+    kprintf("[xHCI] %u controller(s) in service\n", g_controller_count);
+
+    /* Surveyed only once every controller is running, so that a device on the
+     * second one is not enumerated while the first is still being reset. */
+    for (uint8_t i = 0; i < g_controller_count; i++) {
+        xhci_survey_root_ports(&g_controllers[i]);
+    }
+    return 0;
 }

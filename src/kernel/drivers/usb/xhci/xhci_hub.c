@@ -576,7 +576,7 @@ static void hub_port_gone(XhciHub* h, uint8_t port)
          * recursive: releasing a child that is itself a hub releases its own
          * children, and the list is re-walked because it changed underneath. */
         for (uint8_t id = 1; id < 255; id++) {
-            xhci_device_slot_t* s = xhci_get_device_slot_by_id(id);
+            xhci_device_slot_t* s = xhci_get_device_slot_by_id(h->ctrl, id);
             if (s && s->parent_slot_id == h->slot->slot_id &&
                 s->parent_port == port) {
                 child = s;
@@ -903,7 +903,7 @@ int xhci_hub_service(xhci_controller_t* ctrl)
     for (;;) {
         xhci_device_slot_t* pending = NULL;
         for (uint8_t id = 1; id < 255; id++) {
-            xhci_device_slot_t* s = xhci_get_device_slot_by_id(id);
+            xhci_device_slot_t* s = xhci_get_device_slot_by_id(ctrl, id);
             if (s && s->driver == XHCI_DRIVER_HUB && !xhci_hub_slot_attached(s)) {
                 pending = s;
                 break;
@@ -944,8 +944,7 @@ void xhci_hub_service_if_pending(void)
     if (!xhci_hub_work_pending()) {
         return;
     }
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (ctrl) {
-        xhci_hub_service(ctrl);
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_hub_service(xhci_controller_at(i));
     }
 }
