@@ -79,6 +79,11 @@ typedef struct {
 } xhci_controller_t;
 
 int xhci_init(void);
+
+/* Look at every root port until it has had the time the bus specifies to say
+ * what is on it, enumerating whatever answers. Called once, after the
+ * controller is running. */
+void xhci_survey_root_ports(xhci_controller_t* ctrl);
 int xhci_reset(xhci_controller_t* ctrl);
 int xhci_start(xhci_controller_t* ctrl);
 xhci_controller_t* xhci_get_controller(void);

@@ -324,6 +324,88 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
     kprintf("[xHCI] INTx IRQ %u registered (MSI unavailable)\n", ctrl->irq_line);
 }
 
+/*
+ * Look at the root ports until they have had the time the bus gives them.
+ *
+ * A controller that has just been reset has ports that were reset with it. A
+ * USB 2 port must debounce a connection for 100 ms before it may be believed
+ * (USB 2.0 §7.1.7.3), and a SuperSpeed port has to train its link, which is
+ * instantaneous on no real silicon. The old code looked once, immediately
+ * after the controller started, and a port that was not ready in that instant
+ * was never looked at again — nothing rescans, and a device that was already
+ * plugged in when the machine was switched on never "arrives", so no change
+ * event is coming to correct the mistake.
+ *
+ * Under emulation a device is connected the moment the controller runs, which
+ * is exactly why looking once appeared to be enough. On a real board it found
+ * six empty ports with the flash drive the machine had just booted from
+ * sitting in one of them.
+ *
+ * The waiting is shaped by what the bus actually requires rather than by a
+ * number chosen to feel safe: the debounce is paid once because the
+ * specification says it must be, and after that the survey ends as soon as two
+ * passes running turn up nothing new. A machine with nothing plugged in pays
+ * the debounce and leaves; a machine with a hub and a stick on it stays until
+ * they have both spoken. The ceiling exists only so that a port wedged in a
+ * link state it cannot leave costs a bounded amount of boot rather than all of
+ * it.
+ *
+ * Every port is described afterwards either way. On a machine whose only
+ * diagnostic is the screen, "powered, nothing attached, link Polling" and "NOT
+ * powered" are different faults with different answers, and being able to tell
+ * them apart from a photograph is the difference between one reflash and six.
+ */
+void xhci_survey_root_ports(xhci_controller_t* ctrl)
+{
+    if (!ctrl || !ctrl->initialized || ctrl->max_ports == 0) {
+        return;
+    }
+
+    /* The debounce every connection is owed, paid once for all ports. */
+    uint64_t debounce = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_POWER_SETTLE_MS);
+    while ((int64_t)(rdtsc() - debounce) < 0) {
+        cpu_pause();
+    }
+
+    uint32_t seen = 0;                  /* ports already enumerated */
+    unsigned found = 0;
+    unsigned quiet_passes = 0;
+
+    uint64_t ceiling = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_SURVEY_MS);
+    while (quiet_passes < 2 && (int64_t)(rdtsc() - ceiling) < 0) {
+        bool anything_new = false;
+
+        for (uint8_t port = 1; port <= ctrl->max_ports && port < 32; port++) {
+            if (seen & (1u << port)) {
+                continue;
+            }
+            if (!xhci_port_has_device(ctrl, port)) {
+                continue;
+            }
+            seen |= (1u << port);
+            found++;
+            anything_new = true;
+            kprintf("[xHCI] port %u: device attached at boot (USB %u)\n",
+                    port, ctrl->port_major[port]);
+            xhci_enumerate_device(ctrl, port);
+        }
+
+        /* Enumeration is answered by events, and nothing else is draining them
+         * yet. */
+        xhci_process_events();
+
+        quiet_passes = anything_new ? 0 : (quiet_passes + 1);
+        cpu_pause();
+    }
+
+    for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
+        xhci_port_describe(ctrl, port);
+    }
+
+    kprintf("[xHCI] %u of %u root port(s) had something on them\n",
+            found, ctrl->max_ports);
+}
+
 int xhci_init(void) {
     xhci_controller_t* ctrl = &global_controller;
 
@@ -334,9 +416,17 @@ int xhci_init(void) {
     xhci_enumeration_init();
 
     if (pci_find_device_by_class(0x0C, 0x03, 0x30, &ctrl->pci_dev) != 0) {
-        debug_printf("[xHCI] No xHCI controller found\n");
+        kprintf("[xHCI] no xHCI controller on this machine\n");
         return -1;
     }
+
+    /* Named, because this driver takes the first one it finds and a machine
+     * may have more than one. If the devices somebody expects are on a
+     * different controller, the only way to tell from a photograph of the
+     * screen is to know which one this was. */
+    kprintf("[xHCI] controller at %02x:%02x.%u  %04x:%04x\n",
+            ctrl->pci_dev.bus, ctrl->pci_dev.device, ctrl->pci_dev.function,
+            ctrl->pci_dev.vendor_id, ctrl->pci_dev.device_id);
 
     debug_printf("[xHCI] Found controller: %02x:%02x.%x\n",
                  ctrl->pci_dev.bus, ctrl->pci_dev.device, ctrl->pci_dev.function);
@@ -653,13 +743,7 @@ int xhci_init(void) {
             ctrl->max_slots,
             ctrl->use_polling ? "polled" : (ctrl->use_msi ? "MSI" : "INTx"));
 
-    for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
-        if (xhci_port_has_device(ctrl, port)) {
-            kprintf("[xHCI] port %u: device attached at boot (USB %u)\n",
-                    port, ctrl->port_major[port]);
-            xhci_enumerate_device(ctrl, port);
-        }
-    }
+    xhci_survey_root_ports(ctrl);
 
     return 0;
 

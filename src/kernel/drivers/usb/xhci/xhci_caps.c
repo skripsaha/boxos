@@ -89,8 +89,8 @@ int xhci_claim_from_firmware(xhci_controller_t* ctrl)
         /* No USB Legacy Support capability means no firmware ever claimed the
          * controller, which is the normal case under UEFI without CSM and the
          * only case QEMU presents. Nothing to take. */
-        debug_printf("[xHCI] no USB Legacy Support capability — controller was "
-                     "never firmware-owned\n");
+        kprintf("[xHCI] no USB Legacy Support capability — the firmware never "
+                "claimed this controller\n");
         return 0;
     }
 
@@ -102,8 +102,8 @@ int xhci_claim_from_firmware(xhci_controller_t* ctrl)
         /* Published the capability but is not holding it. Still claim it, so
          * that the semaphore reflects the truth for anything that looks. */
         *legsup = owned | XHCI_LEGSUP_OS_OWNED;
-        debug_printf("[xHCI] firmware published the legacy capability but did "
-                     "not hold it\n");
+        kprintf("[xHCI] firmware published the legacy capability but was not "
+                "holding it\n");
     } else {
         kprintf("[xHCI] firmware owns the controller — requesting handoff\n");
 

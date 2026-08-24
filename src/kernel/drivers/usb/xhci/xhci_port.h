@@ -16,6 +16,13 @@
  * before it must answer. */
 #define XHCI_PORT_POWER_SETTLE_MS 100
 
+/* The outside edge of the boot survey, reached only by a port that never
+ * settles. The survey itself ends as soon as two passes running find nothing
+ * new, so a machine with nothing plugged in pays the debounce above and no
+ * more. This exists so that a port wedged in a link state it cannot leave
+ * costs a bounded amount of boot rather than all of it. */
+#define XHCI_PORT_SURVEY_MS 1200
+
 uint32_t xhci_get_port_status(xhci_controller_t* ctrl, uint8_t port);
 bool     xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port);
 uint8_t  xhci_get_port_speed(xhci_controller_t* ctrl, uint8_t port);
@@ -28,6 +35,10 @@ uint8_t  xhci_port_protocol(xhci_controller_t* ctrl, uint8_t port);
 /* Switch on every root port that is not powered, then wait out the debounce.
  * Called once, after the controller is running. */
 void     xhci_power_ports(xhci_controller_t* ctrl);
+
+/* Say what one root port currently reports, in full. The machine this has to
+ * work on has no debugger and no serial cable — it has a screen. */
+void     xhci_port_describe(xhci_controller_t* ctrl, uint8_t port);
 
 /* Start a port reset and return without waiting. Returns 1 when the port is
  * already usable and no reset was needed, 0 when a reset is now in flight and
