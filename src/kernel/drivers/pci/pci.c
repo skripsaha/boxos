@@ -398,6 +398,89 @@ uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num) {
     return (uint64_t)(bar_low & 0xFFFFFFF0);
 }
 
+/*
+ * pci_bar_size — how large is the window this BAR decodes?
+ *
+ * The device answers the question itself. Write all ones into the BAR and read
+ * it back: every address bit the device does not decode reads back as zero, so
+ * the size is the complement of what remains, plus one. This is the only way
+ * to learn the extent — nothing in configuration space states it outright, and
+ * a driver that instead deduces the extent from offsets the device published
+ * (RTSOFF, a port count) is deducing a lower bound and calling it a size.
+ * BoxOS paid for that once already: an xHCI controller whose extended
+ * capabilities sat past the deduced end was a kernel page fault waiting for
+ * the right motherboard.
+ *
+ * Memory decode is turned off around the probe. While the all-ones value sits
+ * in the BAR the device claims a window it does not own, and a bus access that
+ * lands there in the meantime reaches the wrong device.
+ *
+ * Returns 0 for an unimplemented BAR, an I/O-space BAR, or a device that
+ * decodes nothing.
+ */
+uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num) {
+    if (!device || bar_num > 5) {
+        return 0;
+    }
+
+    uint8_t off = (uint8_t)(PCI_BAR0 + (bar_num * 4));
+    uint32_t orig_lo = pci_config_read_dword(device->bus, device->device,
+                                             device->function, off);
+
+    if (orig_lo == 0xFFFFFFFFu || orig_lo == 0) {
+        return 0;                       /* unimplemented */
+    }
+    if (orig_lo & 0x01u) {
+        return 0;                       /* I/O space — callers here want MMIO */
+    }
+
+    bool is64 = (((orig_lo >> 1) & 0x03u) == PCI_BAR_TYPE_64BIT);
+    if (is64 && bar_num >= 5) {
+        return 0;                       /* claims 64-bit with no upper half */
+    }
+
+    uint8_t off_hi = (uint8_t)(off + 4);
+    uint32_t orig_hi = is64 ? pci_config_read_dword(device->bus, device->device,
+                                                    device->function, off_hi)
+                            : 0;
+
+    uint16_t cmd = pci_config_read_word(device->bus, device->device,
+                                        device->function, PCI_COMMAND);
+    pci_config_write_word(device->bus, device->device, device->function,
+                          PCI_COMMAND,
+                          (uint16_t)(cmd & ~(uint16_t)PCI_CMD_MEM_SPACE));
+
+    pci_config_write_dword(device->bus, device->device, device->function,
+                           off, 0xFFFFFFFFu);
+    uint32_t mask_lo = pci_config_read_dword(device->bus, device->device,
+                                             device->function, off);
+    uint32_t mask_hi = 0xFFFFFFFFu;
+    if (is64) {
+        pci_config_write_dword(device->bus, device->device, device->function,
+                               off_hi, 0xFFFFFFFFu);
+        mask_hi = pci_config_read_dword(device->bus, device->device,
+                                        device->function, off_hi);
+        pci_config_write_dword(device->bus, device->device, device->function,
+                               off_hi, orig_hi);
+    }
+    pci_config_write_dword(device->bus, device->device, device->function,
+                           off, orig_lo);
+
+    pci_config_write_word(device->bus, device->device, device->function,
+                          PCI_COMMAND, cmd);
+
+    /* The low four bits are the BAR's type field, not address bits. */
+    uint64_t mask = ((uint64_t)mask_hi << 32) | (uint64_t)(mask_lo & 0xFFFFFFF0u);
+    if (!is64) {
+        mask |= 0xFFFFFFFF00000000ULL;
+    }
+    if (mask == 0 || mask == ~0ULL) {
+        return 0;
+    }
+
+    return ~mask + 1ULL;
+}
+
 /* ============================================================
  * Capability list walkers
  * ============================================================ */

@@ -150,6 +150,12 @@ uint32_t pci_read_bar(pci_device_t* device, uint8_t bar_num);
 // Returns the full physical address. For 64-bit BARs, reads BAR[n] + BAR[n+1].
 uint64_t pci_read_bar64(pci_device_t* device, uint8_t bar_num);
 
+// Size of the window an MMIO BAR decodes, asked of the device itself
+// (all-ones probe with memory decode off). Returns 0 for an unimplemented
+// or I/O-space BAR. Use this instead of deducing an extent from offsets the
+// device published — those give a lower bound, not a size.
+uint64_t pci_bar_size(pci_device_t* device, uint8_t bar_num);
+
 void pci_init(void);
 
 /* PCIe full-tree enumeration via ECAM (when MCFG is present).
