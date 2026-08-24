@@ -1,4 +1,5 @@
 #include "braid.h"
+#include "boardroom.h"
 #include "../tagfs.h"
 #include "../../lib/kernel/klib.h"
 #include "../../../kernel/drivers/disk/ahci_sync.h"
@@ -9,7 +10,6 @@
 // Global Braid state
 static BraidState g_braid_state;
 static BraidStats g_braid_stats;
-static uint8_t g_braid_primary_port = 0;
 
 // Compute tag-based disk assignment (unique to Braid!)
 static uint8_t BraidComputeTagDisk(const uint8_t *tag_context, uint8_t disk_count) {
@@ -24,18 +24,16 @@ static uint8_t BraidComputeTagDisk(const uint8_t *tag_context, uint8_t disk_coun
 // Pure I/O helpers — no g_braid_state access, no lock assumed.
 // Callers are responsible for checking disk availability under lock,
 // then calling these outside the lock, then updating stats under lock.
+/* A Braid disk is a Boardroom seat. The identity that used to be an AHCI port
+ * on one path and an ATA drive index on another — two numbering schemes for the
+ * same idea, chosen by a runtime test at every call — is now one number that
+ * means the same thing everywhere. */
 static int BraidRawRead(uint8_t disk_id, uint64_t sector, void *data) {
-    if (ahci_is_initialized())
-        return ahci_read_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (uint8_t*)data);
-    /* ATA drive_idx convention matches Braid disk_id directly:
-     *   0=primary master  1=primary slave  2=2ndary master  3=2ndary slave */
-    return ata_read_sectors_retry(disk_id, sector, 8, (uint8_t*)data);
+    return BoardroomRead(disk_id, sector, 8, data);
 }
 
 static int BraidRawWrite(uint8_t disk_id, uint64_t sector, const void *data) {
-    if (ahci_is_initialized())
-        return ahci_write_sectors_sync(g_braid_primary_port + disk_id, sector, 8, (const uint8_t*)data);
-    return ata_write_sectors_retry(disk_id, sector, 8, (const uint8_t*)data);
+    return BoardroomWrite(disk_id, sector, 8, data);
 }
 
 // Locked wrappers — used by BraidAutoHeal and BraidVerifyBlock which hold the lock

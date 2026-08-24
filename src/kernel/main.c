@@ -33,6 +33,8 @@
 #include "ready_queue.h"
 #include "irq_defer.h"
 #include "xhci.h"
+#include "xhci_interrupt.h"
+#include "boardroom.h"
 #include "acpi.h"
 #include "ahci.h"
 #include "cabin_layout.h"
@@ -694,6 +696,18 @@ void kernel_main(void)
     debug_printf("[INIT] Async I/O Queue...\n");
     async_io_init();
 
+    /* USB before storage, because a machine that boots from a flash drive has
+     * its filesystem on the USB bus and cannot be asked to find it before the
+     * bus has been asked what is on it. */
+    debug_printf("[INIT] USB xHCI Driver...\n");
+    if (xhci_init() != 0)
+    {
+        debug_printf("[INIT] xHCI controller not found or initialization failed\n");
+    }
+
+    debug_printf("[INIT] Boardroom (media)...\n");
+    BoardroomInit();
+
     debug_printf("[INIT] Storage Deck & TagFS...\n");
     storage_deck_init();
 
@@ -704,6 +718,24 @@ void kernel_main(void)
         kprintf("[WARN] Storage Deck register failed: %s\n", ErrorString(storage_reg_err));
     }
 
+    /* Now that the tag registry exists, resolve the USB Touch tags for real.
+     *
+     * They could not be resolved when the controller came up: tags live in
+     * TagFS, and TagFS lives on a medium the controller had not yet been asked
+     * about. Devices attached at power-on therefore enumerate before anyone can
+     * subscribe to hearing about them — which is why every one of them is also
+     * printed. Hot-plug from here on is announced properly. */
+    xhci_interrupt_touch_init();
+
+    /* The keyboard comes up AFTER the tag registry, and it has to.
+     *
+     * It resolves the "keyboard" tag once at init and caches the handle,
+     * because resolving a tag takes the registry lock and the PS/2 interrupt
+     * cannot. A tag resolved before the registry exists comes back invalid and
+     * stays invalid — every keystroke is then published to nothing, and the
+     * shell sits there receiving no input from a keyboard that is working
+     * perfectly. Moving this above TagFS to make room for USB did exactly
+     * that, on every boot path, with nothing anywhere saying why. */
     debug_printf("[INIT] Keyboard...\n");
     keyboard_init();
 
@@ -712,12 +744,6 @@ void kernel_main(void)
      * can drive the shell. Must follow keyboard_init (fills the same ring). */
     debug_printf("[INIT] Serial console (COM1 RX)...\n");
     serial_console_init();
-
-    debug_printf("[INIT] USB xHCI Driver...\n");
-    if (xhci_init() != 0)
-    {
-        debug_printf("[INIT] xHCI controller not found or initialization failed\n");
-    }
 
     kprintf("Kernel initialization complete!\n");
     kprintf("\n");
