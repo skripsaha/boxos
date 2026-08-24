@@ -807,18 +807,29 @@ static int HwUsbInit(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 }
 
 /*
- * The USB surface here names a slot but not a controller, and a machine has as
- * many controllers as it has — a chipset one and, very often, another on a
- * graphics card. These ops therefore speak to the first one in service, which
- * is stated here rather than left to be discovered: naming the controller is a
- * change to the shape of the manifest, and that is not a decision this file
- * gets to make on its own.
+ * Every USB op below names the controller it is about, as its first parameter.
+ *
+ * A machine has as many USB controllers as it has: one on the chipset where
+ * the sockets on the case are, and very often another on a graphics card. Which
+ * of them a bus walk reaches first is decided by topology — a PCIe bridge sits
+ * at device 1 and the chipset controller at device 0x14, so a depth-first walk
+ * meets the graphics card first. "The controller" names nothing.
+ *
+ * Controllers are numbered from zero in the order they were brought up, and an
+ * index past the last one is refused. That is also how a caller learns how many
+ * there are: ask, and be told no.
  */
+static xhci_controller_t *usb_named_controller(const ManifestOp *op)
+{
+    if (op->param_size < 1) return NULL;
+    return xhci_controller_at(op->params[0]);
+}
+
 static int HwUsbReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
-    (void)op; (void)crates; (void)crate_count; (void)ctx;
-    xhci_controller_t *c = xhci_get_controller();
+    (void)crates; (void)crate_count; (void)ctx;
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c) return ERR_NOT_INITIALIZED;
     return xhci_reset(c) == 0 ? OK : ERR_INTERNAL;
 }
@@ -826,8 +837,8 @@ static int HwUsbReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 static int HwUsbStart(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
-    (void)op; (void)crates; (void)crate_count; (void)ctx;
-    xhci_controller_t *c = xhci_get_controller();
+    (void)crates; (void)crate_count; (void)ctx;
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c) return ERR_NOT_INITIALIZED;
     return xhci_start(c) == 0 ? OK : ERR_INTERNAL;
 }
@@ -841,7 +852,7 @@ static int HwUsbStop(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* HW_USB_PORT_STATUS  params:[u8 port]  out_crate: u32 portsc */
+/* HW_USB_PORT_STATUS  params:[u8 controller, u8 port]  out_crate: u32 portsc */
 static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -849,8 +860,9 @@ static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_c
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    uint8_t port = op->params[0];
-    xhci_controller_t *c = xhci_get_controller();
+    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
+    uint8_t port = op->params[1];
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c || !c->initialized) return ERR_NOT_INITIALIZED;
     if (port == 0 || port > c->max_ports) return ERR_INVALID_ARGUMENT;
 
@@ -862,15 +874,15 @@ static int HwUsbPortStatus(const ManifestOp *op, Crate *crates, uint16_t crate_c
     return OK;
 }
 
-/* HW_USB_PORT_RESET  params:[u8 port] */
+/* HW_USB_PORT_RESET  params:[u8 controller, u8 port] */
 static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t port = op->params[0];
+    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
+    uint8_t port = op->params[1];
 
-    xhci_controller_t *c = xhci_get_controller();
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c || !c->initialized)            return ERR_NOT_INITIALIZED;
     if (port == 0 || port > c->max_ports) return ERR_INVALID_ARGUMENT;
     if (!xhci_port_has_device(c, port))   return ERR_DEVICE_NOT_READY;
@@ -885,34 +897,40 @@ static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return rc >= 0 ? OK : ERR_INTERNAL;
 }
 
-/* HW_USB_PORT_QUERY  out_crate:[u8 max_ports][u8 max_slots][u8 irq][u8 polling] */
+/* HW_USB_PORT_QUERY  params:[u8 controller]
+ * out_crate:[u8 max_ports][u8 max_slots][u8 irq][u8 polling][u8 controllers]
+ *
+ * The last byte is how many controllers there are, so a caller that wants to
+ * walk them all learns the number from the first one it asks rather than by
+ * counting refusals. */
 static int HwUsbPortQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
     (void)crate_count;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    xhci_controller_t *c = xhci_get_controller();
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c || !c->initialized) return ERR_NOT_INITIALIZED;
 
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
-    uint8_t blob[4];
+    if (out->capacity < 5) return ERR_BUFFER_TOO_SMALL;
+    uint8_t blob[5];
     blob[0] = c->max_ports;
     blob[1] = c->max_slots;
     blob[2] = c->irq_line;
     blob[3] = c->use_polling ? 1 : 0;
-    if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
+    blob[4] = xhci_controller_count();
+    if (crate_write(out, ctx, blob, 5) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
-/* HW_USB_ENUM_DEVICE  params:[u8 port] */
+/* HW_USB_ENUM_DEVICE  params:[u8 controller, u8 port] */
 static int HwUsbEnumDevice(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
-    uint8_t port = op->params[0];
-    xhci_controller_t *c = xhci_get_controller();
+    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
+    uint8_t port = op->params[1];
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c || !c->running) return ERR_NOT_INITIALIZED;
 
     int rc = xhci_enumerate_device(c, port);
@@ -929,8 +947,9 @@ static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
-    uint8_t slot_id = op->params[0];
-    xhci_controller_t *c = xhci_get_controller();
+    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
+    uint8_t slot_id = op->params[1];
+    xhci_controller_t *c = usb_named_controller(op);
     if (!c || !c->running) return ERR_NOT_INITIALIZED;
     xhci_device_slot_t *slot = xhci_get_device_slot(c, slot_id);
     if (!slot) return ERR_DEVICE_NOT_READY;
