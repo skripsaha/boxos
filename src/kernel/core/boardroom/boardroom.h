@@ -45,6 +45,17 @@ const char* BoardroomSeatName(uint8_t seat);
  * turns out to live on more than one seat. */
 bool        BoardroomSeatIsRemovable(uint8_t seat);
 
+/*
+ * Is there still a medium in this seat?
+ *
+ * A seat outlives the medium that sat in it — seat numbers never move under
+ * anybody, so a disk that leaves leaves an empty chair rather than renumbering
+ * the room. Anything holding a seat number has to be able to ask whether there
+ * is still something in it, because the answer changes while it is holding it:
+ * that is what removable means.
+ */
+bool        BoardroomSeatOccupied(uint8_t seat);
+
 /* The controller-specific index behind a seat — an AHCI port, an ATA drive, a
  * USB unit. This is a deliberate way out of the abstraction, for the one thing
  * the abstraction cannot express: a fast path that exists on one kind of

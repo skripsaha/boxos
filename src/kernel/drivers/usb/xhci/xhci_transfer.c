@@ -276,7 +276,7 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
             kprintf("[xHCI] slot %u: control transfer failed with completion "
                     "code %u at enumeration step %u\n",
                     slot_id, code, slot->state);
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
 

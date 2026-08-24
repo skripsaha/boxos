@@ -258,6 +258,24 @@ int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     }
 }
 
+bool xhci_command_pending_for_slot(uint8_t slot_id)
+{
+    if (slot_id == 0) {
+        return false;
+    }
+
+    spin_lock(&pending_cmds_lock);
+    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
+        if (pending_cmds[i].state == CMD_STATE_POSTED &&
+            pending_cmds[i].slot_id == slot_id) {
+            spin_unlock(&pending_cmds_lock);
+            return true;
+        }
+    }
+    spin_unlock(&pending_cmds_lock);
+    return false;
+}
+
 void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
     if (!ctrl) {
         return;
@@ -282,7 +300,7 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
                     spin_unlock(&pending_cmds_lock);
                     xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
                     if (slot && slot->state != ENUM_STATE_IDLE) {
-                        xhci_device_slot_cleanup(ctrl, slot);
+                        xhci_slot_retire(ctrl, slot);
                     }
                     spin_lock(&pending_cmds_lock);
                 }

@@ -138,8 +138,12 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
                     xhci_touch_device_left(slot);
                 }
 
-                xhci_post_disable_slot_cmd(ctrl, slot->slot_id);
-                xhci_device_slot_cleanup(ctrl, slot);
+                /* Marked as gone; what is left of it is taken down where
+                 * waiting is allowed. This handler used to post the Disable
+                 * Slot and free the device context in the next statement,
+                 * without waiting for the controller to say it had finished
+                 * reading it. */
+                xhci_slot_retire(ctrl, slot);
             }
             /* No slot means nothing was lost — an empty port clearing a stale
              * connect-change from power-on is not an unplug, and saying so for

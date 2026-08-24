@@ -234,6 +234,39 @@ error_t tagfs_flush_cache(void)
     return (BoardroomFlush(g_tagfs_seat) == 0) ? OK : ERR_IO;
 }
 
+/*
+ * Has the medium the volume lives on left the machine?
+ *
+ * A removable disk is removable while the kernel is using it, and once it has
+ * gone the volume on it has gone with it. Saying so once, here, is what makes
+ * everything above deterministic — without it, whether a file could still be
+ * read depended on whether its blocks happened to be in a four-entry
+ * read-ahead cache, and a program image half of which is real and half of
+ * which is missing is one the loader will happily run. Measured: it did.
+ *
+ * The cached bytes are not wrong. They are simply not the medium any more, and
+ * a filesystem that cannot tell the difference is one that answers questions
+ * about a disk that is in somebody's pocket.
+ */
+static bool g_medium_left = false;
+static void ReadAheadForget(void);
+
+static bool volume_medium_gone(void)
+{
+    if (g_medium_left) {
+        return true;
+    }
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT || BoardroomSeatOccupied(g_tagfs_seat)) {
+        return false;
+    }
+
+    g_medium_left = true;
+    ReadAheadForget();
+    kprintf("[TagFS] the medium the volume lives on has left — every read and "
+            "write from here on will say so\n");
+    return true;
+}
+
 static uint64_t block_to_sector(uint32_t block);
 static int read_block(uint32_t block, void *buffer);
 static int write_block(uint32_t block, const void *buffer);
@@ -337,6 +370,15 @@ void tagfs_readahead_invalidate(uint32_t block) {
     ReadAheadInvalidate(block);
 }
 
+/* Every entry, for when what they are copies of is no longer there. */
+static void ReadAheadForget(void) {
+    spin_lock(&g_read_ahead_lock);
+    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
+        g_read_ahead_cache[i].valid = false;
+    }
+    spin_unlock(&g_read_ahead_lock);
+}
+
 static uint64_t block_to_sector(uint32_t block)
 {
     uint32_t data_start = g_state.superblock.block_bitmap_sector +
@@ -351,6 +393,10 @@ uint64_t tagfs_block_to_sector(uint32_t block)
 
 static int read_block(uint32_t block, void *buffer)
 {
+    if (volume_medium_gone()) {
+        return -1;
+    }
+
     // Check read-ahead cache first
     if (ReadAheadLookup(block, buffer) == 0) {
         return 0;
@@ -373,6 +419,10 @@ static int read_block(uint32_t block, void *buffer)
 
 static int write_block(uint32_t block, const void *buffer)
 {
+    if (volume_medium_gone()) {
+        return -1;
+    }
+
     int rc = -1;
 
     // Route through Braid when it has active disks (provides redundancy).

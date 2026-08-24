@@ -1,5 +1,6 @@
 #include "idle.h"
 #include "xhci_hub.h"
+#include "xhci_enumeration.h"
 #include "process.h"
 #include "nightwatch.h"
 #include "klib.h"
@@ -152,6 +153,13 @@ void cpu_idle(void) {
      * allowed to wait, and the check is a single atomic load when there is
      * nothing to do, which is almost always. */
     xhci_hub_service_if_pending();
+
+    /* USB devices that have been unplugged. Taking one down means waiting for
+     * the controller to confirm it has let go of the device context, and for
+     * whatever was mid-transfer to come out — neither of which can be waited
+     * for where the unplug was noticed. Same shape as the hubs above, and the
+     * same single atomic load when there is nothing to do. */
+    xhci_slot_service_if_pending();
 
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle

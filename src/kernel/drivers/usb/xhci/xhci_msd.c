@@ -123,7 +123,10 @@ static void msd_pause_ms(uint32_t ms)
     }
 }
 
-static XhciMsdUnit* msd_find(uint8_t number)
+/* The list, walked under the lock that guards it. Callers that go on to speak
+ * to the device want msd_take instead — this one is for the bookkeeping that
+ * only reads a number. */
+static XhciMsdUnit* msd_find_locked(uint8_t number)
 {
     for (XhciMsdUnit* u = g_units; u; u = u->next) {
         if (u->number == number) {
@@ -133,12 +136,46 @@ static XhciMsdUnit* msd_find(uint8_t number)
     return NULL;
 }
 
+/*
+ * Take hold of a unit, and of the device underneath it.
+ *
+ * Finding the unit and stepping inside the slot happen under the same lock, so
+ * a device that is being taken down cannot slip between the two. The step
+ * inside is what keeps the endpoints, the rings and the buffers alive for as
+ * long as this caller is using them: the disk is pulled out by a hand, and the
+ * hand does not wait for the filesystem to finish its sentence.
+ *
+ * The unit's own memory is covered by the same hold, because a unit is only
+ * ever released while its slot is being taken down, and that waits.
+ */
+static XhciMsdUnit* msd_take(uint8_t number)
+{
+    if (!g_units_lock_ready) {
+        return NULL;
+    }
+
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(number);
+    if (u && (!u->ready || !xhci_slot_enter(u->slot))) {
+        u = NULL;
+    }
+    spin_unlock(&g_units_lock);
+    return u;
+}
+
+static void msd_give_back(XhciMsdUnit* u)
+{
+    if (u) {
+        xhci_slot_leave(u->slot);
+    }
+}
+
 /* Lowest number nobody is using. Numbers are stable for the life of a unit, so
  * a disk that leaves and comes back does not renumber the ones beside it. */
 static uint8_t msd_next_number(void)
 {
     for (uint8_t n = 0; n < 255; n++) {
-        if (!msd_find(n)) {
+        if (!msd_find_locked(n)) {
             return n;
         }
     }
@@ -398,13 +435,11 @@ static void msd_read_identity(XhciMsdUnit* u)
               vendor, product);
 }
 
-int xhci_msd_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+/* Everything here is a conversation with the device, and the whole point of a
+ * removable disk is that it can be pulled out in the middle of one. The caller
+ * below holds the device open for the length of it. */
+static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 {
-    if (!ctrl || !slot || !slot->endpoints ||
-        !slot->ep_bulk_in || !slot->ep_bulk_out) {
-        return -1;
-    }
-
     msd_units_lock_init();
 
     XhciMsdUnit* u = (XhciMsdUnit*)kmalloc(sizeof(XhciMsdUnit));
@@ -490,6 +525,21 @@ int xhci_msd_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     return 0;
 }
 
+int xhci_msd_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+{
+    if (!ctrl || !slot || !slot->endpoints ||
+        !slot->ep_bulk_in || !slot->ep_bulk_out) {
+        return -1;
+    }
+
+    if (!xhci_slot_enter(slot)) {
+        return -1;                      /* gone before we said hello */
+    }
+    int rc = msd_attach_held(ctrl, slot);
+    xhci_slot_leave(slot);
+    return rc;
+}
+
 bool xhci_msd_slot_attached(xhci_device_slot_t* slot)
 {
     for (XhciMsdUnit* u = g_units; u; u = u->next) {
@@ -537,43 +587,81 @@ void xhci_msd_release(xhci_device_slot_t* slot)
 
 uint8_t xhci_msd_unit_count(void)
 {
+    if (!g_units_lock_ready) return 0;
     uint8_t n = 0;
+    spin_lock(&g_units_lock);
     for (XhciMsdUnit* u = g_units; u; u = u->next) {
         if (u->ready) n++;
     }
+    spin_unlock(&g_units_lock);
     return n;
 }
 
+/*
+ * Is there a disk here to speak to right now?
+ *
+ * Asked by whoever holds a seat number and needs to know whether the medium in
+ * it is still there — so the answer has to be "could I start a transfer this
+ * instant", not "is the bookkeeping still on the list". Those are different
+ * moments: a device is marked as leaving where the unplug is noticed, and its
+ * unit is unlinked later, in the pass that takes the device down. Between the
+ * two, the old answer was yes.
+ *
+ * That gap was measurable. A filesystem above asked, was told the medium was
+ * still there, and went on serving reads out of its block cache — which
+ * happens above the disk driver and never asks it anything. One run in ten
+ * assembled a whole program image that way and ran it.
+ */
 bool xhci_msd_unit_present(uint8_t unit)
 {
-    XhciMsdUnit* u = msd_find(unit);
-    return u && u->ready;
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return false;
+    }
+    msd_give_back(u);
+    return true;
 }
 
 uint64_t xhci_msd_unit_sectors(uint8_t unit)
 {
-    XhciMsdUnit* u = msd_find(unit);
-    return (u && u->ready) ? u->sectors : 0;
+    if (!g_units_lock_ready) return 0;
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    uint64_t sectors = (u && u->ready) ? u->sectors : 0;
+    spin_unlock(&g_units_lock);
+    return sectors;
 }
 
+/* The name belongs to the unit, so it is only worth anything while the unit is
+ * seated. Every caller copies it straight away, which is the only safe way to
+ * use it and the only way it is used. */
 const char* xhci_msd_unit_name(uint8_t unit)
 {
-    XhciMsdUnit* u = msd_find(unit);
-    return (u && u->ready) ? u->name : "";
+    if (!g_units_lock_ready) return "";
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    const char* name = (u && u->ready) ? u->name : "";
+    spin_unlock(&g_units_lock);
+    return name;
 }
 
 static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
                   void* buffer, bool write)
 {
-    XhciMsdUnit* u = msd_find(unit);
-    if (!u || !u->ready || !buffer || count == 0) {
+    if (!buffer || count == 0) {
         return -1;
+    }
+
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return -1;                      /* gone, or on its way out */
     }
     if (lba + count > u->sectors) {
         kprintf("[USB disk %u] request for sectors %llu..%llu, and it has "
                 "%llu\n", unit, (unsigned long long)lba,
                 (unsigned long long)(lba + count - 1),
                 (unsigned long long)u->sectors);
+        msd_give_back(u);
         return -1;
     }
 
@@ -621,6 +709,7 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
     }
 
     spin_unlock(&u->lock);
+    msd_give_back(u);
     return result;
 }
 
@@ -636,8 +725,8 @@ int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffe
 
 int xhci_msd_flush(uint8_t unit)
 {
-    XhciMsdUnit* u = msd_find(unit);
-    if (!u || !u->ready) {
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
         return -1;
     }
 
@@ -649,6 +738,7 @@ int xhci_msd_flush(uint8_t unit)
     spin_lock(&u->lock);
     int rc = msd_command(u, cdb, sizeof(cdb), 0, 0, false, NULL);
     spin_unlock(&u->lock);
+    msd_give_back(u);
 
     return (rc >= 0) ? 0 : -1;
 }
