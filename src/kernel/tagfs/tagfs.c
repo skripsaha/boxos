@@ -2261,7 +2261,17 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
         }
 
         if (found < 0)
-            break;
+        {
+            /* The file claims more bytes than its extents describe. Whatever
+             * lies past the last extent is not a hole to be filled with zeros;
+             * it is metadata that does not match the medium. */
+            kprintf("[TagFS] file %u: no extent covers byte %llu of %llu — the "
+                    "metadata describes more file than there are blocks\n",
+                    handle->file_id, (unsigned long long)file_pos,
+                    (unsigned long long)handle->file_size);
+            kfree(block_buf);
+            return -1;
+        }
 
         uint64_t offset_in_extent = file_pos - extent_start;
         uint32_t block_index = (uint32_t)(offset_in_extent / TAGFS_BLOCK_SIZE);
@@ -2269,7 +2279,34 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
         uint32_t disk_block = handle->extents[found].start_block + block_index;
 
         if (read_block(disk_block, block_buf) != 0)
-            break;
+        {
+            /*
+             * A block the medium would not give up.
+             *
+             * This used to break out of the loop and return the byte count so
+             * far, which for the first block is zero — and zero is not
+             * negative, so every caller that checks for failure the usual way
+             * saw a successful short read into a buffer that was still full of
+             * the zeros it was allocated with.
+             *
+             * Measured: pull the flash drive out while the system is running,
+             * and the program loader reads a process image of nothing, reports
+             * that it started it, and jumps to address 0xC000 where the zeros
+             * are. Both userspace processes died on their first instruction
+             * with every register clear. The medium leaving is not something
+             * this kernel can prevent; a read that failed reading as a read
+             * that succeeded is.
+             *
+             * Bytes already copied stay in the caller's buffer and the handle
+             * does not move: a caller told the read failed cannot use either.
+             */
+            kprintf("[TagFS] file %u: block %u would not read — %llu of %llu "
+                    "bytes had come back before the medium stopped answering\n",
+                    handle->file_id, disk_block,
+                    (unsigned long long)bytes_read, (unsigned long long)size);
+            kfree(block_buf);
+            return -1;
+        }
 
         uint32_t chunk = TAGFS_BLOCK_SIZE - offset_in_block;
         if (chunk > size - bytes_read)
@@ -2338,6 +2375,8 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
     const uint8_t *in = (const uint8_t *)buffer;
     uint8_t block_buf[TAGFS_BLOCK_SIZE];
     uint64_t bytes_written = 0;
+    bool     medium_refused = false;
+    uint32_t refused_block = 0;
 
 
     while (bytes_written < size)
@@ -2460,6 +2499,17 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
         if (!wrote_block) {
             if (write_block(write_target, block_buf) != 0)
             {
+                /* The same lie the read path told, in the direction that
+                 * matters more: a block the medium refused ended the loop and
+                 * the byte count so far was returned as the answer. A caller
+                 * checking for failure the usual way was told the write
+                 * succeeded and simply moved fewer bytes than asked.
+                 *
+                 * The metadata below still commits what actually landed, so
+                 * the file on the medium stays consistent with itself — what
+                 * changes is that the caller is told. */
+                medium_refused = true;
+                refused_block  = write_target;
                 break;
             }
         }
@@ -2532,6 +2582,14 @@ int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
      * (write_observer's payload-size check failed on every BIOS / 1-core
      * config that takes the sync path). Keep tagfs_write itself free
      * of IPC side-effects so its self-tests do not need Touch wiring. */
+    if (medium_refused)
+    {
+        kprintf("[TagFS] file %u: block %u would not be written — %llu of %llu "
+                "bytes had landed before the medium stopped answering\n",
+                handle->file_id, refused_block,
+                (unsigned long long)bytes_written, (unsigned long long)size);
+        return -1;
+    }
     return (int)bytes_written;
 }
 

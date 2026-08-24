@@ -863,7 +863,7 @@ void kernel_main(void)
         uint64_t file_size = meta.size;
         if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE)
         {
-            debug_printf("[AUTOSTART] Skip '%s': invalid size %lu\n",
+            kprintf("[AUTOSTART] Skip '%s': invalid size %lu\n",
                          meta.filename, file_size);
             tagfs_metadata_free(&meta);
             continue;
@@ -873,7 +873,7 @@ void kernel_main(void)
         void *phys_buf = pmm_alloc_zero(pages_needed);
         if (!phys_buf)
         {
-            debug_printf("[AUTOSTART] Skip '%s': memory allocation failed\n",
+            kprintf("[AUTOSTART] Skip '%s': memory allocation failed\n",
                          meta.filename);
             tagfs_metadata_free(&meta);
             continue;
@@ -885,7 +885,7 @@ void kernel_main(void)
         if (!fh)
         {
             pmm_free(phys_buf, pages_needed);
-            debug_printf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
+            kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
                          meta.filename);
             tagfs_metadata_free(&meta);
             continue;
@@ -897,7 +897,7 @@ void kernel_main(void)
         if (read_result < 0)
         {
             pmm_free(phys_buf, pages_needed);
-            debug_printf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
+            kprintf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
                          meta.filename, read_result);
             tagfs_metadata_free(&meta);
             continue;
@@ -908,7 +908,7 @@ void kernel_main(void)
         if (!proc)
         {
             pmm_free(phys_buf, pages_needed);
-            debug_printf("[AUTOSTART] Skip '%s': process_create failed\n",
+            kprintf("[AUTOSTART] Skip '%s': process_create failed\n",
                          meta.filename);
             tagfs_metadata_free(&meta);
             continue;
@@ -920,7 +920,7 @@ void kernel_main(void)
         if (load_result != 0)
         {
             process_destroy(proc);
-            debug_printf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
+            kprintf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
                          meta.filename, load_result);
             tagfs_metadata_free(&meta);
             continue;
