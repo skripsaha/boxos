@@ -121,6 +121,10 @@ void idt_init(void)
     idt_set_entry(AHCI_MSI_VECTOR, (uint64_t)isr_table[AHCI_MSI_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
+    // xHCI MSI vector (0x71) — message-signalled interrupt from the USB host
+    idt_set_entry(XHCI_MSI_VECTOR, (uint64_t)isr_table[XHCI_MSI_VECTOR],
+                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+
     // AMP IPI vectors (0xF0-0xF2)
     idt_set_entry(IPI_WAKE_VECTOR, (uint64_t)isr_table[IPI_WAKE_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
@@ -956,6 +960,18 @@ void irq_handler(interrupt_frame_t *frame)
     if (vector == AHCI_MSI_VECTOR)
     {
         ahci_irq_handler();
+        lapic_send_eoi();
+        return;
+    }
+
+    /* xHCI message-signalled interrupt. Same reasoning as AHCI above: MSI is
+     * point-to-point to the LAPIC and is acknowledged there. This is the path
+     * a real PCH takes — its INTx line is frequently absent or mis-described
+     * in PCI configuration space, and a USB keyboard whose interrupts never
+     * arrive is a keyboard that does not type. */
+    if (vector == XHCI_MSI_VECTOR)
+    {
+        xhci_irq_handler();
         lapic_send_eoi();
         return;
     }
