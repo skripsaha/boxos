@@ -107,7 +107,11 @@ void xhci_power_ports(xhci_controller_t* ctrl)
     }
 
     if ((ctrl->cap_regs->hccparams1 & XHCI_HCC1_PPC) == 0) {
-        debug_printf("[xHCI Port] controller powers its own ports\n");
+        /* Said out loud, not whispered into a debug build. On the machine
+         * where this matters there is no debug build — there is a screen, and
+         * a person reading it. Every fact this function establishes changes
+         * what the next line of the boot means. */
+        kprintf("[xHCI] the controller powers its own ports\n");
         return;
     }
 
@@ -120,16 +124,38 @@ void xhci_power_ports(xhci_controller_t* ctrl)
         switched++;
     }
 
-    if (switched == 0) {
-        return;
-    }
+    kprintf("[xHCI] powered %u root port(s) of %u\n", switched, ctrl->max_ports);
 
-    kprintf("[xHCI] powered %u root port(s)\n", switched);
+    if (switched == 0) {
+        return;                         /* firmware had already powered them */
+    }
 
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_POWER_SETTLE_MS);
     while ((int64_t)(rdtsc() - deadline) < 0) {
         cpu_pause();
     }
+}
+
+/* What a port has to say about itself, in the terms the register uses. */
+void xhci_port_describe(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!ctrl || !ctrl->ports) return;
+
+    uint32_t sc = xhci_get_port_status(ctrl, port);
+    uint8_t  pls = (uint8_t)XHCI_PORTSC_PLS(sc);
+
+    static const char* link[16] = {
+        "U0", "U1", "U2", "U3", "Disabled", "RxDetect", "Inactive", "Polling",
+        "Recovery", "Hot Reset", "Compliance", "Test", "?", "?", "?", "Resume"
+    };
+
+    kprintf("[xHCI] port %u: %s, %s, link %s, speed %u  (PORTSC 0x%x, USB %u)\n",
+            port,
+            (sc & XHCI_PORTSC_PP)  ? "powered"   : "NOT powered",
+            (sc & XHCI_PORTSC_CCS) ? "something attached" : "nothing attached",
+            link[pls],
+            (unsigned)XHCI_PORTSC_SPEED(sc),
+            sc, ctrl->port_major[port]);
 }
 
 /*
