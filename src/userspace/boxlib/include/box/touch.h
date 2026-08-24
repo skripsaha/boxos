@@ -37,8 +37,29 @@ typedef uint16_t TouchTag;
 #define TOUCH_TAG_PROCESS_SPAWNED   "process:spawned"
 #define TOUCH_TAG_SYSTEM_SHUTDOWN   "system:shutdown"
 #define TOUCH_TAG_SYSTEM_REBOOT     "system:reboot"
+/* Two levels, and the difference matters. connect/disconnect are about a
+ * socket: something changed at port 5, and at that instant nobody knows what.
+ * arrived/left are about a device — addressed, configured, and carrying its
+ * vendor, product and class, so a subscriber never has to go and ask. */
 #define TOUCH_TAG_USB_CONNECT       "usb:connect"
 #define TOUCH_TAG_USB_DISCONNECT    "usb:disconnect"
+#define TOUCH_TAG_USB_ARRIVED       "usb:arrived"
+#define TOUCH_TAG_USB_LEFT          "usb:left"
+
+/* Payload of usb:arrived and usb:left. Kept in lock-step with the kernel's
+ * xhci_touch_device_t. */
+typedef struct {
+    uint8_t  port;
+    uint8_t  slot_id;
+    uint8_t  speed;
+    uint8_t  dev_class;
+    uint8_t  dev_subclass;
+    uint8_t  dev_protocol;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t usb_version;       /* bcdUSB, so 0x0300 says SuperSpeed */
+    uint32_t reserved;
+} __attribute__((packed)) TouchUsbDevice;
 
 typedef struct {
     TouchTag full;   /* (key, value) id — TOUCH_TAG_INVALID for wildcard strings */
