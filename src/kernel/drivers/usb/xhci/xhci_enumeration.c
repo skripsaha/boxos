@@ -268,6 +268,15 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         return -1;
     }
 
+    /* Four bits name the port at each tier, so fifteen is the highest port the
+     * bus can be told about — which is why the specification stops hubs there
+     * too, and why a hub claiming more of them has some that cannot be used. */
+    if (hub_port > 15) {
+        kprintf("[xHCI] hub slot %u has no port %u the bus could name — four "
+                "bits per tier stop at 15\n", hub->slot_id, hub_port);
+        return -5;
+    }
+
     /* Five tiers is the whole of the route string, and the specification says
      * so: four bits each, twenty bits, and no sixth place to put a number. */
     if (hub->depth >= 5) {
@@ -314,9 +323,14 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
     memset(&slot->device_desc, 0, sizeof(slot->device_desc));
 
     /* Four bits per tier, and the tier is how deep the HUB is — a device on a
-     * hub that is itself on a root port occupies the first four bits. */
-    uint8_t nibble = (hub_port > 15) ? 15 : hub_port;
-    slot->route_string   = hub->route_string | ((uint32_t)nibble << (4 * hub->depth));
+     * hub that is itself on a root port occupies the first four bits.
+     *
+     * A port number above fifteen does not fit in those four bits, and the old
+     * code clamped it to fifteen. That does not address port sixteen; it
+     * addresses port fifteen, and hands whatever is plugged into that one the
+     * transfers meant for its neighbour. A port the bus cannot name is a port
+     * this driver says it cannot reach. */
+    slot->route_string   = hub->route_string | ((uint32_t)hub_port << (4 * hub->depth));
     slot->depth          = (uint8_t)(hub->depth + 1);
     slot->parent_slot_id = hub->slot_id;
     slot->parent_port    = hub_port;

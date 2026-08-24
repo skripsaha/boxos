@@ -14,43 +14,101 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
-/* ── the hub class, on the wire (USB 2.0 chapter 11) ────────────────────── */
+/* ── the hub class, on the wire ─────────────────────────────────────────────
+ *
+ * There are two dialects of it, and a hub states which one it speaks in its own
+ * device descriptor rather than by how fast it is: USB 2.0 §11.23.1 and USB 3.2
+ * Table 10-7 share that one field. Asking the port how fast it trained would be
+ * the wrong question — a SuperSpeed hub and the USB 2.0 hub inside the same
+ * plastic box are two separate devices with separate ports, and each of them
+ * answers for itself.
+ */
+#define HUB_PROTOCOL_FULL_SPEED  0
+#define HUB_PROTOCOL_SINGLE_TT   1
+#define HUB_PROTOCOL_MULTI_TT    2
+#define HUB_PROTOCOL_SUPERSPEED  3
 
-#define USB_DESC_HUB            0x29
+#define USB_DESC_HUB             0x29
+#define USB_DESC_HUB_SS          0x2A
+#define HUB_DESC_LEN             9
+#define HUB_DESC_LEN_SS          12
 
-/* Features of a downstream port, as SET_FEATURE and CLEAR_FEATURE name them. */
-#define PORT_FEAT_ENABLE        1
-#define PORT_FEAT_RESET         4
-#define PORT_FEAT_POWER         8
-#define PORT_FEAT_C_CONNECTION  16
-#define PORT_FEAT_C_ENABLE      17
-#define PORT_FEAT_C_RESET       20
+#define HUB_REQ_GET_STATUS       0x00
+#define HUB_REQ_SET_FEATURE      0x03
+#define HUB_REQ_SET_DEPTH        0x0C
+#define USB_REQ_SET_INTERFACE    0x0B
 
-/* wPortStatus */
-#define PORT_STAT_CONNECTION    (1u << 0)
-#define PORT_STAT_ENABLE        (1u << 1)
-#define PORT_STAT_RESET         (1u << 4)
-#define PORT_STAT_POWER         (1u << 8)
-#define PORT_STAT_LOW_SPEED     (1u << 9)
-#define PORT_STAT_HIGH_SPEED    (1u << 10)
+/* Features of a downstream port, as SET_FEATURE and CLEAR_FEATURE name them.
+ * The numbering is shared; which of them exist is not. */
+#define PORT_FEAT_ENABLE         1
+#define PORT_FEAT_RESET          4
+#define PORT_FEAT_POWER          8
+#define PORT_FEAT_C_CONNECTION   16
+#define PORT_FEAT_C_ENABLE       17     /* USB 2.0 only */
+#define PORT_FEAT_C_OVERCURRENT  19
+#define PORT_FEAT_C_RESET        20
+#define PORT_FEAT_C_LINK_STATE   25     /* SuperSpeed only */
+#define PORT_FEAT_C_CONFIG_ERROR 26     /* SuperSpeed only */
+#define PORT_FEAT_BH_RESET       28     /* SuperSpeed only */
+#define PORT_FEAT_C_BH_RESET     29     /* SuperSpeed only */
 
-/* wPortChange */
-#define PORT_CHG_CONNECTION     (1u << 0)
-#define PORT_CHG_ENABLE         (1u << 1)
-#define PORT_CHG_RESET          (1u << 4)
+/* wPortStatus. The first four bits mean the same thing in both dialects; above
+ * them the layouts part company, because a SuperSpeed port has a link state to
+ * report and had to find sixteen values' worth of room for it. */
+#define PORT_STAT_CONNECTION     (1u << 0)
+#define PORT_STAT_ENABLE         (1u << 1)
+#define PORT_STAT_OVERCURRENT    (1u << 3)
+#define PORT_STAT_RESET          (1u << 4)
 
-#define HUB_CTRL_TIMEOUT_MS     1000
+#define PORT_STAT_POWER          (1u << 8)      /* USB 2.0 */
+#define PORT_STAT_LOW_SPEED      (1u << 9)
+#define PORT_STAT_HIGH_SPEED     (1u << 10)
+
+#define SS_PORT_STAT_LINK_STATE  (0xFu << 5)    /* SuperSpeed */
+#define SS_PORT_STAT_POWER       (1u << 9)
+#define SS_PORT_STAT_SPEED       (0x7u << 10)
+
+/* wPortChange. Bit 5 is C_PORT_L1 to a USB 2.0 hub and C_BH_PORT_RESET to a
+ * SuperSpeed one — the same bit, two meanings, and the wrong CLEAR_FEATURE for
+ * it is a request the hub is entitled to refuse. */
+#define PORT_CHG_CONNECTION      (1u << 0)
+#define PORT_CHG_ENABLE          (1u << 1)      /* USB 2.0 only */
+#define PORT_CHG_OVERCURRENT     (1u << 3)
+#define PORT_CHG_RESET           (1u << 4)
+#define SS_PORT_CHG_BH_RESET     (1u << 5)      /* SuperSpeed only */
+#define SS_PORT_CHG_LINK_STATE   (1u << 6)
+#define SS_PORT_CHG_CONFIG_ERR   (1u << 7)
+
+/* Link states worth naming. A link that came out of a reset in one of the last
+ * two did not fail to reset — it failed to train, and that is a different
+ * failure with a different answer. */
+#define SS_LINK_U0               0
+#define SS_LINK_SS_INACTIVE      6
+#define SS_LINK_COMPLIANCE       10
+
+/*
+ * Fifteen ports, and the number is not this driver's choice.
+ *
+ * A device below a hub is reached by a route string that spends four bits on
+ * each tier naming the port taken there, so port 16 has no way of being named.
+ * The old code clamped a larger port number to 15 — which does not address port
+ * 16, it addresses port 15, and quietly hands whatever is plugged into that one
+ * the transfers meant for its neighbour.
+ */
+#define HUB_MAX_ROUTABLE_PORTS   15
+
+#define HUB_CTRL_TIMEOUT_MS      1000
 
 /* USB 2.0 §7.1.7.5: a port reset is driven for at least 10 ms and the device
  * is allowed 10 ms more to recover. The hub reports when it is done, and this
  * is only the outside edge of waiting for that. */
-#define HUB_RESET_TIMEOUT_MS    800
-#define HUB_RESET_POLL_MS       10
-#define HUB_RESET_RECOVERY_MS   20
+#define HUB_RESET_TIMEOUT_MS     800
+#define HUB_RESET_POLL_MS        10
+#define HUB_RESET_RECOVERY_MS    20
 
 /* A newly connected device must be given time to settle before it is reset —
  * §7.1.7.3 calls it debounce and asks for 100 ms. */
-#define HUB_DEBOUNCE_MS         100
+#define HUB_DEBOUNCE_MS          100
 
 typedef struct XhciHub {
     struct XhciHub* next;
@@ -58,15 +116,31 @@ typedef struct XhciHub {
     xhci_device_slot_t* slot;
 
     uint8_t  ports;
-    uint8_t  power_on_delay_ms;
+    bool     superspeed;
     bool     attached;
+
+    /* bPwrOn2PwrGood counts two-millisecond units in a byte, so a hub is
+     * entitled to ask for half a second. Keeping the answer in a byte turned
+     * the 300 ms a slow hub asks for into 44. */
+    uint16_t power_on_delay_ms;
 
     /* Raised by the status-change endpoint from interrupt context, lowered by
      * the service pass that acts on it. */
     volatile bool change_pending;
 
-    /* Which of our ports currently has a device, so a change report can be
-     * turned into "this one arrived" or "this one left". */
+    /*
+     * Two facts about a port, and they are not the same fact.
+     *
+     * `present` is a connection this driver has already answered — whether the
+     * answer was a working device or a failure. `occupied` is a device that is
+     * actually there. Keeping only the second one meant a port that would not
+     * come up was never marked as dealt with, so the next status report found
+     * it connected and unknown all over again; the hub goes on reporting until
+     * the change is resolved, and the change is resolved by bringing the port
+     * up. Measured nowhere, because nothing in QEMU fails to reset — on a desk
+     * with a bad cable it is a loop with no way out.
+     */
+    uint32_t present;
     uint32_t occupied;
 
     void*    buf_virt;
@@ -119,6 +193,34 @@ static XhciHub* hub_for_slot(xhci_device_slot_t* slot)
     return NULL;
 }
 
+static const char* ss_link_name(uint16_t status)
+{
+    switch ((status & SS_PORT_STAT_LINK_STATE) >> 5) {
+        case 0:  return "U0";
+        case 1:  return "U1";
+        case 2:  return "U2";
+        case 3:  return "U3 (suspended)";
+        case 4:  return "SS.Disabled";
+        case 5:  return "Rx.Detect";
+        case 6:  return "SS.Inactive";
+        case 7:  return "Polling";
+        case 8:  return "Recovery";
+        case 9:  return "Hot Reset";
+        case 10: return "Compliance Mode";
+        case 11: return "Loopback";
+        default: return "a state the specification has not given a name";
+    }
+}
+
+/* A SuperSpeed link that is inactive or stuck in compliance mode is one the
+ * ordinary reset cannot rescue: it has to be taken all the way down and
+ * retrained, which is what the hub calls a warm reset. */
+static bool ss_link_usable(uint16_t status)
+{
+    uint16_t state = (status & SS_PORT_STAT_LINK_STATE) >> 5;
+    return state != SS_LINK_SS_INACTIVE && state != SS_LINK_COMPLIANCE;
+}
+
 /* ── class requests ─────────────────────────────────────────────────────── */
 
 /* Asked more than once on purpose. A hub that has this instant been given its
@@ -129,37 +231,52 @@ static XhciHub* hub_for_slot(xhci_device_slot_t* slot)
 
 static int hub_get_descriptor_once(XhciHub* h)
 {
+    uint8_t  type = h->superspeed ? USB_DESC_HUB_SS : USB_DESC_HUB;
+    uint16_t want = h->superspeed ? HUB_DESC_LEN_SS : HUB_DESC_LEN;
+
     usb_setup_packet_t setup = {
         .bmRequestType = 0xA0,          /* device to host, class, device */
         .bRequest = USB_REQ_GET_DESCRIPTOR,
-        .wValue = (uint16_t)(USB_DESC_HUB << 8),
+        .wValue = (uint16_t)(type << 8),
         .wIndex = 0,
-        .wLength = 9
+        .wLength = want
     };
 
-    memset(h->buf_virt, 0, 9);
+    memset(h->buf_virt, 0, want);
     int code = xhci_control_transfer_sync(h->ctrl, h->slot, &setup,
-                                          h->buf_phys, 9, true,
+                                          h->buf_phys, want, true,
                                           HUB_CTRL_TIMEOUT_MS);
     if (code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PKT) {
         return -1;
     }
 
     const uint8_t* d = (const uint8_t*)h->buf_virt;
-    if (d[1] != USB_DESC_HUB || d[2] == 0) {
+    if (d[1] != type || d[2] == 0) {
         return -1;
     }
 
     h->ports = d[2];
+    if (h->ports > HUB_MAX_ROUTABLE_PORTS) {
+        kprintf("[USB hub slot %u] says it has %u ports; the route string has "
+                "room to name %u, so the rest cannot be reached and are left "
+                "alone\n",
+                h->slot->slot_id, h->ports, HUB_MAX_ROUTABLE_PORTS);
+        h->ports = HUB_MAX_ROUTABLE_PORTS;
+    }
 
     /* wHubCharacteristics: bits 6:5 are the think time in units of eight full
-     * speed bit times, and the slot context wants exactly those two bits. */
+     * speed bit times, and the slot context wants exactly those two bits. They
+     * are reserved in a SuperSpeed hub's characteristics — a transaction
+     * translator is a thing only a high-speed hub has, because only it has
+     * something slower on the other side to translate for. */
     uint16_t characteristics = (uint16_t)(d[3] | ((uint16_t)d[4] << 8));
-    h->slot->tt_think_time = (uint8_t)((characteristics >> 5) & 0x3);
+    h->slot->tt_think_time = h->superspeed
+                           ? 0
+                           : (uint8_t)((characteristics >> 5) & 0x3);
 
     /* bPwrOn2PwrGood is in two-millisecond units, and is the hub telling us how
      * long after switching a port on its power is worth believing. */
-    h->power_on_delay_ms = (uint8_t)(d[5] * 2);
+    h->power_on_delay_ms = (uint16_t)((uint16_t)d[5] * 2u);
     if (h->power_on_delay_ms < 20) {
         h->power_on_delay_ms = 20;
     }
@@ -177,11 +294,71 @@ static int hub_get_descriptor(XhciHub* h)
     return -1;
 }
 
+/*
+ * Tell a SuperSpeed hub how deep it is.
+ *
+ * The route string names a port per tier, and a hub reading one has to know
+ * which tier is its own before it can tell which four bits are addressed to it.
+ * A USB 2.0 hub never asks, because it does not route: it repeats everything
+ * downstream and lets the devices sort it out. A SuperSpeed hub does route, and
+ * one that has not been told its depth routes by the wrong nibble — which is
+ * not a failure it reports, it is transfers arriving at the wrong port.
+ */
+static int hub_set_depth(XhciHub* h)
+{
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x20,          /* host to device, class, device */
+        .bRequest = HUB_REQ_SET_DEPTH,
+        .wValue = h->slot->depth,
+        .wIndex = 0,
+        .wLength = 0
+    };
+    int code = xhci_control_transfer_sync(h->ctrl, h->slot, &setup, 0, 0, false,
+                                          HUB_CTRL_TIMEOUT_MS);
+    if (code != TRB_COMPLETION_SUCCESS) {
+        kprintf("[USB hub slot %u] would not accept a depth of %u — it cannot "
+                "route, so nothing below it would be reachable\n",
+                h->slot->slot_id, h->slot->depth);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Put a high-speed hub on its second alternate setting, which is where its
+ * extra transaction translators are.
+ *
+ * A hub capable of one translator per port starts with one for all of them, and
+ * says which it is doing by which alternate setting it is on — not by what its
+ * descriptor is capable of. The old code read the capability out of the
+ * interface descriptor and told the controller about it, which is the worse of
+ * the two mistakes available here: the controller would then schedule split
+ * transactions per port to hardware with a single queue behind all of them.
+ */
+static void hub_select_multi_tt(XhciHub* h)
+{
+    usb_setup_packet_t setup = {
+        .bmRequestType = 0x01,          /* host to device, standard, interface */
+        .bRequest = USB_REQ_SET_INTERFACE,
+        .wValue = 1,                    /* alternate setting 1 = multiple TTs */
+        .wIndex = h->slot->interface_num,
+        .wLength = 0
+    };
+    int code = xhci_control_transfer_sync(h->ctrl, h->slot, &setup, 0, 0, false,
+                                          HUB_CTRL_TIMEOUT_MS);
+
+    h->slot->multi_tt = (code == TRB_COMPLETION_SUCCESS);
+    if (!h->slot->multi_tt) {
+        kprintf("[USB hub slot %u] would not switch to one translator per port "
+                "— using the single one it starts with\n", h->slot->slot_id);
+    }
+}
+
 static int hub_port_feature(XhciHub* h, uint8_t port, uint8_t feature, bool set)
 {
     usb_setup_packet_t setup = {
         .bmRequestType = 0x23,          /* host to device, class, other */
-        .bRequest = set ? 0x03 /* SET_FEATURE */ : USB_REQ_CLEAR_FEATURE,
+        .bRequest = set ? HUB_REQ_SET_FEATURE : USB_REQ_CLEAR_FEATURE,
         .wValue = feature,
         .wIndex = port,
         .wLength = 0
@@ -196,7 +373,7 @@ static int hub_port_status(XhciHub* h, uint8_t port,
 {
     usb_setup_packet_t setup = {
         .bmRequestType = 0xA3,          /* device to host, class, other */
-        .bRequest = 0x00,               /* GET_STATUS */
+        .bRequest = HUB_REQ_GET_STATUS,
         .wValue = 0,
         .wIndex = port,
         .wLength = 4
@@ -216,25 +393,129 @@ static int hub_port_status(XhciHub* h, uint8_t port,
     return 0;
 }
 
-/* The speed the port reports, in the numbering the controller uses. A hub
- * states it as two flags, and neither of them set means full speed. */
-static uint8_t hub_port_speed(uint16_t status)
+/*
+ * Acknowledge everything the port has to say.
+ *
+ * A change bit nobody clears is a hub that never stops talking: the status
+ * change endpoint reports for as long as anything is outstanding, and the only
+ * thing that ends it is clearing the bit that caused it. Over-current was not
+ * being cleared at all, and neither was the reset change on any of the paths
+ * that give up on a port — both of which are conditions QEMU never produces
+ * and a desk with a bad cable produces immediately.
+ */
+static void hub_clear_changes(XhciHub* h, uint8_t port, uint16_t change)
 {
+    if (change & PORT_CHG_CONNECTION) {
+        hub_port_feature(h, port, PORT_FEAT_C_CONNECTION, false);
+    }
+    if (change & PORT_CHG_OVERCURRENT) {
+        hub_port_feature(h, port, PORT_FEAT_C_OVERCURRENT, false);
+    }
+    if (change & PORT_CHG_RESET) {
+        hub_port_feature(h, port, PORT_FEAT_C_RESET, false);
+    }
+
+    if (h->superspeed) {
+        if (change & SS_PORT_CHG_BH_RESET) {
+            hub_port_feature(h, port, PORT_FEAT_C_BH_RESET, false);
+        }
+        if (change & SS_PORT_CHG_LINK_STATE) {
+            hub_port_feature(h, port, PORT_FEAT_C_LINK_STATE, false);
+        }
+        if (change & SS_PORT_CHG_CONFIG_ERR) {
+            hub_port_feature(h, port, PORT_FEAT_C_CONFIG_ERROR, false);
+        }
+    } else if (change & PORT_CHG_ENABLE) {
+        hub_port_feature(h, port, PORT_FEAT_C_ENABLE, false);
+    }
+}
+
+/* The speed the port reports, in the numbering the controller uses. */
+static uint8_t hub_port_speed(const XhciHub* h, uint16_t status)
+{
+    if (h->superspeed) {
+        /* Everything below a SuperSpeed hub is SuperSpeed — the USB 2.0 half of
+         * the same plastic box is a separate device with its own ports, and a
+         * slower device plugs into that one. Which SuperSpeed is the remaining
+         * question, and it is not answered here: a Gen 1 hub leaves the speed
+         * field zero because in its world there is one answer, and a Gen 2 hub
+         * states the lane speeds in an extended port status this driver does
+         * not read. Saying SuperSpeed is right for the first and understates
+         * the second, which costs scheduling headroom and never correctness. */
+        return XHCI_PORT_SPEED_SUPER;
+    }
     if (status & PORT_STAT_LOW_SPEED)  return XHCI_PORT_SPEED_LOW;
     if (status & PORT_STAT_HIGH_SPEED) return XHCI_PORT_SPEED_HIGH;
-    return XHCI_PORT_SPEED_FULL;
+    return XHCI_PORT_SPEED_FULL;       /* neither flag set means full speed */
 }
 
 /* ── one port ───────────────────────────────────────────────────────────── */
 
 /*
- * Reset a port and enumerate what answers.
+ * Drive one reset and wait for the hub to say it finished.
  *
  * The reset is driven by the hub, not by the controller, so this is where the
- * waiting happens — and it is a real wait on a real device, bounded and
- * reported rather than assumed. A port that resets and does not enable has
- * something attached that did not answer, and enumerating into that produces a
- * slot the controller will refuse to address.
+ * waiting happens — a real wait on a real device, bounded and reported rather
+ * than assumed. Both reset-change bits are cleared on the way out whatever
+ * happened, including on the paths that give up: leaving one standing is
+ * leaving the hub with something to report that nothing will ever answer.
+ */
+static int hub_reset_port(XhciHub* h, uint8_t port, bool warm,
+                          uint16_t* out_status)
+{
+    uint8_t  feature = warm ? PORT_FEAT_BH_RESET : PORT_FEAT_RESET;
+    uint16_t finished = warm ? SS_PORT_CHG_BH_RESET : PORT_CHG_RESET;
+
+    /* A SuperSpeed hub may answer either way round: it is entitled to escalate
+     * a reset it was asked for into the deeper one on its own. */
+    if (h->superspeed) {
+        finished = PORT_CHG_RESET | SS_PORT_CHG_BH_RESET;
+    }
+
+    if (hub_port_feature(h, port, feature, true) != 0) {
+        return -1;
+    }
+
+    uint16_t status = 0, change = 0;
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(HUB_RESET_TIMEOUT_MS);
+
+    for (;;) {
+        hub_pause_ms(HUB_RESET_POLL_MS);
+
+        if (hub_port_status(h, port, &status, &change) != 0) {
+            return -1;
+        }
+        if (change & finished) {
+            break;
+        }
+        if ((int64_t)(rdtsc() - deadline) >= 0) {
+            kprintf("[USB hub slot %u] port %u did not finish %s resetting\n",
+                    h->slot->slot_id, port, warm ? "warm" : "");
+            hub_clear_changes(h, port, change);
+            return -1;
+        }
+    }
+
+    hub_clear_changes(h, port, change);
+    hub_pause_ms(HUB_RESET_RECOVERY_MS);
+
+    if (hub_port_status(h, port, &status, &change) != 0) {
+        return -1;
+    }
+    hub_clear_changes(h, port, change);
+
+    if (out_status) {
+        *out_status = status;
+    }
+    return 0;
+}
+
+/*
+ * Reset a port and enumerate what answers.
+ *
+ * A port that resets and does not enable has something attached that did not
+ * answer, and enumerating into that produces a slot the controller will refuse
+ * to address.
  */
 static int hub_bring_up_port(XhciHub* h, uint8_t port)
 {
@@ -250,44 +531,35 @@ static int hub_bring_up_port(XhciHub* h, uint8_t port)
         return -1;                      /* gone again already */
     }
 
-    if (hub_port_feature(h, port, PORT_FEAT_RESET, true) != 0) {
+    if (hub_reset_port(h, port, false, &status) != 0) {
         return -1;
     }
 
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(HUB_RESET_TIMEOUT_MS);
-    for (;;) {
-        hub_pause_ms(HUB_RESET_POLL_MS);
-
-        if (hub_port_status(h, port, &status, &change) != 0) {
-            return -1;
-        }
-        if (change & PORT_CHG_RESET) {
-            break;
-        }
-        if ((int64_t)(rdtsc() - deadline) >= 0) {
-            kprintf("[USB hub slot %u] port %u did not finish resetting\n",
-                    h->slot->slot_id, port);
+    /* A link that came out of the reset inactive or stuck in compliance mode
+     * has not failed to reset — it has failed to train, and the answer to that
+     * is the other reset: the one that takes the link down and brings it back
+     * up from nothing. */
+    if (h->superspeed && !ss_link_usable(status)) {
+        kprintf("[USB hub slot %u] port %u came out of the reset in %s — "
+                "warm resetting it\n",
+                h->slot->slot_id, port, ss_link_name(status));
+        if (hub_reset_port(h, port, true, &status) != 0) {
             return -1;
         }
     }
 
-    hub_port_feature(h, port, PORT_FEAT_C_RESET, false);
-    hub_pause_ms(HUB_RESET_RECOVERY_MS);
-
-    if (hub_port_status(h, port, &status, &change) != 0) {
-        return -1;
-    }
     if (!(status & PORT_STAT_ENABLE)) {
         kprintf("[USB hub slot %u] port %u reset but did not enable\n",
                 h->slot->slot_id, port);
         return -1;
     }
 
-    uint8_t speed = hub_port_speed(status);
+    uint8_t speed = hub_port_speed(h, status);
     kprintf("[USB hub slot %u] port %u: %s-speed device attached\n",
             h->slot->slot_id, port,
-            speed == XHCI_PORT_SPEED_LOW  ? "low"  :
-            speed == XHCI_PORT_SPEED_HIGH ? "high" : "full");
+            speed == XHCI_PORT_SPEED_LOW   ? "low"   :
+            speed == XHCI_PORT_SPEED_HIGH  ? "high"  :
+            speed == XHCI_PORT_SPEED_SUPER ? "super" : "full");
 
     return xhci_enumerate_behind_hub(h->ctrl, h->slot, port, speed);
 }
@@ -316,6 +588,16 @@ static void hub_port_gone(XhciHub* h, uint8_t port)
         }
         xhci_device_slot_cleanup(h->ctrl, child);
     }
+}
+
+/* Forget whatever this port was holding. */
+static void hub_port_forget(XhciHub* h, uint8_t port)
+{
+    if (h->occupied & (1u << port)) {
+        hub_port_gone(h, port);
+    }
+    h->present  &= ~(1u << port);
+    h->occupied &= ~(1u << port);
 }
 
 /*
@@ -351,29 +633,47 @@ static int hub_scan_ports(XhciHub* h, bool announce_only_changes)
             continue;
         }
 
-        if (change & PORT_CHG_CONNECTION) {
-            hub_port_feature(h, port, PORT_FEAT_C_CONNECTION, false);
-        }
-        if (change & PORT_CHG_ENABLE) {
-            hub_port_feature(h, port, PORT_FEAT_C_ENABLE, false);
+        hub_clear_changes(h, port, change);
+
+        if (status & PORT_STAT_OVERCURRENT) {
+            /* The hub has already cut power to it, and will not restore it
+             * while the condition lasts. There is nothing to bring up. */
+            kprintf("[USB hub slot %u] port %u draws more current than the hub "
+                    "will supply — it has switched the port off\n",
+                    h->slot->slot_id, port);
+            hub_port_forget(h, port);
+            acted++;
+            continue;
         }
 
         bool connected = (status & PORT_STAT_CONNECTION) != 0;
-        bool known     = (h->occupied & (1u << port)) != 0;
+        bool answered  = (h->present & (1u << port)) != 0;
 
-        if (announce_only_changes && connected == known &&
+        /* A connection that changed and is present again need not be the same
+         * connection. Whatever was being held for this port belongs to a device
+         * that has already gone, whether or not anything noticed it leave. */
+        if ((change & PORT_CHG_CONNECTION) && answered) {
+            hub_port_forget(h, port);
+            answered = false;
+            acted++;
+        }
+
+        if (announce_only_changes && connected == answered &&
             !(change & PORT_CHG_CONNECTION)) {
             continue;
         }
 
-        if (connected && !known) {
+        if (connected && !answered) {
+            /* Marked as answered before the attempt, not after it: a port that
+             * will not come up must not be tried again until the connection
+             * itself changes. */
+            h->present |= (1u << port);
             if (hub_bring_up_port(h, port) == 0) {
                 h->occupied |= (1u << port);
             }
             acted++;
-        } else if (!connected && known) {
-            hub_port_gone(h, port);
-            h->occupied &= ~(1u << port);
+        } else if (!connected && answered) {
+            hub_port_forget(h, port);
             acted++;
         }
     }
@@ -404,6 +704,10 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     h->ctrl = ctrl;
     h->slot = slot;
 
+    /* Which dialect, asked of the hub rather than of the port it is on. */
+    uint8_t protocol = slot->device_desc.bDeviceProtocol;
+    h->superspeed = (protocol == HUB_PROTOCOL_SUPERSPEED);
+
     void* page = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     if (!page) {
         kfree(h);
@@ -423,12 +727,26 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         return -1;
     }
 
+    /* Depth before anything below it is addressed: a SuperSpeed hub routes by
+     * the four bits of the route string that belong to its own tier, and does
+     * not know which four those are until it is told. */
+    if (h->superspeed && hub_set_depth(h) != 0) {
+        xhci_hub_release(ctrl, slot);
+        return -1;
+    }
+
+    /* One translator per port is a mode to be entered, not a capability to be
+     * reported. A hub that is not asked stays on the one it starts with. */
+    slot->multi_tt = false;
+    if (protocol == HUB_PROTOCOL_MULTI_TT) {
+        hub_select_multi_tt(h);
+    }
+
     /* The controller has to be told this device is a hub before it can address
      * anything below it: a slot context without the Hub bit is scheduled as an
      * endpoint device, and the ports underneath do not exist as far as it is
      * concerned. The context is rewritten and re-evaluated. */
     slot->hub_ports = h->ports;
-    slot->multi_tt  = (slot->interface_protocol == 2);
 
     uint32_t pages = xhci_input_ctx_pages(ctrl);
     void* input_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
@@ -467,8 +785,13 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     }
     pmm_free(input_phys, pages);
 
-    kprintf("[USB hub slot %u] %u port(s), %u ms to power\n",
-            slot->slot_id, h->ports, h->power_on_delay_ms);
+    kprintf("[USB hub slot %u] %s: %u port(s), %u ms to power%s\n",
+            slot->slot_id,
+            h->superspeed        ? "SuperSpeed hub" :
+            protocol == HUB_PROTOCOL_FULL_SPEED ? "full-speed hub"
+                                                : "high-speed hub",
+            h->ports, h->power_on_delay_ms,
+            slot->multi_tt ? ", one translator per port" : "");
 
     /* Power every port, then wait once for all of them. */
     for (uint8_t port = 1; port <= h->ports; port++) {
