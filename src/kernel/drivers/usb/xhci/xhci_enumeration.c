@@ -6,6 +6,7 @@
 #include "xhci_hid.h"
 #include "xhci_endpoint.h"
 #include "xhci_msd.h"
+#include "xhci_hub.h"
 #include "xhci_interrupt.h"
 #include "usb_common.h"
 #include "klib.h"
@@ -173,6 +174,15 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     slot->ep_bulk_out = 0;
     slot->config_value = 0;
     slot->interface_num = 0;
+    slot->route_string = 0;
+    slot->depth = 0;
+    slot->parent_slot_id = 0;
+    slot->parent_port = 0;
+    slot->tt_slot_id = 0;
+    slot->tt_port = 0;
+    slot->hub_ports = 0;
+    slot->tt_think_time = 0;
+    slot->multi_tt = false;
     memset(&slot->device_desc, 0, sizeof(slot->device_desc));
     slot->timestamp_started = rdtsc();
 
@@ -221,6 +231,121 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     return 0;
 }
 
+xhci_device_slot_t* xhci_get_device_slot_by_id(uint8_t slot_id)
+{
+    if (slot_id == 0) {
+        return NULL;
+    }
+    spin_lock(&device_slots_lock);
+    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+        if (device_slots[i].slot_id == slot_id &&
+            device_slots[i].state != ENUM_STATE_IDLE) {
+            spin_unlock(&device_slots_lock);
+            return &device_slots[i];
+        }
+    }
+    spin_unlock(&device_slots_lock);
+    return NULL;
+}
+
+/*
+ * A device found on a hub port.
+ *
+ * The hub has already powered the port, reset it and read back what speed
+ * answered, so there is no port reset to wait for here — this joins the same
+ * conversation a root-port device joins after its own reset, at Enable Slot.
+ *
+ * What is different is everything the controller needs in order to find the
+ * device at all: the root port the branch hangs off, the route down through
+ * the hubs, and, when the device is slower than the bus it is reached over,
+ * which hub is translating for it.
+ */
+int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
+                              xhci_device_slot_t* hub,
+                              uint8_t hub_port, uint8_t speed)
+{
+    if (!ctrl || !ctrl->running || !hub || hub_port == 0) {
+        return -1;
+    }
+
+    /* Five tiers is the whole of the route string, and the specification says
+     * so: four bits each, twenty bits, and no sixth place to put a number. */
+    if (hub->depth >= 5) {
+        kprintf("[xHCI] a device on hub slot %u port %u is six hubs deep, "
+                "which is one more than the bus can address\n",
+                hub->slot_id, hub_port);
+        return -2;
+    }
+
+    struct xhci_device_slot* slot = find_free_slot();
+    if (!slot) {
+        kprintf("[xHCI] no free device slot for hub slot %u port %u\n",
+                hub->slot_id, hub_port);
+        return -3;
+    }
+
+    slot->slot_id = 0;
+    slot->port_num = hub->port_num;          /* the root port, still */
+    slot->speed = speed;
+    slot->dev_ctx = NULL;
+    slot->dev_ctx_phys = 0;
+    slot->input_ctx_phys = 0;
+    slot->ep0_ring = NULL;
+    slot->ep0_ring_phys = 0;
+    slot->ep0_max_packet = 0;
+    slot->config_total_len = 0;
+    slot->interface_class = 0;
+    slot->interface_subclass = 0;
+    slot->interface_protocol = 0;
+    slot->descriptor_buffer_virt = NULL;
+    slot->descriptor_buffer_phys = 0;
+    slot->endpoints = NULL;
+    slot->max_dci = 0;
+    slot->ep_pending_add = 0;
+    slot->driver = XHCI_DRIVER_NONE;
+    slot->ep_interrupt_in = 0;
+    slot->ep_bulk_in = 0;
+    slot->ep_bulk_out = 0;
+    slot->config_value = 0;
+    slot->interface_num = 0;
+    slot->hub_ports = 0;
+    slot->tt_think_time = 0;
+    slot->multi_tt = false;
+    memset(&slot->device_desc, 0, sizeof(slot->device_desc));
+
+    /* Four bits per tier, and the tier is how deep the HUB is — a device on a
+     * hub that is itself on a root port occupies the first four bits. */
+    uint8_t nibble = (hub_port > 15) ? 15 : hub_port;
+    slot->route_string   = hub->route_string | ((uint32_t)nibble << (4 * hub->depth));
+    slot->depth          = (uint8_t)(hub->depth + 1);
+    slot->parent_slot_id = hub->slot_id;
+    slot->parent_port    = hub_port;
+
+    /* Who translates. A low or full speed device reached through a high speed
+     * hub is spoken to by that hub on the controller's behalf, and the
+     * controller has to be told which one. A device deeper down inherits
+     * whichever translator was already standing in the way. */
+    if ((speed == XHCI_PORT_SPEED_LOW || speed == XHCI_PORT_SPEED_FULL) &&
+        hub->speed == XHCI_PORT_SPEED_HIGH) {
+        slot->tt_slot_id = hub->slot_id;
+        slot->tt_port    = hub_port;
+    } else {
+        slot->tt_slot_id = hub->tt_slot_id;
+        slot->tt_port    = hub->tt_port;
+    }
+
+    slot->timestamp_started = rdtsc();
+
+    debug_printf("[xHCI ENUM] device on hub slot %u port %u, route 0x%05x, "
+                 "depth %u\n", hub->slot_id, hub_port,
+                 slot->route_string, slot->depth);
+
+    if (enum_begin_slot(ctrl, slot) != 0) {
+        return -4;
+    }
+    return 0;
+}
+
 void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
 {
     if (!ctrl) {
@@ -257,6 +382,9 @@ void xhci_device_slot_cleanup(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 
     if (slot->driver == XHCI_DRIVER_STORAGE) {
         xhci_msd_release(slot);
+    }
+    if (slot->driver == XHCI_DRIVER_HUB) {
+        xhci_hub_release(ctrl, slot);
     }
 
     xhci_ep_table_free(slot);
@@ -305,7 +433,7 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
 
     xhci_slot_context_t* slot_ctx =
         (xhci_slot_context_t*)(input_base + ctrl->context_size);
-    xhci_init_slot_context(slot_ctx, slot->port_num, slot->speed);
+    xhci_fill_slot_context(slot_ctx, slot);
 
     slot->ep0_max_packet = ep0_initial_max_packet(slot->speed);
     xhci_endpoint_context_t* ep0_ctx =
@@ -613,6 +741,32 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         return;
     }
 
+    /* A hub, which is an ordinary device that happens to have ports. It gets
+     * one interrupt endpoint, on which it says when something below it has
+     * changed — and nothing else here, because everything a hub is for needs
+     * control transfers and this is the interrupt handler. */
+    memset(&pick, 0, sizeof(pick));
+    if (usb_walk_interface(cfg, len, USB_CLASS_HUB, USB_CLASS_ANY,
+                           USB_CLASS_ANY, &iface,
+                           enum_pick_visit, &pick) && pick.intr_in_dci) {
+
+        slot->driver          = XHCI_DRIVER_HUB;
+        slot->interface_num   = iface;
+        slot->ep_interrupt_in = pick.intr_in_dci;
+
+        if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
+                            pick.intr_addr, pick.intr_mps, pick.intr_interval,
+                            pick.intr_mps) != 0 ||
+            xhci_ep_configure(ctrl, slot) != 0) {
+            kprintf("[xHCI] port %u: could not configure the hub\n",
+                    slot->port_num);
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
+        return;
+    }
+
     enum_settle_unclaimed(slot);
 }
 
@@ -638,6 +792,17 @@ static void enum_driver_start(xhci_controller_t* ctrl, struct xhci_device_slot* 
                 slot->slot_id, slot->ep_interrupt_in);
         break;
     }
+
+    case XHCI_DRIVER_HUB:
+        /* Same reasoning as storage: everything a hub needs doing is a control
+         * transfer, and this runs inside the event handler. Saying that there
+         * is a hub waiting is the whole of what can be done from here. */
+        kprintf("[xHCI] port %u: %s-speed hub %04x:%04x on slot %u\n",
+                slot->port_num, speed_name(slot->speed),
+                slot->device_desc.idVendor, slot->device_desc.idProduct,
+                slot->slot_id);
+        xhci_hub_note_work();
+        break;
 
     case XHCI_DRIVER_STORAGE:
         /* Deliberately no SCSI here. Everything in this function runs inside

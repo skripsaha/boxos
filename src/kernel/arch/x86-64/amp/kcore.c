@@ -1,4 +1,5 @@
 #include "kcore.h"
+#include "xhci_hub.h"
 #include "process.h"
 #include "guide.h"
 #include "lapic.h"
@@ -244,6 +245,22 @@ void kcore_run_loop(void)
          * context, so handlers can kmalloc / tagfs / process_walk
          * safely. */
         irq_defer_pump(my_idx);
+
+        /* USB hubs, when one has reported a change on its ports.
+         *
+         * Finding out what a hub means by that takes control transfers, and
+         * those have to be waited for — which the interrupt handler that
+         * received the report cannot do. This is the same reasoning that puts
+         * the deferred IRQ work above in this loop, and the same context.
+         *
+         * It is here rather than in the idle loop because on a multi-core
+         * machine the idle loop is not where the cores are: they are here.
+         * Measured — a hub reported, the flag was raised, and cpu_idle was not
+         * reached once in eight seconds.
+         *
+         * The check is one atomic load when there is nothing to do, which is
+         * every iteration but the ones after somebody touched a socket. */
+        xhci_hub_service_if_pending();
 
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before

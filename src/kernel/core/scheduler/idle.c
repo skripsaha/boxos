@@ -1,4 +1,5 @@
 #include "idle.h"
+#include "xhci_hub.h"
 #include "process.h"
 #include "nightwatch.h"
 #include "klib.h"
@@ -143,6 +144,14 @@ void cpu_idle(void) {
      * through to the cheap "no work" path because the flag is never
      * set there. */
     cpu_tsc_recal_if_pending();
+
+    /* USB hubs, when one has said something. Finding out what a hub means by
+     * "something changed on my ports" takes control transfers, and control
+     * transfers have to be waited for — which cannot happen in the interrupt
+     * handler that received the report. This is the nearest place that is
+     * allowed to wait, and the check is a single atomic load when there is
+     * nothing to do, which is almost always. */
+    xhci_hub_service_if_pending();
 
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle
