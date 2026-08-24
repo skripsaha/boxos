@@ -586,7 +586,7 @@ static void hub_port_gone(XhciHub* h, uint8_t port)
         if (!child) {
             return;
         }
-        xhci_device_slot_cleanup(h->ctrl, child);
+        xhci_slot_retire(h->ctrl, child);
     }
 }
 

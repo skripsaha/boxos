@@ -1,5 +1,6 @@
 #include "kcore.h"
 #include "xhci_hub.h"
+#include "xhci_enumeration.h"
 #include "process.h"
 #include "guide.h"
 #include "lapic.h"
@@ -261,6 +262,15 @@ void kcore_run_loop(void)
          * The check is one atomic load when there is nothing to do, which is
          * every iteration but the ones after somebody touched a socket. */
         xhci_hub_service_if_pending();
+
+        /* And USB devices that have been unplugged. Taking one down means
+         * waiting for the controller to say it has let go of the device
+         * context and for whatever was mid-transfer to come out — and it is
+         * here for the same reason the hubs are, which had to be measured
+         * twice: the first attempt hung this on cpu_idle, where the cores are
+         * parked in MWAIT, and sixty-three devices came and went without a
+         * single one of them being taken down. */
+        xhci_slot_service_if_pending();
 
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before

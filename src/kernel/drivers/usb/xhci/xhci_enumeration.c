@@ -23,6 +23,28 @@ void xhci_enumeration_init(void) {
     memset(device_slots, 0, sizeof(device_slots));
 }
 
+static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
+
+/* Raised when something has been retired and not yet taken down; lowered by
+ * the pass that takes it down. One core does that at a time, and the others
+ * go away rather than queue up behind it — the same arrangement the hubs use,
+ * and for the same reason. */
+static volatile uint32_t retire_pending = 0;
+static volatile uint32_t retire_busy = 0;
+
+/*
+ * A slot somebody may still speak to.
+ *
+ * Idle means nothing is there. Retiring means something was, and what is left
+ * of it is being taken down — a lookup that returns one of those hands out a
+ * device context that is about to stop existing, and a port number that
+ * belongs to whatever is plugged in next.
+ */
+static bool slot_is_live(const struct xhci_device_slot* s) {
+    uint8_t state = __atomic_load_n(&s->state, __ATOMIC_ACQUIRE);
+    return state != ENUM_STATE_IDLE && state != ENUM_STATE_RETIRING;
+}
+
 static struct xhci_device_slot* find_free_slot(void) {
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
@@ -39,8 +61,7 @@ static struct xhci_device_slot* find_free_slot(void) {
 static struct xhci_device_slot* find_slot_by_port(uint8_t port) {
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].port_num == port &&
-            device_slots[i].state != ENUM_STATE_IDLE) {
+        if (device_slots[i].port_num == port && slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -56,8 +77,7 @@ xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_i
 
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].slot_id == slot_id &&
-            device_slots[i].state != ENUM_STATE_IDLE) {
+        if (device_slots[i].slot_id == slot_id && slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -238,14 +258,165 @@ xhci_device_slot_t* xhci_get_device_slot_by_id(uint8_t slot_id)
     }
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].slot_id == slot_id &&
-            device_slots[i].state != ENUM_STATE_IDLE) {
+        if (device_slots[i].slot_id == slot_id && slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
     }
     spin_unlock(&device_slots_lock);
     return NULL;
+}
+
+bool xhci_slot_enter(xhci_device_slot_t* slot)
+{
+    if (!slot) {
+        return false;
+    }
+
+    /*
+     * Counted first, then checked.
+     *
+     * The other order leaves a window: a retirement that lands between the
+     * check and the count sees nobody inside and takes the endpoints away
+     * underneath a caller that has just satisfied itself they are there.
+     * Counting first closes it — either the retirement sees this visitor, or
+     * this visitor sees the retirement. One of the two always happens.
+     */
+    __atomic_fetch_add(&slot->visitors, 1, __ATOMIC_ACQ_REL);
+    if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != ENUM_STATE_CONFIGURED) {
+        __atomic_fetch_sub(&slot->visitors, 1, __ATOMIC_ACQ_REL);
+        return false;
+    }
+    return true;
+}
+
+void xhci_slot_leave(xhci_device_slot_t* slot)
+{
+    if (!slot) {
+        return;
+    }
+    __atomic_fetch_sub(&slot->visitors, 1, __ATOMIC_ACQ_REL);
+}
+
+void xhci_slot_retire(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+{
+    if (!slot) {
+        return;
+    }
+
+    /* Whoever gets there first retires it; a second caller for the same
+     * departure finds it already going and has nothing to add. */
+    uint8_t was = __atomic_exchange_n(&slot->state,
+                                      (uint8_t)ENUM_STATE_RETIRING,
+                                      __ATOMIC_ACQ_REL);
+    if (was == ENUM_STATE_IDLE || was == ENUM_STATE_RETIRING) {
+        __atomic_store_n(&slot->state, was, __ATOMIC_RELEASE);
+        return;
+    }
+
+    /* The socket is free for whatever is plugged in next, and that is a
+     * different device: nothing may find this one by port any more. */
+    slot->port_num = 0;
+    slot->retire_started = rdtsc();
+    slot->retire_warned = false;
+
+    /*
+     * Give the slot back to the controller.
+     *
+     * A slot is a resource the controller hands out on Enable Slot and takes
+     * back on Disable Slot, and this used to be issued on exactly one of the
+     * many paths that finish with a device — the root-port unplug. Every
+     * other one, including every enumeration that failed and every device
+     * unplugged from a hub, freed the driver's memory and left the controller
+     * believing the slot was still in use. There are sixty-four of them.
+     *
+     * Posted, not waited for: this is reached from the event handler. The
+     * memory the command names stays where it is until the command has been
+     * answered, which is what the second step below is waiting for.
+     */
+    if (ctrl && slot->slot_id != 0) {
+        xhci_post_disable_slot_cmd(ctrl, slot->slot_id);
+    }
+
+    __atomic_store_n(&retire_pending, 1, __ATOMIC_RELEASE);
+}
+
+int xhci_slot_service(xhci_controller_t* ctrl)
+{
+    if (!ctrl) {
+        return 0;
+    }
+    if (__atomic_load_n(&retire_pending, __ATOMIC_ACQUIRE) == 0) {
+        return 0;
+    }
+    if (__atomic_exchange_n(&retire_busy, 1, __ATOMIC_ACQUIRE) != 0) {
+        return 0;                       /* somebody is already doing this */
+    }
+
+    __atomic_store_n(&retire_pending, 0, __ATOMIC_RELEASE);
+
+    int done = 0;
+    bool more = false;
+
+    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+        struct xhci_device_slot* slot = &device_slots[i];
+        if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != ENUM_STATE_RETIRING) {
+            continue;
+        }
+
+        uint32_t inside = __atomic_load_n(&slot->visitors, __ATOMIC_ACQUIRE);
+        bool controller_busy = slot->slot_id != 0 &&
+                               xhci_command_pending_for_slot(slot->slot_id);
+
+        if (inside != 0 || controller_busy) {
+            /*
+             * Waiting, not forcing. A transfer that will never be answered
+             * gives up after five seconds and its caller leaves, so this
+             * resolves itself; and freeing pages a caller is still inside or
+             * the controller is still reading is the very thing this whole
+             * arrangement exists to prevent. A slot held too long is said out
+             * loud once and then kept — a leaked slot is a smaller problem
+             * than a heap somebody else is writing into.
+             */
+            if (!slot->retire_warned &&
+                (int64_t)(rdtsc() - slot->retire_started) >
+                (int64_t)cpu_ms_to_tsc(XHCI_RETIRE_PATIENCE_MS)) {
+                slot->retire_warned = true;
+                kprintf("[xHCI] slot %u has been leaving for %u ms — %u caller(s) "
+                        "still inside it%s\n",
+                        slot->slot_id, XHCI_RETIRE_PATIENCE_MS, inside,
+                        controller_busy ? " and the controller has not answered"
+                                        : "");
+            }
+            more = true;
+            continue;
+        }
+
+        slot_take_down(ctrl, slot);
+        done++;
+    }
+
+    if (more) {
+        __atomic_store_n(&retire_pending, 1, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&retire_busy, 0, __ATOMIC_RELEASE);
+    return done;
+}
+
+bool xhci_slot_retire_pending(void)
+{
+    return __atomic_load_n(&retire_pending, __ATOMIC_ACQUIRE) != 0;
+}
+
+void xhci_slot_service_if_pending(void)
+{
+    if (!xhci_slot_retire_pending()) {
+        return;
+    }
+    xhci_controller_t* ctrl = xhci_get_controller();
+    if (ctrl) {
+        xhci_slot_service(ctrl);
+    }
 }
 
 /*
@@ -377,7 +548,7 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
          * would keep the port unusable for whatever is plugged in next. */
         kprintf("[xHCI] port %u reset but did not enable — no usable device\n",
                 port);
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
         return;
     }
 
@@ -385,7 +556,14 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
     enum_begin_slot(ctrl, slot);
 }
 
-void xhci_device_slot_cleanup(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
+/* The second half of a departure: what is left of the device, taken apart.
+ *
+ * Reached only from xhci_slot_service, and only once the controller has said
+ * it is finished with the slot and nobody is inside the device any more. It is
+ * deliberately not something any other file can call — every path that once
+ * did now retires the slot and lets the service pass get here in its own
+ * time. */
+static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
     if (!slot) {
         return;
     }
@@ -408,14 +586,21 @@ void xhci_device_slot_cleanup(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         slot->input_ctx_phys = 0;
     }
 
+    /* Take the controller's pointer away BEFORE the page it points at goes back
+     * to the allocator — the other order hands a live pointer to the next
+     * tenant of that page. And only while it still points at THIS device: by
+     * the time a departure is taken down, the controller may have given the
+     * same slot number to whatever was plugged in next, and clearing it then
+     * would erase the newcomer's device context instead. */
+    if (ctrl && slot->slot_id > 0 && slot->slot_id <= ctrl->max_slots &&
+        ctrl->dcbaa->device_context_ptrs[slot->slot_id] == slot->dev_ctx_phys) {
+        ctrl->dcbaa->device_context_ptrs[slot->slot_id] = 0;
+    }
+
     if (slot->dev_ctx_phys) {
         pmm_free((void*)slot->dev_ctx_phys, 1);
         slot->dev_ctx_phys = 0;
         slot->dev_ctx = NULL;
-    }
-
-    if (ctrl && slot->slot_id > 0 && slot->slot_id <= ctrl->max_slots) {
-        ctrl->dcbaa->device_context_ptrs[slot->slot_id] = 0;
     }
 
     slot->slot_id = 0;
@@ -434,7 +619,7 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
     if (!input_ctx_phys) {
         kprintf("[xHCI] out of memory addressing the device on port %u\n",
                 slot->port_num);
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
         return;
     }
     slot->input_ctx_phys = (uint64_t)input_ctx_phys;
@@ -459,7 +644,7 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
     if (xhci_post_address_device_cmd(ctrl, slot->slot_id,
                                      (uint64_t)input_ctx_phys) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Address Device\n");
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
     }
 }
 
@@ -491,7 +676,7 @@ static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* 
     void* input_ctx_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
     if (!input_ctx_phys) {
         kprintf("[xHCI] out of memory correcting EP0 on port %u\n", slot->port_num);
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
         return;
     }
     slot->input_ctx_phys = (uint64_t)input_ctx_phys;
@@ -511,7 +696,7 @@ static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* 
     if (xhci_post_evaluate_context_cmd(ctrl, slot->slot_id,
                                        (uint64_t)input_ctx_phys) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Evaluate Context\n");
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
     }
 }
 
@@ -578,7 +763,7 @@ void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     slot->state = ENUM_STATE_WAIT_EP0_RESET;
 
     if (xhci_post_reset_endpoint_cmd(ctrl, slot->slot_id, 1) < 0) {
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
     }
 }
 
@@ -702,7 +887,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
                             pick.intr_mps) != 0) {
             kprintf("[xHCI] port %u: no memory for the keyboard endpoint\n",
                     slot->port_num);
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
 
@@ -714,7 +899,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
             .wLength = 0
         };
         if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
         slot->state = ENUM_STATE_WAIT_SET_PROTOCOL;
@@ -743,12 +928,12 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
                             pick.bulk_out_addr, pick.bulk_out_mps, 0, 0) != 0) {
             kprintf("[xHCI] port %u: no memory for the storage endpoints\n",
                     slot->port_num);
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
 
         if (xhci_ep_configure(ctrl, slot) != 0) {
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
         slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
@@ -774,7 +959,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
             xhci_ep_configure(ctrl, slot) != 0) {
             kprintf("[xHCI] port %u: could not configure the hub\n",
                     slot->port_num);
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
         slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
@@ -796,7 +981,7 @@ static void enum_driver_start(xhci_controller_t* ctrl, struct xhci_device_slot* 
                            ep->buffer_phys, ep->max_packet) != 0) {
             kprintf("[xHCI] port %u: keyboard endpoint could not be primed\n",
                     slot->port_num);
-            xhci_device_slot_cleanup(ctrl, slot);
+            xhci_slot_retire(ctrl, slot);
             return;
         }
         kprintf("[xHCI] port %u: %s-speed keyboard %04x:%04x is live "
@@ -851,11 +1036,18 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     for (;;) {
         xhci_process_events();
 
+        /* This is a context that may wait, so anything that departed while the
+         * bus was settling gets taken down here rather than waiting for a core
+         * to go idle — which during boot may be a while. */
+        xhci_slot_service(ctrl);
+
         int busy = 0;
         for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            uint8_t state = device_slots[i].state;
-            if (state != ENUM_STATE_IDLE && state != ENUM_STATE_CONFIGURED) {
-                busy++;
+            uint8_t state = __atomic_load_n(&device_slots[i].state,
+                                            __ATOMIC_ACQUIRE);
+            if (state != ENUM_STATE_IDLE && state != ENUM_STATE_CONFIGURED &&
+                state != ENUM_STATE_RETIRING) {
+                busy++;     /* mid-enumeration; leaving is not enumerating */
             }
         }
 
@@ -893,9 +1085,10 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         struct xhci_device_slot* slot = &device_slots[i];
 
-        uint8_t state = slot->state;
-        if (state == ENUM_STATE_IDLE || state == ENUM_STATE_CONFIGURED) {
-            continue;
+        uint8_t state = __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE);
+        if (state == ENUM_STATE_IDLE || state == ENUM_STATE_CONFIGURED ||
+            state == ENUM_STATE_RETIRING) {
+            continue;   /* nothing started, finished, or already leaving */
         }
         if (slot->timestamp_started == 0) {
             continue;
@@ -906,7 +1099,7 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
 
         kprintf("[xHCI] port %u: gave up after %u ms while %s\n",
                 slot->port_num, XHCI_ENUM_TIMEOUT_MS, enum_state_name(state));
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
     }
 }
 
@@ -929,11 +1122,23 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
         spin_unlock(&device_slots_lock);
     } else {
-        /* For all other commands, slot_id from the completion event is valid. */
+        /*
+         * For all other commands, slot_id from the completion event is valid —
+         * but it does not identify a slot on its own.
+         *
+         * A slot number is the controller's, and it hands the same one straight
+         * back out once it has been disabled. A device on its way out therefore
+         * shares its number with the device that replaced it, and matching on
+         * the number alone found whichever came first in the table. Measured:
+         * every Enable Slot after a round of unplugs was answered into a slot
+         * that had already left, so the device actually waiting for it waited
+         * until the watchdog gave up on it. A slot that is leaving is not a
+         * step of any enumeration.
+         */
         spin_lock(&device_slots_lock);
         for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
             if (device_slots[i].slot_id == slot_id &&
-                device_slots[i].state != ENUM_STATE_IDLE) {
+                slot_is_live(&device_slots[i])) {
                 slot = &device_slots[i];
                 break;
             }
@@ -960,7 +1165,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         kprintf("[xHCI] port %u: enumeration step %u failed with completion "
                 "code %u — releasing the slot\n",
                 slot->port_num, slot->state, completion_code);
-        xhci_device_slot_cleanup(ctrl, slot);
+        xhci_slot_retire(ctrl, slot);
         return;
     }
 
@@ -970,7 +1175,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             if (slot_id == 0 || slot_id > ctrl->max_slots) {
                 kprintf("[xHCI] Enable Slot returned slot id %u, which this "
                         "controller cannot have\n", slot_id);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -985,14 +1190,14 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             if (xhci_ep_table_alloc(slot) != 0) {
                 kprintf("[xHCI] port %u: no memory for the endpoint table\n",
                         slot->port_num);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
             /* Allocate EP0 ring now — needed before Address Device. */
             if (xhci_alloc_ep0_ring(ctrl, slot) < 0) {
                 debug_printf("[xHCI ENUM] Failed to allocate EP0 ring\n");
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1000,7 +1205,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             void* dev_ctx_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
             if (!dev_ctx_phys) {
                 debug_printf("[xHCI ENUM] Failed to allocate Device Context\n");
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->dev_ctx_phys = (uint64_t)dev_ctx_phys;
@@ -1023,7 +1228,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
              * endpoint context currently names. */
             if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8) < 0) {
                 debug_printf("[xHCI ENUM] Failed to post Get Device Descriptor\n");
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1048,7 +1253,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 real_mps != 64 && real_mps != 512) {
                 kprintf("[xHCI] port %u: device names an impossible EP0 packet "
                         "size (%u) — refusing it\n", slot->port_num, real_mps);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1060,7 +1265,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             }
 
             if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
@@ -1071,7 +1276,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             enum_free_input_ctx(ctrl, slot);
 
             if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
@@ -1084,7 +1289,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             if (!usb_validate_device_desc(desc)) {
                 kprintf("[xHCI] port %u: device descriptor is malformed\n",
                         slot->port_num);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1101,7 +1306,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
              * carries media keys is a composite device, with its boot-keyboard
              * interface described past whatever the guess covered. */
             if (enum_get_descriptor(ctrl, slot, USB_DT_CONFIG, 9) < 0) {
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->state = ENUM_STATE_WAIT_GET_CONFIG_HEADER;
@@ -1114,7 +1319,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             if (cfg->bDescriptorType != USB_DESC_CONFIGURATION || cfg->bLength < 9) {
                 kprintf("[xHCI] port %u: configuration descriptor is malformed\n",
                         slot->port_num);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1134,7 +1339,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             slot->config_total_len = total;
 
             if (enum_get_descriptor(ctrl, slot, USB_DT_CONFIG, total) < 0) {
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->state = ENUM_STATE_WAIT_GET_CONFIG_DESC;
@@ -1168,7 +1373,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
                 debug_printf("[xHCI ENUM] Failed to post Set Configuration\n");
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1196,7 +1401,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
                 debug_printf("[xHCI ENUM] Failed to post Set Idle\n");
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
 
@@ -1216,7 +1421,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             if (xhci_post_set_tr_dequeue_cmd(ctrl, slot->slot_id, 1,
                     resume | (slot->ep0_ring->cycle_state ? 1u : 0u)) < 0) {
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
             }
             break;
         }
@@ -1232,7 +1437,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             if (xhci_ep_configure(ctrl, slot) != 0) {
                 kprintf("[xHCI] port %u: could not configure the keyboard "
                         "endpoint\n", slot->port_num);
-                xhci_device_slot_cleanup(ctrl, slot);
+                xhci_slot_retire(ctrl, slot);
                 return;
             }
             slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;

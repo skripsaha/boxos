@@ -219,6 +219,24 @@ bool BoardroomSeatIsRemovable(uint8_t seat)
     return s ? s->removable : false;
 }
 
+bool BoardroomSeatOccupied(uint8_t seat)
+{
+    BoardSeat* s = seat_find(seat);
+    if (!s) {
+        return false;
+    }
+
+    switch (s->kind) {
+    /* The only medium here that can walk away while the machine runs. The
+     * others are screwed to the board; a SATA disk that vanishes at runtime is
+     * a fault, not a removal, and it reports itself as failing commands. */
+    case BOARD_USB:  return xhci_msd_unit_present(s->index);
+    case BOARD_AHCI:
+    case BOARD_ATA:  return true;
+    default:         return false;
+    }
+}
+
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
     BoardSeat* s = seat_find(seat);

@@ -51,6 +51,11 @@ int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
  * endpoints has to know that happened before it uses the endpoint again. */
 int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms);
 
+/* True while a command naming this slot is still unanswered. Whoever is about
+ * to hand the slot's pages back to the allocator has to know the controller
+ * has finished reading them. */
+bool xhci_command_pending_for_slot(uint8_t slot_id);
+
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event);
 void xhci_check_command_timeouts(xhci_controller_t* ctrl);
 
