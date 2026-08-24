@@ -67,6 +67,13 @@ typedef struct {
 } usb_keyboard_info_t;
 
 int xhci_parse_config_descriptor(void* data, uint16_t len, usb_keyboard_info_t* info);
+
+/* Class, subclass and protocol of the first interface a configuration
+ * describes. This is what decides who drives the device — including the
+ * answer "nobody, yet", which is a legitimate outcome and not a failure. */
+void xhci_usb_interface_summary(const void* data, uint16_t len,
+                                uint8_t* out_class, uint8_t* out_subclass,
+                                uint8_t* out_protocol);
 void xhci_process_keyboard_report(usb_boot_keyboard_report_t* report);
 
 #endif

@@ -867,7 +867,14 @@ static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_co
     if (port == 0 || port > c->max_ports) return ERR_INVALID_ARGUMENT;
     if (!xhci_port_has_device(c, port))   return ERR_DEVICE_NOT_READY;
 
-    return xhci_reset_port(c, port) == 0 ? OK : ERR_INTERNAL;
+    /* Starting the reset is the whole of the operation. The port announces
+     * its own completion through a port-status change, and the enumeration
+     * state machine is what listens for it — so this returns as soon as the
+     * reset is in flight rather than holding a caller for the tens of
+     * milliseconds the hardware takes. A port that needed no reset (a USB 3
+     * link that trained itself) reports success without touching it. */
+    int rc = xhci_port_begin_reset(c, port);
+    return rc >= 0 ? OK : ERR_INTERNAL;
 }
 
 /* HW_USB_PORT_QUERY  out_crate:[u8 max_ports][u8 max_slots][u8 irq][u8 polling] */

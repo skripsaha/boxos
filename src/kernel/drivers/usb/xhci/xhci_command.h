@@ -19,6 +19,7 @@ struct xhci_pending_cmd {
     uint32_t sequence;
     uint8_t slot_id;
     uint8_t state;
+    uint8_t trb_type;           /* which command this was */
     uint8_t completion_code;
     uint32_t completion_param;
 };
@@ -37,6 +38,13 @@ int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, uint8_t slot_id);
 int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
 int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
 int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys);
+
+/* Endpoint recovery. Reset Endpoint clears a halt; Set TR Dequeue tells the
+ * controller where to pick the ring up again. Neither belongs to enumeration,
+ * and their completions must not be mistaken for one of its steps. */
+int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t dci);
+int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
+                                 uint8_t dci, uint64_t dequeue_ptr_with_dcs);
 
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event);
 void xhci_check_command_timeouts(xhci_controller_t* ctrl);

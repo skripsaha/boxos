@@ -1040,8 +1040,9 @@ void irq_handler(interrupt_frame_t *frame)
         /* Deferred touch event delivery */
         TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
 
-        /* xHCI events handled via IRQ; poll only as fallback */
-        xhci_poll_events();
+        /* xHCI: poll for events when the controller has no usable interrupt,
+         * and run the command and enumeration watchdogs either way. */
+        xhci_tick();
 
         /* Ф26 M1 — AHCI async-completion watchdog (safety backstop). Reconciles
          * a lost/coalesced completion MSI from the port's PxSACT/PxCI level, and
