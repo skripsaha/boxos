@@ -17,15 +17,43 @@
  * kmalloc a fresh intern entry — both of which violate IRQ-context lock
  * ordering on this kernel (see project memory `irq_defer_done_2026_05_17`).
  *
- * Two tags are cached because the xHCI port-change handler publishes to
- * one of two distinct events depending on whether the device connected
- * or disconnected. Both are bare keys (no value); the registry resolves
- * `bare_id` populated and `full_id` invalid. TouchPublishIrqPair handles
- * that case correctly by publishing to the non-invalid id only. */
+ * Four tags are cached: a connect/disconnect pair about the socket, and an
+ * arrived/left pair about the device in it.
+ *
+ * Each is a key:value tag, and the registry interns BOTH halves — the full
+ * (usb, arrived) id and the bare (usb) id — so a subscriber naming the full
+ * tag gets only that event, while one naming the bare key gets everything USB.
+ * A comment here used to claim the full id came back invalid for these; it
+ * does not, and a subscriber measured on all four distinct ids. Publishing
+ * carries both, and TouchPublishIrqPair skips whichever side is invalid. */
 static volatile uint16_t g_xhci_touch_connect_full    = TOUCH_TAG_INVALID;
 static volatile uint16_t g_xhci_touch_connect_bare    = TOUCH_TAG_INVALID;
 static volatile uint16_t g_xhci_touch_disconnect_full = TOUCH_TAG_INVALID;
 static volatile uint16_t g_xhci_touch_disconnect_bare = TOUCH_TAG_INVALID;
+
+/* And two more for the device, as opposed to the socket it is in. */
+static volatile uint16_t g_xhci_touch_arrived_full = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_arrived_bare = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_left_full    = TOUCH_TAG_INVALID;
+static volatile uint16_t g_xhci_touch_left_bare    = TOUCH_TAG_INVALID;
+
+/* What an arrival or a departure carries. Sixteen bytes, well inside the
+ * bounded payload an IRQ-side publish is allowed, and enough that nothing
+ * subscribing to it has to go and ask a second question. */
+typedef struct __attribute__((packed)) {
+    uint8_t  port;
+    uint8_t  slot_id;
+    uint8_t  speed;
+    uint8_t  dev_class;
+    uint8_t  dev_subclass;
+    uint8_t  dev_protocol;
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint16_t usb_version;       /* bcdUSB, so 0x0300 says SuperSpeed */
+    uint32_t reserved;
+} xhci_touch_device_t;
+
+_Static_assert(sizeof(xhci_touch_device_t) == 16, "device event is 16 bytes");
 
 void xhci_interrupt_touch_init(void)
 {
@@ -38,6 +66,14 @@ void xhci_interrupt_touch_init(void)
     TouchTagResolve("usb:disconnect", &full, &bare);
     __atomic_store_n(&g_xhci_touch_disconnect_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xhci_touch_disconnect_bare, bare, __ATOMIC_RELEASE);
+
+    TouchTagResolve("usb:arrived", &full, &bare);
+    __atomic_store_n(&g_xhci_touch_arrived_full, full, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xhci_touch_arrived_bare, bare, __ATOMIC_RELEASE);
+
+    TouchTagResolve("usb:left", &full, &bare);
+    __atomic_store_n(&g_xhci_touch_left_full, full, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_xhci_touch_left_bare, bare, __ATOMIC_RELEASE);
 
     debug_printf("[xHCI] Touch tag handles cached: connect=%u/%u, disconnect=%u/%u\n",
                  (unsigned)__atomic_load_n(&g_xhci_touch_connect_full,    __ATOMIC_RELAXED),
@@ -96,6 +132,12 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
                 kprintf("[xHCI] port %u: %04x:%04x unplugged\n",
                         port, slot->device_desc.idVendor,
                         slot->device_desc.idProduct);
+
+                /* Only a device that was announced gets a departure. */
+                if (slot->state == ENUM_STATE_CONFIGURED) {
+                    xhci_touch_device_left(slot);
+                }
+
                 xhci_post_disable_slot_cmd(ctrl, slot->slot_id);
                 xhci_device_slot_cleanup(ctrl, slot);
             }
@@ -142,6 +184,44 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
                                 0, TOUCH_FLAG_KERNEL);
         }
     }
+}
+
+static void xhci_publish_device(const xhci_device_slot_t* slot,
+                                volatile uint16_t* full_cache,
+                                volatile uint16_t* bare_cache)
+{
+    if (!slot) {
+        return;
+    }
+
+    xhci_touch_device_t ev = {
+        .port          = slot->port_num,
+        .slot_id       = slot->slot_id,
+        .speed         = slot->speed,
+        .dev_class     = slot->interface_class,
+        .dev_subclass  = slot->interface_subclass,
+        .dev_protocol  = slot->interface_protocol,
+        .vendor_id     = slot->device_desc.idVendor,
+        .product_id    = slot->device_desc.idProduct,
+        .usb_version   = slot->device_desc.bcdUSB,
+        .reserved      = 0,
+    };
+
+    TouchTag full = __atomic_load_n(full_cache, __ATOMIC_ACQUIRE);
+    TouchTag bare = __atomic_load_n(bare_cache, __ATOMIC_ACQUIRE);
+    TouchPublishIrqPair(full, bare, &ev, sizeof(ev), 0, TOUCH_FLAG_KERNEL);
+}
+
+void xhci_touch_device_arrived(const xhci_device_slot_t* slot)
+{
+    xhci_publish_device(slot, &g_xhci_touch_arrived_full,
+                              &g_xhci_touch_arrived_bare);
+}
+
+void xhci_touch_device_left(const xhci_device_slot_t* slot)
+{
+    xhci_publish_device(slot, &g_xhci_touch_left_full,
+                              &g_xhci_touch_left_bare);
 }
 
 void xhci_process_events(void) {

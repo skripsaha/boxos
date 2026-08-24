@@ -4,6 +4,7 @@
 #include "xhci_port.h"
 #include "xhci_transfer.h"
 #include "xhci_hid.h"
+#include "xhci_interrupt.h"
 #include "usb_common.h"
 #include "klib.h"
 #include "pmm.h"
@@ -410,6 +411,13 @@ static void enum_settle_unclaimed(struct xhci_device_slot* slot)
             slot->interface_class, slot->interface_subclass,
             slot->interface_protocol);
     slot->state = ENUM_STATE_CONFIGURED;
+
+    /* "No driver claims it" is a statement about right now, not about ever.
+     * The announcement goes out all the same, carrying everything a driver
+     * would need to recognise its own device — which is how a class driver
+     * comes to own this one without anybody editing the state machine above
+     * to know about it. */
+    xhci_touch_device_arrived(slot);
 }
 
 /*
@@ -992,6 +1000,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                     slot->port_num, speed_name(slot->speed),
                     slot->device_desc.idVendor, slot->device_desc.idProduct,
                     slot->slot_id, slot->keyboard_endpoint_dci);
+
+            xhci_touch_device_arrived(slot);
             break;
         }
 
