@@ -1,4 +1,5 @@
 #include "xhci_device.h"
+#include "xhci_enumeration.h"
 #include "klib.h"
 
 /*
@@ -8,14 +9,43 @@
  *   dword2: Parent Hub Slot ID[7:0], Parent Port Num[15:8], TTT[17:16], Interrupter Target[31:22]
  *   dword3: USB Device Address[7:0], Slot State[31:27]
  *   dword4-7: Reserved
+ *
+ * The route string is the part that is easy to get wrong and impossible to
+ * notice: four bits per tier naming which hub port was taken, and a device
+ * whose route is zero is a device the controller believes is plugged into the
+ * root port directly. It will then address whatever actually is.
  */
-void xhci_init_slot_context(xhci_slot_context_t* slot_ctx, uint8_t port, uint32_t speed) {
-    if (!slot_ctx) return;
+void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
+                            const struct xhci_device_slot* slot) {
+    if (!slot_ctx || !slot) return;
     memset(slot_ctx, 0, sizeof(xhci_slot_context_t));
-    /* Context Entries = 1 (Slot + EP0 only initially), Speed, no hub/MTT */
-    slot_ctx->dwords[0] = (1 << 27) | (speed << 20);
-    /* Root Hub Port Number */
-    slot_ctx->dwords[1] = ((uint32_t)port << 16);
+
+    /* Context Entries starts at 1 (slot + EP0); whoever adds endpoints raises
+     * it to the highest Device Context Index in use. */
+    slot_ctx->dwords[0] = (1u << 27)
+                        | ((uint32_t)slot->speed << 20)
+                        | (slot->route_string & 0x000FFFFFu);
+
+    if (slot->hub_ports > 0) {
+        slot_ctx->dwords[0] |= (1u << 26);              /* this device is a hub */
+        if (slot->multi_tt) {
+            slot_ctx->dwords[0] |= (1u << 25);          /* one translator per port */
+        }
+    }
+
+    slot_ctx->dwords[1] = ((uint32_t)slot->port_num << 16)
+                        | ((uint32_t)slot->hub_ports << 24);
+
+    /* The translator, when one stands in the way: which hub is doing it and on
+     * which of its ports. Left zero for a device the controller can reach at
+     * its own speed. */
+    if (slot->tt_slot_id != 0) {
+        slot_ctx->dwords[2] = (uint32_t)slot->tt_slot_id
+                            | ((uint32_t)slot->tt_port << 8);
+    }
+    if (slot->hub_ports > 0) {
+        slot_ctx->dwords[2] |= ((uint32_t)(slot->tt_think_time & 0x3) << 16);
+    }
 }
 
 /*

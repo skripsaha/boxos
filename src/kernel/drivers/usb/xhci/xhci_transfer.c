@@ -6,6 +6,7 @@
 #include "xhci_trb.h"
 #include "xhci_hid.h"
 #include "xhci_endpoint.h"
+#include "xhci_hub.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
@@ -269,6 +270,35 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
     }
 
     if (!slot->endpoints || endpoint_id > XHCI_MAX_DCI) {
+        return;
+    }
+
+    /* A hub reporting that something below it changed. What changed can only
+     * be found out with control transfers, so this raises a flag and re-arms;
+     * the finding out happens somewhere that is allowed to wait. */
+    if (slot->driver == XHCI_DRIVER_HUB &&
+        endpoint_id == slot->ep_interrupt_in) {
+
+        /* Note it, and DO NOT re-arm here.
+         *
+         * A hub goes on reporting for as long as a port change is outstanding,
+         * and clearing that change takes control transfers, which cannot
+         * happen in this handler. Re-arming from here therefore asks the hub
+         * to tell us again immediately — and it does, without pause, forever.
+         * Measured: the core stopped reaching the idle loop altogether, which
+         * is precisely where the change would have been dealt with. An
+         * interrupt storm that starves the only context able to end it.
+         *
+         * The endpoint is re-armed by the service pass, once it has something
+         * new to say. */
+        xhci_endpoint_t* ep = &slot->endpoints[endpoint_id];
+        if (code == TRB_COMPLETION_STALL) {
+            xhci_ep_recover(ctrl, slot, endpoint_id);
+        }
+        ep->xfer_state = XHCI_XFER_IDLE;
+        if (ok) {
+            xhci_hub_note_change(slot);
+        }
         return;
     }
 

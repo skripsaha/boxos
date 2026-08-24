@@ -81,6 +81,31 @@ struct xhci_device_slot {
     uint8_t  interface_subclass;
     uint8_t  interface_protocol;
 
+    /* Where this device sits on the bus.
+     *
+     * port_num is the ROOT port the whole branch hangs off, and stays that for
+     * every device below it — it is what the controller is told, and what the
+     * port-change handler matches on. The rest describes the path down from
+     * there: the route string names the hub port at each tier, four bits per
+     * tier, and is how the controller finds a device that is not plugged into
+     * it directly.
+     *
+     * A low or full speed device behind a high speed hub also needs to name
+     * that hub, because the hub is doing the speed translation and the
+     * controller has to address the translator, not just the device. */
+    uint32_t route_string;
+    uint8_t  depth;             /* 0 = plugged into a root port */
+    uint8_t  parent_slot_id;    /* the hub above, 0 when there is none */
+    uint8_t  parent_port;       /* which of its ports, 1-based */
+    uint8_t  tt_slot_id;        /* the high-speed hub doing translation, 0 = none */
+    uint8_t  tt_port;
+
+    /* Non-zero when this device is itself a hub, and the controller has to be
+     * told so — it schedules differently for something with ports of its own. */
+    uint8_t  hub_ports;
+    uint8_t  tt_think_time;     /* as the hub characteristics state it, 0..3 */
+    bool     multi_tt;
+
     /* Which configuration was selected, and the interface this driver drives. */
     uint8_t  config_value;
     uint8_t  interface_num;
@@ -110,6 +135,16 @@ struct xhci_device_slot {
 
 void xhci_enumeration_init(void);
 int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port);
+
+/* Enumerate a device found on a port of a hub. The hub has already reset the
+ * port and knows what speed answered, so this starts where a root-port
+ * enumeration starts after its own reset: at Enable Slot. */
+int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
+                              xhci_device_slot_t* hub,
+                              uint8_t hub_port, uint8_t speed);
+
+/* The slot this device's hub occupies, or NULL. */
+xhci_device_slot_t* xhci_get_device_slot_by_id(uint8_t slot_id);
 void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t completion_code);
 
 /* The port finished the reset enumeration asked for. Called from the

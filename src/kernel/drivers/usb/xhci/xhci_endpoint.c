@@ -227,7 +227,7 @@ int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 
     xhci_slot_context_t* slot_ctx =
         (xhci_slot_context_t*)(base + ctrl->context_size);
-    xhci_init_slot_context(slot_ctx, slot->port_num, slot->speed);
+    xhci_fill_slot_context(slot_ctx, slot);
     slot_ctx->dwords[0] = (slot_ctx->dwords[0] & ~(0x1Fu << 27)) |
                           ((uint32_t)slot->max_dci << 27);
 

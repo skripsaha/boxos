@@ -6,6 +6,7 @@
 #include "xhci.h"
 #include "xhci_enumeration.h"
 #include "xhci_msd.h"
+#include "xhci_hub.h"
 
 /* A seat is one medium. The list is built at init and grows when media arrive;
  * nothing here is sized in advance, because the number of disks a machine has
@@ -112,6 +113,21 @@ static void seat_usb_take_attendance(void)
     xhci_controller_t* ctrl = xhci_get_controller();
     if (!ctrl) {
         return;
+    }
+
+    /* Hubs first, and until the bus stops changing: a disk plugged into a hub
+     * is not on any port this controller has, and asking the controller what
+     * is attached would find the hub and stop there. Each pass may enumerate
+     * devices that turn out to be hubs themselves, so this repeats until a
+     * pass finds nothing new — bounded, because a bus that keeps changing on
+     * every pass is a bus with something wrong with it. */
+    for (int pass = 0; pass < 8; pass++) {
+        if (xhci_enum_settle(ctrl, 3000) > 0) {
+            break;
+        }
+        if (xhci_hub_service(ctrl) == 0) {
+            break;
+        }
     }
 
     int unsettled = xhci_enum_settle(ctrl, 3000);

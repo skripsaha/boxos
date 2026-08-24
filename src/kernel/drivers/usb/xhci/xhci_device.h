@@ -42,7 +42,14 @@ _Static_assert(sizeof(xhci_endpoint_context_t) == 32, "Endpoint Context must be 
 _Static_assert(sizeof(xhci_input_control_context_t) == 32, "Input Control Context must be 32 bytes");
 _Static_assert(sizeof(xhci_device_context_t) == 1024, "Device Context must be 1024 bytes (32-byte mode)");
 
-void xhci_init_slot_context(xhci_slot_context_t* slot_ctx, uint8_t port, uint32_t speed);
+/* Fill a Slot Context from what is known about the device: where it sits on
+ * the bus, how fast it is, whether it is a hub, and which translator stands
+ * between it and the controller. Takes the slot rather than a port number
+ * because a device behind a hub is described by five of those things and not
+ * by one. */
+struct xhci_device_slot;
+void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
+                            const struct xhci_device_slot* slot);
 void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx, uint64_t ring_phys, uint16_t max_packet);
 
 #endif
