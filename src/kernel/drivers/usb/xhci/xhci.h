@@ -5,6 +5,7 @@
 #include "xhci_regs.h"
 #include "xhci_rings.h"
 #include "xhci_device.h"
+#include "klib.h"
 #include "pci.h"
 #include "boxos_limits.h"
 
@@ -28,6 +29,14 @@ typedef struct {
 
     xhci_ring_t command_ring;
     xhci_ring_t event_ring;
+
+    /* One drainer of the event ring at a time. The interrupt handler is no
+     * longer the only one: a transfer waiting for its completion drains the
+     * ring itself rather than trusting that an interrupt will arrive to do it,
+     * which is what lets bulk I/O work before interrupts are routed and on a
+     * controller that has none. Two drainers without this would advance the
+     * dequeue pointer past each other's events. */
+    spinlock_t event_lock;
     xhci_erst_t event_ring_segment_table;
 
     xhci_dcbaa_t* dcbaa;

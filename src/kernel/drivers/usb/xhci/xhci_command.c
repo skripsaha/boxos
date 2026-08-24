@@ -1,4 +1,5 @@
 #include "xhci_command.h"
+#include "xhci_interrupt.h"
 #include "xhci_enumeration.h"
 #include "xhci_regs.h"
 #include "xhci_rings.h"
@@ -224,6 +225,37 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) 
     pending_cmds[cmd_idx].state = CMD_STATE_IDLE;
     pending_cmds[cmd_idx].trb_phys = 0;
     spin_unlock(&pending_cmds_lock);
+}
+
+int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
+{
+    if (!ctrl) {
+        return -1;
+    }
+
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+
+    for (;;) {
+        xhci_process_events();
+
+        bool busy = false;
+        spin_lock(&pending_cmds_lock);
+        for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
+            if (pending_cmds[i].state == CMD_STATE_POSTED) {
+                busy = true;
+                break;
+            }
+        }
+        spin_unlock(&pending_cmds_lock);
+
+        if (!busy) {
+            return 0;
+        }
+        if ((int64_t)(rdtsc() - deadline) >= 0) {
+            return -1;
+        }
+        cpu_pause();
+    }
 }
 
 void xhci_check_command_timeouts(xhci_controller_t* ctrl) {

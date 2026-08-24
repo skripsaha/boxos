@@ -4,7 +4,6 @@
 #include "ktypes.h"
 #include "xhci.h"
 #include "usb_descriptors.h"
-#include "xhci_hid.h"
 
 /* Enumeration is a conversation, and every step of it waits on something the
  * hardware will say when it is ready — a command completion, a transfer
@@ -82,17 +81,32 @@ struct xhci_device_slot {
     uint8_t  interface_subclass;
     uint8_t  interface_protocol;
 
-    /* HID keyboard info (filled during enumeration) */
-    usb_keyboard_info_t keyboard_info;
-    bool is_keyboard;
+    /* Which configuration was selected, and the interface this driver drives. */
+    uint8_t  config_value;
+    uint8_t  interface_num;
 
-    /* Interrupt endpoint (for keyboard) */
-    xhci_ring_t* interrupt_ring;
-    uint64_t interrupt_ring_phys;
-    void* interrupt_data_buffer_virt;
-    uint64_t interrupt_data_buffer_phys;
-    uint8_t keyboard_endpoint_dci;
+    /* Every endpoint beyond EP0, indexed by Device Context Index. Allocated
+     * when the slot is enabled, because the number of them is a property of
+     * the device and not of this driver. EP0 is not in here — it belongs to
+     * enumeration itself and lives in ep0_ring above. */
+    struct xhci_endpoint* endpoints;
+    uint8_t  max_dci;               /* highest DCI this device uses */
+    uint32_t ep_pending_add;        /* DCI bitmap awaiting Configure Endpoint */
+
+    /* Who ended up driving this device, and the endpoints it uses. */
+    uint8_t  driver;                /* XHCI_DRIVER_* */
+    uint8_t  ep_interrupt_in;       /* DCI, 0 when none */
+    uint8_t  ep_bulk_in;
+    uint8_t  ep_bulk_out;
 };
+
+/* Who claimed a device. A device nobody claims is not a failure — it is
+ * enumerated, configured and left addressed, which is exactly the ground a
+ * class driver stands on when one arrives. */
+#define XHCI_DRIVER_NONE     0
+#define XHCI_DRIVER_KEYBOARD 1
+#define XHCI_DRIVER_STORAGE  2
+#define XHCI_DRIVER_HUB      3
 
 void xhci_enumeration_init(void);
 int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port);
@@ -110,6 +124,20 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port);
 /* Report and release any enumeration that stopped being answered. Driven from
  * the timer tick. */
 void xhci_enum_watchdog(xhci_controller_t* ctrl);
+
+/* Wait until nothing is mid-enumeration, draining events while waiting.
+ *
+ * Enumeration is driven by interrupts, so a device present at power-on is
+ * still being asked who it is while the rest of the kernel carries on booting.
+ * Anything that needs to know what is attached — a filesystem looking for its
+ * volume, say — has to wait for the conversation to finish rather than ask
+ * before it has. Returns the number of slots still unsettled, so zero means
+ * everything that was going to arrive has. */
+int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms);
+
+/* Walk every device that has finished enumerating. */
+typedef void (*xhci_slot_visitor)(void* ctx, xhci_device_slot_t* slot);
+void xhci_enum_for_each_configured(xhci_slot_visitor visit, void* ctx);
 
 /* True when a STALL at this point in enumeration is the device declining an
  * optional request rather than the conversation failing. */
