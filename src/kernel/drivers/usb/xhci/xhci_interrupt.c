@@ -230,6 +230,23 @@ void xhci_process_events(void) {
         return;
     }
 
+    /* One drainer at a time. This used to be reached only from the interrupt
+     * handler, where that was true by construction; it is now also reached by
+     * whoever is waiting on a transfer, and two drainers advancing the same
+     * dequeue pointer would each consume events the other was looking for.
+     *
+     * The lock disables interrupts while held, so the handler cannot preempt a
+     * drain on this core, and on another core it waits out a drain measured in
+     * microseconds. */
+    if (!spin_trylock(&ctrl->event_lock)) {
+        /* Somebody is already draining. Theirs will reach every event on the
+         * ring including the one this caller is waiting for, so there is
+         * nothing to add by queueing behind them — and a great deal to lose:
+         * a drain reached from inside another drain, on the same core, would
+         * be waiting for a lock its own caller holds. */
+        return;
+    }
+
     xhci_ring_t* event_ring = &ctrl->event_ring;
     xhci_interrupter_regs_t* intr0 = &ctrl->runtime_regs->interrupters[0];
 
@@ -276,6 +293,8 @@ void xhci_process_events(void) {
                         (event_ring->dequeue_idx * sizeof(xhci_trb_t));
     new_erdp |= XHCI_ERDP_EHB;
     intr0->erdp = new_erdp;
+
+    spin_unlock(&ctrl->event_lock);
 }
 
 void xhci_poll_events(void) {

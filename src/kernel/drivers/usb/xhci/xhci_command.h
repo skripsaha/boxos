@@ -46,6 +46,11 @@ int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint8
 int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
                                  uint8_t dci, uint64_t dequeue_ptr_with_dcs);
 
+/* Wait until no command is outstanding, draining the event ring while doing
+ * so. A class driver that has just asked the controller to unhalt one of its
+ * endpoints has to know that happened before it uses the endpoint again. */
+int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms);
+
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event);
 void xhci_check_command_timeouts(xhci_controller_t* ctrl);
 

@@ -5,6 +5,7 @@
 #include "xhci_device.h"
 #include "xhci_trb.h"
 #include "xhci_hid.h"
+#include "xhci_endpoint.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
@@ -60,7 +61,58 @@ int xhci_alloc_ep0_ring(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
     slot->descriptor_buffer_virt = vmm_phys_to_virt((uintptr_t)desc_phys);
     slot->descriptor_buffer_phys = (uint64_t)desc_phys;
 
+    /* EP0 is entered in the endpoint table as well, sharing the ring rather
+     * than owning it — the table's teardown starts at DCI 2 and will not
+     * double free it. It is there so that a driver can wait on a control
+     * transfer the same way it waits on a bulk one: enumeration is not the
+     * only thing that ever needs to ask a device a question. */
+    if (slot->endpoints) {
+        slot->endpoints[1].ring       = ring;
+        slot->endpoints[1].type       = XHCI_EP_TYPE_CONTROL;
+        slot->endpoints[1].max_packet = slot->ep0_max_packet;
+        slot->endpoints[1].active     = true;
+        slot->endpoints[1].xfer_state = XHCI_XFER_IDLE;
+    }
+
     return 0;
+}
+
+/*
+ * A control transfer with somebody waiting for the answer.
+ *
+ * Enumeration never needs this: each of its steps is driven by the completion
+ * of the last, and the state machine is the thing that carries it forward. A
+ * class driver is in the opposite position — it is running as ordinary kernel
+ * code with a question to ask and nothing to do until the device answers.
+ *
+ * The two are told apart at the event, by whether anything is waiting on EP0.
+ */
+int xhci_control_transfer_sync(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                               usb_setup_packet_t* setup, uint64_t data_phys,
+                               uint16_t data_len, bool data_in,
+                               uint32_t timeout_ms)
+{
+    if (!ctrl || !slot || !slot->endpoints) {
+        return -1;
+    }
+
+    xhci_endpoint_t* ep0 = &slot->endpoints[1];
+    if (ep0->xfer_state == XHCI_XFER_IN_FLIGHT) {
+        return -2;
+    }
+
+    /* Zero means "the next completion on this endpoint is mine". A control
+     * transfer raises exactly one, from its Status Stage. */
+    ep0->xfer_trb_phys = 0;
+    ep0->xfer_state    = XHCI_XFER_IN_FLIGHT;
+
+    if (xhci_control_transfer(ctrl, slot, setup, data_phys, data_len, data_in) < 0) {
+        ep0->xfer_state = XHCI_XFER_IDLE;
+        return -1;
+    }
+
+    uint32_t residual = 0;
+    return xhci_ep_wait(ctrl, slot, 1, timeout_ms, &residual);
 }
 
 void xhci_free_ep0_ring(xhci_device_slot_t* slot) {
@@ -165,91 +217,40 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
     return 0;
 }
 
-int xhci_queue_interrupt_transfer(xhci_device_slot_t* slot) {
-    if (!slot || !slot->interrupt_ring) {
-        return -1;
-    }
-
-    xhci_trb_t trb = {0};
-    trb.parameter = slot->interrupt_data_buffer_phys;
-    trb.status = slot->keyboard_info.max_packet_size;
-    /* Interrupt On Short Packet as well as On Completion: a keyboard report
-     * shorter than the endpoint's maximum is ordinary, and without ISP such a
-     * transfer would complete with nothing to say it had. */
-    trb.control = TRB_SET_TYPE(TRB_TYPE_NORMAL) | TRB_IOC | TRB_ISP;
-
-    uint64_t trb_phys = xhci_ring_enqueue(slot->interrupt_ring, &trb);
-    if (trb_phys == 0) {
-        return -1;
-    }
-
-    return 0;
-}
-
-/*
- * A stalled endpoint stays stalled.
- *
- * Once the controller halts an endpoint, nothing queued on it runs again until
- * a Reset Endpoint command clears the halt and a Set TR Dequeue Pointer tells
- * the controller where to resume. Without that, a keyboard that stalls once —
- * one glitch, one marginal cable — is a keyboard that never types again for
- * the rest of the boot, and nothing anywhere says why.
- */
-static void xhci_recover_stalled_endpoint(xhci_controller_t* ctrl,
-                                          xhci_device_slot_t* slot,
-                                          uint8_t dci)
-{
-    kprintf("[xHCI] slot %u endpoint %u stalled — resetting it\n",
-            slot->slot_id, dci);
-
-    if (xhci_post_reset_endpoint_cmd(ctrl, slot->slot_id, dci) < 0) {
-        return;
-    }
-
-    /* Resume where the ring now stands. The reset leaves the endpoint's
-     * dequeue pointer on the TRB that stalled; the ring's own enqueue position
-     * is where the next transfer will be written. */
-    xhci_ring_t* ring = (dci == 1) ? slot->ep0_ring : slot->interrupt_ring;
-    if (!ring) {
-        return;
-    }
-
-    uint64_t resume = ring->trbs_phys +
-                      (uint64_t)ring->enqueue_idx * sizeof(xhci_trb_t);
-    xhci_post_set_tr_dequeue_cmd(ctrl, slot->slot_id, dci,
-                                 resume | (ring->cycle_state ? 1u : 0u));
-}
-
 void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
     if (!ctrl || !event) {
         return;
     }
 
-    uint8_t slot_id = (event->control >> 24) & 0xFF;
-    uint8_t endpoint_id = (event->control >> 16) & 0x1F;
-    uint8_t completion_code = (event->status >> 24) & 0xFF;
+    uint8_t  slot_id     = (event->control >> 24) & 0xFF;
+    uint8_t  endpoint_id = (event->control >> 16) & 0x1F;
+    uint8_t  code        = (event->status >> 24) & 0xFF;
+    /* The length field of a transfer event is what was NOT transferred. */
+    uint32_t residual    = event->status & 0x00FFFFFFu;
+    uint64_t trb_phys    = event->parameter;
 
     xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
     if (!slot) {
         return;
     }
 
-    bool ok = (completion_code == TRB_COMPLETION_SUCCESS ||
-               completion_code == TRB_COMPLETION_SHORT_PKT);
+    bool ok = (code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PKT);
 
     /* EP0 is always DCI 1. Test it first, so that a device whose interrupt
      * endpoint somehow reported the same number cannot divert control
-     * transfers into the keyboard path. */
+     * transfers into another path. */
     if (endpoint_id == 1) {
+        /* Somebody asked this question themselves and is waiting for it. */
+        if (slot->endpoints &&
+            slot->endpoints[1].xfer_state == XHCI_XFER_IN_FLIGHT) {
+            xhci_ep_complete(slot, 1, code, residual, 0);
+            return;
+        }
+
         if (!ok) {
             /* A stall on an optional class request is the device declining it,
-             * not the device failing. Clear the pipe and carry on from there.
-             *
-             * Tearing the slot down here — which is what happened before —
-             * also had a second fault: the recovery commands it issued
-             * referenced a transfer ring the very next statement freed, so the
-             * controller was left pointed at memory the kernel had given back. */
-            if (completion_code == TRB_COMPLETION_STALL &&
+             * not the device failing. Clear the pipe and carry on from there. */
+            if (code == TRB_COMPLETION_STALL &&
                 xhci_enum_stall_is_tolerable(slot->state)) {
                 xhci_enum_recover_ep0(ctrl, slot);
                 return;
@@ -257,43 +258,48 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
 
             kprintf("[xHCI] slot %u: control transfer failed with completion "
                     "code %u at enumeration step %u\n",
-                    slot_id, completion_code, slot->state);
+                    slot_id, code, slot->state);
             xhci_device_slot_cleanup(ctrl, slot);
             return;
         }
 
-        /* Every step of enumeration lives in one place. This used to decode
-         * descriptors here as well, which meant two code paths took turns
-         * driving the same state machine. */
+        /* Every step of enumeration lives in one place. */
         xhci_enum_advance_state(ctrl, slot_id, TRB_COMPLETION_SUCCESS);
         return;
     }
 
-    if (slot->interrupt_ring && endpoint_id == slot->keyboard_endpoint_dci) {
+    if (!slot->endpoints || endpoint_id > XHCI_MAX_DCI) {
+        return;
+    }
+
+    /* The keyboard is the one endpoint nobody waits on: its reports arrive
+     * unasked and the only right response is to take the report and hold the
+     * endpoint open again. Everything else has a caller waiting, and the
+     * completion is recorded for it. */
+    if (slot->driver == XHCI_DRIVER_KEYBOARD &&
+        endpoint_id == slot->ep_interrupt_in) {
+
+        xhci_endpoint_t* ep = &slot->endpoints[endpoint_id];
+
         if (ok) {
-            usb_boot_keyboard_report_t* report =
-                (usb_boot_keyboard_report_t*)slot->interrupt_data_buffer_virt;
-            xhci_process_keyboard_report(report);
-        } else if (completion_code == TRB_COMPLETION_STALL) {
-            xhci_recover_stalled_endpoint(ctrl, slot, endpoint_id);
+            xhci_process_keyboard_report(
+                (usb_boot_keyboard_report_t*)ep->buffer_virt);
+        } else if (code == TRB_COMPLETION_STALL) {
+            xhci_ep_recover(ctrl, slot, endpoint_id);
         } else {
             /* Transaction errors are what a marginal cable looks like, and the
              * controller has already retried them CErr times. Re-arming is the
              * right answer; going quiet is not. */
-            debug_printf("[xHCI] slot %u keyboard transfer completion %u\n",
-                         slot_id, completion_code);
+            debug_printf("[xHCI] slot %u keyboard completion %u\n", slot_id, code);
         }
 
-        /* Re-arm regardless, and after the recovery above rather than before
-         * it: a Set TR Dequeue Pointer names where the controller will resume,
-         * and the transfer queued here lands on exactly that TRB. Swapping the
-         * two would point the endpoint past the very transfer meant to restart
-         * it. An interrupt endpoint that is not re-armed after every report
-         * simply stops delivering. */
-        if (xhci_queue_interrupt_transfer(slot) == 0) {
-            __sync_synchronize();
-            ctrl->doorbells->doorbells[slot->slot_id].doorbell = endpoint_id;
-        }
+        /* Re-arm after any recovery above, never before it: a Set TR Dequeue
+         * names where the controller resumes, and the transfer queued here
+         * lands on exactly that TRB. */
+        ep->xfer_state = XHCI_XFER_IDLE;
+        xhci_ep_submit(ctrl, slot, endpoint_id, ep->buffer_phys, ep->max_packet);
         return;
     }
+
+    xhci_ep_complete(slot, endpoint_id, code, residual, trb_phys);
 }

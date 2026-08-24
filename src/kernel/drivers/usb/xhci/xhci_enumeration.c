@@ -4,6 +4,8 @@
 #include "xhci_port.h"
 #include "xhci_transfer.h"
 #include "xhci_hid.h"
+#include "xhci_endpoint.h"
+#include "xhci_msd.h"
 #include "xhci_interrupt.h"
 #include "usb_common.h"
 #include "klib.h"
@@ -18,19 +20,6 @@ static spinlock_t device_slots_lock;
 void xhci_enumeration_init(void) {
     spinlock_init(&device_slots_lock);
     memset(device_slots, 0, sizeof(device_slots));
-}
-
-/*
- * An Input Context is one Input Control Context, one Slot Context and 31
- * Endpoint Contexts — 33 of them, each context_size bytes. That is 1056 bytes
- * in 32-byte mode and 2112 in 64-byte mode, so one page covers both. The old
- * code asked for two pages and three, which was harmless only because the
- * matching frees asked for the same wrong number; deriving it here means the
- * allocation and the free can no longer disagree.
- */
-static uint32_t input_ctx_pages(xhci_controller_t* ctrl) {
-    size_t bytes = (size_t)ctrl->context_size * 33u;
-    return (uint32_t)vmm_size_to_pages(bytes);
 }
 
 static struct xhci_device_slot* find_free_slot(void) {
@@ -175,14 +164,16 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     slot->interface_protocol = 0;
     slot->descriptor_buffer_virt = NULL;
     slot->descriptor_buffer_phys = 0;
-    slot->interrupt_ring = NULL;
-    slot->interrupt_ring_phys = 0;
-    slot->interrupt_data_buffer_virt = NULL;
-    slot->interrupt_data_buffer_phys = 0;
-    slot->keyboard_endpoint_dci = 0;
-    slot->is_keyboard = false;
+    slot->endpoints = NULL;
+    slot->max_dci = 0;
+    slot->ep_pending_add = 0;
+    slot->driver = XHCI_DRIVER_NONE;
+    slot->ep_interrupt_in = 0;
+    slot->ep_bulk_in = 0;
+    slot->ep_bulk_out = 0;
+    slot->config_value = 0;
+    slot->interface_num = 0;
     memset(&slot->device_desc, 0, sizeof(slot->device_desc));
-    memset(&slot->keyboard_info, 0, sizeof(slot->keyboard_info));
     slot->timestamp_started = rdtsc();
 
     debug_printf("[xHCI ENUM] Starting enumeration for port %u\n", port);
@@ -264,23 +255,14 @@ void xhci_device_slot_cleanup(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         xhci_free_ep0_ring(slot);
     }
 
-    if (slot->interrupt_ring) {
-        xhci_ring_destroy(slot->interrupt_ring);
-        if (slot->interrupt_ring_phys) {
-            pmm_free((void*)slot->interrupt_ring_phys, 1);
-        }
-        slot->interrupt_ring = NULL;
-        slot->interrupt_ring_phys = 0;
-
-        if (slot->interrupt_data_buffer_phys) {
-            pmm_free((void*)slot->interrupt_data_buffer_phys, 1);
-        }
-        slot->interrupt_data_buffer_virt = NULL;
-        slot->interrupt_data_buffer_phys = 0;
+    if (slot->driver == XHCI_DRIVER_STORAGE) {
+        xhci_msd_release(slot);
     }
 
+    xhci_ep_table_free(slot);
+
     if (slot->input_ctx_phys && ctrl) {
-        pmm_free((void*)slot->input_ctx_phys, input_ctx_pages(ctrl));
+        pmm_free((void*)slot->input_ctx_phys, xhci_input_ctx_pages(ctrl));
         slot->input_ctx_phys = 0;
     }
 
@@ -298,14 +280,14 @@ void xhci_device_slot_cleanup(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     slot->port_num = 0;
     slot->state = ENUM_STATE_IDLE;
     slot->timestamp_started = 0;
-    slot->is_keyboard = false;
+    slot->driver = XHCI_DRIVER_NONE;
 }
 
 /* Build an Input Context describing the slot and EP0, and ask the controller
  * to address the device with it. */
 static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
 {
-    uint32_t pages = input_ctx_pages(ctrl);
+    uint32_t pages = xhci_input_ctx_pages(ctrl);
     void* input_ctx_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
     if (!input_ctx_phys) {
         kprintf("[xHCI] out of memory addressing the device on port %u\n",
@@ -363,7 +345,7 @@ static int enum_get_descriptor(xhci_controller_t* ctrl, struct xhci_device_slot*
 static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* slot,
                               uint16_t max_packet)
 {
-    uint32_t pages = input_ctx_pages(ctrl);
+    uint32_t pages = xhci_input_ctx_pages(ctrl);
     void* input_ctx_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
     if (!input_ctx_phys) {
         kprintf("[xHCI] out of memory correcting EP0 on port %u\n", slot->port_num);
@@ -394,7 +376,7 @@ static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* 
 static void enum_free_input_ctx(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
 {
     if (slot->input_ctx_phys) {
-        pmm_free((void*)slot->input_ctx_phys, input_ctx_pages(ctrl));
+        pmm_free((void*)slot->input_ctx_phys, xhci_input_ctx_pages(ctrl));
         slot->input_ctx_phys = 0;
     }
 }
@@ -495,6 +477,231 @@ static const char* enum_state_name(uint8_t state) {
  * printed fact naming the exact step, and the port is handed back for whatever
  * is plugged in next.
  */
+/*
+ * What the device offers, gathered while walking one interface.
+ *
+ * The walk reports endpoints one at a time rather than filling an array, so
+ * this keeps only the ones any driver here knows what to do with. An interface
+ * that offers six endpoints is not a problem to be capped; it is five endpoints
+ * nobody asked about.
+ */
+typedef struct {
+    uint8_t  intr_in_dci,  intr_addr,  intr_interval;
+    uint16_t intr_mps;
+    uint8_t  bulk_in_dci,  bulk_in_addr;
+    uint16_t bulk_in_mps;
+    uint8_t  bulk_out_dci, bulk_out_addr;
+    uint16_t bulk_out_mps;
+} enum_pick_t;
+
+static bool enum_pick_visit(void* ctx, const usb_endpoint_info_t* ep)
+{
+    enum_pick_t* p = (enum_pick_t*)ctx;
+    bool in = (ep->addr & 0x80) != 0;
+
+    switch (ep->attributes & 0x03) {
+        case USB_EP_XFER_INTERRUPT:
+            if (in && !p->intr_in_dci) {
+                p->intr_in_dci   = xhci_dci_of(ep->addr);
+                p->intr_addr     = ep->addr;
+                p->intr_mps      = ep->max_packet;
+                p->intr_interval = ep->interval;
+            }
+            break;
+        case USB_EP_XFER_BULK:
+            if (in && !p->bulk_in_dci) {
+                p->bulk_in_dci  = xhci_dci_of(ep->addr);
+                p->bulk_in_addr = ep->addr;
+                p->bulk_in_mps  = ep->max_packet;
+            } else if (!in && !p->bulk_out_dci) {
+                p->bulk_out_dci  = xhci_dci_of(ep->addr);
+                p->bulk_out_addr = ep->addr;
+                p->bulk_out_mps  = ep->max_packet;
+            }
+            break;
+        default:
+            break;
+    }
+    return true;
+}
+
+/*
+ * Who drives this device?
+ *
+ * The device has just accepted its configuration, and the descriptor that
+ * described it is still in the scratch page. This is the one place where a
+ * device is matched against the drivers this kernel has — and where a device
+ * matching none of them is settled rather than discarded.
+ *
+ * It is deliberately not a table of drivers scanning for devices. Each branch
+ * asks the descriptor a question it already knows the answer to, prepares the
+ * endpoints it needs, and hands the slot back to the state machine.
+ */
+static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    void*    cfg = slot->descriptor_buffer_virt;
+    uint16_t len = slot->config_total_len;
+    uint8_t  iface = 0;
+    enum_pick_t pick;
+
+    /* A boot-protocol keyboard, which is the one HID shape a kernel can read
+     * without parsing a report descriptor. */
+    memset(&pick, 0, sizeof(pick));
+    if (usb_walk_interface(cfg, len, USB_HID_CLASS, USB_HID_SUBCLASS_BOOT,
+                           USB_HID_PROTOCOL_KEYBOARD, &iface,
+                           enum_pick_visit, &pick) && pick.intr_in_dci) {
+
+        slot->driver          = XHCI_DRIVER_KEYBOARD;
+        slot->interface_num   = iface;
+        slot->ep_interrupt_in = pick.intr_in_dci;
+
+        if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
+                            pick.intr_addr, pick.intr_mps, pick.intr_interval,
+                            pick.intr_mps) != 0) {
+            kprintf("[xHCI] port %u: no memory for the keyboard endpoint\n",
+                    slot->port_num);
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x21,
+            .bRequest = HID_REQ_SET_PROTOCOL,
+            .wValue = 0,                /* 0 = boot protocol */
+            .wIndex = iface,
+            .wLength = 0
+        };
+        if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+        slot->state = ENUM_STATE_WAIT_SET_PROTOCOL;
+        return;
+    }
+
+    /* Mass storage over Bulk-Only Transport. The subclass is not part of the
+     * match: 0x06 (SCSI transparent) is what everything modern reports, and
+     * the older ones answer the same READ(10) and WRITE(10) anyway. What
+     * matters is the transport, because that is what decides the shape of
+     * every exchange after this point. */
+    memset(&pick, 0, sizeof(pick));
+    if (usb_walk_interface(cfg, len, USB_CLASS_MASS_STORAGE, USB_CLASS_ANY,
+                           USB_MSD_PROTOCOL_BOT, &iface,
+                           enum_pick_visit, &pick) &&
+        pick.bulk_in_dci && pick.bulk_out_dci) {
+
+        slot->driver        = XHCI_DRIVER_STORAGE;
+        slot->interface_num = iface;
+        slot->ep_bulk_in    = pick.bulk_in_dci;
+        slot->ep_bulk_out   = pick.bulk_out_dci;
+
+        if (xhci_ep_prepare(slot, pick.bulk_in_dci, XHCI_EP_TYPE_BULK_IN,
+                            pick.bulk_in_addr, pick.bulk_in_mps, 0, 0) != 0 ||
+            xhci_ep_prepare(slot, pick.bulk_out_dci, XHCI_EP_TYPE_BULK_OUT,
+                            pick.bulk_out_addr, pick.bulk_out_mps, 0, 0) != 0) {
+            kprintf("[xHCI] port %u: no memory for the storage endpoints\n",
+                    slot->port_num);
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+
+        if (xhci_ep_configure(ctrl, slot) != 0) {
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
+        return;
+    }
+
+    enum_settle_unclaimed(slot);
+}
+
+/* The device is configured and the controller knows its endpoints. Whoever
+ * claimed it takes it from here. */
+static void enum_driver_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    switch (slot->driver) {
+
+    case XHCI_DRIVER_KEYBOARD: {
+        xhci_endpoint_t* ep = &slot->endpoints[slot->ep_interrupt_in];
+        if (xhci_ep_submit(ctrl, slot, slot->ep_interrupt_in,
+                           ep->buffer_phys, ep->max_packet) != 0) {
+            kprintf("[xHCI] port %u: keyboard endpoint could not be primed\n",
+                    slot->port_num);
+            xhci_device_slot_cleanup(ctrl, slot);
+            return;
+        }
+        kprintf("[xHCI] port %u: %s-speed keyboard %04x:%04x is live "
+                "(slot %u, endpoint %u)\n",
+                slot->port_num, speed_name(slot->speed),
+                slot->device_desc.idVendor, slot->device_desc.idProduct,
+                slot->slot_id, slot->ep_interrupt_in);
+        break;
+    }
+
+    case XHCI_DRIVER_STORAGE:
+        /* Deliberately no SCSI here. Everything in this function runs inside
+         * the event handler, and asking a disk how big it is means bulk
+         * transfers, and waiting for a bulk transfer means draining the event
+         * ring — from inside the drain that called us. The conversation with
+         * the disk happens in ordinary kernel context, where somebody wants to
+         * read from it; this only records that there is a disk to have it
+         * with. */
+        kprintf("[xHCI] port %u: %s-speed mass storage %04x:%04x on slot %u "
+                "(bulk in %u, out %u)\n",
+                slot->port_num, speed_name(slot->speed),
+                slot->device_desc.idVendor, slot->device_desc.idProduct,
+                slot->slot_id, slot->ep_bulk_in, slot->ep_bulk_out);
+        break;
+
+    default:
+        break;
+    }
+
+    xhci_touch_device_arrived(slot);
+}
+
+int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
+{
+    if (!ctrl || !ctrl->initialized) {
+        return 0;
+    }
+
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+
+    for (;;) {
+        xhci_process_events();
+
+        int busy = 0;
+        for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+            uint8_t state = device_slots[i].state;
+            if (state != ENUM_STATE_IDLE && state != ENUM_STATE_CONFIGURED) {
+                busy++;
+            }
+        }
+
+        if (busy == 0) {
+            return 0;
+        }
+        if ((int64_t)(rdtsc() - deadline) >= 0) {
+            return busy;
+        }
+        cpu_pause();
+    }
+}
+
+void xhci_enum_for_each_configured(xhci_slot_visitor visit, void* ctx)
+{
+    if (!visit) {
+        return;
+    }
+    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+        if (device_slots[i].state == ENUM_STATE_CONFIGURED) {
+            visit(ctx, &device_slots[i]);
+        }
+    }
+}
+
 void xhci_enum_watchdog(xhci_controller_t* ctrl)
 {
     if (!ctrl || !ctrl->initialized) {
@@ -593,6 +800,15 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             debug_printf("[xHCI ENUM] Slot enabled: slot_id=%u port=%u speed=%u\n",
                          slot_id, slot->port_num, slot->speed);
+
+            /* The endpoint table is a property of the device, so it comes
+             * into being with the device's slot and dies with it. */
+            if (xhci_ep_table_alloc(slot) != 0) {
+                kprintf("[xHCI] port %u: no memory for the endpoint table\n",
+                        slot->port_num);
+                xhci_device_slot_cleanup(ctrl, slot);
+                return;
+            }
 
             /* Allocate EP0 ring now — needed before Address Device. */
             if (xhci_alloc_ep0_ring(ctrl, slot) < 0) {
@@ -748,33 +964,25 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
         case ENUM_STATE_WAIT_GET_CONFIG_DESC: {
             usb_config_desc_t* cfg = (usb_config_desc_t*)slot->descriptor_buffer_virt;
-            slot->keyboard_info.config_value = cfg->bConfigurationValue;
+            slot->config_value = cfg->bConfigurationValue;
 
-            xhci_usb_interface_summary(slot->descriptor_buffer_virt,
+            usb_config_first_interface(slot->descriptor_buffer_virt,
                                        slot->config_total_len,
                                        &slot->interface_class,
                                        &slot->interface_subclass,
                                        &slot->interface_protocol);
 
-            int parse_result = xhci_parse_config_descriptor(
-                slot->descriptor_buffer_virt, slot->config_total_len,
-                &slot->keyboard_info);
-
-            slot->is_keyboard = (parse_result == 0);
-            if (slot->is_keyboard) {
-                slot->keyboard_endpoint_dci = slot->keyboard_info.endpoint_dci;
-                debug_printf("[xHCI ENUM] Keyboard: iface=%u ep=0x%02x dci=%u\n",
-                             slot->keyboard_info.interface_num,
-                             slot->keyboard_info.endpoint_addr,
-                             slot->keyboard_info.endpoint_dci);
-            }
-
             /* Every device gets configured, driver or no driver. Leaving one
-             * in the Addressed state is leaving it half spoken to. */
+             * in the Addressed state is leaving it half spoken to.
+             *
+             * The device is told which configuration to adopt before the
+             * controller is told which endpoints to expect, and that order is
+             * deliberate: the endpoints do not exist until the device has
+             * selected the configuration that describes them. */
             usb_setup_packet_t setup = {
                 .bmRequestType = 0x00,
                 .bRequest = USB_REQ_SET_CONFIGURATION,
-                .wValue = slot->keyboard_info.config_value,
+                .wValue = slot->config_value,
                 .wIndex = 0,
                 .wLength = 0
             };
@@ -790,26 +998,11 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
 
         case ENUM_STATE_WAIT_SET_CONFIGURATION: {
-            if (!slot->is_keyboard) {
-                enum_settle_unclaimed(slot);
-                return;
-            }
-
-            usb_setup_packet_t setup = {
-                .bmRequestType = 0x21,
-                .bRequest = HID_REQ_SET_PROTOCOL,
-                .wValue = 0,
-                .wIndex = slot->keyboard_info.interface_num,
-                .wLength = 0
-            };
-
-            if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
-                debug_printf("[xHCI ENUM] Failed to post Set Protocol\n");
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-
-            slot->state = ENUM_STATE_WAIT_SET_PROTOCOL;
+            /* The configuration descriptor is still in the scratch page — Set
+             * Configuration carries no data — so this is where the device is
+             * matched against the drivers this kernel has, and the endpoints
+             * it will actually use are prepared. */
+            enum_bind_driver(ctrl, slot);
             break;
         }
 
@@ -818,7 +1011,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 .bmRequestType = 0x21,
                 .bRequest = HID_REQ_SET_IDLE,
                 .wValue = 0,
-                .wIndex = slot->keyboard_info.interface_num,
+                .wIndex = slot->interface_num,
                 .wLength = 0
             };
 
@@ -857,151 +1050,21 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
 
         case ENUM_STATE_WAIT_SET_IDLE: {
-            /* Allocate interrupt ring — xHCI controller DMA target. */
-            void* ring_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
-            if (!ring_phys) {
+            if (xhci_ep_configure(ctrl, slot) != 0) {
+                kprintf("[xHCI] port %u: could not configure the keyboard "
+                        "endpoint\n", slot->port_num);
                 xhci_device_slot_cleanup(ctrl, slot);
                 return;
             }
-
-            xhci_ring_t* ring = (xhci_ring_t*)vmm_phys_to_virt((uintptr_t)ring_phys);
-            if (!ring) {
-                pmm_free(ring_phys, 1);
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-
-            if (xhci_ring_init(ring, 32, true) != 0) {
-                pmm_free(ring_phys, 1);
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-
-            slot->interrupt_ring = ring;
-            slot->interrupt_ring_phys = (uint64_t)ring_phys;
-
-            /* Allocate interrupt data buffer — DMA target. */
-            void* data_phys = pmm_alloc_zero(1, PHYS_TAG_DMA32);
-            if (!data_phys) {
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-            slot->interrupt_data_buffer_virt = vmm_phys_to_virt((uintptr_t)data_phys);
-            slot->interrupt_data_buffer_phys = (uint64_t)data_phys;
-
-            /* Allocate Input Context for Configure Endpoint. */
-            void* input_ctx_phys = pmm_alloc_zero(input_ctx_pages(ctrl), PHYS_TAG_DMA32);
-            if (!input_ctx_phys) {
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-            slot->input_ctx_phys = (uint64_t)input_ctx_phys;
-
-            uint8_t* input_base = (uint8_t*)vmm_phys_to_virt((uintptr_t)input_ctx_phys);
-            uint8_t dci = slot->keyboard_endpoint_dci;
-
-            /* Input Control Context: add Slot (A0) + EPn (A_dci). */
-            xhci_input_control_context_t* icc = (xhci_input_control_context_t*)input_base;
-            icc->add_context_flags = (1 << 0) | (1 << dci);
-
-            /* Slot Context: update Context Entries to cover the new endpoint. */
-            xhci_slot_context_t* slot_ctx =
-                (xhci_slot_context_t*)(input_base + ctrl->context_size);
-            xhci_init_slot_context(slot_ctx, slot->port_num, slot->speed);
-            slot_ctx->dwords[0] = (slot_ctx->dwords[0] & ~(0x1Fu << 27))
-                                | ((uint32_t)dci << 27);
-
-            /* Interrupt endpoint service interval.
-             *
-             * The units differ by speed and the encodings do not line up. A
-             * low or full speed endpoint states bInterval directly in frames
-             * (1 ms each), and the xHCI Interval field is a power-of-two count
-             * of 125 us microframes, so the conversion is a base-2 logarithm
-             * plus three — not an addition. High and super speed endpoints
-             * already state an exponent, and there the conversion is a
-             * subtraction. Getting this wrong does not fail loudly: the
-             * endpoint is simply serviced at the wrong rate, and a keyboard
-             * polled every two seconds looks like a keyboard that drops
-             * keystrokes. */
-            uint8_t xhci_interval;
-            if (slot->speed == XHCI_PORT_SPEED_FULL ||
-                slot->speed == XHCI_PORT_SPEED_LOW) {
-                uint8_t frames = slot->keyboard_info.interval;
-                if (frames == 0) {
-                    frames = 1;
-                }
-                uint8_t log2 = 0;
-                while ((1u << (log2 + 1)) <= frames && log2 < 10) {
-                    log2++;
-                }
-                xhci_interval = (uint8_t)(log2 + 3);
-            } else {
-                uint8_t exponent = slot->keyboard_info.interval;
-                if (exponent == 0) {
-                    exponent = 1;
-                }
-                if (exponent > 16) {
-                    exponent = 16;
-                }
-                xhci_interval = (uint8_t)(exponent - 1);
-            }
-
-            /* Interrupt endpoint context at offset context_size * (dci + 1). */
-            xhci_endpoint_context_t* ep_ctx =
-                (xhci_endpoint_context_t*)(input_base + ctrl->context_size * (dci + 1));
-            memset(ep_ctx, 0, sizeof(xhci_endpoint_context_t));
-
-            /* dword0: Interval field [23:16]. */
-            ep_ctx->dwords[0] = (uint32_t)xhci_interval << 16;
-
-            /* dword1: CErr=3 [2:1], EP Type=7 (Interrupt IN) [5:3], Max Packet Size [31:16]. */
-            ep_ctx->dwords[1] = (3 << 1) | (XHCI_EP_TYPE_INTERRUPT_IN << 3) |
-                                 ((uint32_t)slot->keyboard_info.max_packet_size << 16);
-
-            /* dword2-3: TR Dequeue Pointer | DCS=1. */
-            uint64_t ring_addr = slot->interrupt_ring->trbs_phys;
-            ep_ctx->dwords[2] = (uint32_t)(ring_addr & 0xFFFFFFF0) | 1;
-            ep_ctx->dwords[3] = (uint32_t)(ring_addr >> 32);
-
-            /* dword4: Average TRB Length, and Max ESIT Payload in the high half
-             * — a periodic endpoint that does not state its payload is one the
-             * controller cannot reserve bandwidth for. */
-            ep_ctx->dwords[4] = (uint32_t)slot->keyboard_info.max_packet_size |
-                                ((uint32_t)slot->keyboard_info.max_packet_size << 16);
-
             slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
-
-            if (xhci_post_configure_endpoint_cmd(ctrl, slot->slot_id,
-                                                 (uint64_t)input_ctx_phys) < 0) {
-                debug_printf("[xHCI ENUM] Failed to post Configure Endpoint\n");
-                xhci_device_slot_cleanup(ctrl, slot);
-            }
             break;
         }
 
         case ENUM_STATE_WAIT_CONFIGURE_ENDPOINT: {
             enum_free_input_ctx(ctrl, slot);
-
-            if (xhci_queue_interrupt_transfer(slot) < 0) {
-                kprintf("[xHCI] port %u: keyboard endpoint could not be "
-                        "primed\n", slot->port_num);
-                xhci_device_slot_cleanup(ctrl, slot);
-                return;
-            }
-
-            __sync_synchronize();
-            ctrl->doorbells->doorbells[slot->slot_id].doorbell =
-                slot->keyboard_endpoint_dci;
-
+            slot->ep_pending_add = 0;
             slot->state = ENUM_STATE_CONFIGURED;
-
-            kprintf("[xHCI] port %u: %s-speed keyboard %04x:%04x is live "
-                    "(slot %u, endpoint %u)\n",
-                    slot->port_num, speed_name(slot->speed),
-                    slot->device_desc.idVendor, slot->device_desc.idProduct,
-                    slot->slot_id, slot->keyboard_endpoint_dci);
-
-            xhci_touch_device_arrived(slot);
+            enum_driver_start(ctrl, slot);
             break;
         }
 

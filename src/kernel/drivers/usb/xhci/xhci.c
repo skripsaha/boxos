@@ -329,6 +329,7 @@ int xhci_init(void) {
 
     debug_printf("[xHCI] Initializing xHCI driver...\n");
 
+    spinlock_init(&ctrl->event_lock);
     xhci_command_init();
     xhci_enumeration_init();
 
