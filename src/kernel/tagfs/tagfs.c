@@ -1,4 +1,5 @@
 #include "tagfs.h"
+#include "boardroom.h"
 #include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
 #include "tag_bitmap/tag_bitmap.h"
@@ -163,119 +164,74 @@ static inline bool bitmap_test_bit(const uint8_t *bitmap, uint32_t bit)
 // ----------------------------------------------------------------------------
 
 /*
- * Disk selection:
- *   g_tagfs_drive      — ATA drive index 0..3, per ata.h:
- *                        0 = primary master, 1 = primary slave,
- *                        2 = secondary master, 3 = secondary slave.
- *                        Used when AHCI is NOT initialized.
- *   g_tagfs_ahci_port  — AHCI port number. Used when AHCI IS initialized.
+ * Which medium the volume is on.
  *
- * Both are set by TagFSProbeDrive() before the first superblock read.
- * Defaults match the single-disk BIOS boot layout (primary master,
- * AHCI port 0).
+ * This used to be two numbers and a question asked at every call site: an ATA
+ * drive index, an AHCI port, and "is AHCI initialised?" repeated eight times
+ * over. It is now one seat number in the Boardroom, which knows what kind of
+ * medium sits in it. The filesystem's business is sectors; whose sectors they
+ * are is somebody else's.
  */
-static uint8_t g_tagfs_drive     = 0; /* ATA: 0..3, default primary master */
-static uint8_t g_tagfs_ahci_port = 0; /* AHCI port, probed at init */
+static uint8_t g_tagfs_seat = BOARDROOM_NO_SEAT;
 
-uint8_t tagfs_get_drive(void)     { return g_tagfs_drive;     }
-uint8_t tagfs_get_ahci_port(void) { return g_tagfs_ahci_port; }
-
-static const char* ata_slot_name(uint8_t d) {
-    switch (d) {
-        case 0: return "primary master";
-        case 1: return "primary slave";
-        case 2: return "secondary master";
-        case 3: return "secondary slave";
-        default: return "?";
-    }
-}
+uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
 
 /*
- * TagFSProbeDrive — locate the disk that holds the TagFS volume by
- * scanning active drives/ports for the TagFS superblock magic. Sets
- * g_tagfs_drive (ATA path) or g_tagfs_ahci_port (AHCI path). Called
- * once at the very beginning of tagfs_init().
- *
- * Real-PC layouts the audit must support:
- *   - HDD on primary master  (default for QEMU PIIX3, most desktops)
- *   - HDD on primary slave   (occurs when a CD-ROM is on master)
- *   - HDD on secondary M/S   (servers with onboard DVD on primary)
+ * Recognise the volume: the superblock magic, in the sector it always lives in.
+ * Handed to the Boardroom, which asks it of every medium in turn — the
+ * Boardroom knows about media, and this is the only thing that knows what a
+ * TagFS volume looks like.
  */
-static void TagFSProbeDrive(void)
+static bool tagfs_recognise(void *ctx, uint8_t seat)
 {
+    (void)ctx;
     uint8_t buf[TAGFS_SECTOR_SIZE];
     uint32_t magic;
 
-    if (ahci_is_initialized()) {
-        uint32_t port_mask = ahci_get_active_port_mask();
-        for (uint8_t p = 0; p < 32; p++) {
-            if (!(port_mask & (1U << p))) continue;
-            if (ahci_read_sectors_sync(p, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
-                continue;
-            __builtin_memcpy(&magic, buf, 4);
-            if (magic == TAGFS_MAGIC) {
-                g_tagfs_ahci_port = p;
-                debug_printf("[TagFS] Probe: TagFS on AHCI port %u\n", p);
-                return;
-            }
-        }
-        debug_printf("[TagFS] Probe: TagFS magic not found on any AHCI port\n");
+    if (BoardroomRead(seat, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0) {
+        return false;
+    }
+    __builtin_memcpy(&magic, buf, 4);
+    return magic == TAGFS_MAGIC;
+}
+
+static void TagFSProbeDrive(void)
+{
+    g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, NULL);
+
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
+        kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n",
+                BoardroomSeatCount());
         return;
     }
 
-    /* ATA legacy path: scan all four PATA slots in deterministic order. */
-    for (uint8_t d = 0; d < 4; d++) {
-        if (ata_read_sectors_retry(d, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0)
-            continue;
-        __builtin_memcpy(&magic, buf, 4);
-        if (magic == TAGFS_MAGIC) {
-            g_tagfs_drive = d;
-            debug_printf("[TagFS] Probe: TagFS on ATA %s (drive=%u)\n",
-                         ata_slot_name(d), d);
-            return;
-        }
-    }
-    debug_printf("[TagFS] Probe: TagFS magic not found on any ATA slot\n");
+    kprintf("[TagFS] volume on seat %u: %s\n", g_tagfs_seat,
+            BoardroomSeatName(g_tagfs_seat));
 }
 
 static int disk_read_sectors(uint64_t lba, uint16_t count, void *buffer)
 {
-    if (ahci_is_initialized())
-        return ahci_read_sectors_sync(g_tagfs_ahci_port, lba, count, buffer);
-    return ata_read_sectors_retry(g_tagfs_drive, lba, count, (uint8_t *)buffer);
+    return BoardroomRead(g_tagfs_seat, lba, count, buffer);
 }
 
 static int disk_write_sectors(uint64_t lba, uint16_t count, const void *buffer)
 {
-    if (ahci_is_initialized())
-        return ahci_write_sectors_sync(g_tagfs_ahci_port, lba, count, buffer);
-    return ata_write_sectors_retry(g_tagfs_drive, lba, count, (const uint8_t *)buffer);
+    return BoardroomWrite(g_tagfs_seat, lba, count, buffer);
 }
 
 /*
- * tagfs_flush_cache — force the volatile write cache of the disk that
- * actually holds the TagFS volume out to the media.
+ * tagfs_flush_cache — force the volatile write cache of the medium that
+ * actually holds the volume out to it.
  *
- * ATA8-ACS (T13/1699-D) FLUSH CACHE EXT (0xEA) / the AHCI port flush only
- * return once the drive's on-disk write cache (16-256 MiB) has reached the
- * platters/NAND; a write command "completing" merely means the bytes were
- * received into that volatile cache. Without this, a power cut loses data
- * the FS believes is durable.
- *
- * Routed to the PROBED device — the same dispatch disk_read_sectors /
- * disk_write_sectors use. A hardcoded ata_flush_cache(1) flushes ATA
- * master / AHCI port 0 regardless of where the volume lives, so on a real
- * PC whose SATA boot disk is not on port 0 the flush hits the wrong (or an
- * absent) device and every "durable" commit silently stays in cache.
+ * A write command "completing" means the bytes were received into a cache the
+ * device can lose; this is what makes them durable. It goes to the seat the
+ * volume is on, which is the whole reason the seat exists — a flush aimed at
+ * the wrong device leaves every "durable" commit sitting in the right one's
+ * cache.
  */
 error_t tagfs_flush_cache(void)
 {
-    int rc;
-    if (ahci_is_initialized())
-        rc = ahci_flush_cache_sync(g_tagfs_ahci_port);
-    else
-        rc = ata_flush_cache(g_tagfs_drive); /* drive_idx 0..3, set by TagFSProbeDrive */
-    return (rc == 0) ? OK : ERR_IO;
+    return (BoardroomFlush(g_tagfs_seat) == 0) ? OK : ERR_IO;
 }
 
 static uint64_t block_to_sector(uint32_t block);

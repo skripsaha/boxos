@@ -47,6 +47,22 @@
 #include "touch.h"
 #include "cow.h"
 #include "amp.h"   /* g_amp.total_cores — async write needs a K-Core to pump */
+#include "boardroom.h"
+
+/*
+ * The asynchronous disk path is AHCI's, and only AHCI's.
+ *
+ * It used to be gated on "is there an AHCI controller?", which was the same
+ * question as "is the volume on it" only for as long as there was nowhere else
+ * a volume could be. There is now: a machine that boots from a flash drive has
+ * its filesystem on the USB bus and its SATA controller initialised beside it,
+ * and submitting that filesystem's reads to an AHCI port would have read
+ * somebody else's disk and called the bytes a file.
+ */
+static inline bool tagfs_volume_is_ahci(void)
+{
+    return BoardroomSeatKind(tagfs_get_seat()) == BOARD_AHCI;
+}
 
 #define OBJ_WRITE_APPEND_FLAG (1u << 0)
 
@@ -274,7 +290,8 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
 
     uint64_t lba = tagfs_block_to_sector(disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_read_async(tagfs_get_ahci_port(), lba, 8, ctx->dma_phys,
+    error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()),
+                                           lba, 8, ctx->dma_phys,
                                            obj_read_async_complete, ctx, &slot);
     if (err != OK) {
         obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
@@ -377,7 +394,7 @@ static int ObjRead(const ManifestOp *op,
      * those structures; the sync read path below is correct there and on
      * real HW (which is multi-core) the async path still applies. */
     if (offset < handle->file_size && handle->extent_count > 0 &&
-        ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
+        tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
 
         uint64_t remaining = handle->file_size - offset;
         uint64_t to_read   = (out->capacity > remaining) ? remaining : out->capacity;
@@ -522,7 +539,7 @@ static int ObjWrite(const ManifestOp *op,
      * mode; on a single core the BSP runs userspace and never pumps, so the
      * job would strand. Use the sync path there — it is correct and has no
      * benefit to lose (one core does everything regardless). */
-    if (ahci_is_initialized() && ctx && ctx->proc && g_amp.total_cores > 1) {
+    if (tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
         int rc = ObjWriteAsync(file_id, offset, flags,
                                src_bounce, (uint32_t)src->size,
                                out_crate, ctx,

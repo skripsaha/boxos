@@ -411,8 +411,7 @@ int      meta_pool_flush(void);
 // ----------------------------------------------------------------------------
 
 error_t  tagfs_init(void);
-uint8_t  tagfs_get_drive(void);      /* ATA drive (1=master, 0=slave) — valid when AHCI is off */
-uint8_t  tagfs_get_ahci_port(void);  /* AHCI port number — valid when AHCI is initialized      */
+uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
 void tagfs_shutdown(void);
 void tagfs_sync(void);
 

@@ -5,21 +5,18 @@
 #include "../../lib/kernel/crypto.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 #include "../../../kernel/drivers/disk/ahci.h"
-#include "../../../kernel/drivers/disk/ahci_sync.h"
-#include "../../../kernel/drivers/disk/ata.h"
+#include "boardroom.h"
 
 // Direct sector I/O — bypasses the tagfs block abstraction (the journal lives
 // in a fixed disk region addressed by absolute LBA, not by TagFS block number).
+// Same seat as the volume: the journal describes that volume and belongs on
+// the medium carrying it.
 static int disk_book_read_sectors(uint64_t lba, uint16_t count, void *buf) {
-    if (ahci_is_initialized())
-        return ahci_read_sectors_sync(tagfs_get_ahci_port(), lba, count, buf);
-    return ata_read_sectors_retry(tagfs_get_drive(), lba, count, (uint8_t *)buf);
+    return BoardroomRead(tagfs_get_seat(), lba, count, buf);
 }
 
 static int disk_book_write_sectors(uint64_t lba, uint16_t count, const void *buf) {
-    if (ahci_is_initialized())
-        return ahci_write_sectors_sync(tagfs_get_ahci_port(), lba, count, buf);
-    return ata_write_sectors_retry(tagfs_get_drive(), lba, count, (const uint8_t *)buf);
+    return BoardroomWrite(tagfs_get_seat(), lba, count, buf);
 }
 
 // ----------------------------------------------------------------------------

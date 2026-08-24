@@ -27,6 +27,7 @@
  */
 
 #include "write_job.h"
+#include "boardroom.h"
 #include "storage_completion.h"
 #include "crate_stage.h"
 #include "tagfs.h"
@@ -282,7 +283,7 @@ static bool w_cow_read_old(WriteJob *j)
 {
     uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_read_async(tagfs_get_ahci_port(), lba, 8, j->dma_phys,
+    error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                            wjob_cow_read_complete, j, &slot);
     if (err != OK) {
         wjob_finalize(j, ERR_IO);
@@ -307,7 +308,7 @@ static bool w_ahci_submit(WriteJob *j)
 {
     uint64_t lba = tagfs_block_to_sector(j->if_disk_block);
     uint8_t  slot;
-    error_t  err = ahci_submit_write_async(tagfs_get_ahci_port(), lba, 8, j->dma_phys,
+    error_t  err = ahci_submit_write_async(BoardroomSeatIndex(tagfs_get_seat()), lba, 8, j->dma_phys,
                                             wjob_ahci_complete, j, &slot);
     if (err != OK) {
         wjob_finalize(j, ERR_IO);
