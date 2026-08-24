@@ -110,10 +110,12 @@ static void usb_attach_visitor(void* ctx, xhci_device_slot_t* slot)
 
 static void seat_usb_take_attendance(void)
 {
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (!ctrl) {
-        return;
-    }
+    /* Every controller, because a machine has as many as it has: the chipset
+     * one where the case sockets are, and often another on a graphics card.
+     * Asking only the first found the wrong silicon on a live board. */
+    for (uint8_t ci = 0; ci < xhci_controller_count(); ci++) {
+      xhci_controller_t* ctrl = xhci_controller_at(ci);
+      if (!ctrl) continue;
 
     /* Hubs first, and until the bus stops changing: a disk plugged into a hub
      * is not on any port this controller has, and asking the controller what
@@ -136,7 +138,8 @@ static void seat_usb_take_attendance(void)
                 "without them\n", unsettled);
     }
 
-    xhci_enum_for_each_configured(usb_attach_visitor, ctrl);
+      xhci_enum_for_each_configured(ctrl, usb_attach_visitor, ctrl);
+    }
 }
 
 void BoardroomInit(void)

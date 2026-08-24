@@ -58,10 +58,12 @@ static struct xhci_device_slot* find_free_slot(void) {
     return NULL;
 }
 
-static struct xhci_device_slot* find_slot_by_port(uint8_t port) {
+static struct xhci_device_slot* find_slot_by_port(xhci_controller_t* ctrl,
+                                                 uint8_t port) {
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].port_num == port && slot_is_live(&device_slots[i])) {
+        if (device_slots[i].ctrl == ctrl && device_slots[i].port_num == port &&
+            slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -77,7 +79,8 @@ xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_i
 
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].slot_id == slot_id && slot_is_live(&device_slots[i])) {
+        if (device_slots[i].ctrl == ctrl && device_slots[i].slot_id == slot_id &&
+            slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -86,8 +89,9 @@ xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_i
     return NULL;
 }
 
-xhci_device_slot_t* xhci_get_device_slot_by_port(uint8_t port) {
-    return find_slot_by_port(port);
+xhci_device_slot_t* xhci_get_device_slot_by_port(xhci_controller_t* ctrl,
+                                                 uint8_t port) {
+    return find_slot_by_port(ctrl, port);
 }
 
 /*
@@ -158,7 +162,7 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -3;
     }
 
-    if (find_slot_by_port(port)) {
+    if (find_slot_by_port(ctrl, port)) {
         return -4;
     }
 
@@ -169,6 +173,7 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     }
 
     // slot->state is already ENUM_STATE_CLAIMING — zero individual fields only
+    slot->ctrl = ctrl;
     slot->slot_id = 0;
     slot->port_num = port;
     slot->speed = 0;
@@ -251,14 +256,16 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     return 0;
 }
 
-xhci_device_slot_t* xhci_get_device_slot_by_id(uint8_t slot_id)
+xhci_device_slot_t* xhci_get_device_slot_by_id(xhci_controller_t* ctrl,
+                                               uint8_t slot_id)
 {
     if (slot_id == 0) {
         return NULL;
     }
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].slot_id == slot_id && slot_is_live(&device_slots[i])) {
+        if (device_slots[i].ctrl == ctrl && device_slots[i].slot_id == slot_id &&
+            slot_is_live(&device_slots[i])) {
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
         }
@@ -413,9 +420,8 @@ void xhci_slot_service_if_pending(void)
     if (!xhci_slot_retire_pending()) {
         return;
     }
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (ctrl) {
-        xhci_slot_service(ctrl);
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_slot_service(xhci_controller_at(i));
     }
 }
 
@@ -464,6 +470,7 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         return -3;
     }
 
+    slot->ctrl = ctrl;
     slot->slot_id = 0;
     slot->port_num = hub->port_num;          /* the root port, still */
     slot->speed = speed;
@@ -537,7 +544,7 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
         return;
     }
 
-    struct xhci_device_slot* slot = find_slot_by_port(port);
+    struct xhci_device_slot* slot = find_slot_by_port(ctrl, port);
     if (!slot || slot->state != ENUM_STATE_WAIT_PORT_RESET) {
         return;                 /* a reset nobody was waiting on */
     }
@@ -1061,13 +1068,21 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     }
 }
 
-void xhci_enum_for_each_configured(xhci_slot_visitor visit, void* ctx)
+void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
+                                   xhci_slot_visitor visit, void* ctx)
 {
-    if (!visit) {
+    if (!visit || !ctrl) {
         return;
     }
+    /* One controller's devices, not every device on the machine. The slot
+     * table is shared, and a caller working through the controllers one at a
+     * time would otherwise be handed the second controller's disk while it is
+     * holding the first one — measured: the disk attached to the wrong
+     * controller, every transfer went to silicon that had never heard of it,
+     * and it "never became ready". */
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].state == ENUM_STATE_CONFIGURED) {
+        if (device_slots[i].ctrl == ctrl &&
+            device_slots[i].state == ENUM_STATE_CONFIGURED) {
             visit(ctx, &device_slots[i]);
         }
     }
@@ -1115,7 +1130,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
     if (slot_id == 0) {
         spin_lock(&device_slots_lock);
         for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            if (device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT) {
+            if (device_slots[i].ctrl == ctrl &&
+                device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT) {
                 slot = &device_slots[i];
                 break;
             }
@@ -1137,7 +1153,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
          */
         spin_lock(&device_slots_lock);
         for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            if (device_slots[i].slot_id == slot_id &&
+            if (device_slots[i].ctrl == ctrl &&
+                device_slots[i].slot_id == slot_id &&
                 slot_is_live(&device_slots[i])) {
                 slot = &device_slots[i];
                 break;
@@ -1146,7 +1163,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         /* Fallback: also check for WAIT_ENABLE_SLOT with slot_id still 0. */
         if (!slot) {
             for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-                if (device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT &&
+                if (device_slots[i].ctrl == ctrl &&
+                    device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT &&
                     device_slots[i].slot_id == 0) {
                     slot = &device_slots[i];
                     break;

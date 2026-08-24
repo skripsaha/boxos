@@ -88,4 +88,9 @@ int xhci_reset(xhci_controller_t* ctrl);
 int xhci_start(xhci_controller_t* ctrl);
 xhci_controller_t* xhci_get_controller(void);
 
+/* Every controller in service. Anything that means "all the USB on this
+ * machine" walks these rather than asking for "the" controller. */
+uint8_t            xhci_controller_count(void);
+xhci_controller_t* xhci_controller_at(uint8_t index);
+
 #endif

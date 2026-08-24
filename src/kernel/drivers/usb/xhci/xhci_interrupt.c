@@ -124,7 +124,7 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
                 uint16_t _reserved;
             } ev = { port, 0, 0, 0, 0 };
 
-            xhci_device_slot_t* slot = xhci_get_device_slot_by_port(port);
+            xhci_device_slot_t* slot = xhci_get_device_slot_by_port(ctrl, port);
             if (slot) {
                 ev.vendor_id  = slot->device_desc.idVendor;
                 ev.product_id = slot->device_desc.idProduct;
@@ -228,8 +228,9 @@ void xhci_touch_device_left(const xhci_device_slot_t* slot)
                               &g_xhci_touch_left_bare);
 }
 
-void xhci_process_events(void) {
-    xhci_controller_t* ctrl = xhci_get_controller();
+/* One controller's event ring. Draining is per-controller because the ring,
+ * the lock and the interrupter all are. */
+static void xhci_process_events_on(xhci_controller_t* ctrl) {
     if (!ctrl || !ctrl->running) {
         return;
     }
@@ -302,11 +303,12 @@ void xhci_process_events(void) {
 }
 
 void xhci_poll_events(void) {
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (!ctrl || !ctrl->use_polling) {
-        return;
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_controller_t* ctrl = xhci_controller_at(i);
+        if (ctrl && ctrl->use_polling) {
+            xhci_process_events_on(ctrl);
+        }
     }
-    xhci_process_events();
 }
 
 /*
@@ -320,22 +322,43 @@ void xhci_poll_events(void) {
  * partway through being asked who it is. Neither is supposed to happen, and
  * both are supposed to be said out loud when they do.
  */
-void xhci_tick(void) {
-    xhci_controller_t* ctrl = xhci_get_controller();
-    if (!ctrl || !ctrl->running) {
-        return;
+/*
+ * Every controller, every time.
+ *
+ * Interrupts are shared and a vector says which line fired, not which
+ * controller is holding an event — and the drain of a ring with nothing on it
+ * is one register read. Asking all of them is both simpler and the only answer
+ * that stays right when a machine has more than one.
+ */
+void xhci_process_events(void) {
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_process_events_on(xhci_controller_at(i));
     }
-
-    if (ctrl->use_polling) {
-        xhci_process_events();
-    }
-
-    xhci_check_command_timeouts(ctrl);
-    xhci_enum_watchdog(ctrl);
 }
 
-void xhci_irq_handler(void) {
-    xhci_controller_t* ctrl = xhci_get_controller();
+void xhci_tick(void) {
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_controller_t* ctrl = xhci_controller_at(i);
+        if (!ctrl || !ctrl->running) {
+            continue;
+        }
+        if (ctrl->use_polling) {
+            xhci_process_events_on(ctrl);
+        }
+        xhci_check_command_timeouts(ctrl);
+        xhci_enum_watchdog(ctrl);
+    }
+}
+
+/*
+ * One interrupt, asked of every controller.
+ *
+ * A vector says which line fired, not which controller is holding an event,
+ * and on a machine with two of them the line may well be shared. Reading a
+ * status register and finding nothing costs one access; guessing costs a
+ * device that never gets serviced.
+ */
+static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
     if (!ctrl || !ctrl->running) {
         return;
     }
@@ -363,8 +386,14 @@ void xhci_irq_handler(void) {
      * on: acting on it here as well would mean two paths clearing the same
      * write-one-to-clear bits, with whichever ran first deciding what the
      * other one got to see. */
-    xhci_process_events();
+    xhci_process_events_on(ctrl);
 
     /* Clear IMAN IP (Interrupt Pending) bit — write 1 to clear. */
     ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
+}
+
+void xhci_irq_handler(void) {
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_irq_handler_on(xhci_controller_at(i));
+    }
 }

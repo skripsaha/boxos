@@ -104,6 +104,14 @@ void     pci_ecam_write_byte(uint16_t segment, uint8_t bus, uint8_t device,
                               uint8_t function, uint16_t offset, uint8_t value);
 
 int pci_find_device_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if, pci_device_t* out);
+
+/* The index-th device of a class, counting from zero in scan order. "The first
+ * one found" names no device in particular on a machine that has several of a
+ * kind — and machines do: a chipset xHCI and another on a graphics card, two
+ * SATA controllers, a pair of network cards. Returns non-zero when there is no
+ * such device, which is how a caller learns it has seen them all. */
+int pci_find_nth_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
+                          uint32_t index, pci_device_t* out);
 int pci_enable_bus_master(pci_device_t* device);
 
 /* PCI capability list walker (PCI 3.0 §6.7).

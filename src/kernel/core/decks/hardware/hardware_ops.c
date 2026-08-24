@@ -806,6 +806,14 @@ static int HwUsbInit(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return xhci_init() == 0 ? OK : ERR_INTERNAL;
 }
 
+/*
+ * The USB surface here names a slot but not a controller, and a machine has as
+ * many controllers as it has — a chipset one and, very often, another on a
+ * graphics card. These ops therefore speak to the first one in service, which
+ * is stated here rather than left to be discovered: naming the controller is a
+ * change to the shape of the manifest, and that is not a decision this file
+ * gets to make on its own.
+ */
 static int HwUsbReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {

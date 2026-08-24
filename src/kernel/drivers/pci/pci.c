@@ -238,7 +238,7 @@ static bool pci_visited_test_set(uint64_t visited[4], uint8_t bus) {
 
 static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                              uint8_t prog_if, pci_device_t* out,
-                             uint64_t visited[4]) {
+                             uint64_t visited[4], uint32_t* skip) {
     if (pci_visited_test_set(visited, bus)) {
         debug_printf("[PCI] cycle guard: bus %u already visited, skipping\n", bus);
         return -1;
@@ -277,6 +277,15 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                 out->revision_id = pci_config_read_byte(bus, device, function, PCI_REVISION_ID);
                 out->header_type = header_type & PCI_HEADER_TYPE_MASK;
 
+                /* Matches before the one asked for are walked past rather than
+                 * returned. A machine may hold several devices of one class —
+                 * two xHCI controllers, say, one on the chipset and one on a
+                 * graphics card — and "the first one found" names none of them
+                 * in particular. */
+                if (skip && *skip > 0) {
+                    (*skip)--;
+                } else
+
                 return 0;
             }
 
@@ -288,7 +297,8 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
                     debug_printf("[PCI] Bridge %02x:%02x.%u -> secondary bus %u\n",
                                  bus, device, function, secondary_bus);
                     int result = pci_scan_bus_impl(secondary_bus, class_code,
-                                                   subclass, prog_if, out, visited);
+                                                   subclass, prog_if, out,
+                                                   visited, skip);
                     if (result == 0) {
                         return 0;
                     }
@@ -305,10 +315,17 @@ static int pci_scan_bus_impl(uint8_t bus, uint8_t class_code, uint8_t subclass,
     return -1;
 }
 
-int pci_find_device_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if, pci_device_t* out) {
+int pci_find_device_by_class(uint8_t class_code, uint8_t subclass,
+                             uint8_t prog_if, pci_device_t* out) {
+    return pci_find_nth_by_class(class_code, subclass, prog_if, 0, out);
+}
+
+int pci_find_nth_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_if,
+                          uint32_t index, pci_device_t* out) {
     if (!out) {
         return -1;
     }
+    uint32_t skip = index;
 
     // Check if host bridge is multi-function (multiple PCI domains)
     uint8_t host_header = pci_config_read_byte(0, 0, 0, PCI_HEADER_TYPE);
@@ -321,11 +338,13 @@ int pci_find_device_by_class(uint8_t class_code, uint8_t subclass, uint8_t prog_
             uint16_t vid = pci_config_read_word(0, 0, fn, PCI_VENDOR_ID);
             if (vid == PCI_INVALID_VENDOR) continue;
 
-            int result = pci_scan_bus_impl(fn, class_code, subclass, prog_if, out, visited);
+            int result = pci_scan_bus_impl(fn, class_code, subclass, prog_if,
+                                           out, visited, &skip);
             if (result == 0) return 0;
         }
     } else {
-        return pci_scan_bus_impl(0, class_code, subclass, prog_if, out, visited);
+        return pci_scan_bus_impl(0, class_code, subclass, prog_if, out, visited,
+                                 &skip);
     }
 
     return -1;
