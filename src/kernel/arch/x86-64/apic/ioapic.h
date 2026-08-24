@@ -49,6 +49,17 @@ uintptr_t ioapic_get_base(void);
 
 // Interrupt Source Override management
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags);
+
+/* Polarity and trigger for a GSI, from whichever source described it —
+ * firmware's Interrupt Source Override first, then anything the kernel had to
+ * say for a line firmware left unsaid. False when nobody described it and the
+ * bus default applies. */
+bool ioapic_gsi_flags(uint32_t gsi, uint16_t *out_flags);
+
+/* Describe a line firmware did not. Flags use the MADT encoding: bits 1:0
+ * polarity (11 = active low), bits 3:2 trigger (11 = level). An existing
+ * firmware override for the same GSI still wins. */
+void ioapic_describe_gsi(uint32_t gsi, uint16_t flags);
 uint32_t ioapic_isa_to_gsi(uint8_t isa_irq);
 uint16_t ioapic_get_iso_flags(uint8_t isa_irq);
 

@@ -6,6 +6,8 @@
 #include "irqchip.h"
 #include "ioapic.h"
 #include "touch.h"
+#include "system_halt.h"
+#include "ioapic.h"
 #include "irq_defer.h"
 #include "atomics.h"
 #include "kernel_config.h"
@@ -206,6 +208,174 @@ static void gpe_dispatch_block(uint8_t* fired_bytes, uint8_t bytes,
     }
 }
 
+/* ============================================================
+ * The power button
+ * ============================================================
+ *
+ * The PM1 event block is one block with two halves of PM1_EVT_LEN/2 bytes
+ * each: status first, enable second. The chipset raises a status bit whether
+ * or not anybody asked for it, and raises an SCI only for the bits named in
+ * the enable half.
+ *
+ * Nothing here had ever written that half. So on a real machine the button set
+ * PWRBTN_STS, no interrupt was raised, and the kernel never heard about the
+ * press at all — the only thing that turned the machine off was holding the
+ * button down for four seconds, which is the chipset doing it without asking
+ * anybody, and is exactly what the owner of this board had to do.
+ */
+#define GAS_AS_SYSTEM_IO 1
+#define PM1_EN_PWRBTN    (1u << 8)
+
+typedef struct {
+    uint16_t status;        /* 0 when this half of the pair does not exist */
+    uint16_t enable;
+} AcpiPm1Event;
+
+static AcpiPm1Event g_pm1a_event;
+static AcpiPm1Event g_pm1b_event;
+
+
+static bool fadt_has_field(uint32_t len, size_t field_end) {
+    return len >= field_end;
+}
+
+/* An I/O port for a PM1 event block, preferring what the extended field says.
+ * Every x86 firmware puts these in I/O space; one that does not is one this
+ * kernel would silently read the wrong bytes from, so it says so instead. */
+static uint16_t pm1_event_port(const acpi_gas_t *x, uint32_t legacy,
+                               uint32_t fadt_len, size_t x_field_end,
+                               const char *which)
+{
+    if (fadt_has_field(fadt_len, x_field_end) && x->address != 0) {
+        if (x->address_space == GAS_AS_SYSTEM_IO) {
+            return (uint16_t)x->address;
+        }
+        kprintf("[ACPI] %s event block lives in address space %u, not I/O — "
+                "falling back to the legacy port\n", which, x->address_space);
+    }
+    return (uint16_t)legacy;
+}
+
+static void acpi_pm1_events_locate(void)
+{
+    if (!g_acpi.fadt) return;
+
+    uint32_t flen = g_acpi.fadt->header.length;
+    uint8_t  half = (uint8_t)(g_acpi.fadt->pm1_event_length / 2);
+
+    /* Two registers of at least sixteen bits each — the specification's own
+     * minimum. A block too small to hold them describes nothing usable. */
+    if (half < 2) {
+        kprintf("[ACPI] PM1 event block is %u byte(s) — too small to hold a "
+                "status and an enable register; the power button cannot be "
+                "heard\n", g_acpi.fadt->pm1_event_length);
+        return;
+    }
+
+    uint16_t a = pm1_event_port(&g_acpi.fadt->x_pm1a_event_block,
+                                g_acpi.fadt->pm1a_event_block, flen,
+                                offsetof(acpi_fadt_t, x_pm1a_event_block) +
+                                    sizeof(acpi_gas_t), "PM1a");
+    uint16_t b = pm1_event_port(&g_acpi.fadt->x_pm1b_event_block,
+                                g_acpi.fadt->pm1b_event_block, flen,
+                                offsetof(acpi_fadt_t, x_pm1b_event_block) +
+                                    sizeof(acpi_gas_t), "PM1b");
+
+    if (a) {
+        g_pm1a_event.status = a;
+        g_pm1a_event.enable = (uint16_t)(a + half);
+    }
+    if (b) {
+        g_pm1b_event.status = b;
+        g_pm1b_event.enable = (uint16_t)(b + half);
+    }
+}
+
+/* Switch the button on, in both halves of the pair.
+ *
+ * PM1b is not a spare copy of PM1a: a chipset that has one reports part of its
+ * event state there and nowhere else, and a driver that reads only PM1a leaves
+ * a status bit standing that nothing will ever clear — which on a level-
+ * triggered line means the interrupt never stops being asserted.
+ *
+ * Only the power button is enabled. The sleep button would raise events this
+ * kernel has nothing to do with, and by the rule below an event nobody claims
+ * is one the kernel acts on — arming a button whose meaning is "sleep" and
+ * answering it with "power off" is worse than leaving it silent.
+ */
+static void acpi_pm1_arm_power_button(void)
+{
+    bool armed = false;
+
+    AcpiPm1Event *pair[2] = { &g_pm1a_event, &g_pm1b_event };
+    const char   *name[2] = { "PM1a", "PM1b" };
+
+    for (int i = 0; i < 2; i++) {
+        if (pair[i]->status == 0) continue;
+
+        /* A press from before this kernel existed is not a press for it to
+         * answer. Clear it before switching the line on. */
+        outw(pair[i]->status, PM1_EN_PWRBTN);
+
+        uint16_t en = inw(pair[i]->enable);
+        outw(pair[i]->enable, (uint16_t)(en | PM1_EN_PWRBTN));
+
+        uint16_t back = inw(pair[i]->enable);
+        kprintf("[ACPI] power button armed on %s (status 0x%x enable 0x%x -> "
+                "0x%x)\n", name[i], pair[i]->status, pair[i]->enable, back);
+        armed = (back & PM1_EN_PWRBTN) != 0 || armed;
+    }
+
+    if (!armed) {
+        kprintf("[ACPI] the power button could not be armed — pressing it will "
+                "raise nothing\n");
+    }
+}
+
+/*
+ * A press nobody has claimed is a press the kernel answers.
+ *
+ * The owner of a machine expects the button to turn it off. A program that
+ * wants to be asked first says so by subscribing, and then the decision is
+ * its own — save the file, refuse,
+ * ask the person in front of it. Nobody subscribed means
+ * nobody is going to answer, and waiting for an answer that is not coming is
+ * how a button ends up doing nothing at all.
+ *
+ * There is no timer here and nothing to wait for: whether anyone is listening
+ * is a question with an answer at the instant of the press.
+ */
+static void acpi_power_button_answer(void)
+{
+    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+    TouchTagResolve("acpi:power-button", &full, &bare);
+
+    bool claimed = (full != TOUCH_TAG_INVALID && TouchHasAnyListenersForTag(full)) ||
+                   (bare != TOUCH_TAG_INVALID && TouchHasAnyListenersForTag(bare));
+
+    if (claimed) {
+        kprintf("[ACPI] power button pressed — a subscriber has it\n");
+        return;
+    }
+
+    kprintf("[ACPI] power button pressed and nobody is listening — shutting "
+            "down\n");
+    system_halt(false);
+}
+
+/* Carried out of the interrupt handler by the same mechanism that carries the
+ * Touch publish beside it — the one place in this kernel that turns "noticed
+ * in an interrupt" into "done where waiting is allowed". On a machine with
+ * K-Cores that is their guide loop, which is the context the shutdown sequence
+ * documents that it needs; on a machine that is one core it is the timer's own
+ * deferred pump, gated on having interrupted user mode so no kernel lock is
+ * held. There is no second arrangement to keep in step with the first. */
+static void acpi_power_button_deferred(void *ctx)
+{
+    (void)ctx;
+    acpi_power_button_answer();
+}
+
 /*
  * SCI interrupt handler — fires for any ACPI-routed event:
  *   - PM1 status bits (power button, sleep button, RTC alarm, wake)
@@ -232,10 +402,15 @@ static void acpi_sci_handler(void) {
         irqchip_send_eoi(g_acpi.fadt ? g_acpi.fadt->sci_interrupt : 9);
         return;
     }
-    uint32_t pm1a_evt = g_acpi.fadt->pm1a_event_block;
-    if (pm1a_evt == 0) goto eoi;
+    /* Both halves of the pair. PM1b is not a spare copy of PM1a: a chipset
+     * that has one reports part of its event state there and nowhere else,
+     * and a status bit nobody clears holds a level-triggered line asserted
+     * for good. Only PM1a was ever read. */
+    uint16_t sts_a = g_pm1a_event.status ? inw(g_pm1a_event.status) : 0;
+    uint16_t sts_b = g_pm1b_event.status ? inw(g_pm1b_event.status) : 0;
+    uint16_t sts   = (uint16_t)(sts_a | sts_b);
 
-    uint16_t sts = inw((uint16_t)pm1a_evt);
+    if (g_pm1a_event.status == 0 && g_pm1b_event.status == 0) goto eoi;
 
     /* Every PM1 event class fires both a debug line (keeps the boot log
      * useful) and a Touch publish (lets every userspace listener that
@@ -249,6 +424,10 @@ static void acpi_sci_handler(void) {
     if (sts & PM1_STS_PWRBTN) {
         debug_printf("[ACPI] power button event\n");
         acpi_queue_touch_irq("acpi:power-button", sts);
+        /* Answered where waiting is allowed: deciding what a press means ends
+         * either in a Touch delivery or in the whole shutdown sequence, and
+         * neither of those belongs in an interrupt handler. */
+        irq_defer(acpi_power_button_deferred, NULL);
     }
     if (sts & PM1_STS_SLPBTN) {
         debug_printf("[ACPI] sleep button event\n");
@@ -263,9 +442,12 @@ static void acpi_sci_handler(void) {
         acpi_queue_touch_irq("acpi:wake", sts);
     }
 
-    /* W1C: write the read value back to clear every set bit at once.
-     * This also drops the SCI line so the IOAPIC can re-arm. */
-    if (sts) outw((uint16_t)pm1a_evt, sts);
+    /* W1C: write each half's own bits back to clear them. Writing PM1a's
+     * value into PM1b would acknowledge events that never happened there and
+     * leave the ones that did. This is what drops the SCI line so the IOAPIC
+     * can re-arm. */
+    if (sts_a) outw(g_pm1a_event.status, sts_a);
+    if (sts_b) outw(g_pm1b_event.status, sts_b);
 
     /* APEI/GHES SCI-notify path. Walks every HEST GHES source whose
      * notify type == 3 (SCI), reads its Generic Error Status Block,
@@ -335,9 +517,31 @@ void acpi_sci_register(void) {
         debug_printf("[ACPI] SCI GSI %u beyond IOAPIC range\n", sci);
         return;
     }
+    /*
+     * ACPI 6.5 §5.2.15: the SCI is a level-sensitive, shareable, active-low
+     * interrupt — and that is not the ISA bus default the IOAPIC applies to a
+     * line nobody described. Firmware usually supplies an Interrupt Source
+     * Override saying so, and is not required to.
+     *
+     * Without one the line was programmed edge-triggered and active high,
+     * which on a level, active-low line reads as asserted the moment it is
+     * unmasked and never asserts again after the first event is cleared. QEMU
+     * forgives it. A chipset does not.
+     */
+    if (!ioapic_gsi_flags(sci, NULL)) {
+        /* polarity 11 = active low, trigger 11 = level */
+        ioapic_describe_gsi(sci, 0x000F);
+        kprintf("[ACPI] firmware described no override for the SCI — GSI %u "
+                "programmed level-triggered and active low, as the "
+                "specification requires\n", sci);
+    }
+
     irq_register_handler((uint8_t)sci, acpi_sci_handler);
     irqchip_enable_irq((uint8_t)sci);
-    debug_printf("[ACPI] SCI handler registered on GSI %u\n", sci);
+    kprintf("[ACPI] SCI on GSI %u\n", sci);
+
+    acpi_pm1_events_locate();
+    acpi_pm1_arm_power_button();
 }
 
 /* ACPI 6.5 §16.3.2: many real firmwares boot in PIC/SMI mode (SCI_EN=0).

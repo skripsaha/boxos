@@ -81,23 +81,17 @@ void ioapic_enable_irq(uint8_t gsi, uint8_t vector, uint8_t dest_lapic_id) {
         return;
     }
 
-    // Check for ISA override flags
     uint32_t redir_flags = IOAPIC_REDIR_DELMOD_FIXED | IOAPIC_REDIR_DESTMOD_PHYS;
 
-    // Apply Interrupt Source Override flags if this GSI has an ISO entry
-    // ISO table is indexed by ISA IRQ, so scan all entries to find one matching this GSI
-    for (int i = 0; i < ISO_TABLE_SIZE; i++) {
-        if (iso_table[i].active && iso_table[i].gsi == gsi) {
-            uint16_t flags = iso_table[i].flags;
-            // Polarity: bits 0-1 (00=bus default, 01=active high, 11=active low)
-            if ((flags & 0x03) == 0x03) {
-                redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
-            }
-            // Trigger: bits 2-3 (00=bus default, 01=edge, 11=level)
-            if ((flags & 0x0C) == 0x0C) {
-                redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
-            }
-            break;
+    uint16_t flags = 0;
+    if (ioapic_gsi_flags(gsi, &flags)) {
+        // Polarity: bits 0-1 (00=bus default, 01=active high, 11=active low)
+        if ((flags & 0x03) == 0x03) {
+            redir_flags |= IOAPIC_REDIR_POLARITY_LOW;
+        }
+        // Trigger: bits 2-3 (00=bus default, 01=edge, 11=level)
+        if ((flags & 0x0C) == 0x0C) {
+            redir_flags |= IOAPIC_REDIR_TRIGGER_LEVEL;
         }
     }
 
@@ -141,6 +135,63 @@ uint8_t ioapic_get_max_entries(void) {
 
 uintptr_t ioapic_get_base(void) {
     return ioapic_base_phys;
+}
+
+/*
+ * A line the firmware did not describe, described by whoever does know.
+ *
+ * The override table above answers for ISA interrupts and is indexed by ISA
+ * IRQ, because there are sixteen of those. Not every line that needs
+ * describing is one of them: the ACPI SCI is level-triggered and active low by
+ * specification rather than by bus default, and its GSI is whatever the FADT
+ * says — on some boards well past fifteen. Firmware usually supplies an
+ * override for it and usually does not have to.
+ *
+ * Firmware wins where it spoke: it knows its own board, and this is only for
+ * the lines it left unsaid.
+ */
+#define GSI_DESCRIBED_MAX 8
+
+typedef struct {
+    uint32_t gsi;
+    uint16_t flags;
+    bool     active;
+} ioapic_gsi_desc_t;
+
+static ioapic_gsi_desc_t gsi_desc_table[GSI_DESCRIBED_MAX];
+
+bool ioapic_gsi_flags(uint32_t gsi, uint16_t *out_flags) {
+    for (int i = 0; i < ISO_TABLE_SIZE; i++) {
+        if (iso_table[i].active && iso_table[i].gsi == gsi) {
+            if (out_flags) *out_flags = iso_table[i].flags;
+            return true;
+        }
+    }
+    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
+        if (gsi_desc_table[i].active && gsi_desc_table[i].gsi == gsi) {
+            if (out_flags) *out_flags = gsi_desc_table[i].flags;
+            return true;
+        }
+    }
+    return false;
+}
+
+void ioapic_describe_gsi(uint32_t gsi, uint16_t flags) {
+    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
+        if (gsi_desc_table[i].active && gsi_desc_table[i].gsi == gsi) {
+            gsi_desc_table[i].flags = flags;
+            return;
+        }
+    }
+    for (int i = 0; i < GSI_DESCRIBED_MAX; i++) {
+        if (!gsi_desc_table[i].active) {
+            gsi_desc_table[i].gsi    = gsi;
+            gsi_desc_table[i].flags  = flags;
+            gsi_desc_table[i].active = true;
+            return;
+        }
+    }
+    debug_printf("[IOAPIC] %[E]no room left to describe GSI %u%[D]\n", gsi);
 }
 
 void ioapic_register_iso(uint8_t isa_irq, uint32_t gsi, uint16_t flags) {
