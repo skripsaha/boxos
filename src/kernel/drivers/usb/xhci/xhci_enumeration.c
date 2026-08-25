@@ -912,11 +912,10 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
             .wIndex = iface,
             .wLength = 0
         };
+        slot->state = ENUM_STATE_WAIT_SET_PROTOCOL;
         if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
             xhci_slot_retire(ctrl, slot);
-            return;
         }
-        slot->state = ENUM_STATE_WAIT_SET_PROTOCOL;
         return;
     }
 
@@ -1176,6 +1175,26 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
     }
 }
 
+/*
+ * ‼ THE RULE THIS FUNCTION IS BUILT ON
+ *
+ * Say what is being waited for BEFORE doing the thing that ends the wait.
+ *
+ * Every step below ends by asking the bus or the controller for something and
+ * writing down which answer it is now waiting for. Those two must happen in
+ * that order — the note first, the request second. A request is answered by an
+ * event, an event is drained by whichever core reaches the ring first, and on
+ * a real machine that is routinely a different core from the one still walking
+ * through this function. If the request goes out first, the answer can arrive
+ * and be looked up against a slot whose note still names the previous step:
+ * there is nowhere to put it, it is dropped, and the device waits for an event
+ * that has already been and gone.
+ *
+ * This was learned once on the port reset and applied only there. It cost four
+ * devices on a live board, twice: three Configure Endpoint sites and all eight
+ * transfer sites had it the wrong way round. Under emulation the drain is very
+ * nearly always the same core that posted, so none of it was visible.
+ */
 void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t completion_code) {
     if (!ctrl) {
         return;
@@ -1308,13 +1327,12 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
              * bMaxPacketSize0, which is the field that decides whether the rest
              * of this conversation can even be held at the packet size the
              * endpoint context currently names. */
-            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8) < 0) {
-                debug_printf("[xHCI ENUM] Failed to post Get Device Descriptor\n");
-                xhci_slot_retire(ctrl, slot);
-                return;
-            }
-
             slot->state = ENUM_STATE_WAIT_GET_DESC_HEADER;
+            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8) < 0) {
+                kprintf("[xHCI %s] port %u: could not ask for the device "
+                        "descriptor\n", ctrl->name, slot->port_num);
+                xhci_slot_retire(ctrl, slot);
+            }
             break;
         }
 
@@ -1346,22 +1364,20 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 return;
             }
 
+            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
             if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
                 xhci_slot_retire(ctrl, slot);
-                return;
             }
-            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
             break;
         }
 
         case ENUM_STATE_WAIT_EVALUATE_CONTEXT: {
             enum_free_input_ctx(ctrl, slot);
 
+            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
             if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
                 xhci_slot_retire(ctrl, slot);
-                return;
             }
-            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
             break;
         }
 
@@ -1387,11 +1403,10 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
              * truncates every composite device — and a keyboard that also
              * carries media keys is a composite device, with its boot-keyboard
              * interface described past whatever the guess covered. */
+            slot->state = ENUM_STATE_WAIT_GET_CONFIG_HEADER;
             if (enum_get_descriptor(ctrl, slot, USB_DT_CONFIG, 9) < 0) {
                 xhci_slot_retire(ctrl, slot);
-                return;
             }
-            slot->state = ENUM_STATE_WAIT_GET_CONFIG_HEADER;
             break;
         }
 
@@ -1420,11 +1435,10 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
             }
             slot->config_total_len = total;
 
+            slot->state = ENUM_STATE_WAIT_GET_CONFIG_DESC;
             if (enum_get_descriptor(ctrl, slot, USB_DT_CONFIG, total) < 0) {
                 xhci_slot_retire(ctrl, slot);
-                return;
             }
-            slot->state = ENUM_STATE_WAIT_GET_CONFIG_DESC;
             break;
         }
 
@@ -1453,13 +1467,12 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 .wLength = 0
             };
 
-            if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
-                debug_printf("[xHCI ENUM] Failed to post Set Configuration\n");
-                xhci_slot_retire(ctrl, slot);
-                return;
-            }
-
             slot->state = ENUM_STATE_WAIT_SET_CONFIGURATION;
+            if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
+                kprintf("[xHCI %s] port %u: could not ask it to take its "
+                        "configuration\n", ctrl->name, slot->port_num);
+                xhci_slot_retire(ctrl, slot);
+            }
             break;
         }
 
@@ -1481,13 +1494,12 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
                 .wLength = 0
             };
 
-            if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
-                debug_printf("[xHCI ENUM] Failed to post Set Idle\n");
-                xhci_slot_retire(ctrl, slot);
-                return;
-            }
-
             slot->state = ENUM_STATE_WAIT_SET_IDLE;
+            if (xhci_control_transfer(ctrl, slot, &setup, 0, 0, false) < 0) {
+                kprintf("[xHCI %s] port %u: could not ask it to stop idling\n",
+                        ctrl->name, slot->port_num);
+                xhci_slot_retire(ctrl, slot);
+            }
             break;
         }
 
