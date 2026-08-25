@@ -893,7 +893,7 @@ static int HwUsbPortReset(const ManifestOp *op, Crate *crates, uint16_t crate_co
      * reset is in flight rather than holding a caller for the tens of
      * milliseconds the hardware takes. A port that needed no reset (a USB 3
      * link that trained itself) reports success without touching it. */
-    int rc = xhci_port_begin_reset(c, port);
+    int rc = xhci_port_begin_reset(c, port, NULL);
     return rc >= 0 ? OK : ERR_INTERNAL;
 }
 

@@ -121,15 +121,50 @@ struct xhci_device_slot {
      * rather than abandoned half-configured. */
     uint16_t config_total_len;
 
-    /* Where to carry on from once a stalled EP0 has been cleared. A device is
+    /* Where to carry on from once a halted EP0 has been cleared. A device is
      * allowed to refuse an optional request, and refusing it halts the pipe;
-     * this is the step that was being attempted when that happened. */
-    uint8_t  stall_resume;
+     * so does babbling at one, and so does a transaction the controller could
+     * not complete. This is the step that was being attempted when that
+     * happened. */
+    uint8_t  step_resume;
 
     /* How many times the control pipe has been cleared and the same step tried
-     * again. A device is entitled to stall; it is not entitled to stall for
-     * ever, and a slot retried without a bound is a port held hostage. */
-    uint8_t  stall_retry;
+     * again. A device is entitled to refuse once; it is not entitled to refuse
+     * for ever, and a slot retried without a bound is a port held hostage. */
+    uint8_t  step_retry;
+
+    /* Whether resuming means asking the step again or stepping over it. A
+     * device that declined an optional request is answered by moving on; one
+     * whose answer never arrived is answered by asking again, and the two go
+     * through the same clearing of the pipe. */
+    bool     step_reissue;
+
+    /*
+     * The control transfer in flight, and how much of it actually arrived.
+     *
+     * A control transfer is three transfer descriptors and can raise TWO
+     * events: one from a data stage that came up short, and one from the
+     * status stage that ends it. An answer therefore has to say which of the
+     * two it is, and the TRB it names is what says so.
+     *
+     * received starts equal to requested because that is what "no short packet
+     * was reported" means. Without this pair the state machine had no way at
+     * all to tell a descriptor that arrived from one that did not, and parsed
+     * whatever the previous read had left in the scratch page.
+     */
+    uint64_t ctl_data_trb;
+    uint64_t ctl_status_trb;
+    uint16_t ctl_requested;
+    uint16_t ctl_received;
+
+    /* What was done to this device's port before it was spoken to, and how
+     * long the reset took. A device answers the default address only in the
+     * Default state, and it enters the Default state only through a reset —
+     * so on a machine that can only be read by photographing its screen, this
+     * is the first thing a silent Address Device has to be checked against. */
+    uint8_t  reset_kind;            /* XHCI_PORT_RESET_* */
+    uint32_t reset_took_ms;
+
     uint8_t  interface_class;
     uint8_t  interface_subclass;
     uint8_t  interface_protocol;
@@ -295,31 +330,53 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
 bool xhci_enum_stall_is_tolerable(uint8_t state);
 
 /*
- * Where to resume so that a stalled step is ISSUED AGAIN rather than skipped.
+ * True when a failed control transfer is worth asking again on a clean pipe.
  *
- * The state machine's cases perform the request that leads to the next state,
- * so "do that step again" means "resume at the state that issued it". Returns
- * ENUM_STATE_IDLE for a step this driver will not retry.
+ * Three completion codes mean "this exchange did not happen", and all three
+ * leave the control pipe halted (xHCI 1.2 Section 4.10.2.1): the device
+ * refused, the device sent more than the endpoint was told to expect, or the
+ * controller could not complete the transaction after its own CErr retries.
+ * None of them is a statement about the device being unusable — they are what
+ * a bus that was disturbed looks like from the host — and every USB host asks
+ * again. This driver used to ask again only after a refusal, and threw the
+ * device away for the other two.
  */
-uint8_t xhci_enum_stall_retry_from(uint8_t state);
+bool xhci_enum_fault_is_retryable(uint8_t completion_code);
+
+/*
+ * True for a step that is a control transfer and can therefore simply be made
+ * again on a cleared pipe.
+ *
+ * ‼ What this replaced was a table of "the state that issued this step", which
+ * the recovery then resumed at. That is a different thing: every case of this
+ * state machine both checks the previous answer and issues the next request,
+ * so resuming at one re-checks a scratch page that now holds a different
+ * descriptor — and two of that table's five entries could therefore only ever
+ * end in the slot being released. Asking again is the request alone.
+ */
+bool xhci_enum_step_can_be_asked_again(uint8_t state);
 
 /* What a slot is waiting for, in words rather than a number. */
 const char* xhci_enum_state_name(uint8_t state);
 
 /* How many times a step may be retried before the device is let go. */
-#define XHCI_STALL_RETRIES 3
+#define XHCI_STEP_RETRIES 3
 
 /* How many times a root port is tried again after a device on it failed to
  * come up. The first attempt is not counted, so this is three retries after
  * the original try. */
 #define XHCI_ENUM_ATTEMPTS 3
 
-/* Clear a halted EP0 and resume enumeration from where it stalled. */
-/* Clear a halted control pipe and carry on from `resume_at` — which is the
- * stalled state itself to step over the request, or the state that issued it
- * to make the request again. */
+/*
+ * Clear a halted control pipe and carry on at `resume_at`.
+ *
+ * ask_again false: the state machine runs that state as if its answer had
+ * arrived, which steps over the request that failed — the right answer to a
+ * device declining something optional.
+ * ask_again true: the request that state is waiting for is simply made again.
+ */
 void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
-                           uint8_t resume_at);
+                           uint8_t resume_at, bool ask_again);
 xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_id);
 xhci_device_slot_t* xhci_get_device_slot_by_port(xhci_controller_t* ctrl, uint8_t port);
 

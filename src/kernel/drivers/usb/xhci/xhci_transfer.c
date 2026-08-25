@@ -129,6 +129,15 @@ int xhci_control_transfer_sync(xhci_controller_t* ctrl, xhci_device_slot_t* slot
         xhci_ep_recover(ctrl, slot, 1);
         xhci_command_wait_idle(ctrl, timeout_ms);
     }
+
+    /* A device that answered with less than was asked for says so, rather than
+     * saying Success and leaving the caller to decide from the contents of a
+     * buffer whether the contents are its own. Every caller here already
+     * expects the answer; until the data stage carried Interrupt On Short
+     * Packet there was nothing that could give it. */
+    if (code == TRB_COMPLETION_SUCCESS && slot->ctl_received < slot->ctl_requested) {
+        return TRB_COMPLETION_SHORT_PKT;
+    }
     return code;
 }
 
@@ -171,11 +180,23 @@ void xhci_free_ep0_ring(xhci_device_slot_t* slot) {
  * raised it. Asking a device for more descriptor than it has is not an
  * unusual thing to do; it is how you find out how much it has.
  *
- * So: no Chain anywhere, Interrupt On Completion on the Status Stage alone,
- * and therefore exactly one Transfer Event per control transfer. Interrupt On
- * Short Packet is deliberately not set — it would add a second event per short
- * transfer for a length this driver does not need, because every descriptor it
- * reads states its own.
+ * So: no Chain anywhere, and Interrupt On Completion on the Status Stage.
+ *
+ * ‼ Interrupt On Short Packet IS set on the Data Stage, and it used to not be.
+ * The reasoning for leaving it off was that "every descriptor states its own
+ * length" — which is true of a descriptor that arrived, and equally true of the
+ * one still lying in the scratch page from the read before it. Without ISP a
+ * data stage that comes up short raises no event at all: the only event is the
+ * status stage's, and a status stage moves zero bytes, so its length field says
+ * nothing about the data. The state machine therefore had NO WAY, by
+ * construction, to tell a descriptor it had read from one it had not, and
+ * parsed whatever was there. Nothing under emulation ever answers a descriptor
+ * read short, which is why it looked correct for as long as it was only ever
+ * run against one.
+ *
+ * The price is that a short control transfer now raises two events, so the
+ * TRBs of both stages are written down and an answer says which one it is
+ * answering.
  */
 int xhci_control_transfer(xhci_controller_t* ctrl,
                           xhci_device_slot_t* slot,
@@ -188,6 +209,14 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
     }
 
     xhci_ring_t* ring = slot->ep0_ring;
+
+    /* What is being asked for, before it is asked. "Received" starts at the
+     * full length because that is exactly what "no short packet was reported"
+     * will mean when the status stage arrives on its own. */
+    slot->ctl_data_trb   = 0;
+    slot->ctl_status_trb = 0;
+    slot->ctl_requested  = data_length;
+    slot->ctl_received   = data_length;
 
     /* Transfer Type in the Setup Stage: 0 = no data, 2 = OUT data, 3 = IN. */
     uint32_t trt = 0;
@@ -208,12 +237,14 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
         xhci_trb_t data_trb = {0};
         data_trb.parameter = data_buffer_phys;
         data_trb.status = data_length;
-        data_trb.control = TRB_SET_TYPE(TRB_TYPE_DATA_STAGE) |
+        data_trb.control = TRB_SET_TYPE(TRB_TYPE_DATA_STAGE) | TRB_ISP |
                            (data_in ? (1u << 16) : 0);
-        if (xhci_ring_enqueue(ring, &data_trb) == 0) {
+        uint64_t data_phys = xhci_ring_enqueue(ring, &data_trb);
+        if (data_phys == 0) {
             debug_printf("[xHCI TRANSFER] EP0 ring full posting Data Stage\n");
             return -1;
         }
+        slot->ctl_data_trb = data_phys;
     }
 
     /* The Status Stage runs opposite to the data: an IN data stage is
@@ -223,10 +254,12 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
     xhci_trb_t status_trb = {0};
     status_trb.control = TRB_SET_TYPE(TRB_TYPE_STATUS_STAGE) | TRB_IOC |
                          (status_in ? (1u << 16) : 0);
-    if (xhci_ring_enqueue(ring, &status_trb) == 0) {
+    uint64_t status_phys = xhci_ring_enqueue(ring, &status_trb);
+    if (status_phys == 0) {
         debug_printf("[xHCI TRANSFER] EP0 ring full posting Status Stage\n");
         return -1;
     }
+    slot->ctl_status_trb = status_phys;
 
     __sync_synchronize();
     ctrl->doorbells->doorbells[slot->slot_id].doorbell = 1;
@@ -270,6 +303,26 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
      * endpoint somehow reported the same number cannot divert control
      * transfers into another path. */
     if (endpoint_id == 1) {
+        /*
+         * How much of the data stage actually arrived.
+         *
+         * A control transfer whose data stage comes up short raises this event
+         * from the Data Stage TRB, and the status stage still raises its own
+         * afterwards. So this one records the length and gets out of the way —
+         * the transfer is not over, and completing anything on the strength of
+         * it would end the wait one event early.
+         */
+        if (code == TRB_COMPLETION_SHORT_PKT && trb_phys != 0 &&
+            trb_phys == slot->ctl_data_trb) {
+            slot->ctl_received = (residual <= slot->ctl_requested)
+                               ? (uint16_t)(slot->ctl_requested - residual)
+                               : 0;
+            return;
+        }
+
+        /* Anything else that names the data stage is that stage failing, and
+         * the status stage will not run. It is the answer. */
+
         /* Somebody asked this question themselves and is waiting for it. */
         if (slot->endpoints &&
             slot->endpoints[1].xfer_state == XHCI_XFER_IN_FLIGHT) {
@@ -278,32 +331,41 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
         }
 
         if (!ok) {
-            if (code == TRB_COMPLETION_STALL) {
-                /* An optional class request the device does not implement.
-                 * Clear the pipe and step over it — that is the answer. */
-                if (xhci_enum_stall_is_tolerable(slot->state)) {
-                    kprintf("[xHCI %s] port %u: device declined an optional "
-                            "request — clearing the control pipe and carrying "
-                            "on\n", ctrl->name, slot->port_num);
-                    xhci_enum_recover_ep0(ctrl, slot, slot->state);
-                    return;
-                }
+            /* An optional class request the device does not implement. Clear
+             * the pipe and step over it — that is the answer.
+             *
+             * Also where a step this driver could do without ends up once it
+             * has been asked for as many times as it is going to be: a
+             * keyboard that will not answer Set Idle is still a keyboard, and
+             * throwing it away over a request it never had to implement is
+             * the fault this whole branch exists to avoid. */
+            if (xhci_enum_stall_is_tolerable(slot->state) &&
+                (code == TRB_COMPLETION_STALL ||
+                 slot->step_retry >= XHCI_STEP_RETRIES)) {
+                kprintf("[xHCI %s] port %u: %s — %s; it is optional, carrying "
+                        "on without it\n", ctrl->name, slot->port_num,
+                        xhci_enum_state_name(slot->state),
+                        xhci_completion_name(code));
+                xhci_enum_recover_ep0(ctrl, slot, slot->state, false);
+                return;
+            }
 
-                /* A step enumeration cannot do without. Clear the pipe and ask
-                 * again: a device whose bus was disturbed while it was
-                 * answering refuses once and answers the second time. */
-                uint8_t again = xhci_enum_stall_retry_from(slot->state);
-                if (again != ENUM_STATE_IDLE &&
-                    slot->stall_retry < XHCI_STALL_RETRIES) {
-                    slot->stall_retry++;
-                    kprintf("[xHCI %s] port %u: %s was refused — clearing the "
-                            "control pipe and asking again (attempt %u of "
-                            "%u)\n", ctrl->name, slot->port_num,
-                            xhci_enum_state_name(slot->state),
-                            slot->stall_retry, XHCI_STALL_RETRIES);
-                    xhci_enum_recover_ep0(ctrl, slot, again);
-                    return;
-                }
+            /* A step enumeration cannot do without, and a fault that leaves
+             * the pipe halted rather than the device broken. Clear the pipe
+             * and ask again: a device whose bus was disturbed while it was
+             * answering fails once and answers the second time. */
+            if (xhci_enum_fault_is_retryable(code) &&
+                xhci_enum_step_can_be_asked_again(slot->state) &&
+                slot->step_retry < XHCI_STEP_RETRIES) {
+                slot->step_retry++;
+                kprintf("[xHCI %s] port %u: %s — %s; clearing the control "
+                        "pipe and asking again (attempt %u of %u)\n",
+                        ctrl->name, slot->port_num,
+                        xhci_enum_state_name(slot->state),
+                        xhci_completion_name(code),
+                        slot->step_retry, XHCI_STEP_RETRIES);
+                xhci_enum_recover_ep0(ctrl, slot, slot->state, true);
+                return;
             }
 
             kprintf("[xHCI %s] port %u: %s failed — %s (code %u); releasing "
