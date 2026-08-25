@@ -201,6 +201,17 @@ typedef struct {
     bool     event_pressure_said;
 
     /*
+     * The longest a single drain has ever held the event lock, in microseconds.
+     *
+     * This is not a performance curiosity. The drain runs from the interrupt
+     * handler and holds a spinlock, and a held spinlock on this kernel keeps
+     * interrupts off for as long as it is held (klib.h) — so this number IS the
+     * worst interrupt latency this driver imposes on the core it runs on.
+     * Anything that waits inside the drain shows up here and nowhere else.
+     */
+    uint32_t drain_longest_us;
+
+    /*
      * The one device this controller is bringing up right now, or NULL.
      *
      * Enumeration is serialised per controller because the bus requires it:

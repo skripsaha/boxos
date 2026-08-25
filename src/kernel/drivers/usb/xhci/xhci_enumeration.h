@@ -33,6 +33,24 @@ typedef enum {
      */
     ENUM_STATE_QUEUED,
     ENUM_STATE_WAIT_PORT_RESET,
+
+    /*
+     * The reset is over and the device is coming up in the Default state.
+     *
+     * USB 2.0 §7.1.7.5 gives it TRSTRCY — ten milliseconds — before the host
+     * may address it, and this driver used to spend them spinning. Where it
+     * spun is the problem: the port-status change arrives on the event ring,
+     * so that code runs inside the drain, which holds the ring lock, and this
+     * kernel's spinlocks keep interrupts disabled for as long as they are held
+     * (klib.h). Ten milliseconds per device with no interrupt served on the
+     * core, inside the interrupt handler that was serving one.
+     *
+     * The device is owed the time, not the core. So the wait became a deadline
+     * the slot carries, and the pump — which already runs from both the tick
+     * and the settle loop — starts Enable Slot when the clock says it may.
+     */
+    ENUM_STATE_WAIT_RESET_RECOVERY,
+
     ENUM_STATE_WAIT_ENABLE_SLOT,
     ENUM_STATE_WAIT_ADDRESS_DEVICE,
     ENUM_STATE_WAIT_GET_DESC_HEADER,
@@ -164,6 +182,10 @@ struct xhci_device_slot {
      * is the first thing a silent Address Device has to be checked against. */
     uint8_t  reset_kind;            /* XHCI_PORT_RESET_* */
     uint32_t reset_took_ms;
+
+    /* When the recovery the bus owes this device is up, and it may be
+     * addressed. Only meaningful in ENUM_STATE_WAIT_RESET_RECOVERY. */
+    uint64_t recovery_due;
 
     uint8_t  interface_class;
     uint8_t  interface_subclass;

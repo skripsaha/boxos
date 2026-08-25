@@ -299,10 +299,30 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
     }
 
     struct xhci_device_slot* next = NULL;
+    struct xhci_device_slot* recovered = NULL;
 
     spin_lock(&device_slots_lock);
 
     struct xhci_device_slot* active = ctrl->enum_active;
+
+    /* A device whose port reset is over and whose recovery time is up. Claimed
+     * under the lock so that two cores arriving together cannot both start
+     * Enable Slot for it. */
+    if (active &&
+        __atomic_load_n(&active->state, __ATOMIC_ACQUIRE) ==
+            ENUM_STATE_WAIT_RESET_RECOVERY &&
+        (int64_t)(rdtsc() - active->recovery_due) >= 0) {
+        __atomic_store_n(&active->state, (uint8_t)ENUM_STATE_CLAIMING,
+                         __ATOMIC_RELEASE);
+        recovered = active;
+    }
+
+    if (recovered) {
+        spin_unlock(&device_slots_lock);
+        enum_begin_slot(ctrl, recovered);
+        return;
+    }
+
     if (active) {
         uint8_t state = __atomic_load_n(&active->state, __ATOMIC_ACQUIRE);
         bool still_going = (state != ENUM_STATE_IDLE &&
@@ -689,30 +709,9 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
         return;
     }
 
-    /*
-     * The recovery the bus is owed, and this driver never paid.
-     *
-     * USB 2.0 §7.1.7.5: after a port reset ends, a device is given TRSTRCY —
-     * 10 ms — before it may be addressed. It spends that time coming up in the
-     * Default state, and it is not obliged to answer anything until it has.
-     * Addressing it early is not a slow device; it is a device that does not
-     * respond to the first thing the host says to it.
-     *
-     * Nothing in an emulator needs this, because an emulated device is ready
-     * inside the register write that reset it — which is why a driver that
-     * went straight from "reset finished" to Enable Slot looked correct for as
-     * long as it was only ever run against one.
-     */
-    /* How long the reset itself took, measured before the recovery is paid so
+    /* How long the reset itself took, measured before the recovery is owed so
      * that the number is the hardware's and not this driver's. */
     slot->reset_took_ms = (uint32_t)cpu_tsc_to_ms(rdtsc() - slot->timestamp_started);
-
-    {
-        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_RESET_RECOVERY_MS);
-        while ((int64_t)(rdtsc() - deadline) < 0) {
-            cpu_pause();
-        }
-    }
 
     /*
      * What the port looks like at the one moment that decides everything after
@@ -729,7 +728,32 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
             slot->reset_took_ms, portsc, XHCI_PORTSC_PLS(portsc),
             (unsigned)XHCI_PORTSC_SPEED(portsc));
 
-    enum_begin_slot(ctrl, slot);
+    /*
+     * The recovery the bus owes the DEVICE, which is not the same as time this
+     * core has to spend.
+     *
+     * USB 2.0 §7.1.7.5: after a port reset ends, a device is given TRSTRCY —
+     * ten milliseconds — before it may be addressed. It spends them coming up
+     * in the Default state and is not obliged to answer anything until it has.
+     * Addressing it early is not a slow device; it is a device that does not
+     * respond to the first thing the host says to it.
+     *
+     * ‼ This used to be spent spinning, right here. And right here is inside
+     * the event drain — the port-status change arrives on the event ring — so
+     * it held the ring lock, and a held spinlock on this kernel keeps
+     * interrupts off for as long as it is held (klib.h). Ten milliseconds per
+     * device, on the core, inside the interrupt handler that was serving one.
+     * Measured by putting it back: the longest drain went from 4471 us, all of
+     * which is the emulator's cost of touching a device register, to 12444.
+     *
+     * So the device gets its ten milliseconds and the core gets none of them:
+     * the deadline goes on the slot, and the pump — which already runs from
+     * both the timer tick and the settle loop — starts Enable Slot when the
+     * clock says it may.
+     */
+    slot->recovery_due = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_RESET_RECOVERY_MS);
+    __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_WAIT_RESET_RECOVERY,
+                     __ATOMIC_RELEASE);
 }
 
 /* The second half of a departure: what is left of the device, taken apart.
@@ -1183,6 +1207,7 @@ const char* xhci_enum_state_name(uint8_t state) {
         case ENUM_STATE_CLAIMING:               return "claiming a slot";
         case ENUM_STATE_QUEUED:                 return "waiting its turn on the bus";
         case ENUM_STATE_WAIT_PORT_RESET:        return "waiting for the port reset";
+        case ENUM_STATE_WAIT_RESET_RECOVERY:    return "letting the device come up after its reset";
         case ENUM_STATE_WAIT_ENABLE_SLOT:       return "waiting for Enable Slot";
         case ENUM_STATE_WAIT_ADDRESS_DEVICE:    return "waiting for Address Device";
         case ENUM_STATE_WAIT_GET_DESC_HEADER:   return "reading the first 8 descriptor bytes";
