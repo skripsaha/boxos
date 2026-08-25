@@ -335,6 +335,11 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
         return;
     }
 
+    /* That TRB and everything queued ahead of it are done with — the command
+     * ring is executed strictly in order (Section 4.6.1), which is the same
+     * property that makes one unanswered command block the rest of it. */
+    xhci_ring_reclaim_to(&ctrl->command_ring, trb_phys);
+
     spin_lock(&ctrl->pending_lock);
     xhci_pending_cmd_t entry = ctrl->pending_cmds[index];
     if (entry.state != XHCI_CMD_POSTED) {
@@ -583,6 +588,7 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
     ctrl->cmd_nudges      = 0;
 
     ctrl->command_ring.enqueue_idx = 0;
+    ctrl->command_ring.dequeue_idx = 0;
     ctrl->command_ring.cycle_state = 1;
     if (ctrl->command_ring.trbs) {
         memset(ctrl->command_ring.trbs, 0,
