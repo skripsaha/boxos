@@ -2,6 +2,7 @@
 #define BOARDROOM_H
 
 #include "ktypes.h"
+#include "error.h"
 
 /*
  * The Boardroom — where every medium this machine can keep a filesystem on has
@@ -96,6 +97,52 @@ uint8_t BoardroomSeatIndex(uint8_t seat);
  * caller has to know what any particular controller's limit is. */
 int BoardroomRead (uint8_t seat, uint64_t lba, uint32_t count, void* buffer);
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer);
+
+/*
+ * A read for a caller that is not going to stand and watch.
+ *
+ * The room is where "which controller is this" is answered, and this is the
+ * same question in the one place it is asked. Before it, the storage deck asked
+ * "is there an AHCI disk under the volume?" — because when it was written a
+ * volume could only live on one, and there was nothing else to ask. A machine
+ * that boots from a flash drive answers no, and every block of every file it
+ * reads is read by a core standing over the transfer, while the same machine
+ * booting from SATA parks the caller and gets on with something else.
+ *
+ * `cb` runs on a K-Core once the medium has answered, and is shaped the way the
+ * SATA path already shaped it — `index` names the port or the unit, `slot` is
+ * the AHCI command slot and is zero for a seat that has no such thing — so the
+ * same function can be handed to either kind of seat with nothing standing in
+ * between to translate.
+ *
+ * Sectors land straight in `dma_phys`. Returns OK when the read is on its way
+ * and the callback WILL run; on any other return it will not, and the caller
+ * still owns everything it passed in.
+ */
+typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
+                                 error_t status, void* ctx);
+
+error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
+                           void* dma_phys, BoardroomAsyncCb cb, void* ctx);
+
+/* Whether this seat can take the call above at all. A seat that cannot is not
+ * a broken seat — it is one whose caller has to stay and wait. */
+bool BoardroomSeatCanReadAsync(uint8_t seat);
+
+/*
+ * Prove, on this machine, that a read nobody stands over brings back the same
+ * bytes as one somebody does.
+ *
+ * A boot self-test rather than a unit test, because the thing being tested is a
+ * conversation with the hardware in front of it: whether the completion reaches
+ * a K-Core, whether the sectors land where they were asked to, and whether the
+ * bytes are the right ones. None of that can be established anywhere but on the
+ * machine, and the machine this matters most on is read by photographing its
+ * screen — so it says PASS or FAIL in one line and says why.
+ *
+ * No-op, silently, for a seat that has no asynchronous read to test.
+ */
+void BoardroomAsyncSelfTest(uint8_t seat);
 
 /* Push the medium's own write cache out. A write that has completed is a write
  * the device has accepted, not necessarily one it has kept. */

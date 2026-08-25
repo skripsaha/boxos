@@ -721,6 +721,11 @@ void kernel_main(void)
     debug_printf("[INIT] Storage Deck & TagFS...\n");
     storage_deck_init();
 
+    /* And whether the medium the volume landed on can be read without a core
+     * standing over the transfer — asked here, where the volume is known and
+     * the answer is still cheap to act on. */
+    BoardroomAsyncSelfTest(tagfs_get_seat());
+
     debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
     error_t storage_reg_err = StorageDeckRegister();
     if (storage_reg_err != OK)

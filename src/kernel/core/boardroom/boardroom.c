@@ -4,11 +4,19 @@
 #include "klib.h"
 #include "ahci.h"
 #include "ahci_sync.h"
+#include "ahci_async.h"
 #include "ata.h"
 #include "xhci.h"
 #include "xhci_enumeration.h"
 #include "xhci_msd.h"
 #include "xhci_hub.h"
+#include "xhci_interrupt.h"
+#include "storage_completion.h"
+#include "amp.h"
+#include "pmm.h"
+#include "vmm.h"
+#include "cpu_calibrate.h"
+#include "atomics.h"
 
 /* A seat is one medium. The list is built at init and grows when media arrive;
  * nothing here is sized in advance, because the number of disks a machine has
@@ -30,6 +38,10 @@ static bool       g_initialised = false;
  * take a 16-bit count, and the USB path splits internally anyway; keeping the
  * split here means every seat behaves the same to a caller. */
 #define BOARD_MAX_RUN 64u
+
+/* Long enough that a slow stick answering one block is not called broken,
+ * short enough that a machine with a dead one still boots. */
+#define BOARD_ASYNC_TEST_MS 5000u
 
 static BoardSeat* seat_find(uint8_t number)
 {
@@ -358,6 +370,143 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         count -= run;
     }
     return 0;
+}
+
+bool BoardroomSeatCanReadAsync(uint8_t seat)
+{
+    BoardSeat* s = seat_find(seat);
+    if (!s) {
+        return false;
+    }
+
+    switch (s->kind) {
+    case BOARD_AHCI: return ahci_is_initialized();
+    case BOARD_USB:  return xhci_msd_unit_can_read_async(s->index);
+    /* The legacy channels are programmed I/O with the processor doing the
+     * moving. There is no completion to be told about, so there is nothing
+     * here to be asynchronous about — and saying so is better than pretending
+     * otherwise and quietly doing it synchronously underneath. */
+    case BOARD_ATA:
+    default:         return false;
+    }
+}
+
+error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
+                           void* dma_phys, BoardroomAsyncCb cb, void* ctx)
+{
+    BoardSeat* s = seat_find(seat);
+    if (!s || !dma_phys || count == 0) {
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    switch (s->kind) {
+    case BOARD_AHCI: {
+        uint8_t slot;
+        return ahci_submit_read_async(s->index, lba, (uint16_t)count, dma_phys,
+                                      cb, ctx, &slot);
+    }
+    case BOARD_USB:
+        return xhci_msd_read_async(s->index, lba, count, dma_phys, cb, ctx);
+    default:
+        return ERR_UNSUPPORTED;
+    }
+}
+
+/* ── the self-test ──────────────────────────────────────────────────────── */
+
+typedef struct {
+    volatile uint8_t done;
+    error_t          status;
+} BoardAsyncProbe;
+
+static void board_async_probe_done(uint8_t index, uint8_t slot,
+                                   error_t status, void* ctx)
+{
+    (void)index; (void)slot;
+    BoardAsyncProbe* p = (BoardAsyncProbe*)ctx;
+    p->status = status;
+    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
+}
+
+void BoardroomAsyncSelfTest(uint8_t seat)
+{
+    if (!BoardroomSeatCanReadAsync(seat)) {
+        return;
+    }
+
+    /* One filesystem block, which is the unit everything above reads in, and
+     * the only shape the asynchronous path accepts. Sector 0 because every
+     * medium has one and its contents are not this test's business — the test
+     * is whether two ways of asking give the same answer. */
+    const uint32_t sectors = 8;
+    const uint32_t bytes   = sectors * BOARDROOM_SECTOR_BYTES;
+
+    void* dma = pmm_alloc_zero(1, PHYS_TAG_DMA32);
+    uint8_t* expect = (uint8_t*)kmalloc(bytes);
+    if (!dma || !expect) {
+        if (dma)    pmm_free(dma, 1);
+        if (expect) kfree(expect);
+        kprintf("[USB ASYNC TEST] no memory to run it — not run\n");
+        return;
+    }
+    uint8_t* got = (uint8_t*)vmm_phys_to_virt((uintptr_t)dma);
+
+    if (BoardroomRead(seat, 0, sectors, expect) != 0) {
+        kprintf("[USB ASYNC TEST] the ordinary read failed, so there is "
+                "nothing to compare against — not run\n");
+        pmm_free(dma, 1); kfree(expect);
+        return;
+    }
+
+    BoardAsyncProbe probe = { .done = 0, .status = OK };
+    error_t sub = BoardroomReadAsync(seat, 0, sectors, dma,
+                                     board_async_probe_done, &probe);
+    if (sub != OK) {
+        kprintf("[USB ASYNC TEST] FAILED: the seat would not take the read "
+                "(error %d)\n", (int)sub);
+        pmm_free(dma, 1); kfree(expect);
+        return;
+    }
+
+    /*
+     * Turn the handle. The guide loop that would normally do it does not start
+     * until the end of boot, and this runs before that — so the completion is
+     * pumped here, on this core, which is the one it was posted to.
+     */
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(BOARD_ASYNC_TEST_MS);
+    while (!__atomic_load_n(&probe.done, __ATOMIC_ACQUIRE)) {
+        xhci_process_events();
+        StorageCompletionPump(amp_get_core_index());
+        if ((int64_t)(rdtsc() - deadline) >= 0) {
+            kprintf("[USB ASYNC TEST] FAILED: no answer in %u ms — the read was "
+                    "accepted and its completion never arrived\n",
+                    BOARD_ASYNC_TEST_MS);
+            /* The buffers are deliberately NOT freed: the transfer was
+             * accepted, so the controller may still write into that page. A
+             * leaked page is a smaller fault than a device writing into one
+             * somebody else has been given. */
+            kfree(expect);
+            return;
+        }
+        cpu_pause();
+    }
+
+    if (probe.status != OK) {
+        kprintf("[USB ASYNC TEST] FAILED: the medium refused the read "
+                "(error %d)\n", (int)probe.status);
+    } else if (memcmp(got, expect, bytes) != 0) {
+        uint32_t first = 0;
+        while (first < bytes && got[first] == expect[first]) first++;
+        kprintf("[USB ASYNC TEST] FAILED: the two reads disagree, first at "
+                "byte %u (0x%02x, expected 0x%02x)\n",
+                first, got[first], expect[first]);
+    } else {
+        kprintf("[USB ASYNC TEST] PASSED: %u bytes read without anybody "
+                "standing over it, identical to the ordinary read\n", bytes);
+    }
+
+    pmm_free(dma, 1);
+    kfree(expect);
 }
 
 int BoardroomFlush(uint8_t seat)

@@ -2,6 +2,7 @@
 #define XHCI_MSD_H
 
 #include "ktypes.h"
+#include "error.h"
 #include "xhci.h"
 
 /*
@@ -46,6 +47,51 @@ const char* xhci_msd_unit_name(uint8_t unit);
  * Returns 0 on success. */
 int xhci_msd_read (uint8_t unit, uint64_t lba, uint32_t count, void* buffer);
 int xhci_msd_write(uint8_t unit, uint64_t lba, uint32_t count, const void* buffer);
+
+/*
+ * A read for a caller that is not going to stand and watch.
+ *
+ * The sectors land straight in `dma_phys` — no bounce, because the whole point
+ * is that nobody is here to copy them out afterwards — and `cb` is told when
+ * the device has answered. It runs on a K-Core, out of the guide loop, so it
+ * may take locks, free memory and wake whoever was waiting.
+ *
+ * The callback is shaped exactly like the SATA one, so that the Boardroom can
+ * hand the same function to either kind of seat without an adapter standing in
+ * between: `index` is the USB unit, `slot` is meaningless here and is zero.
+ *
+ * The request must cover whole device blocks and start on one. Everything
+ * BoxOS reads asynchronously is a filesystem block, which does; a request that
+ * does not is REFUSED rather than quietly widened, because widening it would
+ * mean a bounce buffer and a copy, and that is the sync path's job.
+ *
+ * Returns OK when the command is on its way (or queued behind one on the same
+ * device), and the callback WILL run. On any other return it will not.
+ */
+typedef void (*XhciMsdAsyncCb)(uint8_t index, uint8_t slot,
+                               error_t status, void* ctx);
+
+error_t xhci_msd_read_async(uint8_t unit, uint64_t lba, uint32_t count,
+                            void* dma_phys, XhciMsdAsyncCb cb, void* ctx);
+
+/* True when this unit can take the call above — it exists, it is ready, and
+ * the geometry of a filesystem block suits it. */
+bool xhci_msd_unit_can_read_async(uint8_t unit);
+
+/*
+ * Look over the asynchronous reads in flight, and give up on one that has
+ * stopped being answered.
+ *
+ * A read somebody is standing over carries its own deadline, in the loop that
+ * is standing there. One nobody is standing over has nobody to carry it — and
+ * a device that goes quiet mid-command would otherwise hold its turn for ever,
+ * which is not one lost read but every read after it on that device. Measured
+ * by mutation: with the completion suppressed, the machine did not reach the
+ * shell at all.
+ *
+ * Called from the tick, beside this driver's other watchdogs.
+ */
+void xhci_msd_watchdog(void);
 
 /* Push the device's own write cache to the medium. A write that has completed
  * is a write the device has accepted, not necessarily one it has kept. */
