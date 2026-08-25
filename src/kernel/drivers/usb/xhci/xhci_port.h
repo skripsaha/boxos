@@ -23,6 +23,11 @@
  * costs a bounded amount of boot rather than all of it. */
 #define XHCI_PORT_SURVEY_MS 1200
 
+/* TRSTRCY — what a device is owed between the end of its port reset and the
+ * first thing the host says to it (USB 2.0 §7.1.7.5). Ten milliseconds, spent
+ * by the device coming up in the Default state. */
+#define XHCI_PORT_RESET_RECOVERY_MS 10
+
 uint32_t xhci_get_port_status(xhci_controller_t* ctrl, uint8_t port);
 bool     xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port);
 uint8_t  xhci_get_port_speed(xhci_controller_t* ctrl, uint8_t port);
