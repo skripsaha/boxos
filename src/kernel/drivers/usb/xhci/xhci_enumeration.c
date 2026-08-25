@@ -1073,6 +1073,19 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     for (;;) {
         xhci_process_events();
 
+        /*
+         * The watchdogs run from here as well as from the timer tick.
+         *
+         * This is reached during boot, and boot is exactly the stretch where
+         * the tick may not be running — so a device that stops answering would
+         * hold this loop for its whole budget with nothing to end the wait, and
+         * the two facilities written to say why it stopped would never once
+         * have run at the moment they were needed. They are idempotent and
+         * cost a walk of two tables when there is nothing to find.
+         */
+        xhci_check_command_timeouts(ctrl);
+        xhci_enum_watchdog(ctrl);
+
         /* This is a context that may wait, so anything that departed while the
          * bus was settling gets taken down here rather than waiting for a core
          * to go idle — which during boot may be a while. */
