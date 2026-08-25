@@ -344,6 +344,7 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
 
     xhci_ring_t* event_ring = &ctrl->event_ring;
     xhci_interrupter_regs_t* intr0 = &ctrl->runtime_regs->interrupters[0];
+    uint32_t drained = 0;
 
 drain_again:
     while (1) {
@@ -363,6 +364,43 @@ drain_again:
         if (event_ring->dequeue_idx >= event_ring->num_trbs) {
             event_ring->dequeue_idx = 0;
             event_ring->cycle_state ^= 1;
+        }
+
+        /*
+         * The one completion code that is not about a transfer at all.
+         *
+         * Event Ring Full says the controller had something to tell software
+         * and no room to write it: whatever that was is gone, and whoever was
+         * waiting for it will wait until a watchdog gives up. It is the only
+         * failure in this driver that is invisible by construction — the event
+         * that would have reported it is the event that could not be posted —
+         * so it is said out loud the moment the controller manages to mention
+         * it, and never folded into the per-transfer handling below.
+         */
+        if (((event.status >> 24) & 0xFF) == TRB_COMPLETION_EVENT_RING_FULL) {
+            kprintf("[xHCI %s] the event ring was full — the controller had "
+                    "something to say and nowhere to write it, and that "
+                    "answer is lost (ring of %u, dequeue at %u)\n",
+                    ctrl->name, event_ring->num_trbs, event_ring->dequeue_idx);
+            xhci_hold_screen();
+        }
+
+        /*
+         * Tell the controller how far software has got, DURING the drain and
+         * not only at the end of it.
+         *
+         * xHCI 1.2 Section 4.9.4: the ring is full when the controller's
+         * enqueue position runs into the dequeue pointer software published,
+         * and software publishes that pointer here. Doing it once, after the
+         * loop, means a burst longer than the ring meets a controller that
+         * still believes software has read nothing — the ring fills, and the
+         * events at the end of the burst are the ones that never get written.
+         * Costs one register write per batch of events actually handled.
+         */
+        if (++drained % XHCI_ERDP_BATCH == 0) {
+            intr0->erdp = (event_ring->trbs_phys +
+                           event_ring->dequeue_idx * sizeof(xhci_trb_t)) |
+                          XHCI_ERDP_EHB;
         }
 
         switch (trb_type) {
@@ -408,6 +446,26 @@ drain_again:
     if ((event_ring->trbs[event_ring->dequeue_idx].control & TRB_C) ==
         event_ring->cycle_state) {
         goto drain_again;
+    }
+
+    /*
+     * How far behind the controller software was allowed to fall, said once.
+     *
+     * A ring that has been half full has been one burst of the same size away
+     * from losing events, and losing an event is the one failure here that
+     * reports itself as silence. Whether 256 entries is enough for a given
+     * board is not something to decide by argument — this is the number that
+     * settles it, and it costs a comparison per drain.
+     */
+    if (drained > ctrl->event_high_water) {
+        ctrl->event_high_water = drained;
+        if (!ctrl->event_pressure_said && drained * 2 > event_ring->num_trbs) {
+            ctrl->event_pressure_said = true;
+            kprintf("[xHCI %s] one drain handled %u events of a %u-entry ring "
+                    "— the ring is closer to full than it should ever be\n",
+                    ctrl->name, drained, event_ring->num_trbs);
+            xhci_hold_screen();
+        }
     }
 
     __atomic_store_n(&ctrl->drain_owner, 0, __ATOMIC_RELEASE);
