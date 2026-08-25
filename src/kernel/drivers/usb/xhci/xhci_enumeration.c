@@ -227,6 +227,13 @@ static int enum_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
                      __ATOMIC_RELEASE);
 
     uint8_t kind = XHCI_PORT_RESET_NONE;
+    slot->reset_kind = XHCI_PORT_RESET_NONE;
+
+    /* Every root port is reset, at every speed, and there is no longer a path
+     * that skips it — see xhci_port_begin_reset for why a SuperSpeed link that
+     * is already up says nothing about whether the device on it will answer
+     * the default address. So the reset event always follows, and this never
+     * has to carry the conversation forward itself. */
     int reset = xhci_port_begin_reset(ctrl, slot->port_num, &kind);
     slot->reset_kind = kind;
     if (reset < 0) {
@@ -234,13 +241,6 @@ static int enum_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
                      slot->port_num, reset);
         xhci_slot_retire(ctrl, slot);
         return -6;
-    }
-
-    /* A port that needed no reset will never announce one, so this is the only
-     * place that can carry it forward — but only if nothing already has. */
-    if (reset == 1 &&
-        __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == ENUM_STATE_WAIT_PORT_RESET) {
-        return enum_begin_slot(ctrl, slot) == 0 ? 0 : -7;
     }
     return 0;
 }
@@ -660,11 +660,31 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
     }
 
     if (!xhci_port_reset_finished(ctrl, port)) {
-        /* The reset ended and the port is not enabled: the device on it did
-         * not answer. Nothing further is possible, and holding the slot for it
-         * would keep the port unusable for whatever is plugged in next. */
-        kprintf("[xHCI] port %u reset but did not enable — no usable device\n",
-                port);
+        /*
+         * The reset ended and the port is not enabled.
+         *
+         * On a SuperSpeed port that is a link which did not come back, and the
+         * answer is the reset that works out of band — a hot reset is carried
+         * over the very link that is not working. Escalating here rather than
+         * giving up is the difference between a stick that needs its socket
+         * wiggled and one that comes up on the second try. Once, and only from
+         * a hot reset: a warm one that did not work either is a port with
+         * nothing usable on it.
+         */
+        if (slot->reset_kind == XHCI_PORT_RESET_HOT &&
+            xhci_port_protocol(ctrl, port) >= 3 &&
+            xhci_port_warm_reset(ctrl, port) == 0) {
+            slot->reset_kind = XHCI_PORT_RESET_WARM;
+            slot->timestamp_started = rdtsc();
+            return;                 /* still waiting on a reset, a louder one */
+        }
+
+        /* Nothing further is possible, and holding the slot for it would keep
+         * the port unusable for whatever is plugged in next. */
+        kprintf("[xHCI %s] port %u: the %s ended with the port still disabled "
+                "(PORTSC 0x%08x) — no usable device\n",
+                ctrl->name, port, xhci_port_reset_kind_name(slot->reset_kind),
+                xhci_get_port_status(ctrl, port));
         xhci_slot_retire(ctrl, slot);
         return;
     }

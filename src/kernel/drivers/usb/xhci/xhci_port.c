@@ -159,26 +159,6 @@ void xhci_port_describe(xhci_controller_t* ctrl, uint8_t port)
             sc, ctrl->port_major[port]);
 }
 
-/*
- * Beginning a port reset, and then leaving.
- *
- * A USB 2 port has to be driven through a reset before the device on it will
- * answer to anything. That reset takes tens of milliseconds, and the old code
- * spent them spinning — inside the interrupt handler, once per port, with
- * every other interrupt on the core waiting behind it. Nothing about the
- * hardware requires that: the controller raises a port-status change when the
- * reset finishes and sets PRC to say which one it was. So this asserts the
- * reset and returns, and xhci_port_reset_finished picks the story up when the
- * hardware says it is time.
- *
- * A USB 3 port needs nothing: the link trains itself on connect and arrives
- * already Enabled. Driving a software reset at it is not harmless — it drops a
- * link that was working and starts the negotiation over.
- *
- * Returns 1 when the port is already usable and the caller should proceed
- * immediately, 0 when a reset was started and the event will follow, and
- * negative on error.
- */
 const char* xhci_port_reset_kind_name(uint8_t kind)
 {
     switch (kind) {
@@ -189,6 +169,69 @@ const char* xhci_port_reset_kind_name(uint8_t kind)
     }
 }
 
+/*
+ * A link that cannot be recovered by asking politely.
+ *
+ * SS.Inactive is a SuperSpeed link that failed and cannot retrain itself, and
+ * Compliance is a port that fell into the electrical test mode a partly
+ * connected cable puts it in. Neither answers a hot reset, because a hot reset
+ * is carried IN BAND over a link that is not working. A warm reset is signalled
+ * out of band and is the only one that gets those ports back — which is exactly
+ * the escalation every USB stack does, and why PORTSC has two reset bits.
+ */
+static bool port_link_needs_warm(uint32_t portsc)
+{
+    switch (XHCI_PORTSC_PLS(portsc)) {
+        case XHCI_PLS_INACTIVE:
+        case XHCI_PLS_COMPLIANCE:
+        case XHCI_PLS_DISABLED:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/*
+ * Beginning a port reset, and then leaving.
+ *
+ * A port has to be driven through a reset before the device on it will answer
+ * to anything. That reset takes tens of milliseconds, and the old code spent
+ * them spinning — inside the interrupt handler, once per port, with every other
+ * interrupt on the core waiting behind it. Nothing about the hardware requires
+ * that: the controller raises a port-status change when the reset finishes and
+ * sets PRC or WRC to say which one it was. So this asserts the reset and
+ * returns, and xhci_port_reset_finished picks the story up when the hardware
+ * says it is time.
+ *
+ * ‼ EVERY PORT IS RESET, INCLUDING A USB 3 PORT THAT ARRIVES ALREADY ENABLED.
+ *
+ * This driver used to leave those alone, reasoning that a SuperSpeed link
+ * trains itself on connect and that resetting it drops a link that was working.
+ * Both halves of that are true and the conclusion does not follow, because a
+ * trained link says nothing whatever about the state of the DEVICE on it:
+ *
+ *   Address Device sends a USB SET_ADDRESS to the DEFAULT ADDRESS (xHCI 1.2
+ *   Section 4.6.5), and a device answers the default address only while it is
+ *   in the Default state, which it enters only through a reset (USB 2.0
+ *   Section 9.1.1.3). A Host Controller Reset does not put it there — HCRST
+ *   resets the controller, not the devices, and a SuperSpeed link that comes
+ *   back up keeps the address it had.
+ *
+ * BoxOS boots from a flash drive through the firmware, so it reaches this
+ * driver with the firmware having already addressed at least the boot device
+ * and the keyboard. Sending SET_ADDRESS to address zero at a device that is
+ * already addressed is sending it to an address nobody on the bus answers on:
+ * the command goes out and is never completed, and because the command ring
+ * executes strictly in order, everything queued behind it stops too. Nothing in
+ * an emulator reproduces it — QEMU's devices come up unaddressed every time.
+ *
+ * Which reset depends on the link, not on the speed: a hot reset is signalled
+ * in band and needs a link that works, so a port whose link has failed gets the
+ * warm one. A USB 2 port has only the hot one and needs no choice.
+ *
+ * Returns 0 when a reset was started and its event will follow, negative on
+ * error. There is no longer a "nothing to do" answer.
+ */
 int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port,
                           uint8_t* out_kind)
 {
@@ -205,44 +248,52 @@ int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port,
     }
 
     uint8_t major = xhci_port_protocol(ctrl, port);
+    bool    warm  = (major >= 3) &&
+                    (port_link_needs_warm(portsc) ||
+                     !(portsc & XHCI_PORTSC_PED));
 
     /*
-     * Said out loud, once per device, not into a debug build.
-     *
-     * A device answers the default address only in the Default state, and
-     * enters it only through a reset — so on a machine whose only diagnostic
-     * is a photograph of the screen, this line is what an Address Device that
-     * was never answered has to be read against. There is one of these per
-     * device brought up, and only for ports something is plugged into.
+     * Said out loud, once per device, not into a debug build. On a machine
+     * whose only diagnostic is a photograph of the screen, this line is what an
+     * Address Device that was never answered has to be read against.
      */
-    if (major >= 3 && (portsc & XHCI_PORTSC_PED)) {
-        kprintf("[xHCI %s] port %u (USB %u): arrived enabled, NOT reset "
-                "(PORTSC 0x%08x, link %u)\n",
-                ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
-        return 1;
-    }
+    kprintf("[xHCI %s] port %u (USB %u): %s (PORTSC 0x%08x, link %u)\n",
+            ctrl->name, port, major,
+            warm ? "warm reset" : "hot reset",
+            portsc, XHCI_PORTSC_PLS(portsc));
 
-    if (major >= 3) {
-        /* A SuperSpeed port that connected but did not enable itself has a
-         * link that failed to train. A warm reset is the one the specification
-         * defines for that case; the hot reset used on USB 2 does not
-         * re-establish a SuperSpeed link. */
-        kprintf("[xHCI %s] port %u (USB %u): warm reset (PORTSC 0x%08x, "
-                "link %u)\n",
-                ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
-        if (out_kind) {
-            *out_kind = XHCI_PORT_RESET_WARM;
-        }
-        portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_WPR);
-        return 0;
-    }
-
-    kprintf("[xHCI %s] port %u (USB %u): hot reset (PORTSC 0x%08x, link %u)\n",
-            ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
     if (out_kind) {
-        *out_kind = XHCI_PORT_RESET_HOT;
+        *out_kind = warm ? XHCI_PORT_RESET_WARM : XHCI_PORT_RESET_HOT;
     }
-    portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_PR);
+    portsc_write(ctrl, port, portsc_base(ctrl, port) |
+                             (warm ? XHCI_PORTSC_WPR : XHCI_PORTSC_PR));
+    return 0;
+}
+
+/*
+ * The escalation: a hot reset that ended with the port still not enabled.
+ *
+ * On a SuperSpeed port that means the link did not come back, and the only
+ * thing left is the out-of-band reset. Doing it here rather than giving the
+ * device up is what turns "a stick that needs its socket wiggled" into a stick
+ * that comes up on the second try.
+ */
+int xhci_port_warm_reset(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!port_valid(ctrl, port)) {
+        return -1;
+    }
+
+    uint32_t portsc = portsc_read(ctrl, port);
+    if (!(portsc & XHCI_PORTSC_CCS)) {
+        return -2;
+    }
+
+    kprintf("[xHCI %s] port %u: the hot reset left it disabled — warm reset "
+            "(PORTSC 0x%08x, link %u)\n",
+            ctrl->name, port, portsc, XHCI_PORTSC_PLS(portsc));
+
+    portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_WPR);
     return 0;
 }
 
