@@ -1,4 +1,5 @@
 #include "xhci_interrupt.h"
+#include "xhci_msd.h"
 #include "xhci.h"
 #include "xhci_regs.h"
 #include "xhci_rings.h"
@@ -605,6 +606,9 @@ void xhci_tick(void) {
         xhci_enum_watchdog(ctrl);
         xhci_enum_pump(ctrl);
     }
+    /* And the reads nobody is standing over. Not per controller — a unit knows
+     * which one it belongs to, and there is one list of them. */
+    xhci_msd_watchdog();
     __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 

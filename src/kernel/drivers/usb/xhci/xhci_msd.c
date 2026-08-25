@@ -89,6 +89,9 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
 #define MSD_READY_ATTEMPTS    40
 #define MSD_READY_WAIT_MS     50
 
+struct MsdAsyncReq;
+struct MsdJob;
+
 typedef struct XhciMsdUnit {
     struct XhciMsdUnit* next;
 
@@ -119,6 +122,21 @@ typedef struct XhciMsdUnit {
 
     /* Whose turn it is on this device. Not a lock — see msd_gate_enter. */
     volatile uint32_t busy;
+
+    /* The job holding the turn when nobody is standing over it, and since
+     * when. Only ever set for an asynchronous read: a caller that waits is its
+     * own watchdog, and one that does not needs this. */
+    struct MsdJob*    watched;
+    volatile uint64_t watched_since;
+
+    /* Requests that arrived while somebody else had the turn, and are not
+     * standing over it. A caller that can wait does; a caller that has gone
+     * away leaves its request here to be started when the turn comes free.
+     * The lock covers the list and nothing else — it is held for the length of
+     * two pointer assignments, which is what a spinlock is for. */
+    struct MsdAsyncReq* q_head;
+    struct MsdAsyncReq* q_tail;
+    spinlock_t          q_lock;
 
     char     name[41];                  /* "usb0 VENDOR PRODUCT" and room */
 } XhciMsdUnit;
@@ -296,9 +314,42 @@ static void msd_gate_enter(XhciMsdUnit* u)
     }
 }
 
+/*
+ * A job nobody is standing over, and the clock that stands over it instead.
+ *
+ * Armed when such a job takes the turn and disarmed when it gives it back, so
+ * the window watched is exactly the window in which the device owes an answer.
+ */
+static void msd_watch_arm(XhciMsdUnit* u, struct MsdJob* j)
+{
+    __atomic_store_n(&u->watched_since, rdtsc(), __ATOMIC_RELAXED);
+    __atomic_store_n(&u->watched, j, __ATOMIC_RELEASE);
+}
+
+static void msd_watch_disarm(XhciMsdUnit* u)
+{
+    __atomic_store_n(&u->watched, NULL, __ATOMIC_RELEASE);
+}
+
+static bool msd_gate_try_enter(XhciMsdUnit* u)
+{
+    return __atomic_exchange_n(&u->busy, 1u, __ATOMIC_ACQUIRE) == 0;
+}
+
+static void msd_start_queued(XhciMsdUnit* u);
+
+/*
+ * Give up the turn — and, before anybody else can take it, hand it to a
+ * request that has been left waiting.
+ *
+ * The handover matters: a caller that went away cannot come back and try
+ * again, so if the turn were simply released the queued request would sit
+ * there until some unrelated command happened to end and remember it.
+ */
 static void msd_gate_leave(XhciMsdUnit* u)
 {
     __atomic_store_n(&u->busy, 0u, __ATOMIC_RELEASE);
+    msd_start_queued(u);
 }
 
 /* Lowest number nobody is using. Numbers are stable for the life of a unit, so
@@ -862,6 +913,7 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         return -1;
     }
     memset(u, 0, sizeof(*u));
+    spinlock_init(&u->q_lock);
     u->ctrl = ctrl;
     u->slot = slot;
 
@@ -1219,6 +1271,273 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
     msd_gate_leave(u);
     msd_give_back(u);
     return result;
+}
+
+
+/* ── a read for somebody who did not stay ───────────────────────────────── */
+
+/*
+ * The same BOT job, with the other driver on the handle.
+ *
+ * Everything above this — the Boardroom, the storage deck, a process reading a
+ * file — has had exactly one way to get sectors off a flash drive: ask, and
+ * stand there. That is what made a machine booted from a stick spend a core on
+ * every block of every file, while the same machine booted from a SATA disk
+ * parked the caller and got on with something else. The difference was never
+ * the hardware; the USB path was simply never joined to the completion spine
+ * the SATA path has used all along.
+ *
+ * A request that finds the device busy is LEFT here rather than refused. Its
+ * owner is not standing over it and cannot be told to try again, and the layer
+ * above has no way to fall back once it has committed to waiting — so a refusal
+ * would surface as a failed read on a perfectly good disk.
+ */
+typedef struct MsdAsyncReq {
+    struct MsdAsyncReq* next;
+    MsdJob         job;             /* carries the never-drop completion node */
+    XhciMsdUnit*   u;
+    XhciMsdAsyncCb cb;
+    void*          ctx;
+    uint8_t        unit_number;
+} MsdAsyncReq;
+
+static void msd_async_done(void* ctx, int status, uint32_t transferred);
+
+/*
+ * Start whatever is at the head of the queue, if the turn is free.
+ *
+ * Written as a loop rather than as a call from the completion path: a request
+ * whose submission fails finishes immediately, which frees the turn again, and
+ * a chain of those would otherwise recurse as deep as the queue is long.
+ */
+static void msd_start_queued(XhciMsdUnit* u)
+{
+    for (;;) {
+        spin_lock(&u->q_lock);
+        MsdAsyncReq* r = u->q_head;
+        if (!r) {
+            spin_unlock(&u->q_lock);
+            return;
+        }
+        spin_unlock(&u->q_lock);
+
+        if (!msd_gate_try_enter(u)) {
+            return;                 /* somebody else has it; they will hand over */
+        }
+
+        /* Unlinked only once the turn is actually held, so two cores cannot
+         * both take the same request off the front. */
+        spin_lock(&u->q_lock);
+        r = u->q_head;
+        if (!r) {
+            spin_unlock(&u->q_lock);
+            __atomic_store_n(&u->busy, 0u, __ATOMIC_RELEASE);
+            return;
+        }
+        u->q_head = r->next;
+        if (!u->q_head) {
+            u->q_tail = NULL;
+        }
+        spin_unlock(&u->q_lock);
+
+        r->next = NULL;
+        msd_watch_arm(u, &r->job);
+        msd_job_begin(&r->job);
+
+        /* If it finished inside that call (a submission that could not be
+         * made), the turn is free again and the next one may go now. */
+        if (!__atomic_load_n(&r->job.finished, __ATOMIC_ACQUIRE)) {
+            return;
+        }
+    }
+}
+
+/*
+ * The job is over, and this runs on a K-Core.
+ *
+ * The order matters: the device is let go of first, so the turn is available
+ * to the next request before the caller above is woken and possibly asks for
+ * another block; then the request's memory goes; then the answer is given.
+ */
+static void msd_async_done(void* ctx, int status, uint32_t transferred)
+{
+    MsdAsyncReq* r = (MsdAsyncReq*)ctx;
+    XhciMsdUnit* u = r->u;
+
+    msd_watch_disarm(u);
+
+    XhciMsdAsyncCb cb   = r->cb;
+    void*          cctx = r->ctx;
+    uint8_t        unit = r->unit_number;
+    uint32_t       want = r->job.data_len;
+
+    /* A device that carried the command out but moved fewer bytes than were
+     * asked for has not answered the question that was put to it. */
+    error_t st = (status == 0 && transferred == want) ? OK : ERR_IO;
+
+    kfree(r);
+
+    /* The turn, then the visit. Both belong to the request and neither may
+     * outlive it. */
+    msd_gate_leave(u);
+    xhci_slot_leave(u->slot);
+
+    if (cb) {
+        cb(unit, 0, st, cctx);
+    }
+}
+
+void xhci_msd_watchdog(void)
+{
+    if (!g_units_lock_ready) {
+        return;
+    }
+
+    /*
+     * The list is walked under its lock and the giving-up is done outside it:
+     * finishing a job runs the caller's completion, and that is not something
+     * to do with a spinlock held — least of all this one, which every other
+     * unit operation needs.
+     */
+    MsdJob*      late_job  = NULL;
+    XhciMsdUnit* late_unit = NULL;
+
+    spin_lock(&g_units_lock);
+    for (XhciMsdUnit* u = g_units; u; u = u->next) {
+        MsdJob* j = __atomic_load_n(&u->watched, __ATOMIC_ACQUIRE);
+        if (!j || __atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
+            continue;
+        }
+        uint64_t since = __atomic_load_n(&u->watched_since, __ATOMIC_RELAXED);
+        if ((int64_t)(rdtsc() - since) < (int64_t)cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS)) {
+            continue;
+        }
+        /* Claimed here, so a second tick on another core cannot give up on the
+         * same job twice. */
+        if (__atomic_exchange_n(&u->watched, NULL, __ATOMIC_ACQ_REL) != j) {
+            continue;
+        }
+        late_job  = j;
+        late_unit = u;
+        break;                  /* one per tick is plenty; the next comes in 10 ms */
+    }
+    spin_unlock(&g_units_lock);
+
+    if (!late_job) {
+        return;
+    }
+
+    kprintf("[USB disk %u] a read nobody was waiting on went unanswered for "
+            "%u ms at stage %u — resetting the transport\n",
+            late_unit->number, MSD_XFER_TIMEOUT_MS, late_job->phase);
+    msd_bot_reset(late_unit);
+    msd_job_finish(late_job, -1);
+}
+
+bool xhci_msd_unit_can_read_async(uint8_t unit)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return false;
+    }
+    /* Nothing about the geometry rules it out: a request is refused per-request
+     * if it does not sit on whole blocks, and the reads that come down here are
+     * filesystem blocks, which do. */
+    msd_give_back(u);
+    return true;
+}
+
+error_t xhci_msd_read_async(uint8_t unit, uint64_t lba, uint32_t count,
+                            void* dma_phys, XhciMsdAsyncCb cb, void* ctx)
+{
+    if (!dma_phys || count == 0) {
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return ERR_DEVICE_NOT_READY;
+    }
+
+    if (lba + count > u->sectors) {
+        msd_give_back(u);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    /*
+     * Whole device blocks, starting on one. Said out loud rather than worked
+     * around: widening the request would need the bounce buffer and a copy out
+     * of it, and the copy is exactly what the caller is not here to do.
+     */
+    const uint32_t per_sector = u->per_sector;
+    if ((lba % per_sector) != 0 || (count % per_sector) != 0) {
+        msd_give_back(u);
+        return ERR_INVALID_ARGUMENT;
+    }
+    uint32_t nblocks = count / per_sector;
+    uint32_t bytes   = nblocks * u->block_bytes;
+    if (bytes > MSD_BOUNCE_BYTES) {
+        msd_give_back(u);
+        return ERR_INVALID_ARGUMENT;
+    }
+
+    MsdAsyncReq* r = (MsdAsyncReq*)kmalloc(sizeof(MsdAsyncReq));
+    if (!r) {
+        msd_give_back(u);
+        return ERR_NO_MEMORY;
+    }
+    memset(r, 0, sizeof(*r));
+    r->u           = u;
+    r->cb          = cb;
+    r->ctx         = ctx;
+    r->unit_number = unit;
+
+    MsdJob* j = &r->job;
+    j->u             = u;
+    j->hand_to_kcore = true;
+    j->data_phys     = (uint64_t)dma_phys;
+    j->data_len      = bytes;
+    j->data_in       = true;
+    j->done          = msd_async_done;
+    j->done_ctx      = r;
+
+    uint64_t block = lba / per_sector;
+    if (block + nblocks > 0x100000000ULL) {
+        j->cdb[0] = SCSI_READ_16;
+        be64_put(&j->cdb[2], block);
+        be32_put(&j->cdb[10], nblocks);
+        j->cdb_len = 16;
+    } else {
+        j->cdb[0] = SCSI_READ_10;
+        be32_put(&j->cdb[2], (uint32_t)block);
+        j->cdb[7] = (uint8_t)(nblocks >> 8);
+        j->cdb[8] = (uint8_t)nblocks;
+        j->cdb_len = 10;
+    }
+
+    /*
+     * The visit is NOT given back here. It is what keeps the endpoints, the
+     * rings and the buffers alive while the transfer is in flight, and the
+     * transfer outlives this call by design — msd_async_done gives it back.
+     */
+    if (msd_gate_try_enter(u)) {
+        msd_watch_arm(u, j);
+        msd_job_begin(j);
+        return OK;
+    }
+
+    spin_lock(&u->q_lock);
+    if (u->q_tail) {
+        u->q_tail->next = r;
+    } else {
+        u->q_head = r;
+    }
+    u->q_tail = r;
+    spin_unlock(&u->q_lock);
+
+    /* And in case the holder finished between the failed try and the link. */
+    msd_start_queued(u);
+    return OK;
 }
 
 int xhci_msd_read(uint8_t unit, uint64_t lba, uint32_t count, void* buffer)

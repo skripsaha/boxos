@@ -50,14 +50,35 @@
 #include "boardroom.h"
 
 /*
- * The asynchronous disk path is AHCI's, and only AHCI's.
+ * Can the medium under the volume answer a read without somebody standing over
+ * it?
  *
- * It used to be gated on "is there an AHCI controller?", which was the same
- * question as "is the volume on it" only for as long as there was nowhere else
- * a volume could be. There is now: a machine that boots from a flash drive has
- * its filesystem on the USB bus and its SATA controller initialised beside it,
- * and submitting that filesystem's reads to an AHCI port would have read
- * somebody else's disk and called the bytes a file.
+ * This used to be "is there an AHCI controller", which was the same question as
+ * "is the volume on it" only for as long as there was nowhere else a volume
+ * could be. Then it became "is the volume on AHCI", which stopped reads going
+ * to somebody else's disk but left the real answer unasked: a machine that
+ * boots from a flash drive has its filesystem on the USB bus, answered no, and
+ * spent a core standing over every block of every file it read — while the
+ * same machine booted from SATA parked the caller and got on with something
+ * else. The medium was never what made the difference.
+ *
+ * So the question is put to the seat, which is the one place that knows what is
+ * under it.
+ */
+static inline bool tagfs_volume_can_read_async(void)
+{
+    return BoardroomSeatCanReadAsync(tagfs_get_seat());
+}
+
+/*
+ * Writing is still AHCI's, and only AHCI's — honestly rather than by omission.
+ *
+ * A write here is not one command: it is a WriteJob that allocates blocks,
+ * threads the DiskBook journal and may copy on write, and its state machine is
+ * built on AHCI slots and the AHCI completion. Pointing it at another kind of
+ * seat would need that machine rebuilt, not a different submit call. Until it
+ * is, a volume on a flash drive takes the synchronous write path, which is
+ * correct and says so.
  */
 static inline bool tagfs_volume_is_ahci(void)
 {
@@ -289,10 +310,8 @@ static void obj_read_step(ObjReadAsyncCtx *ctx)
     ctx->in_flight_chunk      = chunk;
 
     uint64_t lba = tagfs_block_to_sector(disk_block);
-    uint8_t  slot;
-    error_t  err = ahci_submit_read_async(BoardroomSeatIndex(tagfs_get_seat()),
-                                           lba, 8, ctx->dma_phys,
-                                           obj_read_async_complete, ctx, &slot);
+    error_t  err = BoardroomReadAsync(tagfs_get_seat(), lba, 8, ctx->dma_phys,
+                                      obj_read_async_complete, ctx);
     if (err != OK) {
         obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
     }
@@ -394,7 +413,7 @@ static int ObjRead(const ManifestOp *op,
      * those structures; the sync read path below is correct there and on
      * real HW (which is multi-core) the async path still applies. */
     if (offset < handle->file_size && handle->extent_count > 0 &&
-        tagfs_volume_is_ahci() && ctx && ctx->proc && g_amp.total_cores > 1) {
+        tagfs_volume_can_read_async() && ctx && ctx->proc && g_amp.total_cores > 1) {
 
         uint64_t remaining = handle->file_size - offset;
         uint64_t to_read   = (out->capacity > remaining) ? remaining : out->capacity;
