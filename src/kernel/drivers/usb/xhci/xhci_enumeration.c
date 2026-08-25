@@ -1169,6 +1169,10 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
         kprintf("[xHCI %s]   no command outstanding for it — the last answer "
                 "arrived and moved nothing\n", ctrl->name);
     }
+
+    /* These three lines are the report. Held so they can be read off a screen
+     * rather than inferred from a blur. */
+    xhci_hold_screen();
 }
 
 /*
@@ -1247,6 +1251,7 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
                     ctrl->command_ring.enqueue_idx,
                     ctrl->command_ring.cycle_state,
                     xhci_command_outstanding(ctrl));
+            xhci_hold_screen();
         }
         xhci_slot_retire(ctrl, slot);
     }

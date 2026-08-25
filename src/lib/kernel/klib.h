@@ -177,6 +177,22 @@ size_t strspn(const char* s, const char* accept);
 size_t strcspn(const char* s, const char* reject);
 char* strpbrk(const char* s, const char* accept);
 
+/*
+ * Hold the screen after something worth reading has been printed.
+ *
+ * On the machine this exists for there is no scrollback, no log file and no
+ * serial cable — there is a screen and somebody photographing it, and a line
+ * that scrolls past in a hundredth of a second is a line that was never
+ * printed. This is for the handful of places where the next few lines decide
+ * what happens next.
+ *
+ * It spins on the TSC, so it is never for a hot path and never for a caller
+ * that cannot afford to wait — and never, ever from an interrupt handler,
+ * where a second of not returning is a second of the machine's timekeeping
+ * gone.
+ */
+void kscreen_hold(uint32_t ms);
+
 // Tag wildcard matching: "key:..." matches any "key:<value>"
 bool tag_is_wildcard(const char* tag);
 bool tag_match(const char* pattern, const char* tag);

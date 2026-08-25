@@ -22,6 +22,8 @@
 #include "video.h"
 #include "canvas.h"
 #include "serial.h"
+#include "atomics.h"
+#include "cpu_calibrate.h"
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
@@ -491,4 +493,15 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     while (1)
         asm volatile("hlt");
+}
+
+/* See klib.h. Deliberately the dumbest possible wait: the caller has just
+ * printed something a person needs to see, and there is nothing else this
+ * kernel could usefully be doing with the microseconds. */
+void kscreen_hold(uint32_t ms)
+{
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(ms);
+    while ((int64_t)(rdtsc() - deadline) < 0) {
+        cpu_pause();
+    }
 }

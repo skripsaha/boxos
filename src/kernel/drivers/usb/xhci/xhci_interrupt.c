@@ -339,7 +339,26 @@ void xhci_process_events(void) {
     }
 }
 
+/*
+ * True while this core is inside the interrupt handler or the timer tick.
+ *
+ * Both of those reach the same watchdogs as ordinary boot-time code does, and
+ * only one of the two callers can afford to stop for a second. A plain flag is
+ * enough: the tick is the timer interrupt and runs on one core, and the handler
+ * cannot preempt itself.
+ */
+static volatile uint32_t g_no_waiting = 0;
+
+void xhci_hold_screen(void)
+{
+    if (__atomic_load_n(&g_no_waiting, __ATOMIC_ACQUIRE) != 0) {
+        return;
+    }
+    kscreen_hold(XHCI_SCREEN_HOLD_MS);
+}
+
 void xhci_tick(void) {
+    __atomic_store_n(&g_no_waiting, 1, __ATOMIC_RELEASE);
     for (uint8_t i = 0; i < xhci_controller_count(); i++) {
         xhci_controller_t* ctrl = xhci_controller_at(i);
         if (!ctrl || !ctrl->running) {
@@ -365,6 +384,7 @@ void xhci_tick(void) {
         xhci_check_command_timeouts(ctrl);
         xhci_enum_watchdog(ctrl);
     }
+    __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 
 /*
@@ -380,6 +400,7 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
         return;
     }
     __atomic_fetch_add(&ctrl->irq_count, 1, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_no_waiting, 1, __ATOMIC_RELEASE);
 
     uint32_t usbsts = ctrl->op_regs->usbsts;
 
@@ -434,6 +455,7 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      * other one got to see. */
     xhci_process_events_on(ctrl);
 
+    __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 
 /*

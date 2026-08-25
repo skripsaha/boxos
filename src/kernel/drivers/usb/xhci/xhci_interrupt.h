@@ -36,4 +36,21 @@ void xhci_touch_device_left(const xhci_device_slot_t* slot);
  * Re-callable; later calls overwrite cached handles atomically. */
 void xhci_interrupt_touch_init(void);
 
+/*
+ * Hold the screen so the lines just printed can be read — or photographed.
+ *
+ * This driver is brought up on a machine whose only diagnostic is a monitor
+ * and a phone camera, and the lines that decide what to do next go past faster
+ * than a shutter. So the few places where the next line changes what happens
+ * next stop for a moment afterwards.
+ *
+ * It does nothing when the caller is an interrupt handler or the timer tick.
+ * That is the whole reason this exists rather than a bare kscreen_hold at each
+ * site: a second spent not returning from IRQ0 is a second of the machine's
+ * timekeeping thrown away, and the enumeration watchdog is reached from both
+ * there and from ordinary context.
+ */
+#define XHCI_SCREEN_HOLD_MS 1000
+void xhci_hold_screen(void);
+
 #endif

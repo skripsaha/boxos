@@ -407,6 +407,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     if (!by_rule) {
         kprintf("[Boardroom] seat %u carries the volume this kernel was read "
                 "out of — the loader said so on its boarding pass\n", chosen);
+        kscreen_hold(1000);
         return chosen;
     }
 
@@ -430,5 +431,9 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
                 "wins\n");
     }
 
+    /* Which volume is about to be mounted, and on what grounds. Held for the
+     * same reason as the rest: this is the line that explains every file the
+     * machine goes on to read. */
+    kscreen_hold(1000);
     return chosen;
 }
