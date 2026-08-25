@@ -22,6 +22,7 @@ DEFAULT ABS
 ; 0x0A000             - Boot info for kernel (structured, versioned)
 ; 0x0A200             - TagFS superblock buffer (512 bytes)
 ; 0x0A400             - TagFS metadata buffer (512 bytes)
+; 0x0A600             - Boarding pass for kernel (512 bytes, stamped)
 ; 0x10000             - Bounce buffer for INT 13h reads (32KB)
 ; 0x100000            - Kernel run address (1MB, linked address, loaded via Unreal Mode)
 ; kernel_end + 4KB    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - DYNAMIC
@@ -66,6 +67,9 @@ STAGE2_SIGNATURE      equ 0x2907
 %ifndef STAGE2_SECTORS
   %error "STAGE2_SECTORS must come from the build (-DSTAGE2_SECTORS=...)"
 %endif
+%ifndef BOARDING_PASS_ADDR
+  %error "BOARDING_PASS_ADDR must come from the build (-DBOARDING_PASS_ADDR=...)"
+%endif
 %ifndef BOOT_INFO_ADDR
   %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
 %endif
@@ -73,6 +77,22 @@ STAGE2_SIGNATURE      equ 0x2907
 ; boot_info structure constants (shared contract with kernel)
 BOOT_INFO_MAGIC       equ 0x42583031     ; "BX01" — BoxOS boot info v1
 BOOT_INFO_VERSION     equ 1
+
+; The Boarding Pass — what this loader tells the kernel about its own arrival,
+; as opposed to boot_info, which describes the machine. Layout in
+; src/include/boarding_pass.h; the numbers below are that layout and the
+; kernel's static assertions are the other half of the agreement.
+BOARDING_PASS_MAGIC   equ 0x53415042     ; "BPAS"
+BOARDING_PASS_VERSION equ 1
+BOARDING_PASS_BYTES   equ 512
+BOARDING_HDR_BYTES    equ 16
+BOARDING_STAMP_VOLUME equ 1
+BOARDING_STAMP_MEDIUM equ 2
+BOARDING_STAMP_LOADER equ 3
+BOARDING_FIRMWARE_BIOS equ 0
+; Where the volume identity sits inside a TagFS superblock. Asserted on the
+; kernel side against the structure itself, so the two cannot drift.
+TAGFS_SB_UUID_OFFSET  equ 88
 
 TAGFS_SUPERBLOCK_SECTOR equ 1034
 TAGFS_METADATA_START    equ 1035
@@ -371,6 +391,8 @@ long_mode_start:
     mov dword [BOOT_INFO_ADDR+32],   eax                 ; +32: stack_base
     mov dword [BOOT_INFO_ADDR+36],   40                  ; +36: total_size
 
+    call write_boarding_pass
+
     jmp KERNEL_RUN_ADDR
 
 .kernel_not_loaded:
@@ -385,6 +407,67 @@ long_mode_start:
     cli
     hlt
     jmp $
+
+; ---------------------------------------------------------------------------
+; The Boarding Pass.
+;
+; Three stamps, and the one that matters is the first: the identity of the
+; volume this kernel was just read out of. It is sitting in the superblock this
+; loader read at the start, sixteen bytes at TAGFS_SB_UUID_OFFSET, and until
+; now it was thrown away with the rest of that buffer.
+;
+; Without it the kernel reaches long mode with no way to ask the firmware which
+; device it booted from, and the Boardroom picks a volume by a rule — "the
+; removable medium wins" — which is wrong on any machine carrying BoxOS on an
+; internal disk with a flash drive in a socket. This loader is the one part of
+; the system that knows the answer.
+;
+; Written here, in long mode, immediately after boot_info and immediately
+; before the jump: everything it needs is settled by this point and nothing
+; runs between this and the kernel that could disturb it.
+; ---------------------------------------------------------------------------
+write_boarding_pass:
+    ; Header
+    mov dword [BOARDING_PASS_ADDR],     BOARDING_PASS_MAGIC     ; +0  magic
+    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version
+    mov word  [BOARDING_PASS_ADDR+6],   BOARDING_HDR_BYTES      ; +6  header_bytes
+    mov word  [BOARDING_PASS_ADDR+8],   64                      ; +8  used_bytes
+    mov word  [BOARDING_PASS_ADDR+10],  BOARDING_PASS_BYTES     ; +10 capacity
+    mov word  [BOARDING_PASS_ADDR+12],  3                       ; +12 count
+    mov word  [BOARDING_PASS_ADDR+14],  0                       ; +14 reserved
+
+    ; Stamp 1 at +16: the volume, sixteen bytes out of the superblock.
+    mov word  [BOARDING_PASS_ADDR+16],  BOARDING_STAMP_VOLUME
+    mov word  [BOARDING_PASS_ADDR+18],  16
+    mov rax, [TAGFS_SUPERBLOCK_ADDR + TAGFS_SB_UUID_OFFSET]
+    mov [BOARDING_PASS_ADDR+20], rax
+    mov rax, [TAGFS_SUPERBLOCK_ADDR + TAGFS_SB_UUID_OFFSET + 8]
+    mov [BOARDING_PASS_ADDR+28], rax
+
+    ; Stamp 2 at +36: the medium. The drive number is the one this loader
+    ; actually used, which is not always the one the firmware first offered —
+    ; there is a fallback to 0x80 above for firmware that hands out a handle it
+    ; then does not honour, and the kernel should be told which one worked.
+    mov word  [BOARDING_PASS_ADDR+36],  BOARDING_STAMP_MEDIUM
+    mov word  [BOARDING_PASS_ADDR+38],  4
+    mov byte  [BOARDING_PASS_ADDR+40],  BOARDING_FIRMWARE_BIOS
+    mov al, [boot_drive_saved]
+    mov byte  [BOARDING_PASS_ADDR+41],  al
+    mov word  [BOARDING_PASS_ADDR+42],  0
+
+    ; Stamp 3 at +44: who wrote this. On a board that boots through CSM one
+    ; week and UEFI the next, that is a real question with nothing on the
+    ; screen to answer it.
+    mov word  [BOARDING_PASS_ADDR+44],  BOARDING_STAMP_LOADER
+    mov word  [BOARDING_PASS_ADDR+46],  16
+    mov rax, [boarding_loader_name]
+    mov [BOARDING_PASS_ADDR+48], rax
+    mov eax, [boarding_loader_name+8]
+    mov [BOARDING_PASS_ADDR+56], eax
+    mov word  [BOARDING_PASS_ADDR+60],  1                       ; major
+    mov word  [BOARDING_PASS_ADDR+62],  0                       ; minor
+    ret
+
 
 [BITS 16]
 
@@ -1967,6 +2050,10 @@ dap_kernel_chunk:
 align 4
 boot_drive_saved:       db 0
 
+; Twelve bytes, NUL-padded, copied verbatim onto the boarding pass so the
+; kernel can say which loader produced the image it is running.
+boarding_loader_name:   db 'stage2', 0, 0, 0, 0, 0, 0
+
 ; Drive-select base byte for raw ATA PIO LBA28. Computed once on first call
 ; from boot_drive_saved (BIOS DL = 0x80 master, 0x81 slave). Bits encoded:
 ;   0xE0 = 1110_xxxx = master + LBA mode
@@ -2051,8 +2138,11 @@ msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild
 %if TAGFS_SUPERBLOCK_ADDR + TAGFS_SECTOR_SIZE > TAGFS_METADATA_ADDR
   %error "the TagFS superblock buffer runs into the metadata buffer"
 %endif
-%if TAGFS_METADATA_ADDR + TAGFS_SECTOR_SIZE > KERNEL_BOUNCE_ADDR
-  %error "the TagFS metadata buffer runs into the bounce buffer"
+%if TAGFS_METADATA_ADDR + TAGFS_SECTOR_SIZE > BOARDING_PASS_ADDR
+  %error "the TagFS metadata buffer runs into the boarding pass"
+%endif
+%if BOARDING_PASS_ADDR + BOARDING_PASS_BYTES > KERNEL_BOUNCE_ADDR
+  %error "the boarding pass runs into the bounce buffer"
 %endif
 
 ; The other half of a claim stage1 makes: its scratch sits at 0x1200 because

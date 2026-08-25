@@ -182,7 +182,16 @@ uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
  * Boardroom knows about media, and this is the only thing that knows what a
  * TagFS volume looks like.
  */
-static bool tagfs_recognise(void *ctx, uint8_t seat)
+/*
+ * Is there a TagFS volume in this seat, and what does it call itself?
+ *
+ * The magic says it is one of ours. The identity says WHICH one — and that is
+ * the question, because the loader read this kernel out of one particular
+ * volume and wrote its identity on the boarding pass. A machine carrying two
+ * TagFS volumes is not unusual: it is what a machine with BoxOS installed and
+ * a BoxOS stick in a socket looks like.
+ */
+static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 {
     (void)ctx;
     uint8_t buf[TAGFS_SECTOR_SIZE];
@@ -192,7 +201,15 @@ static bool tagfs_recognise(void *ctx, uint8_t seat)
         return false;
     }
     __builtin_memcpy(&magic, buf, 4);
-    return magic == TAGFS_MAGIC;
+    if (magic != TAGFS_MAGIC) {
+        return false;
+    }
+
+    if (out_uuid) {
+        const TagFSSuperblock *sb = (const TagFSSuperblock *)buf;
+        __builtin_memcpy(out_uuid, sb->fs_uuid, 16);
+    }
+    return true;
 }
 
 static void TagFSProbeDrive(void)

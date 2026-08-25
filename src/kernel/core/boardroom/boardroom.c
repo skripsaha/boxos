@@ -1,4 +1,5 @@
 #include "boardroom.h"
+#include "boarding.h"
 #include "klib.h"
 #include "ahci.h"
 #include "ahci_sync.h"
@@ -317,45 +318,116 @@ int BoardroomFlush(uint8_t seat)
     }
 }
 
+/* Sixteen bytes, printed whole. Two volumes made by the same tool on the same
+ * day differ in the middle of it, so an abbreviation would not identify one. */
+static void uuid_text(const uint8_t uuid[16], char out[33])
+{
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 16; i++) {
+        out[i * 2]     = hex[(uuid[i] >> 4) & 0xF];
+        out[i * 2 + 1] = hex[uuid[i] & 0xF];
+    }
+    out[32] = '\0';
+}
+
 uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
 {
     if (!probe) {
         return BOARDROOM_NO_SEAT;
     }
 
-    uint8_t chosen = BOARDROOM_NO_SEAT;
-    unsigned found = 0;
+    /* What the loader said, if it said anything. Read once: the answer cannot
+     * change while the room is being called to order. */
+    uint8_t  want[16];
+    bool     have_pass = BoardingPassVolume(want);
+
+    uint8_t  chosen      = BOARDROOM_NO_SEAT;
+    uint8_t  by_identity = BOARDROOM_NO_SEAT;
+    unsigned found       = 0;
 
     for (BoardSeat* s = g_seats; s; s = s->next) {
-        if (!probe(ctx, s->number)) {
+        uint8_t uuid[16];
+        memset(uuid, 0, sizeof(uuid));
+
+        if (!probe(ctx, s->number, uuid)) {
             continue;
         }
         found++;
+
+        if (have_pass && memcmp(uuid, want, 16) == 0 &&
+            by_identity == BOARDROOM_NO_SEAT) {
+            by_identity = s->number;
+        }
 
         if (chosen == BOARDROOM_NO_SEAT) {
             chosen = s->number;
             continue;
         }
 
-        /* A second volume. The removable one wins, and both are named — a
-         * machine that boots from a stick while carrying an old volume on an
-         * internal disk should not quietly mount the wrong decade. */
+        /* The fallback, for when nothing on the bus is the volume named on the
+         * pass — or there is no pass. */
         BoardSeat* c = seat_find(chosen);
-        if (!c->removable && s->removable) {
+        if (c && !c->removable && s->removable) {
             chosen = s->number;
         }
+    }
+
+    /*
+     * The pass wins when it can be honoured.
+     *
+     * Not "when there is more than one candidate": a single volume that is not
+     * the one this kernel came out of is still the wrong volume, and finding
+     * only one of something is not evidence that it is the right one.
+     */
+    bool by_rule = true;
+    if (by_identity != BOARDROOM_NO_SEAT) {
+        chosen  = by_identity;
+        by_rule = false;
     }
 
     if (found > 1) {
         kprintf("[Boardroom] a volume was found on %u seats:\n", found);
         for (BoardSeat* s = g_seats; s; s = s->next) {
-            if (probe(ctx, s->number)) {
-                kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
-                        s->number == chosen ? "  <- using this one" : "");
+            uint8_t uuid[16];
+            memset(uuid, 0, sizeof(uuid));
+            if (!probe(ctx, s->number, uuid)) {
+                continue;
             }
+            char text[33];
+            uuid_text(uuid, text);
+            kprintf("[Boardroom]   seat %u: %s  %s%s\n", s->number, s->name,
+                    text, s->number == chosen ? "  <- using this one" : "");
         }
-        kprintf("[Boardroom] the removable medium wins, because this kernel "
-                "cannot ask the firmware which one it booted from\n");
+    }
+
+    if (found == 0) {
+        return BOARDROOM_NO_SEAT;
+    }
+
+    if (!by_rule) {
+        kprintf("[Boardroom] seat %u carries the volume this kernel was read "
+                "out of — the loader said so on its boarding pass\n", chosen);
+        return chosen;
+    }
+
+    /*
+     * Down to a rule, and which rule it is depends on why.
+     *
+     * A pass that named a volume nothing on this machine is carrying is worth
+     * more words than one that was never written: it means the medium the
+     * kernel came from is not in the room — unplugged between the loader
+     * finishing and the drivers coming up, or on a controller that has not
+     * answered — and the volume about to be mounted is somebody else's.
+     */
+    if (have_pass) {
+        char text[33];
+        uuid_text(want, text);
+        kprintf("[Boardroom] the loader came from the volume %s, and no seat "
+                "is carrying it\n", text);
+    }
+    if (found > 1) {
+        kprintf("[Boardroom] falling back to the rule: the removable medium "
+                "wins\n");
     }
 
     return chosen;

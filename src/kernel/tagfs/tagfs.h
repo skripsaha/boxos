@@ -110,6 +110,14 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(TagFSSuperblock) == 512, "TagFSSuperblock must be 512 bytes");
 
+/* stage2.asm copies the volume identity straight out of the superblock buffer
+ * it already read, by a number it spells for itself (TAGFS_SB_UUID_OFFSET). An
+ * assembler cannot ask a C structure where a field is, so this is the other
+ * half of that agreement: move fs_uuid and the build stops rather than the
+ * boarding pass quietly naming sixteen bytes of something else. */
+STATIC_ASSERT(__builtin_offsetof(TagFSSuperblock, fs_uuid) == 88,
+              "stage2.asm reads the volume identity from superblock byte 88");
+
 // Header: 4+4+2+2+4 = 16 bytes. data[4080] = 4096 total.
 // Entries are packed variable-length records in data[]:
 //   uint16_t tag_id | uint8_t flags | uint8_t key_len | uint16_t value_len

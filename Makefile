@@ -60,6 +60,12 @@ STAGE2_SECTORS      = 16
 # The two headers _Static_assert against this value, so a drift is a build
 # error rather than a boot that gets as far as its first push.
 BOOT_INFO_ADDR      = 0xA000
+# Where the loaders leave the Boarding Pass — what they say about the journey
+# that produced this kernel, as opposed to boot_info, which describes the
+# machine. One number, spelled here, threaded into the assembler, the UEFI
+# loader and the kernel, all three of which assert it against this value rather
+# than repeat it.
+BOARDING_PASS_ADDR  = 0xA600
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
 
@@ -78,7 +84,7 @@ ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 # Layout facts the image build owns, handed to the assembler rather than
 # repeated inside it.
-ASM_LAYOUT     = -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DBOOT_INFO_ADDR=$(BOOT_INFO_ADDR)
+ASM_LAYOUT     = -DSTAGE2_SECTORS=$(STAGE2_SECTORS) -DBOOT_INFO_ADDR=$(BOOT_INFO_ADDR) -DBOARDING_PASS_ADDR=$(BOARDING_PASS_ADDR)
 ASMFLAGS_ELF   = -g -f elf64 $(ASM_INCLUDE) $(ASM_LAYOUT)
 # ─── Kernel CFLAGS — production-grade real-HW hardening ────────────────────
 #
@@ -184,6 +190,7 @@ endif
 # to off, so the assertion that exists to catch a drift was compiled in
 # exactly the builds nobody ships.
 CFLAGS += -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR)
+CFLAGS += -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR)
 # On-demand BMIDE watchdog TIER-2 (wedge->SRST) diagnostic. Off unless requested
 # (it SRSTs the boot drive) — `make WEDGETEST=on` for a verification build.
 WEDGETEST ?= off
@@ -314,6 +321,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
                   -fpic -fshort-wchar -fno-stack-protector \
                   -Wall -Wextra -Os \
                   -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
+                  -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
                   -I$(SRCDIR)/boot/uefi
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
@@ -324,6 +332,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
                     -Wall -Wextra -Os \
                     -target x86_64-unknown-windows \
                     -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
+                    -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
                     -I$(SRCDIR)/boot/uefi
 
 # Detect whether lld-link is available for direct PE output via clang.

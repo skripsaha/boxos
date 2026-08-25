@@ -72,20 +72,27 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
  * the device has accepted, not necessarily one it has kept. */
 int BoardroomFlush(uint8_t seat);
 
-/* Find the seat carrying a volume, by asking each one in turn.
+/*
+ * Find the seat carrying a volume, by asking each one in turn.
  *
  * The caller supplies the recognition — the Boardroom knows about media, not
  * about what anybody keeps on them. `probe` is handed a seat and returns true
- * when it recognises its own volume there.
+ * when it recognises its own volume there, filling `out_uuid` with whatever
+ * that volume calls itself.
  *
- * When more than one seat answers, the removable one wins and every candidate
- * is named. This kernel cannot ask the firmware which device it was booted
- * from once it is in long mode, so "the medium we booted from" is approximated
- * by "the medium somebody plugged in" — and the approximation is printed
- * rather than assumed, so a wrong guess is visible instead of silent.
+ * When more than one seat answers, the identity decides. The loader read this
+ * kernel out of one particular volume and wrote down which one, so the seat
+ * whose volume matches the Boarding Pass is the seat this machine booted from
+ * — not a resemblance, the same sixteen bytes.
  *
- * Returns the seat, or 0xFF when nothing was recognised. */
-typedef bool (*BoardroomProbe)(void* ctx, uint8_t seat);
+ * Only when there is no pass, or nothing on the bus matches it, does the old
+ * rule apply: the removable medium wins, because a machine that boots from a
+ * stick while carrying an old volume on an internal disk should not quietly
+ * mount the wrong decade. That rule is a guess, and it is printed as one.
+ *
+ * Returns the seat, or 0xFF when nothing was recognised.
+ */
+typedef bool (*BoardroomProbe)(void* ctx, uint8_t seat, uint8_t out_uuid[16]);
 uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx);
 
 #define BOARDROOM_NO_SEAT 0xFF
