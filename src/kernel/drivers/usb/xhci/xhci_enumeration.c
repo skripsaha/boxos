@@ -14,6 +14,7 @@
 #include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "boardroom.h"
 
 static struct xhci_device_slot device_slots[XHCI_MAX_DEVICE_SLOTS];
 static spinlock_t device_slots_lock;
@@ -1443,6 +1444,11 @@ static void enum_driver_start(xhci_controller_t* ctrl, struct xhci_device_slot* 
                 slot->port_num, speed_name(slot->speed),
                 slot->device_desc.idVendor, slot->device_desc.idProduct,
                 slot->slot_id, slot->ep_bulk_in, slot->ep_bulk_out);
+
+        /* And the room is told there is a medium to seat. A flag, because
+         * seating one means asking it how large it is, and that is a transfer
+         * this handler cannot wait for. */
+        BoardroomNoteArrival();
         break;
 
     default:

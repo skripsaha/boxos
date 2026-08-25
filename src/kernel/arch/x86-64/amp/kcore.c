@@ -1,4 +1,5 @@
 #include "kcore.h"
+#include "boardroom.h"
 #include "xhci_hub.h"
 #include "xhci_enumeration.h"
 #include "process.h"
@@ -278,6 +279,13 @@ void kcore_run_loop(void)
          * cannot happen where the error was noticed. One core does it and the
          * rest go away. One load of a flag when nothing has failed. */
         xhci_recover_if_needed();
+
+        /* And a medium that arrived after the room was called to order — a
+         * stick pushed in while the machine runs, or the one it booted from
+         * coming back after its controller was reset. Seating it means asking
+         * it how large it is and whether it is ready, which is transfers, so
+         * it belongs here for the same reason as the three above. */
+        BoardroomAttendIfPending();
 
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before

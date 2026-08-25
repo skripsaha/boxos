@@ -1,4 +1,5 @@
 #include "xhci_msd.h"
+#include "boardroom.h"
 #include "xhci_endpoint.h"
 #include "xhci_enumeration.h"
 #include "xhci_transfer.h"
@@ -684,6 +685,23 @@ void xhci_msd_release(xhci_device_slot_t* slot)
     if (u->bounce_phys) pmm_free((void*)u->bounce_phys,
                                  vmm_size_to_pages(MSD_BOUNCE_BYTES));
     kfree(u);
+
+    /*
+     * And whoever is keeping a filesystem on it is told NOW, not at its next
+     * read.
+     *
+     * A unit number is handed out again as soon as it is free, and a seat
+     * holds a unit number — so a medium that leaves and another that arrives
+     * before anybody touches the filesystem are, from the seat's point of
+     * view, the same medium throughout. Measured: a stick pulled and pushed
+     * back was never noticed to have gone at all, because nothing read from it
+     * in between, and the seat went on pointing at whatever took the number.
+     *
+     * This runs from the service pass, which is ordinary kernel context, so
+     * saying it here is allowed and is the last moment at which it is still
+     * true that the number belongs to nobody.
+     */
+    BoardroomNoteDeparture();
 }
 
 /* ── sector I/O ─────────────────────────────────────────────────────────── */

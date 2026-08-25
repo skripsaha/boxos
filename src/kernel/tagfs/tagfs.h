@@ -420,6 +420,25 @@ int      meta_pool_flush(void);
 
 error_t  tagfs_init(void);
 uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
+
+/*
+ * A medium has arrived somewhere in the Boardroom.
+ *
+ * Either the volume this kernel had is back — same identity, and unchanged
+ * while it was out of the machine, both read off the medium rather than
+ * assumed — or nothing was ever mounted and this is the first medium that
+ * could carry a volume. Called from a context that is allowed to wait,
+ * because deciding takes reads.
+ */
+void     TagFSAttendArrival(void);
+
+/* The medium under the volume may have left; ask now rather than at the next
+ * read, because by then the seat can hold something else. */
+void     TagFSNoteMediumGone(void);
+
+/* Said once, by whoever tried the boot mount, whether or not it succeeded.
+ * Before it, an arriving medium belongs to the boot that is still happening. */
+void     TagFSBootMountSettled(void);
 void tagfs_shutdown(void);
 void tagfs_sync(void);
 

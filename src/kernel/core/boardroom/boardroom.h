@@ -35,6 +35,35 @@ typedef enum {
  * that arrived since. */
 void BoardroomInit(void);
 
+/*
+ * Something arrived on a bus that can gain media while the machine runs.
+ *
+ * Noted from wherever it was noticed — an interrupt handler, usually — and
+ * acted on by the pass below, which runs where waiting is allowed. It has to
+ * be two steps: seating a medium means asking it how large it is and whether
+ * it is ready, and both of those are transfers.
+ *
+ * Without this the room was called to order exactly once, at boot, and a stick
+ * pushed in afterwards was a device the USB driver knew all about and no
+ * filesystem could ever reach: it had no seat, and a seat is the only way in.
+ */
+void BoardroomNoteArrival(void);
+
+/*
+ * A medium left, and this is said at the moment it does.
+ *
+ * Not deferred, because a seat holds a controller-specific index and those are
+ * handed out again as soon as they are free: by the time a deferred pass ran,
+ * the seat could be pointing at a different medium with the same number, and
+ * nothing would ever have noticed the first one leaving. Called from the
+ * service pass that takes the device down, which is ordinary kernel context.
+ */
+void BoardroomNoteDeparture(void);
+
+/* Cheap enough for the idle loop: one atomic load when nothing has arrived,
+ * which is almost always. */
+void BoardroomAttendIfPending(void);
+
 /* How many media answered, and what each of them is. */
 uint8_t     BoardroomSeatCount(void);
 BoardKind   BoardroomSeatKind(uint8_t seat);

@@ -1,4 +1,5 @@
 #include "boardroom.h"
+#include "tagfs.h"
 #include "boarding.h"
 #include "klib.h"
 #include "ahci.h"
@@ -195,6 +196,62 @@ void BoardroomInit(void)
         kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
                 s->removable ? " (removable)" : "");
     }
+}
+
+/*
+ * A medium turned up after the room had already been called to order.
+ *
+ * Raised wherever the arrival was noticed, which is an interrupt handler, and
+ * acted on below where waiting is allowed. The two cannot be the same place:
+ * seating a medium means asking it how large it is and whether it is ready,
+ * and both of those are transfers somebody has to wait for.
+ */
+static volatile uint32_t g_arrival_pending = 0;
+
+void BoardroomNoteArrival(void)
+{
+    __atomic_store_n(&g_arrival_pending, 1u, __ATOMIC_RELEASE);
+}
+
+void BoardroomNoteDeparture(void)
+{
+    /* The Boardroom knows about media and not about what anybody keeps on
+     * them, so it passes the fact on rather than acting on it. */
+    TagFSNoteMediumGone();
+}
+
+void BoardroomAttendIfPending(void)
+{
+    if (__atomic_load_n(&g_arrival_pending, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+
+    /* One core seats what arrived and the rest go away rather than queue up
+     * behind it — the same arrangement the hubs and the slot teardown use, and
+     * for the same reason: this walks and mutates the seat list. */
+    static volatile uint32_t busy = 0;
+    if (__atomic_exchange_n(&busy, 1u, __ATOMIC_ACQUIRE) != 0) {
+        return;
+    }
+    __atomic_store_n(&g_arrival_pending, 0u, __ATOMIC_RELEASE);
+
+    uint8_t before = g_seat_count;
+
+    /* Idempotent per medium: a seat that already exists is not seated twice,
+     * and seat numbers never move, so anything holding one keeps it. */
+    BoardroomInit();
+
+    if (g_seat_count != before) {
+        kprintf("[Boardroom] %u medium/media arrived after the room was called "
+                "to order\n", (unsigned)(g_seat_count - before));
+    }
+
+    /* And whether any of it carries the filesystem this machine lives on. The
+     * Boardroom knows about media; what is kept on them is not its business,
+     * so it asks rather than decides. */
+    TagFSAttendArrival();
+
+    __atomic_store_n(&busy, 0u, __ATOMIC_RELEASE);
 }
 
 uint8_t BoardroomSeatCount(void) { return g_seat_count; }
