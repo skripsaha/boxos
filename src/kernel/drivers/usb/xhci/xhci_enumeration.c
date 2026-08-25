@@ -853,12 +853,12 @@ static const char* enum_state_name(uint8_t state) {
  * nobody asked about.
  */
 typedef struct {
-    uint8_t  intr_in_dci,  intr_addr,  intr_interval;
-    uint16_t intr_mps;
-    uint8_t  bulk_in_dci,  bulk_in_addr;
-    uint16_t bulk_in_mps;
-    uint8_t  bulk_out_dci, bulk_out_addr;
-    uint16_t bulk_out_mps;
+    /* Kept whole rather than picked apart. Every field of what the device said
+     * about an endpoint ends up in its endpoint context, and copying out three
+     * of them was how the burst size came to be dropped on the floor for every
+     * SuperSpeed device on the bus. */
+    usb_endpoint_info_t intr_in, bulk_in, bulk_out;
+    uint8_t  intr_in_dci, bulk_in_dci, bulk_out_dci;
 } enum_pick_t;
 
 static bool enum_pick_visit(void* ctx, const usb_endpoint_info_t* ep)
@@ -869,21 +869,17 @@ static bool enum_pick_visit(void* ctx, const usb_endpoint_info_t* ep)
     switch (ep->attributes & 0x03) {
         case USB_EP_XFER_INTERRUPT:
             if (in && !p->intr_in_dci) {
-                p->intr_in_dci   = xhci_dci_of(ep->addr);
-                p->intr_addr     = ep->addr;
-                p->intr_mps      = ep->max_packet;
-                p->intr_interval = ep->interval;
+                p->intr_in_dci = xhci_dci_of(ep->addr);
+                p->intr_in     = *ep;
             }
             break;
         case USB_EP_XFER_BULK:
             if (in && !p->bulk_in_dci) {
-                p->bulk_in_dci  = xhci_dci_of(ep->addr);
-                p->bulk_in_addr = ep->addr;
-                p->bulk_in_mps  = ep->max_packet;
+                p->bulk_in_dci = xhci_dci_of(ep->addr);
+                p->bulk_in     = *ep;
             } else if (!in && !p->bulk_out_dci) {
-                p->bulk_out_dci  = xhci_dci_of(ep->addr);
-                p->bulk_out_addr = ep->addr;
-                p->bulk_out_mps  = ep->max_packet;
+                p->bulk_out_dci = xhci_dci_of(ep->addr);
+                p->bulk_out     = *ep;
             }
             break;
         default:
@@ -923,8 +919,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->ep_interrupt_in = pick.intr_in_dci;
 
         if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
-                            pick.intr_addr, pick.intr_mps, pick.intr_interval,
-                            pick.intr_mps) != 0) {
+                            &pick.intr_in, pick.intr_in.max_packet) != 0) {
             kprintf("[xHCI] port %u: no memory for the keyboard endpoint\n",
                     slot->port_num);
             xhci_slot_retire(ctrl, slot);
@@ -962,9 +957,9 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->ep_bulk_out   = pick.bulk_out_dci;
 
         if (xhci_ep_prepare(slot, pick.bulk_in_dci, XHCI_EP_TYPE_BULK_IN,
-                            pick.bulk_in_addr, pick.bulk_in_mps, 0, 0) != 0 ||
+                            &pick.bulk_in, 0) != 0 ||
             xhci_ep_prepare(slot, pick.bulk_out_dci, XHCI_EP_TYPE_BULK_OUT,
-                            pick.bulk_out_addr, pick.bulk_out_mps, 0, 0) != 0) {
+                            &pick.bulk_out, 0) != 0) {
             kprintf("[xHCI] port %u: no memory for the storage endpoints\n",
                     slot->port_num);
             xhci_slot_retire(ctrl, slot);
@@ -993,8 +988,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
 
         slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
-                            pick.intr_addr, pick.intr_mps, pick.intr_interval,
-                            pick.intr_mps) != 0 ||
+                            &pick.intr_in, pick.intr_in.max_packet) != 0 ||
             xhci_ep_configure(ctrl, slot) != 0) {
             kprintf("[xHCI] port %u: could not configure the hub\n",
                     slot->port_num);
