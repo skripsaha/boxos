@@ -37,7 +37,30 @@
  * been tried and did not help.
  */
 #define XHCI_CMD_QUIET_MS 1000
-#define XHCI_CMD_NUDGES   3
+
+/*
+ * ‼ One, not three. A second identical register write says nothing the first
+ * one did not.
+ *
+ * The nudge exists for a doorbell the controller did not act on, and one nudge
+ * settles that question completely: either the write takes, or the controller
+ * is not acting on doorbells and no number of further ones will change it.
+ * Three of them were three guesses at the same answer, and each cost the full
+ * command budget — fifteen seconds of a boot spent asking a question already
+ * answered.
+ *
+ * And it is answered, on the machine this is for: two separate runs on the
+ * owner's board rang it three times against an Address Device that would not
+ * complete, and all three did nothing. What moved it was the abort, because
+ * the abort interrupts a command the controller is IN, which is what this
+ * fault actually is. The doorbell is kept because a lost write is real; the
+ * repetition is dropped because it was measured to be worthless.
+ *
+ * This is not a cosmetic number: it is half of how long the bus takes to give
+ * up on a device and try it again, and anything waiting for the bus to finish
+ * is waiting for exactly that.
+ */
+#define XHCI_CMD_NUDGES   1
 
 void xhci_command_init(xhci_controller_t* ctrl);
 
