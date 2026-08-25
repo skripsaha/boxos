@@ -9,6 +9,8 @@
 #include "xhci_enumeration.h"
 #include "klib.h"
 #include "touch.h"
+#include "amp.h"
+#include "atomics.h"
 
 /* ─── Touch tag handle cache (resolved once via xhci_interrupt_touch_init)
  *
@@ -304,20 +306,38 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
      * The lock disables interrupts while held, so the handler cannot preempt a
      * drain on this core, and on another core it waits out a drain measured in
      * microseconds. */
-    if (!spin_trylock(&ctrl->event_lock)) {
-        /* Somebody is already draining. Theirs will reach every event on the
-         * ring including the one this caller is waiting for, so there is
-         * nothing to add by queueing behind them — and a great deal to lose:
-         * a drain reached from inside another drain, on the same core, would
-         * be waiting for a lock its own caller holds. */
-        return;
+    /*
+     * One drainer at a time — but "give up" and "wait a moment" are different
+     * answers, and this used to give the first to both questions.
+     *
+     * A nested call on the SAME core has to leave: it would be waiting for a
+     * lock its own stack frame is holding. A call from another core has only
+     * to wait, because the holder is about to finish and is reading the very
+     * ring this caller wants read. Abandoning that one means a core walks away
+     * from a ring nobody else is going to look at again soon — and during boot
+     * there is no timer tick to come back for it.
+     */
+    uint32_t me = (uint32_t)amp_get_core_index() + 1u;
+    for (;;) {
+        if (spin_trylock(&ctrl->event_lock)) {
+            break;
+        }
+        if (__atomic_load_n(&ctrl->drain_owner, __ATOMIC_ACQUIRE) == me) {
+            /* Ourselves, further up this stack. Theirs will reach every event
+             * on the ring, including the one this caller is waiting for. */
+            __atomic_fetch_add(&ctrl->drain_skips, 1, __ATOMIC_RELAXED);
+            return;
+        }
+        cpu_pause();
     }
+    __atomic_store_n(&ctrl->drain_owner, me, __ATOMIC_RELEASE);
 
     /* Before anything else: is it still running at all? A halted controller
      * produces no events, so a drain that does not ask this simply finds an
      * empty ring, every time, for ever — which is what "the device stopped
      * being answered" looked like from the outside. */
     if (xhci_controller_stopped(ctrl)) {
+        __atomic_store_n(&ctrl->drain_owner, 0, __ATOMIC_RELEASE);
         spin_unlock(&ctrl->event_lock);
         return;
     }
@@ -325,6 +345,7 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
     xhci_ring_t* event_ring = &ctrl->event_ring;
     xhci_interrupter_regs_t* intr0 = &ctrl->runtime_regs->interrupters[0];
 
+drain_again:
     while (1) {
         xhci_trb_t* trb = &event_ring->trbs[event_ring->dequeue_idx];
 
@@ -372,6 +393,24 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
     new_erdp |= XHCI_ERDP_EHB;
     intr0->erdp = new_erdp;
 
+    /*
+     * And look once more, because the ring is not empty just because it was.
+     *
+     * The controller may post an event between the read that found the ring
+     * empty and the write that advances ERDP past it — xHCI 1.2 §4.9.4 asks
+     * software to re-examine the ring after advancing the pointer for exactly
+     * this reason. Leaving without looking parks that event until the next
+     * drain, and during boot there is no timer tick to be the next drain: it
+     * waits for whoever happens along, which on a live board meant a
+     * controller that had executed a command sitting there with the
+     * completion nobody collected.
+     */
+    if ((event_ring->trbs[event_ring->dequeue_idx].control & TRB_C) ==
+        event_ring->cycle_state) {
+        goto drain_again;
+    }
+
+    __atomic_store_n(&ctrl->drain_owner, 0, __ATOMIC_RELEASE);
     spin_unlock(&ctrl->event_lock);
 }
 

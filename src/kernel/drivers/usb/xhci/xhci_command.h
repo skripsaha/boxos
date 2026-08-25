@@ -24,6 +24,21 @@
  * Not a limit — a command slower than this is reported and then waited for. */
 #define XHCI_CMD_SLOW_MS 250
 
+/*
+ * How long the ring may be silent before it is nudged, and how many nudges it
+ * gets before it is aborted.
+ *
+ * A doorbell is how software says "there is work on the ring". Ringing it again
+ * costs one register write, cannot corrupt anything, and is the entire remedy
+ * for a doorbell the controller did not act on — which is a real condition on
+ * real silicon and looks exactly like a command that hangs. Aborting the ring
+ * is the remedy for a controller that has genuinely stopped, and it destroys
+ * every command in flight, so it is what happens after the cheap thing has
+ * been tried and did not help.
+ */
+#define XHCI_CMD_QUIET_MS 1000
+#define XHCI_CMD_NUDGES   3
+
 void xhci_command_init(xhci_controller_t* ctrl);
 
 /*
