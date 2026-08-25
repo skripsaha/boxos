@@ -326,6 +326,19 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -4;
     }
 
+    if (ctrl->enum_attempts[port] >= XHCI_ENUM_ATTEMPTS) {
+        /* Said once, and then the port is left alone until something is
+         * unplugged from it — a port retried for ever is a port that spends
+         * the machine's boot on a device which is not going to answer. */
+        if (ctrl->enum_attempts[port] == XHCI_ENUM_ATTEMPTS) {
+            ctrl->enum_attempts[port]++;
+            kprintf("[xHCI %s] port %u: %u attempts and the device on it never "
+                    "came up — leaving the port alone\n",
+                    ctrl->name, port, XHCI_ENUM_ATTEMPTS);
+        }
+        return -8;
+    }
+
     struct xhci_device_slot* slot = find_free_slot();
     if (!slot) {
         kprintf("[xHCI] no free device slot for port %u\n", port);
@@ -376,6 +389,8 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
      * given up on for the time it spent waiting. */
     slot->timestamp_started = rdtsc();
     slot->depth = 0;
+    slot->born_port = port;
+    slot->ever_configured = false;
 
     debug_printf("[xHCI ENUM] Starting enumeration for port %u\n", port);
 
@@ -659,6 +674,8 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
     }
 
     slot->timestamp_started = rdtsc();
+    slot->born_port = 0;            /* not a root port; no retry from here */
+    slot->ever_configured = false;
 
     debug_printf("[xHCI ENUM] device on hub slot %u port %u, route 0x%05x, "
                  "depth %u\n", hub->slot_id, hub_port,
@@ -760,11 +777,42 @@ static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
         slot->dev_ctx = NULL;
     }
 
+    /*
+     * And then try again, on a port freshly reset.
+     *
+     * A device that failed once is not a device that will fail again: the
+     * first attempt met a descriptor read that babbled, or a request refused
+     * while the device was still settling, or an Address Device the controller
+     * never answered — and every one of those is something a second attempt on
+     * a clean port does not repeat. Every USB host does this; this driver
+     * released the port and moved on, which on a machine that boots from a
+     * flash drive is a machine that boots without a filesystem.
+     *
+     * Only for a device that never got as far as being configured, only for
+     * root ports (a device on a hub is retried by the hub's own scan), only
+     * while something is still plugged in, and only three times — a port
+     * retried for ever is a port that spends the whole boot on a device which
+     * is not going to answer. The attempt is counted here rather than at the
+     * start, so a device that came up costs nothing.
+     */
+    uint8_t retry_port = (!slot->ever_configured && ctrl) ? slot->born_port : 0;
+
     slot->slot_id = 0;
     slot->port_num = 0;
+    slot->born_port = 0;
     slot->state = ENUM_STATE_IDLE;
     slot->timestamp_started = 0;
     slot->driver = XHCI_DRIVER_NONE;
+
+    if (retry_port && retry_port <= ctrl->max_ports &&
+        ctrl->enum_attempts[retry_port] < XHCI_ENUM_ATTEMPTS &&
+        xhci_port_has_device(ctrl, retry_port)) {
+        ctrl->enum_attempts[retry_port]++;
+        kprintf("[xHCI %s] port %u: trying again on a freshly reset port "
+                "(attempt %u of %u)\n", ctrl->name, retry_port,
+                ctrl->enum_attempts[retry_port] + 1, XHCI_ENUM_ATTEMPTS + 1);
+        xhci_enumerate_device(ctrl, retry_port);
+    }
 }
 
 /* Build an Input Context describing the slot and EP0, and ask the controller
@@ -876,6 +924,10 @@ static void enum_settle_unclaimed(struct xhci_device_slot* slot)
             slot->device_desc.idVendor, slot->device_desc.idProduct,
             slot->interface_class, slot->interface_subclass,
             slot->interface_protocol);
+    slot->ever_configured = true;
+    if (slot->ctrl && slot->born_port) {
+        slot->ctrl->enum_attempts[slot->born_port] = 0;
+    }
     slot->state = ENUM_STATE_CONFIGURED;
 
     /* "No driver claims it" is a statement about right now, not about ever.
@@ -1740,6 +1792,10 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         case ENUM_STATE_WAIT_CONFIGURE_ENDPOINT: {
             enum_free_input_ctx(ctrl, slot);
             slot->ep_pending_add = 0;
+            slot->ever_configured = true;
+            if (slot->born_port) {
+                ctrl->enum_attempts[slot->born_port] = 0;
+            }
             slot->state = ENUM_STATE_CONFIGURED;
             enum_driver_start(ctrl, slot);
             break;

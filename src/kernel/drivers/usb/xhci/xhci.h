@@ -192,6 +192,11 @@ typedef struct {
      * ENUM_STATE_QUEUED for its turn.
      */
     xhci_device_slot_t* enum_active;
+
+    /* How many times each root port has been tried and failed. Cleared when a
+     * device on it is finally configured, so a port that works after two goes
+     * costs two goes and not a budget for the life of the machine. */
+    uint8_t enum_attempts[XHCI_PORT_MAP_ENTRIES];
 } xhci_controller_t;
 
 int xhci_init(void);
