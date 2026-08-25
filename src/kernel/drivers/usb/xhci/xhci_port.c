@@ -111,7 +111,7 @@ void xhci_power_ports(xhci_controller_t* ctrl)
          * where this matters there is no debug build — there is a screen, and
          * a person reading it. Every fact this function establishes changes
          * what the next line of the boot means. */
-        kprintf("[xHCI] the controller powers its own ports\n");
+        kprintf("[xHCI %s] powers its own ports\n", ctrl->name);
         return;
     }
 
@@ -124,7 +124,8 @@ void xhci_power_ports(xhci_controller_t* ctrl)
         switched++;
     }
 
-    kprintf("[xHCI] powered %u root port(s) of %u\n", switched, ctrl->max_ports);
+    kprintf("[xHCI %s] powered %u root port(s) of %u\n",
+            ctrl->name, switched, ctrl->max_ports);
 
     if (switched == 0) {
         return;                         /* firmware had already powered them */
@@ -149,8 +150,8 @@ void xhci_port_describe(xhci_controller_t* ctrl, uint8_t port)
         "Recovery", "Hot Reset", "Compliance", "Test", "?", "?", "?", "Resume"
     };
 
-    kprintf("[xHCI] port %u: %s, %s, link %s, speed %u  (PORTSC 0x%x, USB %u)\n",
-            port,
+    kprintf("[xHCI %s] port %u: %s, %s, link %s, speed %u  (PORTSC 0x%x, USB %u)\n",
+            ctrl->name, port,
             (sc & XHCI_PORTSC_PP)  ? "powered"   : "NOT powered",
             (sc & XHCI_PORTSC_CCS) ? "something attached" : "nothing attached",
             link[pls],

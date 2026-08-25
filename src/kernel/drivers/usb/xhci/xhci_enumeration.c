@@ -1112,8 +1112,9 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
             continue;
         }
 
-        kprintf("[xHCI] port %u: gave up after %u ms while %s\n",
-                slot->port_num, XHCI_ENUM_TIMEOUT_MS, enum_state_name(state));
+        kprintf("[xHCI %s] port %u: gave up after %u ms while %s\n",
+                ctrl->name, slot->port_num, XHCI_ENUM_TIMEOUT_MS,
+                enum_state_name(state));
         xhci_slot_retire(ctrl, slot);
     }
 }
@@ -1180,9 +1181,10 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
     }
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        kprintf("[xHCI] port %u: enumeration step %u failed with completion "
+        kprintf("[xHCI %s] port %u: enumeration step %s failed with completion "
                 "code %u — releasing the slot\n",
-                slot->port_num, slot->state, completion_code);
+                ctrl->name, slot->port_num, enum_state_name(slot->state),
+                completion_code);
         xhci_slot_retire(ctrl, slot);
         return;
     }

@@ -369,16 +369,31 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
     ctrl->op_regs->usbsts = usbsts & (XHCI_STS_HSE | XHCI_STS_EINT |
                                       XHCI_STS_PCD);
 
-    if (usbsts & XHCI_STS_HSE) {
-        kprintf("[xHCI] host system error — the controller has stopped "
-                "(USBSTS=0x%08x)\n", usbsts);
+    if (usbsts & (XHCI_STS_HSE | XHCI_STS_HCE)) {
+        /*
+         * The controller has stopped and will not start again by itself.
+         *
+         * Said once, with the state that explains it and the name of the
+         * controller it happened to — on a machine with two of them, "the
+         * controller has stopped" identifies neither. Everything on it is now
+         * unreachable: every device mid-enumeration will run out its two
+         * seconds and be released, and there is no point pretending otherwise.
+         */
+        if (!ctrl->error_state) {
+            kprintf("[xHCI %s] %s — the controller has stopped and needs a "
+                    "reset (USBSTS=0x%08x USBCMD=0x%08x CRCR=0x%08x "
+                    "DCBAAP=0x%08x CONFIG=0x%08x)\n",
+                    ctrl->name,
+                    (usbsts & XHCI_STS_HCE) ? "internal controller error"
+                                            : "host system error",
+                    usbsts,
+                    ctrl->op_regs->usbcmd,
+                    (uint32_t)ctrl->op_regs->crcr,
+                    (uint32_t)ctrl->op_regs->dcbaap,
+                    ctrl->op_regs->config);
+        }
         ctrl->error_state = true;
-    }
-
-    if (usbsts & XHCI_STS_HCE) {
-        kprintf("[xHCI] internal controller error — reset required "
-                "(USBSTS=0x%08x)\n", usbsts);
-        ctrl->error_state = true;
+        ctrl->running     = false;
     }
 
     /* Everything the controller has to say arrives on the event ring, port
@@ -392,6 +407,25 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
     ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
 }
 
+/*
+ * The controller that raised this vector, and only that one.
+ *
+ * Each controller signals on a vector of its own, so an interrupt names its
+ * source instead of being offered to every controller in turn on the chance
+ * that it was the one that spoke.
+ */
+void xhci_irq_handler_vector(uint8_t vector) {
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_controller_t* ctrl = xhci_controller_at(i);
+        if (ctrl && ctrl->irq_vector == vector) {
+            xhci_irq_handler_on(ctrl);
+            return;
+        }
+    }
+}
+
+/* Every controller, for the polled fallback and for anything that has no
+ * vector to go on. */
 void xhci_irq_handler(void) {
     for (uint8_t i = 0; i < xhci_controller_count(); i++) {
         xhci_irq_handler_on(xhci_controller_at(i));

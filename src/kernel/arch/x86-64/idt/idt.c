@@ -12,11 +12,11 @@
 #include "pocket_ring.h"
 #include "kring.h"
 #include "vmm.h"
-#include "uaccess.h"  /* UACCESS_USER_VA_MAX for SMAP-fault diagnostic */
-#include "nameplate.h"  /* nameplate_name_at — name the frames of a user fault */
-#include "nameplate_format.h"  /* NameplateHeader — the kernel table's own minimum size */
+#include "uaccess.h"          /* UACCESS_USER_VA_MAX for SMAP-fault diagnostic */
+#include "nameplate.h"        /* nameplate_name_at — name the frames of a user fault */
+#include "nameplate_format.h" /* NameplateHeader — the kernel table's own minimum size */
 #include "atomics.h"
-#include "touch.h"   /* TouchTag types — Phase 2K #CP publish */
+#include "touch.h" /* TouchTag types — Phase 2K #CP publish */
 #include "scheduler.h"
 #include "context_switch.h"
 #include "keyboard.h"
@@ -26,7 +26,7 @@
 #include "kcore.h"
 #include "xhci_interrupt.h"
 #include "linker_symbols.h"
-#include "cpu_calibrate.h"  // cpu_tsc_recal_tick (periodic recalibration)
+#include "cpu_calibrate.h" // cpu_tsc_recal_tick (periodic recalibration)
 #include "touch_queue.h"
 #include "pit.h"
 #include "irq_defer.h"
@@ -121,9 +121,13 @@ void idt_init(void)
     idt_set_entry(AHCI_MSI_VECTOR, (uint64_t)isr_table[AHCI_MSI_VECTOR],
                   GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
 
-    // xHCI MSI vector (0x71) — message-signalled interrupt from the USB host
-    idt_set_entry(XHCI_MSI_VECTOR, (uint64_t)isr_table[XHCI_MSI_VECTOR],
-                  GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    // xHCI MSI vectors — one per USB host controller, so an interrupt names
+    // which of them raised it instead of being offered to all in turn.
+    for (uint32_t v = XHCI_MSI_VECTOR; v <= XHCI_MSI_VECTOR_LAST; v++)
+    {
+        idt_set_entry((uint8_t)v, (uint64_t)isr_table[v],
+                      GDT_KERNEL_CODE, IDT_TYPE_INTERRUPT_GATE, 0);
+    }
 
     // AMP IPI vectors (0xF0-0xF2)
     idt_set_entry(IPI_WAKE_VECTOR, (uint64_t)isr_table[IPI_WAKE_VECTOR],
@@ -204,22 +208,38 @@ static process_t *find_process_by_kernel_stack_overflow(uint64_t rsp)
  * defensive branch keeps the helper total. */
 static const char *exception_mnemonic(uint8_t vector)
 {
-    switch (vector) {
-    case 0:  return "#DE";
-    case 1:  return "#DB";
-    case 2:  return "NMI";
-    case 3:  return "#BP";
-    case 4:  return "#OF";
-    case 5:  return "#BR";
-    case 6:  return "#UD";
-    case 7:  return "#NM";
-    case 8:  return "#DF";
-    case 10: return "#TS";
-    case 11: return "#NP";
-    case 12: return "#SS";
-    case 13: return "#GP";
-    case 14: return "#PF";
-    case 16: return "#MF";
+    switch (vector)
+    {
+    case 0:
+        return "#DE";
+    case 1:
+        return "#DB";
+    case 2:
+        return "NMI";
+    case 3:
+        return "#BP";
+    case 4:
+        return "#OF";
+    case 5:
+        return "#BR";
+    case 6:
+        return "#UD";
+    case 7:
+        return "#NM";
+    case 8:
+        return "#DF";
+    case 10:
+        return "#TS";
+    case 11:
+        return "#NP";
+    case 12:
+        return "#SS";
+    case 13:
+        return "#GP";
+    case 14:
+        return "#PF";
+    case 16:
+        return "#MF";
     /* #AC (vector 17) — Intel SDM Vol 3 §6.15 Table 6-1. Two distinct
      * triggers reach here: (1) classical alignment-check from a
      * misaligned user-mode memory access while CR0.AM=1 and EFLAGS.AC=1,
@@ -230,12 +250,18 @@ static const char *exception_mnemonic(uint8_t vector)
      * indicates either a misconfigured boot path, a hostile guest VM
      * lying about CPUID, or a real classical AC — all worth a clear
      * diagnostic instead of an anonymous "Exception #17". */
-    case 17: return "#AC";
-    case 18: return "#MC";
-    case 19: return "#XF";
-    case 20: return "#VE";
-    case 21: return "#CP";
-    default: return "INT";
+    case 17:
+        return "#AC";
+    case 18:
+        return "#MC";
+    case 19:
+        return "#XF";
+    case 20:
+        return "#VE";
+    case 21:
+        return "#CP";
+    default:
+        return "INT";
     }
 }
 
@@ -284,19 +310,20 @@ static bool panic_probe_present(uint64_t va)
     __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
 
     const uint64_t ADDR_MASK = 0x000FFFFFFFFFF000ULL;
-    const uint64_t P         = 1ULL << 0;
-    const uint64_t PS        = 1ULL << 7;   /* 1 GiB / 2 MiB leaf */
+    const uint64_t P = 1ULL << 0;
+    const uint64_t PS = 1ULL << 7; /* 1 GiB / 2 MiB leaf */
 
     uint64_t *table = (uint64_t *)vmm_phys_to_virt(cr3 & ADDR_MASK);
     if (!table)
         return false;
 
-    for (int level = 3; level >= 0; level--) {
+    for (int level = 3; level >= 0; level--)
+    {
         uint64_t entry = table[(va >> (12 + level * 9)) & 0x1FF];
         if (!(entry & P))
             return false;
         if (level > 0 && (entry & PS))
-            return true;                    /* large page, and it is present */
+            return true; /* large page, and it is present */
         table = (uint64_t *)vmm_phys_to_virt(entry & ADDR_MASK);
         if (!table)
             return false;
@@ -323,10 +350,11 @@ static bool panic_probe_present(uint64_t va)
 static void panic_claim_or_halt(bool *already_claimed_here)
 {
     if (*already_claimed_here)
-        return;                     /* same dump, further down the same page */
+        return; /* same dump, further down the same page */
 
     static volatile uint32_t panic_claimed = 0;
-    if (__atomic_exchange_n(&panic_claimed, 1u, __ATOMIC_ACQ_REL) != 0) {
+    if (__atomic_exchange_n(&panic_claimed, 1u, __ATOMIC_ACQ_REL) != 0)
+    {
         for (;;)
             __asm__ volatile("cli; hlt");
     }
@@ -384,7 +412,7 @@ void exception_handler(interrupt_frame_t *frame)
 
 #ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
     if (g_bringup_held)
-        bringup_hold_forever();   /* the screen already holds the fault that matters */
+        bringup_hold_forever(); /* the screen already holds the fault that matters */
 #endif
 
     /* NMI (vector 2) — server-class firmware can deliver APEI/GHES
@@ -396,7 +424,8 @@ void exception_handler(interrupt_frame_t *frame)
      * path (if any) and fall through to the standard NMI logging
      * below for non-APEI NMI causes (watchdog, performance counters,
      * etc.). */
-    if (frame->vector == 2) {
+    if (frame->vector == 2)
+    {
         extern bool apei_ghes_nmi_check(void);
         (void)apei_ghes_nmi_check();
         /* fall through to generic NMI logging */
@@ -408,10 +437,12 @@ void exception_handler(interrupt_frame_t *frame)
      * events, and returns true if the error was recoverable (UC=0 or
      * UCR with RIPV=1). On unrecoverable error: fall through to the
      * standard kill-process / system_halt path below. */
-    if (frame->vector == 18) {
+    if (frame->vector == 18)
+    {
         extern bool mce_handle(interrupt_frame_t *);
-        if (mce_handle(frame)) {
-            return;  /* recovered — IRET back to user/kernel */
+        if (mce_handle(frame))
+        {
+            return; /* recovered — IRET back to user/kernel */
         }
         /* fatal — drop into the generic exception path. (cs ring tells
          * exception_handler whether to kill the process or halt.) */
@@ -430,9 +461,10 @@ void exception_handler(interrupt_frame_t *frame)
      *
      * We log + publish Touch and fall through to the generic kill-process
      * path. Recovery is the future per-process CET lifecycle's job. */
-    if (frame->vector == 21) {
-        uint16_t cp_type   = (uint16_t)(frame->error_code & 0x7FFFu);
-        bool     cp_enclave = (frame->error_code & 0x8000u) != 0;
+    if (frame->vector == 21)
+    {
+        uint16_t cp_type = (uint16_t)(frame->error_code & 0x7FFFu);
+        bool cp_enclave = (frame->error_code & 0x8000u) != 0;
         kprintf("[CET] #CP fired: type=%u enclave=%d RIP=0x%lx\n",
                 (unsigned)cp_type, (int)cp_enclave, frame->rip);
         if ((frame->cs & 3) == 0)
@@ -442,11 +474,20 @@ void exception_handler(interrupt_frame_t *frame)
          * handler would take registry locks → deadlock against any
          * thread holding the Touch lock at the moment #CP fired. */
         TouchTag cp_tag = vmm_get_cet_cp_tag();
-        struct { uint64_t rip; uint16_t cp_type; uint8_t enclave; uint8_t pad; } ev = {
-            .rip = frame->rip, .cp_type = cp_type,
-            .enclave = cp_enclave ? 1u : 0u, .pad = 0,
+        struct
+        {
+            uint64_t rip;
+            uint16_t cp_type;
+            uint8_t enclave;
+            uint8_t pad;
+        } ev = {
+            .rip = frame->rip,
+            .cp_type = cp_type,
+            .enclave = cp_enclave ? 1u : 0u,
+            .pad = 0,
         };
-        if (cp_tag != TOUCH_TAG_INVALID) {
+        if (cp_tag != TOUCH_TAG_INVALID)
+        {
             TouchPublishIrqPair(cp_tag, TOUCH_TAG_INVALID,
                                 &ev, (uint16_t)sizeof(ev), 0u, 0u);
         }
@@ -478,10 +519,12 @@ void exception_handler(interrupt_frame_t *frame)
          * The fixup is the correct response: the user pointer is
          * bad (or its page got unmapped under us), bubble the
          * error to the syscall caller. */
-        if ((frame->cs & 3) == 0) {
+        if ((frame->cs & 3) == 0)
+        {
             extern uintptr_t uaccess_lookup_fixup(uintptr_t fault_rip);
             uintptr_t fixup_rip = uaccess_lookup_fixup(frame->rip);
-            if (fixup_rip != 0) {
+            if (fixup_rip != 0)
+            {
                 frame->rip = fixup_rip;
                 return;
             }
@@ -509,7 +552,8 @@ void exception_handler(interrupt_frame_t *frame)
          * STAC/CLAC bracket — adjacent kernel code dereferenced a user-
          * mapped page with RFLAGS.AC=0 and CR4.SMAP=1. The panic block
          * below dumps RFLAGS so the operator can read the AC bit. */
-        if ((frame->cs & 3) == 0) {
+        if ((frame->cs & 3) == 0)
+        {
             /* This line is the first thing an unhandled ring-0 #PF prints, so
              * the claim belongs here rather than at the panic banner below —
              * otherwise a fault raised while printing the dump announces
@@ -522,7 +566,8 @@ void exception_handler(interrupt_frame_t *frame)
             kprintf("\n[VMM] Unhandled kernel #PF at 0x%lx err=0x%lx%s\n",
                     fault_addr, frame->error_code,
                     is_smap_candidate ? "  [SMAP candidate]" : "");
-            if (is_smap_candidate) {
+            if (is_smap_candidate)
+            {
                 kprintf("[VMM]   Kernel dereferenced user-mapped page via "
                         "RIP 0x%lx without STAC/CLAC bracket.\n"
                         "[VMM]   Wrap the access in copy_to/from_user / "
@@ -564,7 +609,8 @@ void exception_handler(interrupt_frame_t *frame)
              * configuration drifted (BIOS re-asserted bit29 mid-runtime
              * is rare but documented). Surface the hint inline so the
              * operator knows what to investigate. */
-            if (frame->vector == 17 && frame->error_code == 0) {
+            if (frame->vector == 17 && frame->error_code == 0)
+            {
                 kprintf("[EXCEPTION] Note: #AC error_code=0 suggests a "
                         "cache-line-spanning LOCK access; check TEST_CTL "
                         "MSR 0x33 bit 29 state on this core.\n");
@@ -633,16 +679,19 @@ void exception_handler(interrupt_frame_t *frame)
             {
                 uint64_t fp = frame->rbp;
                 kprintf("[EXCEPTION]  called from:\n");
-                for (int depth = 0; depth < 8; depth++) {
-                    uint64_t      next = 0, ret = 0;
+                for (int depth = 0; depth < 8; depth++)
+                {
+                    uint64_t next = 0, ret = 0;
                     NameplateName site;
 
-                    if (fp == 0 || (fp & 7) != 0) break;
+                    if (fp == 0 || (fp & 7) != 0)
+                        break;
                     if (get_user_u64(&next, (const uint64_t *)(uintptr_t)fp) != 0)
                         break;
                     if (get_user_u64(&ret, (const uint64_t *)(uintptr_t)(fp + 8)) != 0)
                         break;
-                    if (ret == 0) break;
+                    if (ret == 0)
+                        break;
 
                     /* The return address points PAST the call, so the byte
                      * that belongs to the call is ret-1; naming ret itself
@@ -660,7 +709,8 @@ void exception_handler(interrupt_frame_t *frame)
 
                     /* Frames march toward higher addresses. A chain that
                      * stalls or reverses is a smashed stack, not a caller. */
-                    if (next <= fp) break;
+                    if (next <= fp)
+                        break;
                     fp = next;
                 }
             }
@@ -772,7 +822,8 @@ void exception_handler(interrupt_frame_t *frame)
             exception_mnemonic((uint8_t)frame->vector), frame->vector);
     kprintf("====================================================================\n");
     kprintf("Error code: 0x%lx\n", frame->error_code);
-    if (frame->vector == 17) {
+    if (frame->vector == 17)
+    {
         kprintf("Hint: #AC in kernel mode means BoxOS code emitted a "
                 "cache-line-spanning LOCK instruction. Either a regression "
                 "in atomic-target alignment or TEST_CTL bit 29 was re-asserted "
@@ -825,7 +876,8 @@ void exception_handler(interrupt_frame_t *frame)
          * left in RBP. Reading them unverified is how a stack trace becomes a
          * second page fault, which is how the dump naming the first one gets
          * replaced by a dump naming itself. */
-        if (!panic_probe_range(walk_rbp, 16)) {
+        if (!panic_probe_range(walk_rbp, 16))
+        {
             kprintf("  #%u  <frame at %016lx is not mapped — chain ends here>\n",
                     depth, walk_rbp);
             break;
@@ -836,10 +888,13 @@ void exception_handler(interrupt_frame_t *frame)
         uint64_t ret_addr = fp[1];
 
         bool in_text = (ret_addr >= (uint64_t)_text_start && ret_addr < (uint64_t)_text_end);
-        if (in_text) {
+        if (in_text)
+        {
             kprintf("  #%u  ", depth);
             panic_name_addr("", ret_addr, true);
-        } else {
+        }
+        else
+        {
             /* Outside .text: not a return address at all, so there is nothing
              * to name and naming the nearest thing would be a guess wearing a
              * function's clothes. */
@@ -969,9 +1024,9 @@ void irq_handler(interrupt_frame_t *frame)
      * a real PCH takes — its INTx line is frequently absent or mis-described
      * in PCI configuration space, and a USB keyboard whose interrupts never
      * arrive is a keyboard that does not type. */
-    if (vector == XHCI_MSI_VECTOR)
+    if (vector >= XHCI_MSI_VECTOR && vector <= XHCI_MSI_VECTOR_LAST)
     {
-        xhci_irq_handler();
+        xhci_irq_handler_vector((uint8_t)vector);
         lapic_send_eoi();
         return;
     }
@@ -1082,7 +1137,8 @@ void irq_handler(interrupt_frame_t *frame)
          * interrupted code was in user mode (CS=USER_CS, RPL=3) — which
          * guarantees no kernel lock is held. Multi-core takes the
          * `amp_is_appcore()` branch above and does not pump here. */
-        if (g_amp.total_cores == 1 && (frame->cs & 3) == 3) {
+        if (g_amp.total_cores == 1 && (frame->cs & 3) == 3)
+        {
             irq_defer_pump(0);
         }
 

@@ -76,6 +76,12 @@ typedef struct {
     bool initialized;
 
     uint8_t num_devices;
+
+    /* How this controller is named on the screen. A machine has several, and a
+     * line that says "port 7" without saying whose port 7 is a line that
+     * cannot be acted on — measured: an internal controller error was reported
+     * by one of two and there was no way to tell which. */
+    char    name[10];               /* "00:14.0" */
 } xhci_controller_t;
 
 int xhci_init(void);
