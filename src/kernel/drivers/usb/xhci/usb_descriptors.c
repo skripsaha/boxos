@@ -1,4 +1,5 @@
 #include "usb_descriptors.h"
+#include "klib.h"
 
 /*
  * Is this eighteen bytes a device descriptor, or is it whatever the bus
@@ -140,9 +141,54 @@ bool usb_walk_interface(const void* data, uint16_t len,
     bool inside = false;
     bool found  = false;
 
+    /*
+     * An endpoint is not finished being described until the descriptor after
+     * it has been looked at.
+     *
+     * At SuperSpeed every endpoint descriptor is followed by a companion
+     * (USB 3.2 Section 9.6.7) carrying the one number the endpoint descriptor
+     * has nowhere to put: how many packets may go back to back. So an endpoint
+     * is held here until the next descriptor arrives, and only then handed to
+     * the visitor — with its companion if one followed, without if none did.
+     * Reporting it immediately, which is what this did, meant the companion
+     * was skipped over as an unrecognised descriptor and every SuperSpeed
+     * endpoint on the machine was configured for a burst of one.
+     */
+    usb_endpoint_info_t pending;
+    bool have_pending = false;
+    memset(&pending, 0, sizeof(pending));
+
     const uint8_t* d;
     uint8_t type, dlen;
     while ((d = desc_walk_next(&w, &type, &dlen)) != NULL) {
+
+        /* The companion belongs to the endpoint immediately before it, and to
+         * nothing else. One that arrives with no endpoint held is a device
+         * describing itself wrongly, and is ignored rather than guessed at. */
+        if (type == USB_DESC_SS_EP_COMPANION && dlen >= 6) {
+            if (have_pending) {
+                const usb_ss_ep_companion_desc_t* c =
+                    (const usb_ss_ep_companion_desc_t*)d;
+                pending.max_burst          = c->bMaxBurst;
+                pending.bytes_per_interval = c->wBytesPerInterval;
+                pending.has_companion      = true;
+
+                /* Mult is the isochronous half of bmAttributes; the bulk half
+                 * of the same byte is MaxStreams, which this driver does not
+                 * use and must not mistake for a multiplier. */
+                if ((pending.attributes & 0x03) == USB_EP_XFER_ISOCH) {
+                    pending.mult = (uint8_t)(c->bmAttributes & 0x03);
+                }
+            }
+            continue;
+        }
+
+        if (have_pending) {
+            have_pending = false;
+            if (visit && !visit(ctx, &pending)) {
+                return found;
+            }
+        }
 
         if (type == USB_DESC_INTERFACE && dlen >= 9) {
             const usb_interface_desc_t* iface = (const usb_interface_desc_t*)d;
@@ -169,18 +215,24 @@ bool usb_walk_interface(const void* data, uint16_t len,
 
         if (inside && type == USB_DESC_ENDPOINT && dlen >= 7) {
             const usb_endpoint_desc_t* ep = (const usb_endpoint_desc_t*)d;
-            usb_endpoint_info_t info = {
-                .addr       = ep->bEndpointAddress,
-                .attributes = ep->bmAttributes,
-                /* Bits 12:11 carry the additional-transactions-per-microframe
-                 * count on high speed; the size is the low eleven bits. */
-                .max_packet = (uint16_t)(ep->wMaxPacketSize & 0x07FF),
-                .interval   = ep->bInterval,
-            };
-            if (visit && !visit(ctx, &info)) {
-                return found;
-            }
+            memset(&pending, 0, sizeof(pending));
+            pending.addr       = ep->bEndpointAddress;
+            pending.attributes = ep->bmAttributes;
+            /* Bits 12:11 carry the additional-transactions-per-microframe
+             * count on high speed, in the same "one less than the count"
+             * encoding the SuperSpeed companion uses; the size is the low
+             * eleven bits. A device slower than high speed states zero there,
+             * so this needs no help from the port to be right. */
+            pending.max_packet = (uint16_t)(ep->wMaxPacketSize & 0x07FF);
+            pending.max_burst  = (uint8_t)((ep->wMaxPacketSize >> 11) & 0x03);
+            pending.interval   = ep->bInterval;
+            have_pending = true;
         }
+    }
+
+    /* The last endpoint of the last interface has nothing after it. */
+    if (have_pending && visit) {
+        visit(ctx, &pending);
     }
 
     return found;

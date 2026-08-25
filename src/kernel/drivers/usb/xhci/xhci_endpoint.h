@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "xhci.h"
 #include "xhci_rings.h"
+#include "usb_descriptors.h"
 
 /* Endpoint types as the controller numbers them (xHCI Table 6-9). The value
  * goes straight into the endpoint context, so these are the controller's
@@ -48,6 +49,15 @@ typedef struct xhci_endpoint {
     uint8_t      addr;              /* bEndpointAddress as the device stated it */
     uint8_t      type;              /* XHCI_EP_TYPE_* */
     uint8_t      interval;          /* bInterval as the device stated it */
+
+    /* How many packets may go back to back, one less than the count, and for
+     * a periodic endpoint how many bytes that comes to per service interval.
+     * Both as the device stated them — from the SuperSpeed companion where
+     * there is one, from the packet-size field where there is not. */
+    uint8_t      max_burst;
+    uint8_t      mult;
+    uint16_t     bytes_per_interval;
+
     bool         active;
 
     /* The transfer currently in flight on this endpoint, and what became of
@@ -83,8 +93,7 @@ void xhci_ep_table_free(xhci_device_slot_t* slot);
 uint32_t xhci_input_ctx_pages(xhci_controller_t* ctrl);
 
 int  xhci_ep_prepare(xhci_device_slot_t* slot, uint8_t dci, uint8_t type,
-                     uint8_t addr, uint16_t max_packet, uint8_t interval,
-                     uint32_t buffer_bytes);
+                     const usb_endpoint_info_t* info, uint32_t buffer_bytes);
 
 /* Post Configure Endpoint for every prepared endpoint that the controller does
  * not yet know about. The slot advances on the command completion. */

@@ -80,13 +80,12 @@ void xhci_ep_table_free(xhci_device_slot_t* slot)
 }
 
 int xhci_ep_prepare(xhci_device_slot_t* slot, uint8_t dci, uint8_t type,
-                    uint8_t addr, uint16_t max_packet, uint8_t interval,
-                    uint32_t buffer_bytes)
+                    const usb_endpoint_info_t* info, uint32_t buffer_bytes)
 {
-    if (!slot || !slot->endpoints || dci < 2 || dci > XHCI_MAX_DCI) {
+    if (!slot || !slot->endpoints || dci < 2 || dci > XHCI_MAX_DCI || !info) {
         return -1;
     }
-    if (type == XHCI_EP_TYPE_INVALID || max_packet == 0) {
+    if (type == XHCI_EP_TYPE_INVALID || info->max_packet == 0) {
         return -1;
     }
 
@@ -106,13 +105,16 @@ int xhci_ep_prepare(xhci_device_slot_t* slot, uint8_t dci, uint8_t type,
         return -1;
     }
 
-    ep->ring           = ring;
-    ep->ring_page_phys = (uint64_t)ring_page;
-    ep->max_packet     = max_packet;
-    ep->addr           = addr;
-    ep->type           = type;
-    ep->interval       = interval;
-    ep->xfer_state     = XHCI_XFER_IDLE;
+    ep->ring               = ring;
+    ep->ring_page_phys     = (uint64_t)ring_page;
+    ep->max_packet         = info->max_packet;
+    ep->addr               = info->addr;
+    ep->type               = type;
+    ep->interval           = info->interval;
+    ep->max_burst          = info->max_burst;
+    ep->mult               = info->mult;
+    ep->bytes_per_interval = info->bytes_per_interval;
+    ep->xfer_state         = XHCI_XFER_IDLE;
 
     if (buffer_bytes > 0) {
         size_t pages = vmm_size_to_pages(buffer_bytes);
@@ -172,18 +174,70 @@ static uint8_t ep_interval_for(uint8_t speed, uint8_t type, uint8_t bInterval)
     return (uint8_t)(exponent - 1);
 }
 
+static bool ep_is_periodic(uint8_t type)
+{
+    return type == XHCI_EP_TYPE_INTERRUPT_IN ||
+           type == XHCI_EP_TYPE_INTERRUPT_OUT ||
+           type == XHCI_EP_TYPE_ISOCH_IN ||
+           type == XHCI_EP_TYPE_ISOCH_OUT;
+}
+
+/*
+ * How much the endpoint may move in one service interval.
+ *
+ * xHCI 1.2 Section 4.14.2 and Section 6.2.3.8. A SuperSpeed endpoint states
+ * this itself, in the companion descriptor, and there is nothing to calculate.
+ * Below SuperSpeed there is no such field, so it is Max Packet Size times the
+ * number of transactions the endpoint asked for — the count the packet-size
+ * field carries in bits 12:11 and that this driver used to discard.
+ *
+ * The consequence of getting it low is not slowness. It is what the controller
+ * reserves bus time for, so an endpoint under-declared here is one whose
+ * transfers the controller will decline to schedule in full.
+ */
+static uint32_t ep_max_esit_payload(const xhci_endpoint_t* ep)
+{
+    if (!ep_is_periodic(ep->type)) {
+        return 0;                   /* the field is reserved for the rest */
+    }
+    if (ep->bytes_per_interval) {
+        return ep->bytes_per_interval;
+    }
+    return (uint32_t)ep->max_packet *
+           ((uint32_t)ep->max_burst + 1u) * ((uint32_t)ep->mult + 1u);
+}
+
 static void ep_write_context(xhci_endpoint_t* ep, uint8_t speed,
                              xhci_endpoint_context_t* ctx)
 {
     memset(ctx, 0, sizeof(*ctx));
 
-    uint8_t interval = ep_interval_for(speed, ep->type, ep->interval);
+    uint8_t  interval = ep_interval_for(speed, ep->type, ep->interval);
+    uint32_t esit     = ep_max_esit_payload(ep);
 
-    /* dword0: Interval [23:16]. */
-    ctx->dwords[0] = (uint32_t)interval << 16;
+    /* dword0: Mult [9:8], Interval [23:16], Max ESIT Payload Hi [31:24].
+     *
+     * Mult is SuperSpeed isochronous only; everything else leaves it zero, and
+     * a non-zero Mult on an endpoint that is not entitled to one is a
+     * Parameter Error rather than a fast endpoint. */
+    ctx->dwords[0] = ((uint32_t)(ep->mult & 0x3) << 8) |
+                     ((uint32_t)interval << 16) |
+                     (((esit >> 16) & 0xFFu) << 24);
 
-    /* dword1: CErr = 3 [2:1], EP Type [5:3], Max Packet Size [31:16]. */
+    /*
+     * dword1: CErr = 3 [2:1], EP Type [5:3], Max Burst Size [15:8],
+     *         Max Packet Size [31:16].
+     *
+     * Max Burst Size was left at zero for every endpoint of every device.
+     * Zero means one packet per burst, which is correct for full and low speed
+     * and is wrong everywhere else: a SuperSpeed flash drive that can move
+     * sixteen packets back to back moves one, forever, and nothing anywhere
+     * reports it — the transfers all succeed. A high-speed interrupt endpoint
+     * asking for two or three transactions per microframe gets one, and drops
+     * what it could not send.
+     */
     ctx->dwords[1] = (3u << 1) | ((uint32_t)ep->type << 3) |
+                     ((uint32_t)ep->max_burst << 8) |
                      ((uint32_t)ep->max_packet << 16);
 
     /* dword2-3: TR Dequeue Pointer, with the Dequeue Cycle State in bit 0. */
@@ -191,16 +245,8 @@ static void ep_write_context(xhci_endpoint_t* ep, uint8_t speed,
     ctx->dwords[2] = (uint32_t)(ring_addr & 0xFFFFFFF0u) | 1u;
     ctx->dwords[3] = (uint32_t)(ring_addr >> 32);
 
-    /* dword4: Average TRB Length, and for a periodic endpoint the Max ESIT
-     * Payload in the high half — a periodic endpoint that does not state its
-     * payload is one the controller cannot reserve bandwidth for. */
-    ctx->dwords[4] = ep->max_packet;
-    if (ep->type == XHCI_EP_TYPE_INTERRUPT_IN ||
-        ep->type == XHCI_EP_TYPE_INTERRUPT_OUT ||
-        ep->type == XHCI_EP_TYPE_ISOCH_IN ||
-        ep->type == XHCI_EP_TYPE_ISOCH_OUT) {
-        ctx->dwords[4] |= (uint32_t)ep->max_packet << 16;
-    }
+    /* dword4: Average TRB Length [15:0], Max ESIT Payload Lo [31:16]. */
+    ctx->dwords[4] = (uint32_t)ep->max_packet | ((esit & 0xFFFFu) << 16);
 }
 
 int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
@@ -237,7 +283,24 @@ int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         }
         xhci_endpoint_context_t* ep_ctx =
             (xhci_endpoint_context_t*)(base + ctrl->context_size * (dci + 1));
-        ep_write_context(&slot->endpoints[dci], slot->speed, ep_ctx);
+        xhci_endpoint_t* ep = &slot->endpoints[dci];
+        ep_write_context(ep, slot->speed, ep_ctx);
+
+        /*
+         * What the controller is being told, once per endpoint per device.
+         *
+         * The burst is the reason this line exists. It is invisible in every
+         * other way: an endpoint configured for one packet per burst when it
+         * could do sixteen completes every transfer it is given, reports no
+         * error, and is simply slow for the life of the machine. On a board
+         * that can only be read by photographing its screen, "burst 16" is the
+         * difference between a flash drive that works and one that works
+         * properly, and there is nowhere else to find it out.
+         */
+        kprintf("[xHCI] slot %u endpoint %u: %u byte packets, burst %u, "
+                "interval %u\n",
+                slot->slot_id, dci, ep->max_packet, ep->max_burst + 1,
+                ep_interval_for(slot->speed, ep->type, ep->interval));
     }
 
     if (xhci_post_configure_endpoint_cmd(ctrl, slot, slot->slot_id,
