@@ -186,6 +186,20 @@ struct xhci_device_slot {
     uint64_t retire_started;
     bool     retire_warned;
 
+    /*
+     * The root port this device was found on, kept across the teardown, and
+     * whether it ever got as far as being configured.
+     *
+     * A first attempt at a device fails for reasons that a second attempt on a
+     * freshly reset port does not repeat — a descriptor read that babbled, a
+     * request the device refused while it was still settling, an Address
+     * Device the controller never answered. Every USB host retries; this one
+     * released the port and moved on, so a flash drive that needed a second
+     * go was a machine that booted without a filesystem.
+     */
+    uint8_t  born_port;
+    bool     ever_configured;
+
     /* Who ended up driving this device, and the endpoints it uses. */
     uint8_t  driver;                /* XHCI_DRIVER_* */
     uint8_t  ep_interrupt_in;       /* DCI, 0 when none */
@@ -294,6 +308,11 @@ const char* xhci_enum_state_name(uint8_t state);
 
 /* How many times a step may be retried before the device is let go. */
 #define XHCI_STALL_RETRIES 3
+
+/* How many times a root port is tried again after a device on it failed to
+ * come up. The first attempt is not counted, so this is three retries after
+ * the original try. */
+#define XHCI_ENUM_ATTEMPTS 3
 
 /* Clear a halted EP0 and resume enumeration from where it stalled. */
 /* Clear a halted control pipe and carry on from `resume_at` — which is the
