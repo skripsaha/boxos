@@ -288,7 +288,10 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
                 break;
 
             default:
-                debug_printf("[xHCI] Unknown event TRB type: %u\n", trb_type);
+                /* Visible: an event this driver does not understand is an
+                 * event somebody is waiting for and will not get. */
+                kprintf("[xHCI %s] event type %u on the ring is one this "
+                        "driver does not handle\n", ctrl->name, trb_type);
                 break;
         }
     }
@@ -384,6 +387,19 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
     ctrl->op_regs->usbsts = usbsts & (XHCI_STS_HSE | XHCI_STS_EINT |
                                       XHCI_STS_PCD);
 
+    /*
+     * Acknowledge the interrupt BEFORE reading the ring, not after.
+     *
+     * xHCI 1.2 §4.17.5 puts it in this order for a reason: the controller
+     * raises Interrupt Pending again the moment it adds an event, and an
+     * acknowledgement written after the ring has been read clears a flag that
+     * was raised by an event arriving during the read. That event is still on
+     * the ring, but nothing will interrupt to say so. Clearing it first costs
+     * a spurious interrupt at worst — the drain finds nothing and says so with
+     * a register write — and loses none.
+     */
+    ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
+
     if (usbsts & (XHCI_STS_HSE | XHCI_STS_HCE)) {
         /*
          * The controller has stopped and will not start again by itself.
@@ -418,8 +434,6 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      * other one got to see. */
     xhci_process_events_on(ctrl);
 
-    /* Clear IMAN IP (Interrupt Pending) bit — write 1 to clear. */
-    ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
 }
 
 /*

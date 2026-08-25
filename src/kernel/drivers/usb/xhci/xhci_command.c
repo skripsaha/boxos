@@ -199,7 +199,18 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) 
 
     int cmd_idx = find_cmd_by_trb_phys(trb_phys);
     if (cmd_idx < 0) {
-        debug_printf("[xHCI CMD] No matching pending command for TRB 0x%llx\n", trb_phys);
+        /*
+         * An answer to a question nobody remembers asking.
+         *
+         * Said out loud, not into a debug build: this is a completion that
+         * advances nothing, so whatever was waiting on it waits until the
+         * watchdog gives up — a device that never enumerates, with no line in
+         * the log to say why. It has to be visible on a machine whose only
+         * diagnostic is a screen.
+         */
+        kprintf("[xHCI] a command completion arrived for TRB 0x%llx, which is "
+                "not one this driver is waiting on (slot %u, code %u)\n",
+                (unsigned long long)trb_phys, slot_id, completion_code);
         return;
     }
 

@@ -1106,6 +1106,7 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
 
     uint64_t now = rdtsc();
     uint64_t budget = cpu_ms_to_tsc(XHCI_ENUM_TIMEOUT_MS);
+    static bool reported_state = false;
 
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         struct xhci_device_slot* slot = &device_slots[i];
@@ -1141,6 +1142,38 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
                 ctrl->name, slot->port_num, XHCI_ENUM_TIMEOUT_MS,
                 enum_state_name(state),
                 __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
+
+        /*
+         * And the controller's own account of itself, once per boot.
+         *
+         * A device that stops being answered has a small number of possible
+         * causes and they are told apart by these registers: whether the
+         * controller is still running, whether its command ring is still
+         * running, whether there are events sitting on the ring that this
+         * driver is not reading, and whether the cycle bit it expects still
+         * matches what the controller is writing. Guessing between them from
+         * a photograph is what the last several attempts have been.
+         */
+        if (!reported_state) {
+            reported_state = true;
+            xhci_ring_t* er = &ctrl->event_ring;
+            uint32_t at_dequeue = er->trbs ? er->trbs[er->dequeue_idx].control : 0;
+            unsigned outstanding = 0;
+            for (int c = 0; c < XHCI_MAX_PENDING_CMDS; c++) {
+                if (pending_cmds[c].state == CMD_STATE_POSTED) outstanding++;
+            }
+            kprintf("[xHCI %s] state: USBSTS=0x%08x USBCMD=0x%08x "
+                    "CRCR=0x%08x ERDP=0x%08x IMAN=0x%08x | event ring at %u "
+                    "expecting cycle %u, TRB there 0x%08x | %u command(s) "
+                    "still unanswered\n",
+                    ctrl->name,
+                    ctrl->op_regs->usbsts, ctrl->op_regs->usbcmd,
+                    (uint32_t)ctrl->op_regs->crcr,
+                    (uint32_t)ctrl->runtime_regs->interrupters[0].erdp,
+                    ctrl->runtime_regs->interrupters[0].iman,
+                    er->dequeue_idx, er->cycle_state, at_dequeue,
+                    outstanding);
+        }
         xhci_slot_retire(ctrl, slot);
     }
 }
