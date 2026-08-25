@@ -15,7 +15,43 @@
 #define XHCI_PORT_MAP_ENTRIES 256
 
 typedef struct xhci_device_slot xhci_device_slot_t;
-typedef struct xhci_pending_cmd xhci_pending_cmd_t;
+
+/*
+ * The Command Ring, in TRBs.
+ *
+ * Stated here rather than at the call site because the table that remembers
+ * what was posted is exactly parallel to it. A command's identity is not a
+ * number this driver invents and then has to search for — it is the position
+ * the TRB was written in, which is precisely what the controller hands back in
+ * the Command Completion Event (xHCI 1.2 Section 6.4.2.2). One entry per ring
+ * slot means the lookup is arithmetic, there is nothing to allocate, and a
+ * completion either falls inside this controller's ring or it does not.
+ */
+#define XHCI_CMD_RING_TRBS 256
+
+typedef enum {
+    XHCI_CMD_FREE = 0,
+    XHCI_CMD_POSTED
+} xhci_cmd_state_t;
+
+/*
+ * One command the controller has been asked for and has not yet answered.
+ *
+ * `owner` is the device this command was asked on behalf of, and `owner_epoch`
+ * is which tenancy of that slot asked. A slot structure outlives the devices
+ * that pass through it, so the pointer alone would let an answer to a question
+ * the previous occupant asked be handed to the one that replaced it — which is
+ * a real fault this driver has already been bitten by once, in the form of a
+ * slot NUMBER being reused. The epoch closes it for the pointer as well.
+ */
+typedef struct xhci_pending_cmd {
+    xhci_device_slot_t* owner;
+    uint32_t owner_epoch;
+    uint64_t posted_at;             /* TSC */
+    uint8_t  state;                 /* xhci_cmd_state_t */
+    uint8_t  trb_type;
+    uint8_t  slot_id;               /* as posted; 0 for Enable Slot */
+} xhci_pending_cmd_t;
 
 typedef struct {
     pci_device_t pci_dev;
@@ -89,6 +125,20 @@ typedef struct {
      * spoke, and that is not something a photograph of a screen can otherwise
      * answer. */
     volatile uint32_t irq_count;
+
+    /*
+     * What this controller has been asked and has not yet answered.
+     *
+     * Per controller, not per machine. It used to be one table shared by every
+     * xHCI on the board, and the two watchdogs that walk it take a controller
+     * as their argument: the first controller's tick reaped the second's
+     * commands, looked the slot up in its OWN table, found nothing, and
+     * dropped the command without retiring the device that was waiting for
+     * it. On a desktop with a chipset controller and one inside a graphics
+     * card that happens on every single timeout.
+     */
+    xhci_pending_cmd_t pending_cmds[XHCI_CMD_RING_TRBS];
+    spinlock_t         pending_lock;
 } xhci_controller_t;
 
 int xhci_init(void);

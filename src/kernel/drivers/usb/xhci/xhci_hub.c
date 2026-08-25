@@ -774,7 +774,7 @@ int xhci_hub_attach(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
      * Number of Ports zero. Configure Endpoint applies the whole input slot
      * context, and adding no endpoints with it is legal and is exactly what is
      * wanted here. */
-    if (xhci_post_configure_endpoint_cmd(ctrl, slot->slot_id,
+    if (xhci_post_configure_endpoint_cmd(ctrl, slot, slot->slot_id,
                                          (uint64_t)input_phys) < 0 ||
         xhci_command_wait_idle(ctrl, HUB_CTRL_TIMEOUT_MS) != 0) {
         kprintf("[USB hub slot %u] the controller would not accept it as a "

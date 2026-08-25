@@ -7,69 +7,141 @@
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
-struct xhci_pending_cmd pending_cmds[XHCI_MAX_PENDING_CMDS];
-spinlock_t pending_cmds_lock;
-uint32_t cmd_sequence = 0;
-
-void xhci_command_init(void) {
-    spinlock_init(&pending_cmds_lock);
-    memset(pending_cmds, 0, sizeof(pending_cmds));
-    cmd_sequence = 0;
+const char* xhci_completion_name(uint8_t code)
+{
+    switch (code) {
+        case TRB_COMPLETION_SUCCESS:          return "Success";
+        case TRB_COMPLETION_DATA_BUFFER_ERR:  return "Data Buffer Error";
+        case TRB_COMPLETION_BABBLE:           return "Babble Detected";
+        case TRB_COMPLETION_USB_TRANS_ERR:    return "USB Transaction Error";
+        case TRB_COMPLETION_TRB_ERROR:        return "TRB Error";
+        case TRB_COMPLETION_STALL:            return "Stall";
+        case TRB_COMPLETION_RESOURCE_ERR:     return "Resource Error";
+        case TRB_COMPLETION_BANDWIDTH_ERR:    return "Bandwidth Error";
+        case TRB_COMPLETION_NO_SLOTS:         return "No Slots Available";
+        case TRB_COMPLETION_SLOT_NOT_ENABLED: return "Slot Not Enabled";
+        case TRB_COMPLETION_EP_NOT_ENABLED:   return "Endpoint Not Enabled";
+        case TRB_COMPLETION_SHORT_PKT:        return "Short Packet";
+        case TRB_COMPLETION_RING_UNDERRUN:    return "Ring Underrun";
+        case TRB_COMPLETION_RING_OVERRUN:     return "Ring Overrun";
+        case TRB_COMPLETION_PARAMETER_ERR:    return "Parameter Error";
+        case TRB_COMPLETION_BANDWIDTH_OVER:   return "Bandwidth Overrun";
+        case TRB_COMPLETION_CONTEXT_STATE:    return "Context State Error";
+        case TRB_COMPLETION_NO_PING_RESPONSE: return "No Ping Response";
+        case TRB_COMPLETION_EVENT_RING_FULL:  return "Event Ring Full";
+        case TRB_COMPLETION_INCOMPATIBLE_DEV: return "Incompatible Device";
+        case TRB_COMPLETION_MISSED_SERVICE:   return "Missed Service Error";
+        case TRB_COMPLETION_CMD_RING_STOPPED: return "Command Ring Stopped";
+        case TRB_COMPLETION_COMMAND_ABORTED:  return "Command Aborted";
+        case TRB_COMPLETION_STOPPED:          return "Stopped";
+        case TRB_COMPLETION_STOPPED_LENGTH:   return "Stopped - Length Invalid";
+        case TRB_COMPLETION_SPLIT_TRANS_ERR:  return "Split Transaction Error";
+        default:                              return "an unnamed code";
+    }
 }
 
-static int find_cmd_by_trb_phys(uint64_t trb_phys) {
-    spin_lock(&pending_cmds_lock);
-    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-        if (pending_cmds[i].state == CMD_STATE_POSTED &&
-            pending_cmds[i].trb_phys == trb_phys) {
-            spin_unlock(&pending_cmds_lock);
-            return i;
-        }
+const char* xhci_command_name(uint8_t trb_type)
+{
+    switch (trb_type) {
+        case TRB_TYPE_ENABLE_SLOT:        return "Enable Slot";
+        case TRB_TYPE_DISABLE_SLOT:       return "Disable Slot";
+        case TRB_TYPE_ADDRESS_DEVICE:     return "Address Device";
+        case TRB_TYPE_CONFIGURE_ENDPOINT: return "Configure Endpoint";
+        case TRB_TYPE_EVALUATE_CONTEXT:   return "Evaluate Context";
+        case TRB_TYPE_RESET_ENDPOINT:     return "Reset Endpoint";
+        case TRB_TYPE_STOP_ENDPOINT:      return "Stop Endpoint";
+        case TRB_TYPE_SET_TR_DEQUEUE:     return "Set TR Dequeue Pointer";
+        case TRB_TYPE_NO_OP_CMD:          return "No Op";
+        default:                          return "an unnamed command";
     }
-    spin_unlock(&pending_cmds_lock);
-    return -1;
 }
 
-/* TOCTOU fix: previously find_free_cmd_slot() released the lock between
- * locating an IDLE slot and the caller marking it POSTED, so two callers on
- * different cores could grab the same index. Now allocate, populate, and
- * mark POSTED as one critical section. cmd_sequence is also bumped under
- * the lock so two posters cannot get the same sequence number. */
-static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_id) {
-    uint8_t trb_type = (uint8_t)TRB_GET_TYPE(trb->control);
-
-    spin_lock(&pending_cmds_lock);
-
-    int cmd_idx = -1;
-    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-        if (pending_cmds[i].state == CMD_STATE_IDLE) {
-            cmd_idx = i;
-            break;
-        }
+void xhci_command_init(xhci_controller_t* ctrl)
+{
+    if (!ctrl) {
+        return;
     }
-    if (cmd_idx < 0) {
-        spin_unlock(&pending_cmds_lock);
-        debug_printf("[xHCI CMD] No free command slots\n");
+    spinlock_init(&ctrl->pending_lock);
+    memset(ctrl->pending_cmds, 0, sizeof(ctrl->pending_cmds));
+}
+
+/*
+ * Which command a completion is answering.
+ *
+ * The Command Completion Event carries the physical address of the Command TRB
+ * (xHCI 1.2 Section 6.4.2.2), and that TRB lives at a known offset in a ring
+ * this controller owns. So the answer is arithmetic, and it is exact: an
+ * address outside this ring is not this controller's command, full stop.
+ *
+ * What it replaces was a linear search of a table shared by every controller
+ * on the machine, keyed on an address, followed by a SECOND search of the
+ * device table trying to work out which device the answer belonged to.
+ */
+static int cmd_index_for(const xhci_controller_t* ctrl, uint64_t trb_phys)
+{
+    uint64_t base = ctrl->command_ring.trbs_phys;
+    if (base == 0 || trb_phys < base) {
         return -1;
     }
+    uint64_t offset = trb_phys - base;
+    if (offset % sizeof(xhci_trb_t)) {
+        return -1;
+    }
+    uint64_t index = offset / sizeof(xhci_trb_t);
+    if (index >= ctrl->command_ring.num_trbs) {
+        return -1;
+    }
+    return (int)index;
+}
+
+static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
+                        uint8_t slot_id, xhci_device_slot_t* owner)
+{
+    uint8_t trb_type = (uint8_t)TRB_GET_TYPE(trb->control);
+
+    spin_lock(&ctrl->pending_lock);
 
     uint64_t trb_phys = xhci_ring_enqueue(&ctrl->command_ring, trb);
     if (trb_phys == 0) {
-        spin_unlock(&pending_cmds_lock);
-        debug_printf("[xHCI CMD] Command ring full\n");
+        spin_unlock(&ctrl->pending_lock);
+        kprintf("[xHCI %s] the command ring is full — %s for slot %u was not "
+                "sent\n", ctrl->name, xhci_command_name(trb_type), slot_id);
         return -1;
     }
 
-    pending_cmds[cmd_idx].trb_phys = trb_phys;
-    pending_cmds[cmd_idx].timestamp_posted = rdtsc();
-    pending_cmds[cmd_idx].sequence = ++cmd_sequence;
-    pending_cmds[cmd_idx].slot_id = slot_id;
-    pending_cmds[cmd_idx].trb_type = trb_type;
-    pending_cmds[cmd_idx].state = CMD_STATE_POSTED;
-    pending_cmds[cmd_idx].completion_code = 0;
-    pending_cmds[cmd_idx].completion_param = 0;
+    int index = cmd_index_for(ctrl, trb_phys);
+    if (index < 0) {
+        /* The ring handed back an address that is not in the ring. Nothing
+         * sensible follows from that, and it must not be silent. */
+        spin_unlock(&ctrl->pending_lock);
+        kprintf("[xHCI %s] the command ring produced an address outside "
+                "itself (0x%llx)\n", ctrl->name,
+                (unsigned long long)trb_phys);
+        return -1;
+    }
 
-    spin_unlock(&pending_cmds_lock);
+    if (ctrl->pending_cmds[index].state == XHCI_CMD_POSTED) {
+        /*
+         * The ring has come all the way round onto a command the controller
+         * has still not answered. That is the controller being two hundred and
+         * fifty-five commands behind, which is not a queue — it is a stopped
+         * controller, and overwriting the TRB would hide it.
+         */
+        spin_unlock(&ctrl->pending_lock);
+        kprintf("[xHCI %s] the command ring wrapped onto %s, still unanswered "
+                "— the controller has stopped taking commands\n", ctrl->name,
+                xhci_command_name(ctrl->pending_cmds[index].trb_type));
+        return -1;
+    }
+
+    ctrl->pending_cmds[index].owner       = owner;
+    ctrl->pending_cmds[index].owner_epoch = xhci_slot_epoch(owner);
+    ctrl->pending_cmds[index].posted_at   = rdtsc();
+    ctrl->pending_cmds[index].slot_id     = slot_id;
+    ctrl->pending_cmds[index].trb_type    = trb_type;
+    ctrl->pending_cmds[index].state       = XHCI_CMD_POSTED;
+
+    spin_unlock(&ctrl->pending_lock);
 
     __sync_synchronize();
     ctrl->doorbells->doorbells[0].doorbell = 0;
@@ -77,18 +149,31 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb, uint8_t slot_i
     return 0;
 }
 
-int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl) {
+/*
+ * Enable Slot names the kind of slot it wants (xHCI 1.2 Section 6.4.3.2, bits
+ * 20:16), and the kind comes from the Supported Protocol capability that owns
+ * the port — which this driver already reads and used to throw away. Zero is
+ * right for USB 2 and USB 3 on every controller seen so far, and is exactly
+ * the sort of "right everywhere I looked" that stops being right on somebody
+ * else's machine.
+ */
+int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                              uint8_t slot_type)
+{
     if (!ctrl || !ctrl->running) {
         return -1;
     }
 
     xhci_trb_t trb = {0};
-    trb.control = TRB_SET_TYPE(TRB_TYPE_ENABLE_SLOT);
+    trb.control = TRB_SET_TYPE(TRB_TYPE_ENABLE_SLOT) |
+                  (((uint32_t)slot_type & 0x1Fu) << 16);
 
-    return post_command(ctrl, &trb, 0);
+    return post_command(ctrl, &trb, 0, owner);
 }
 
-int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, uint8_t slot_id) {
+int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                               uint8_t slot_id)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
@@ -96,10 +181,12 @@ int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, uint8_t slot_id) {
     xhci_trb_t trb = {0};
     trb.control = TRB_SET_TYPE(TRB_TYPE_DISABLE_SLOT) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
-int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
+int xhci_post_address_device_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                 uint8_t slot_id, uint64_t input_ctx_phys)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
@@ -108,10 +195,12 @@ int xhci_post_address_device_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint6
     trb.parameter = input_ctx_phys;
     trb.control = TRB_SET_TYPE(TRB_TYPE_ADDRESS_DEVICE) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
-int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
+int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                     uint8_t slot_id, uint64_t input_ctx_phys)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
@@ -120,10 +209,12 @@ int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, u
     trb.parameter = input_ctx_phys;
     trb.control = TRB_SET_TYPE(TRB_TYPE_CONFIGURE_ENDPOINT) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
-int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint64_t input_ctx_phys) {
+int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                   uint8_t slot_id, uint64_t input_ctx_phys)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
     }
@@ -132,10 +223,12 @@ int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uin
     trb.parameter = input_ctx_phys;
     trb.control = TRB_SET_TYPE(TRB_TYPE_EVALUATE_CONTEXT) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
-int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t dci) {
+int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                 uint8_t slot_id, uint8_t dci)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots ||
         dci == 0 || dci > 31) {
         return -1;
@@ -145,11 +238,13 @@ int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, uint8_t slot_id, uint8
     trb.control = TRB_SET_TYPE(TRB_TYPE_RESET_ENDPOINT) |
                   ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
-int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
-                                 uint8_t dci, uint64_t dequeue_ptr_with_dcs) {
+int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                 uint8_t slot_id, uint8_t dci,
+                                 uint64_t dequeue_ptr_with_dcs)
+{
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots ||
         dci == 0 || dci > 31) {
         return -1;
@@ -160,7 +255,7 @@ int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
     trb.control = TRB_SET_TYPE(TRB_TYPE_SET_TR_DEQUEUE) |
                   ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
 
-    return post_command(ctrl, &trb, slot_id);
+    return post_command(ctrl, &trb, slot_id, owner);
 }
 
 /* Which commands are steps of enumeration.
@@ -171,7 +266,8 @@ int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, uint8_t slot_id,
  * running would arrive as an unexplained completion for a slot in a settled
  * state, and a state machine driven by events it did not ask for is a state
  * machine that will eventually take the wrong branch. */
-static bool cmd_is_enumeration_step(uint8_t trb_type) {
+static bool cmd_is_enumeration_step(uint8_t trb_type)
+{
     switch (trb_type) {
         case TRB_TYPE_ENABLE_SLOT:
         case TRB_TYPE_ADDRESS_DEVICE:
@@ -188,54 +284,83 @@ static bool cmd_is_enumeration_step(uint8_t trb_type) {
     }
 }
 
-void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event) {
+void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
+{
     if (!ctrl || !event) {
         return;
     }
 
-    uint64_t trb_phys = event->parameter;
-    uint8_t completion_code = (event->status >> 24) & 0xFF;
-    uint8_t slot_id = (event->control >> 24) & 0xFF;
+    uint64_t trb_phys        = event->parameter;
+    uint8_t  completion_code = (event->status >> 24) & 0xFF;
+    uint8_t  event_slot_id   = (event->control >> 24) & 0xFF;
 
-    int cmd_idx = find_cmd_by_trb_phys(trb_phys);
-    if (cmd_idx < 0) {
+    int index = cmd_index_for(ctrl, trb_phys);
+    if (index < 0) {
         /*
-         * An answer to a question nobody remembers asking.
+         * An answer to a question this controller was never asked.
          *
          * Said out loud, not into a debug build: this is a completion that
-         * advances nothing, so whatever was waiting on it waits until the
+         * advances nothing, so whatever was waiting on it waits until a
          * watchdog gives up — a device that never enumerates, with no line in
-         * the log to say why. It has to be visible on a machine whose only
-         * diagnostic is a screen.
+         * the log to say why.
          */
-        kprintf("[xHCI] a command completion arrived for TRB 0x%llx, which is "
-                "not one this driver is waiting on (slot %u, code %u)\n",
-                (unsigned long long)trb_phys, slot_id, completion_code);
+        kprintf("[xHCI %s] a completion names TRB 0x%llx, which is not on this "
+                "controller's command ring (slot %u, %s)\n",
+                ctrl->name, (unsigned long long)trb_phys, event_slot_id,
+                xhci_completion_name(completion_code));
         return;
     }
 
-    spin_lock(&pending_cmds_lock);
-    pending_cmds[cmd_idx].completion_code = completion_code;
-    pending_cmds[cmd_idx].slot_id = slot_id;
-    pending_cmds[cmd_idx].completion_param = event->status;
-    pending_cmds[cmd_idx].state = (completion_code == TRB_COMPLETION_SUCCESS)
-                                   ? CMD_STATE_COMPLETED : CMD_STATE_ERROR;
-    uint8_t trb_type = pending_cmds[cmd_idx].trb_type;
-    spin_unlock(&pending_cmds_lock);
+    spin_lock(&ctrl->pending_lock);
+    xhci_pending_cmd_t entry = ctrl->pending_cmds[index];
+    if (entry.state != XHCI_CMD_POSTED) {
+        spin_unlock(&ctrl->pending_lock);
+        /* Command Ring Stopped is the controller acknowledging an abort, and
+         * it names the TRB it had reached rather than one still outstanding.
+         * Everything else here is a second answer to a settled question. */
+        if (completion_code != TRB_COMPLETION_CMD_RING_STOPPED) {
+            kprintf("[xHCI %s] a second answer arrived for a command already "
+                    "settled (slot %u, %s)\n", ctrl->name, event_slot_id,
+                    xhci_completion_name(completion_code));
+        }
+        return;
+    }
+    /* Released before the state machine runs. The controller has finished with
+     * this TRB and with the input context it named, which is exactly what
+     * whoever is trying to take the device down needs to know. */
+    ctrl->pending_cmds[index].state = XHCI_CMD_FREE;
+    ctrl->pending_cmds[index].owner = NULL;
+    spin_unlock(&ctrl->pending_lock);
+
+    /*
+     * The answer goes to the device that asked, and to no other.
+     *
+     * The slot is named by the command, not looked for afterwards. Enable Slot
+     * is the reason that matters: it carries no slot id on the way out, so the
+     * old code answered it into "the first device in the table that looks like
+     * it is waiting for one" — which is a guess, and with four devices coming
+     * up at once on a live board it is four guesses in a row.
+     */
+    if (!xhci_slot_still_is(entry.owner, entry.owner_epoch)) {
+        /* The device left while its command was in flight. Not an error — an
+         * unplug during enumeration is an ordinary thing — but it is worth one
+         * line, because it is also what a mis-delivered answer looks like. */
+        kprintf("[xHCI %s] %s answered for slot %u after the device had gone "
+                "(%s)\n", ctrl->name, xhci_command_name(entry.trb_type),
+                event_slot_id, xhci_completion_name(completion_code));
+        return;
+    }
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        kprintf("[xHCI] command %u on slot %u failed with completion code %u\n",
-                trb_type, slot_id, completion_code);
+        kprintf("[xHCI %s] %s on slot %u was refused: %s (code %u)\n",
+                ctrl->name, xhci_command_name(entry.trb_type), event_slot_id,
+                xhci_completion_name(completion_code), completion_code);
     }
 
-    if (cmd_is_enumeration_step(trb_type)) {
-        xhci_enum_advance_state(ctrl, slot_id, completion_code);
+    if (cmd_is_enumeration_step(entry.trb_type)) {
+        xhci_enum_advance_state(ctrl, entry.owner, event_slot_id,
+                                completion_code);
     }
-
-    spin_lock(&pending_cmds_lock);
-    pending_cmds[cmd_idx].state = CMD_STATE_IDLE;
-    pending_cmds[cmd_idx].trb_phys = 0;
-    spin_unlock(&pending_cmds_lock);
 }
 
 int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
@@ -249,17 +374,7 @@ int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     for (;;) {
         xhci_process_events();
 
-        bool busy = false;
-        spin_lock(&pending_cmds_lock);
-        for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-            if (pending_cmds[i].state == CMD_STATE_POSTED) {
-                busy = true;
-                break;
-            }
-        }
-        spin_unlock(&pending_cmds_lock);
-
-        if (!busy) {
+        if (xhci_command_outstanding(ctrl) == 0) {
             return 0;
         }
         if ((int64_t)(rdtsc() - deadline) >= 0) {
@@ -269,66 +384,207 @@ int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
     }
 }
 
-bool xhci_command_pending_for_slot(uint8_t slot_id)
+bool xhci_command_pending_for(xhci_controller_t* ctrl,
+                              const xhci_device_slot_t* slot)
 {
-    if (slot_id == 0) {
+    if (!ctrl || !slot) {
         return false;
     }
 
-    spin_lock(&pending_cmds_lock);
-    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-        if (pending_cmds[i].state == CMD_STATE_POSTED &&
-            pending_cmds[i].slot_id == slot_id) {
-            spin_unlock(&pending_cmds_lock);
+    spin_lock(&ctrl->pending_lock);
+    for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
+        if (ctrl->pending_cmds[i].state == XHCI_CMD_POSTED &&
+            ctrl->pending_cmds[i].owner == slot) {
+            spin_unlock(&ctrl->pending_lock);
             return true;
         }
     }
-    spin_unlock(&pending_cmds_lock);
+    spin_unlock(&ctrl->pending_lock);
     return false;
 }
 
-void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
+unsigned xhci_command_outstanding(xhci_controller_t* ctrl)
+{
     if (!ctrl) {
-        return;
+        return 0;
+    }
+
+    unsigned count = 0;
+    spin_lock(&ctrl->pending_lock);
+    for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
+        if (ctrl->pending_cmds[i].state == XHCI_CMD_POSTED) {
+            count++;
+        }
+    }
+    spin_unlock(&ctrl->pending_lock);
+    return count;
+}
+
+bool xhci_command_oldest_for(xhci_controller_t* ctrl,
+                             const xhci_device_slot_t* slot,
+                             uint8_t* out_trb_type, uint32_t* out_age_ms)
+{
+    if (!ctrl || !slot) {
+        return false;
     }
 
     uint64_t now = rdtsc();
-    uint64_t timeout_cycles = cpu_ms_to_tsc(XHCI_CMD_TIMEOUT_MS);
+    uint64_t oldest = 0;
+    uint8_t  type = 0;
+    bool     found = false;
 
-    spin_lock(&pending_cmds_lock);
-    for (int i = 0; i < XHCI_MAX_PENDING_CMDS; i++) {
-        if (pending_cmds[i].state == CMD_STATE_POSTED) {
-            int64_t elapsed = (int64_t)(now - pending_cmds[i].timestamp_posted);
-            if (elapsed > (int64_t)timeout_cycles) {
-                /*
-                 * A command the controller never answered.
-                 *
-                 * Silent until now, and the one fact that would have settled
-                 * an argument that ran for six flashes: whether four devices
-                 * stuck mid-enumeration were waiting on commands that had been
-                 * reaped here, or on completions that arrived and went
-                 * nowhere. Those are opposite faults and the log could not
-                 * tell them apart.
-                 */
-                kprintf("[xHCI] command type %u on slot %u went unanswered for "
-                        "%u ms — giving up on it\n",
-                        pending_cmds[i].trb_type, pending_cmds[i].slot_id,
-                        XHCI_CMD_TIMEOUT_MS);
+    spin_lock(&ctrl->pending_lock);
+    for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
+        if (ctrl->pending_cmds[i].state != XHCI_CMD_POSTED ||
+            ctrl->pending_cmds[i].owner != slot) {
+            continue;
+        }
+        uint64_t age = now - ctrl->pending_cmds[i].posted_at;
+        if (!found || age > oldest) {
+            oldest = age;
+            type   = ctrl->pending_cmds[i].trb_type;
+            found  = true;
+        }
+    }
+    spin_unlock(&ctrl->pending_lock);
 
-                uint8_t slot_id = pending_cmds[i].slot_id;
-                pending_cmds[i].state = CMD_STATE_IDLE;
-                pending_cmds[i].trb_phys = 0;
+    if (found) {
+        if (out_trb_type) *out_trb_type = type;
+        if (out_age_ms)   *out_age_ms   = (uint32_t)cpu_tsc_to_ms(oldest);
+    }
+    return found;
+}
 
-                if (slot_id > 0 && slot_id <= ctrl->max_slots) {
-                    spin_unlock(&pending_cmds_lock);
-                    xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
-                    if (slot && slot->state != ENUM_STATE_IDLE) {
-                        xhci_slot_retire(ctrl, slot);
-                    }
-                    spin_lock(&pending_cmds_lock);
-                }
+/*
+ * Abandoning a command the controller will not answer.
+ *
+ * There is exactly one way to do this and it is not "stop remembering it".
+ * xHCI 1.2 Section 4.6.1.2: software sets CRCR.CA, waits for the controller to
+ * stop the ring, and re-publishes the ring pointer. Until it has stopped, the
+ * controller is entitled to read that TRB and everything the TRB points at —
+ * and what an Address Device TRB points at is an Input Context that the device
+ * teardown is about to hand back to the page allocator. Forgetting a command
+ * instead of aborting it therefore does not lose a device; it lets the
+ * controller DMA into somebody else's memory some time later.
+ *
+ * A controller that has stopped answering commands has stopped being useful,
+ * so every device with a command in flight is released here. That is honest:
+ * they were going nowhere.
+ */
+static void xhci_command_ring_abort(xhci_controller_t* ctrl)
+{
+    volatile uint32_t* crcr_lo = (volatile uint32_t*)&ctrl->op_regs->crcr;
+
+    /* The pointer half of CRCR reads as zero, so this writes the abort bit and
+     * nothing else — which is what the specification asks for. */
+    ctrl->op_regs->crcr = ctrl->op_regs->crcr | XHCI_CRCR_CA;
+
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_CMD_ABORT_TIMEOUT_MS);
+    bool stopped = false;
+    while ((int64_t)(rdtsc() - deadline) < 0) {
+        /* The abort answers with events; draining is what lets the Command
+         * Ring Stopped event through and keeps the ring from filling. */
+        xhci_process_events();
+        if ((*crcr_lo & XHCI_CRCR_CRR) == 0) {
+            stopped = true;
+            break;
+        }
+        cpu_pause();
+    }
+
+    if (!stopped) {
+        kprintf("[xHCI %s] the command ring would not stop when asked to "
+                "(CRCR=0x%08x USBSTS=0x%08x) — this controller is out of "
+                "service\n", ctrl->name, *crcr_lo, ctrl->op_regs->usbsts);
+        ctrl->running     = false;
+        ctrl->error_state = true;
+    }
+
+    /* Everything that was in flight is gone with the ring. Release the devices
+     * that were waiting on it before the ring is re-published, so that nothing
+     * is left believing an answer is still coming. */
+    spin_lock(&ctrl->pending_lock);
+    xhci_device_slot_t* orphans[XHCI_CMD_RING_TRBS];
+    unsigned orphan_count = 0;
+    for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
+        if (ctrl->pending_cmds[i].state != XHCI_CMD_POSTED) {
+            continue;
+        }
+        xhci_device_slot_t* owner = ctrl->pending_cmds[i].owner;
+        ctrl->pending_cmds[i].state = XHCI_CMD_FREE;
+        ctrl->pending_cmds[i].owner = NULL;
+        if (owner && orphan_count < XHCI_CMD_RING_TRBS) {
+            bool already = false;
+            for (unsigned k = 0; k < orphan_count; k++) {
+                if (orphans[k] == owner) { already = true; break; }
+            }
+            if (!already) {
+                orphans[orphan_count++] = owner;
             }
         }
     }
-    spin_unlock(&pending_cmds_lock);
+
+    /* Start the ring over. The controller's own dequeue pointer is reloaded
+     * from CRCR, so software's enqueue position and cycle state have to go
+     * back to where the controller will be looking. */
+    ctrl->command_ring.enqueue_idx = 0;
+    ctrl->command_ring.cycle_state = 1;
+    if (ctrl->command_ring.trbs) {
+        memset(ctrl->command_ring.trbs, 0,
+               (size_t)ctrl->command_ring.num_trbs * sizeof(xhci_trb_t));
+        xhci_trb_t* link = &ctrl->command_ring.trbs[ctrl->command_ring.num_trbs - 1];
+        link->parameter = ctrl->command_ring.trbs_phys;
+        link->status    = 0;
+        link->control   = TRB_SET_TYPE(TRB_TYPE_LINK) | TRB_TC;
+    }
+    spin_unlock(&ctrl->pending_lock);
+
+    __sync_synchronize();
+    ctrl->op_regs->crcr = ctrl->command_ring.trbs_phys | XHCI_CRCR_RCS;
+
+    for (unsigned k = 0; k < orphan_count; k++) {
+        xhci_slot_retire(ctrl, orphans[k]);
+    }
+
+    kprintf("[xHCI %s] command ring restarted; %u device(s) released\n",
+            ctrl->name, orphan_count);
+}
+
+void xhci_check_command_timeouts(xhci_controller_t* ctrl)
+{
+    if (!ctrl || !ctrl->running) {
+        return;
+    }
+
+    uint64_t now     = rdtsc();
+    uint64_t budget  = cpu_ms_to_tsc(XHCI_CMD_TIMEOUT_MS);
+    bool     expired = false;
+
+    spin_lock(&ctrl->pending_lock);
+    for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
+        if (ctrl->pending_cmds[i].state != XHCI_CMD_POSTED) {
+            continue;
+        }
+        if ((int64_t)(now - ctrl->pending_cmds[i].posted_at) <= (int64_t)budget) {
+            continue;
+        }
+        /*
+         * A command the controller never answered.
+         *
+         * Said out loud, and it is the one fact that settled an argument that
+         * ran for seven photographs of a screen: whether devices stuck
+         * mid-enumeration were waiting on commands that had been quietly
+         * reaped here, or on answers that arrived and went nowhere. Those are
+         * opposite faults and the log could not tell them apart.
+         */
+        kprintf("[xHCI %s] %s on slot %u went unanswered for %u ms\n",
+                ctrl->name, xhci_command_name(ctrl->pending_cmds[i].trb_type),
+                ctrl->pending_cmds[i].slot_id, XHCI_CMD_TIMEOUT_MS);
+        expired = true;
+    }
+    spin_unlock(&ctrl->pending_lock);
+
+    if (expired) {
+        xhci_command_ring_abort(ctrl);
+    }
 }

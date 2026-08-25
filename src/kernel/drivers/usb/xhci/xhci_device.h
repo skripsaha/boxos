@@ -52,4 +52,28 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
                             const struct xhci_device_slot* slot);
 void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx, uint64_t ring_phys, uint16_t max_packet);
 
+/*
+ * What the CONTROLLER thinks of a device, as opposed to what this driver
+ * thinks.
+ *
+ * The Output Slot Context is written by the controller and never by software
+ * (Section 4.5.3): its Slot State says whether the device is Disabled, in
+ * Default, Addressed or Configured, and its USB Device Address says which
+ * address the controller actually assigned. That is the one fact that tells an
+ * Address Device which never happened apart from an Address Device which
+ * happened and whose answer this driver lost — and they are opposite faults
+ * that have looked identical in every report from a live board so far.
+ *
+ * Read at the moment of failure, so the report stands on its own instead of
+ * depending on lines that have already scrolled off a screen.
+ */
+#define XHCI_SLOT_STATE_DISABLED   0
+#define XHCI_SLOT_STATE_DEFAULT    1
+#define XHCI_SLOT_STATE_ADDRESSED  2
+#define XHCI_SLOT_STATE_CONFIGURED 3
+
+uint8_t     xhci_slot_context_state(const struct xhci_device_slot* slot);
+uint8_t     xhci_slot_context_address(const struct xhci_device_slot* slot);
+const char* xhci_slot_state_name(uint8_t state);
+
 #endif

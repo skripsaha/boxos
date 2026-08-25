@@ -45,10 +45,31 @@ static bool slot_is_live(const struct xhci_device_slot* s) {
     return state != ENUM_STATE_IDLE && state != ENUM_STATE_RETIRING;
 }
 
+uint32_t xhci_slot_epoch(const xhci_device_slot_t* slot)
+{
+    if (!slot) {
+        return 0;
+    }
+    return __atomic_load_n(&slot->epoch, __ATOMIC_ACQUIRE);
+}
+
+bool xhci_slot_still_is(const xhci_device_slot_t* slot, uint32_t epoch)
+{
+    if (!slot) {
+        return false;
+    }
+    return __atomic_load_n(&slot->epoch, __ATOMIC_ACQUIRE) == epoch &&
+           slot_is_live(slot);
+}
+
 static struct xhci_device_slot* find_free_slot(void) {
     spin_lock(&device_slots_lock);
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         if (device_slots[i].state == ENUM_STATE_IDLE) {
+            /* A new tenancy, and it says so before anything can be posted on
+             * its behalf. Answers to the previous occupant's questions carry
+             * the old number and are turned away. */
+            __atomic_add_fetch(&device_slots[i].epoch, 1, __ATOMIC_ACQ_REL);
             device_slots[i].state = ENUM_STATE_CLAIMING;
             spin_unlock(&device_slots_lock);
             return &device_slots[i];
@@ -138,7 +159,13 @@ static const char* speed_name(uint8_t speed) {
 static int enum_begin_slot(xhci_controller_t* ctrl, struct xhci_device_slot* slot) {
     slot->state = ENUM_STATE_WAIT_ENABLE_SLOT;
 
-    if (xhci_post_enable_slot_cmd(ctrl) < 0) {
+    /* Which kind of slot, as the Supported Protocol capability covering this
+     * root port states it (xHCI 1.2 Section 6.4.3.2). A device behind a hub
+     * takes the kind of the root port its branch hangs off, which is what
+     * port_num holds for every tier. */
+    uint8_t slot_type = ctrl->port_slot_type[slot->port_num];
+
+    if (xhci_post_enable_slot_cmd(ctrl, slot, slot_type) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Enable Slot command\n");
         slot->state = ENUM_STATE_IDLE;
         slot->port_num = 0;
@@ -342,7 +369,7 @@ void xhci_slot_retire(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
      * answered, which is what the second step below is waiting for.
      */
     if (ctrl && slot->slot_id != 0) {
-        xhci_post_disable_slot_cmd(ctrl, slot->slot_id);
+        xhci_post_disable_slot_cmd(ctrl, slot, slot->slot_id);
     }
 
     __atomic_store_n(&retire_pending, 1, __ATOMIC_RELEASE);
@@ -379,8 +406,7 @@ int xhci_slot_service(xhci_controller_t* ctrl)
         }
 
         uint32_t inside = __atomic_load_n(&slot->visitors, __ATOMIC_ACQUIRE);
-        bool controller_busy = slot->slot_id != 0 &&
-                               xhci_command_pending_for_slot(slot->slot_id);
+        bool controller_busy = xhci_command_pending_for(ctrl, slot);
 
         if (inside != 0 || controller_busy) {
             /*
@@ -655,7 +681,7 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
 
     slot->state = ENUM_STATE_WAIT_ADDRESS_DEVICE;
 
-    if (xhci_post_address_device_cmd(ctrl, slot->slot_id,
+    if (xhci_post_address_device_cmd(ctrl, slot, slot->slot_id,
                                      (uint64_t)input_ctx_phys) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Address Device\n");
         xhci_slot_retire(ctrl, slot);
@@ -707,7 +733,7 @@ static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* 
     slot->ep0_max_packet = max_packet;
     slot->state = ENUM_STATE_WAIT_EVALUATE_CONTEXT;
 
-    if (xhci_post_evaluate_context_cmd(ctrl, slot->slot_id,
+    if (xhci_post_evaluate_context_cmd(ctrl, slot, slot->slot_id,
                                        (uint64_t)input_ctx_phys) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Evaluate Context\n");
         xhci_slot_retire(ctrl, slot);
@@ -776,7 +802,7 @@ void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     slot->stall_resume = slot->state;
     slot->state = ENUM_STATE_WAIT_EP0_RESET;
 
-    if (xhci_post_reset_endpoint_cmd(ctrl, slot->slot_id, 1) < 0) {
+    if (xhci_post_reset_endpoint_cmd(ctrl, slot, slot->slot_id, 1) < 0) {
         xhci_slot_retire(ctrl, slot);
     }
 }
@@ -1095,6 +1121,59 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
     }
 }
 
+/*
+ * The one report a photograph of a screen has to be able to answer from.
+ *
+ * A device that stops halfway through being enumerated has a small number of
+ * possible causes, and they are told apart by facts that are all readable at
+ * the moment it is given up on. Every one of them is printed here, together,
+ * because the alternative — piecing the story together from lines printed
+ * seconds earlier — does not survive the ten screens of self-tests that run
+ * between the two, and has not survived them in seven attempts.
+ *
+ * The decisive line is the controller's own: an Output Slot Context still
+ * reading Disabled says the Address Device never took effect, and one reading
+ * Addressed says it did and its answer went missing. Those are opposite
+ * faults, and nothing else in the machine distinguishes them.
+ */
+static void xhci_report_stuck(xhci_controller_t* ctrl,
+                              struct xhci_device_slot* slot, uint8_t state)
+{
+    uint8_t  cmd_type = 0;
+    uint32_t cmd_age  = 0;
+    bool     waiting  = xhci_command_oldest_for(ctrl, slot, &cmd_type, &cmd_age);
+
+    kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms while %s\n",
+            ctrl->name, slot->port_num, slot->slot_id, XHCI_ENUM_TIMEOUT_MS,
+            enum_state_name(state));
+
+    kprintf("[xHCI %s]   the controller says: slot %s, address %u; "
+            "PORTSC 0x%08x; %u interrupt(s) so far\n",
+            ctrl->name,
+            xhci_slot_state_name(xhci_slot_context_state(slot)),
+            xhci_slot_context_address(slot),
+            xhci_get_port_status(ctrl, slot->port_num),
+            __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
+
+    if (waiting) {
+        kprintf("[xHCI %s]   still waiting on %s, posted %u ms ago\n",
+                ctrl->name, xhci_command_name(cmd_type), cmd_age);
+    } else {
+        kprintf("[xHCI %s]   no command outstanding for it — the last answer "
+                "arrived and moved nothing\n", ctrl->name);
+    }
+}
+
+/*
+ * Two watchdogs, and only one of them owns any given wait.
+ *
+ * A step that is waiting on a command belongs to the command watchdog, which
+ * gives the controller its full budget and then aborts the ring properly. This
+ * one covers the rest — a port event or a transfer that never came — and it
+ * must not reap a device out from under the other, because the two would then
+ * be taking the same slot apart from opposite ends: a Disable Slot racing an
+ * Address Device that the controller has not finished with.
+ */
 void xhci_enum_watchdog(xhci_controller_t* ctrl)
 {
     if (!ctrl || !ctrl->initialized) {
@@ -1103,7 +1182,7 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
 
     uint64_t now = rdtsc();
     uint64_t budget = cpu_ms_to_tsc(XHCI_ENUM_TIMEOUT_MS);
-    static bool reported_state = false;
+    static bool reported_controller = false;
 
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         struct xhci_device_slot* slot = &device_slots[i];
@@ -1133,43 +1212,34 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
         if ((int64_t)(now - slot->timestamp_started) < (int64_t)budget) {
             continue;
         }
+        if (xhci_command_pending_for(ctrl, slot)) {
+            continue;   /* the command watchdog has this one */
+        }
 
-        kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms while %s "
-                "(%u interrupt(s) from this controller so far)\n",
-                ctrl->name, slot->port_num, slot->slot_id, XHCI_ENUM_TIMEOUT_MS,
-                enum_state_name(state),
-                __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
+        xhci_report_stuck(ctrl, slot, state);
 
-        /*
-         * And the controller's own account of itself, once per boot.
-         *
-         * A device that stops being answered has a small number of possible
-         * causes and they are told apart by these registers: whether the
-         * controller is still running, whether its command ring is still
-         * running, whether there are events sitting on the ring that this
-         * driver is not reading, and whether the cycle bit it expects still
-         * matches what the controller is writing. Guessing between them from
-         * a photograph is what the last several attempts have been.
-         */
-        if (!reported_state) {
-            reported_state = true;
+        /* And the controller as a whole, once per boot: whether it is still
+         * running, whether its command ring is, whether events are sitting on
+         * the ring unread, and whether the cycle bit this driver expects still
+         * matches what the controller is writing. */
+        if (!reported_controller) {
+            reported_controller = true;
             xhci_ring_t* er = &ctrl->event_ring;
             uint32_t at_dequeue = er->trbs ? er->trbs[er->dequeue_idx].control : 0;
-            unsigned outstanding = 0;
-            for (int c = 0; c < XHCI_MAX_PENDING_CMDS; c++) {
-                if (pending_cmds[c].state == CMD_STATE_POSTED) outstanding++;
-            }
             kprintf("[xHCI %s] state: USBSTS=0x%08x USBCMD=0x%08x "
-                    "CRCR=0x%08x ERDP=0x%08x IMAN=0x%08x | event ring at %u "
-                    "expecting cycle %u, TRB there 0x%08x | %u command(s) "
-                    "still unanswered\n",
+                    "CRCR=0x%08x ERDP=0x%08x IMAN=0x%08x MFINDEX=0x%08x | "
+                    "event ring at %u expecting cycle %u, TRB there 0x%08x | "
+                    "command ring at %u cycle %u | %u command(s) outstanding\n",
                     ctrl->name,
                     ctrl->op_regs->usbsts, ctrl->op_regs->usbcmd,
                     (uint32_t)ctrl->op_regs->crcr,
                     (uint32_t)ctrl->runtime_regs->interrupters[0].erdp,
                     ctrl->runtime_regs->interrupters[0].iman,
+                    ctrl->runtime_regs->mfindex,
                     er->dequeue_idx, er->cycle_state, at_dequeue,
-                    outstanding);
+                    ctrl->command_ring.enqueue_idx,
+                    ctrl->command_ring.cycle_state,
+                    xhci_command_outstanding(ctrl));
         }
         xhci_slot_retire(ctrl, slot);
     }
@@ -1195,77 +1265,28 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
  * transfer sites had it the wrong way round. Under emulation the drain is very
  * nearly always the same core that posted, so none of it was visible.
  */
-void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t completion_code) {
-    if (!ctrl) {
+void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                             uint8_t slot_id, uint8_t completion_code) {
+    if (!ctrl || !slot) {
         return;
     }
 
-    struct xhci_device_slot* slot = NULL;
-
-    /* Enable Slot completion doesn't carry a valid slot_id in the event yet —
-       find the slot waiting for it by state. */
-    if (slot_id == 0) {
-        spin_lock(&device_slots_lock);
-        for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            if (device_slots[i].ctrl == ctrl &&
-                device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT) {
-                slot = &device_slots[i];
-                break;
-            }
-        }
-        spin_unlock(&device_slots_lock);
-    } else {
-        /*
-         * For all other commands, slot_id from the completion event is valid —
-         * but it does not identify a slot on its own.
-         *
-         * A slot number is the controller's, and it hands the same one straight
-         * back out once it has been disabled. A device on its way out therefore
-         * shares its number with the device that replaced it, and matching on
-         * the number alone found whichever came first in the table. Measured:
-         * every Enable Slot after a round of unplugs was answered into a slot
-         * that had already left, so the device actually waiting for it waited
-         * until the watchdog gave up on it. A slot that is leaving is not a
-         * step of any enumeration.
-         */
-        spin_lock(&device_slots_lock);
-        for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            if (device_slots[i].ctrl == ctrl &&
-                device_slots[i].slot_id == slot_id &&
-                slot_is_live(&device_slots[i])) {
-                slot = &device_slots[i];
-                break;
-            }
-        }
-        /* Fallback: also check for WAIT_ENABLE_SLOT with slot_id still 0. */
-        if (!slot) {
-            for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-                if (device_slots[i].ctrl == ctrl &&
-                    device_slots[i].state == ENUM_STATE_WAIT_ENABLE_SLOT &&
-                    device_slots[i].slot_id == 0) {
-                    slot = &device_slots[i];
-                    break;
-                }
-            }
-        }
-        spin_unlock(&device_slots_lock);
-    }
-
-    if (!slot) {
-        /* An answer with nobody left to hear it. Said out loud: a completion
-         * that finds no slot advances nothing, and whatever posted the command
-         * waits until the watchdog gives up on it — which is a device that
-         * never appears, with no line in the log to say why. */
-        kprintf("[xHCI %s] a completion for slot %u found no device waiting "
-                "for it\n", ctrl->name, slot_id);
-        return;
-    }
+    /*
+     * No search, and therefore no guess.
+     *
+     * There were two here, layered on each other: match the completion's slot
+     * id against the device table, and failing that take the first device
+     * sitting in WAIT_ENABLE_SLOT. Both were needed because the command layer
+     * had thrown away the one fact that settles it — which device asked. It
+     * does not any more: the command carries its asker, the answer carries the
+     * command, and this function is simply told.
+     */
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
-        kprintf("[xHCI %s] port %u: enumeration step %s failed with completion "
-                "code %u — releasing the slot\n",
+        kprintf("[xHCI %s] port %u: enumeration step %s failed — %s (code %u); "
+                "releasing the slot\n",
                 ctrl->name, slot->port_num, enum_state_name(slot->state),
-                completion_code);
+                xhci_completion_name(completion_code), completion_code);
         xhci_slot_retire(ctrl, slot);
         return;
     }
@@ -1513,7 +1534,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
 
             slot->state = ENUM_STATE_WAIT_EP0_DEQUEUE;
 
-            if (xhci_post_set_tr_dequeue_cmd(ctrl, slot->slot_id, 1,
+            if (xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, 1,
                     resume | (slot->ep0_ring->cycle_state ? 1u : 0u)) < 0) {
                 xhci_slot_retire(ctrl, slot);
             }
@@ -1523,7 +1544,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         case ENUM_STATE_WAIT_EP0_DEQUEUE: {
             /* Back where enumeration was, with the refused step behind us. */
             slot->state = slot->stall_resume;
-            xhci_enum_advance_state(ctrl, slot_id, TRB_COMPLETION_SUCCESS);
+            xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
             break;
         }
 

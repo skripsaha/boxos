@@ -54,6 +54,17 @@ struct xhci_device_slot {
      * card are the same entry in this table. */
     xhci_controller_t* ctrl;
 
+    /*
+     * Which tenancy of this table entry this is.
+     *
+     * The entry outlives the devices that pass through it, so "the slot that
+     * asked" is only an answer while it is still the same device asking. Bumped
+     * every time the entry is claimed; a command carries the value it was
+     * posted under, and an answer that does not match is an answer to somebody
+     * who has already gone.
+     */
+    uint32_t epoch;
+
     uint8_t slot_id;
     uint8_t port_num;
     uint8_t state;          /* xhci_enum_state_t */
@@ -177,7 +188,29 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
 
 /* The slot this device's hub occupies, or NULL. */
 xhci_device_slot_t* xhci_get_device_slot_by_id(xhci_controller_t* ctrl, uint8_t slot_id);
-void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t completion_code);
+/*
+ * A command asked on behalf of `slot` has been answered.
+ *
+ * The slot is named, not searched for. It used to be looked up from the slot
+ * id in the completion event — which works for every command except the one
+ * that matters most: Enable Slot goes out with no slot id at all, so its
+ * answer was matched to "the first device in the table that appears to be
+ * waiting for one". With one device coming up that is correct by luck; with
+ * four, as on a desktop with a keyboard, a mouse and two sticks in it, it is
+ * four guesses in a row and nothing in the log when one of them is wrong.
+ *
+ * `slot_id` is still passed because for Enable Slot it is the answer itself —
+ * the number the controller has just handed out.
+ */
+void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                             uint8_t slot_id, uint8_t completion_code);
+
+/* Which tenancy of a slot entry this is, and whether it is still that one.
+ * A command records the first when it is posted and the answer checks the
+ * second, so an answer can never be delivered to the device that replaced the
+ * one which asked. NULL is a valid argument to both. */
+uint32_t xhci_slot_epoch(const xhci_device_slot_t* slot);
+bool     xhci_slot_still_is(const xhci_device_slot_t* slot, uint32_t epoch);
 
 /* The port finished the reset enumeration asked for. Called from the
  * port-status change path, which is the only thing that knows when. */
