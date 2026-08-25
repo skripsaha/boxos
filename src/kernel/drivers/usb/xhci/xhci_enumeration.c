@@ -2003,6 +2003,11 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                               (uint64_t)slot->ep0_ring->enqueue_idx *
                               sizeof(xhci_trb_t);
 
+            /* Those TRBs will never be executed and will never be answered, so
+             * their slots come back now — otherwise every cleared stall costs
+             * the ring a transfer's worth of space for good. */
+            xhci_ring_abandon(slot->ep0_ring);
+
             slot->state = ENUM_STATE_WAIT_EP0_DEQUEUE;
 
             if (xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, 1,

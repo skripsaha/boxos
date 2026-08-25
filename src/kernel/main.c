@@ -260,6 +260,7 @@ void kernel_main(void)
     extern void IommuPresenceTest(void);
     extern void TmeRunTests(int *out_pass, int *out_fail);
     extern void AddrWaitSelfTest(void);
+    extern void XhciRingSelfTest(void);
     VmmHelperTest();
     PmmPoisonTest();
     McePresenceTest();
@@ -274,6 +275,7 @@ void kernel_main(void)
      * iommu_init(); see below. */
     { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
     AddrWaitSelfTest();
+    XhciRingSelfTest();
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();

@@ -460,6 +460,11 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
      * where the next one will be written. */
     uint64_t resume = ring->trbs_phys +
                       (uint64_t)ring->enqueue_idx * sizeof(xhci_trb_t);
+
+    /* And the TRBs being stepped over give their slots back: nothing will ever
+     * execute them, so nothing will ever answer for them. */
+    xhci_ring_abandon(ring);
+
     xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, dci,
                                  resume | (ring->cycle_state ? 1u : 0u));
 }

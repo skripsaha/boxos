@@ -210,6 +210,23 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
 
     xhci_ring_t* ring = slot->ep0_ring;
 
+    /*
+     * Room for the WHOLE transfer, checked before any of it is written.
+     *
+     * The three stages have to arrive together or not at all: a Setup Stage
+     * queued with nowhere to put the Status Stage that ends it is a device
+     * asked a question that can never be finished, on a ring that now has a
+     * partial transfer descriptor in it. Checking per TRB, which is all the
+     * ring itself can do, would allow exactly that.
+     */
+    uint32_t needed = (data_length > 0) ? 3u : 2u;
+    if (xhci_ring_space(ring) < needed) {
+        kprintf("[xHCI %s] port %u: the control ring has no room for a %u-stage "
+                "transfer — %u slot(s) free\n",
+                ctrl->name, slot->port_num, needed, xhci_ring_space(ring));
+        return -1;
+    }
+
     /* What is being asked for, before it is asked. "Received" starts at the
      * full length because that is exactly what "no short packet was reported"
      * will mean when the status stage arrives on its own. */
@@ -298,6 +315,15 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
     }
 
     bool ok = (code == TRB_COMPLETION_SUCCESS || code == TRB_COMPLETION_SHORT_PKT);
+
+    /* The slot that TRB occupied goes back to the ring, and so does every slot
+     * queued ahead of it — a transfer ring is executed strictly in order, so an
+     * answer for one TRB is an answer for all of them. */
+    if (endpoint_id == 1) {
+        xhci_ring_reclaim_to(slot->ep0_ring, trb_phys);
+    } else if (slot->endpoints && endpoint_id <= XHCI_MAX_DCI) {
+        xhci_ring_reclaim_to(slot->endpoints[endpoint_id].ring, trb_phys);
+    }
 
     /* EP0 is always DCI 1. Test it first, so that a device whose interrupt
      * endpoint somehow reported the same number cannot divert control
