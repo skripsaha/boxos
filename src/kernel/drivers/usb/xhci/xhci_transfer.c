@@ -281,7 +281,7 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
         }
 
         /* Every step of enumeration lives in one place. */
-        xhci_enum_advance_state(ctrl, slot_id, TRB_COMPLETION_SUCCESS);
+        xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
         return;
     }
 

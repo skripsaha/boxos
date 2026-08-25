@@ -69,3 +69,40 @@ void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx, uint64_t ring_phys,
     /* dword4: Average TRB Length = 8 (for control endpoint setup packets) */
     ep0_ctx->dwords[4] = 8;
 }
+
+/*
+ * The controller's own account of a slot.
+ *
+ * dword3 of the Output Slot Context: Slot State in bits 31:27, USB Device
+ * Address in bits 7:0. Software writes neither — the controller does, as each
+ * command it is given takes effect — so this is the controller answering
+ * rather than this driver repeating itself back.
+ */
+uint8_t xhci_slot_context_state(const struct xhci_device_slot* slot)
+{
+    if (!slot || !slot->dev_ctx) {
+        return XHCI_SLOT_STATE_DISABLED;
+    }
+    const xhci_device_context_t* ctx = (const xhci_device_context_t*)slot->dev_ctx;
+    return (uint8_t)((ctx->slot.dwords[3] >> 27) & 0x1F);
+}
+
+uint8_t xhci_slot_context_address(const struct xhci_device_slot* slot)
+{
+    if (!slot || !slot->dev_ctx) {
+        return 0;
+    }
+    const xhci_device_context_t* ctx = (const xhci_device_context_t*)slot->dev_ctx;
+    return (uint8_t)(ctx->slot.dwords[3] & 0xFF);
+}
+
+const char* xhci_slot_state_name(uint8_t state)
+{
+    switch (state) {
+        case XHCI_SLOT_STATE_DISABLED:   return "Disabled/Enabled";
+        case XHCI_SLOT_STATE_DEFAULT:    return "Default";
+        case XHCI_SLOT_STATE_ADDRESSED:  return "Addressed";
+        case XHCI_SLOT_STATE_CONFIGURED: return "Configured";
+        default:                         return "a reserved value";
+    }
+}

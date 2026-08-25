@@ -240,7 +240,7 @@ int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         ep_write_context(&slot->endpoints[dci], slot->speed, ep_ctx);
     }
 
-    if (xhci_post_configure_endpoint_cmd(ctrl, slot->slot_id,
+    if (xhci_post_configure_endpoint_cmd(ctrl, slot, slot->slot_id,
                                          (uint64_t)input_phys) < 0) {
         pmm_free(input_phys, pages);
         slot->input_ctx_phys = 0;
@@ -388,7 +388,7 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
     kprintf("[xHCI] slot %u endpoint %u halted — clearing it\n",
             slot->slot_id, dci);
 
-    if (xhci_post_reset_endpoint_cmd(ctrl, slot->slot_id, dci) < 0) {
+    if (xhci_post_reset_endpoint_cmd(ctrl, slot, slot->slot_id, dci) < 0) {
         return;
     }
 
@@ -397,6 +397,6 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
      * where the next one will be written. */
     uint64_t resume = ring->trbs_phys +
                       (uint64_t)ring->enqueue_idx * sizeof(xhci_trb_t);
-    xhci_post_set_tr_dequeue_cmd(ctrl, slot->slot_id, dci,
+    xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, dci,
                                  resume | (ring->cycle_state ? 1u : 0u));
 }

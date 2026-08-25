@@ -42,10 +42,41 @@ typedef struct {
 #define TRB_SET_TYPE(type)           (((type) << TRB_TYPE_SHIFT) & TRB_TYPE_MASK)
 #define TRB_GET_TYPE(ctrl)           (((ctrl) & TRB_TYPE_MASK) >> TRB_TYPE_SHIFT)
 
-#define TRB_COMPLETION_SUCCESS       1
-#define TRB_COMPLETION_USB_TRANS_ERR 4
-#define TRB_COMPLETION_TRB_ERROR     5
-#define TRB_COMPLETION_STALL         6
-#define TRB_COMPLETION_SHORT_PKT     13
+/* Completion codes (xHCI 1.2 Table 6-90). The ones this driver acts on are
+ * named; the rest are printed by number through xhci_completion_name, because
+ * on a machine whose only diagnostic is a screen "Context State Error" and
+ * "code 19" are not the same amount of help. */
+#define TRB_COMPLETION_SUCCESS          1
+#define TRB_COMPLETION_DATA_BUFFER_ERR  2
+#define TRB_COMPLETION_BABBLE           3
+#define TRB_COMPLETION_USB_TRANS_ERR    4
+#define TRB_COMPLETION_TRB_ERROR        5
+#define TRB_COMPLETION_STALL            6
+#define TRB_COMPLETION_RESOURCE_ERR     7
+#define TRB_COMPLETION_BANDWIDTH_ERR    8
+#define TRB_COMPLETION_NO_SLOTS         9
+#define TRB_COMPLETION_SLOT_NOT_ENABLED 11
+#define TRB_COMPLETION_EP_NOT_ENABLED   12
+#define TRB_COMPLETION_SHORT_PKT        13
+#define TRB_COMPLETION_RING_UNDERRUN    14
+#define TRB_COMPLETION_RING_OVERRUN     15
+#define TRB_COMPLETION_PARAMETER_ERR    17
+#define TRB_COMPLETION_BANDWIDTH_OVER   18
+#define TRB_COMPLETION_CONTEXT_STATE    19
+#define TRB_COMPLETION_NO_PING_RESPONSE 20
+#define TRB_COMPLETION_EVENT_RING_FULL  21
+#define TRB_COMPLETION_INCOMPATIBLE_DEV 22
+#define TRB_COMPLETION_MISSED_SERVICE   23
+#define TRB_COMPLETION_CMD_RING_STOPPED 24
+#define TRB_COMPLETION_COMMAND_ABORTED  25
+#define TRB_COMPLETION_STOPPED          26
+#define TRB_COMPLETION_STOPPED_LENGTH   27
+#define TRB_COMPLETION_SPLIT_TRANS_ERR  36
+
+/* What a completion code is called. Never NULL. */
+const char* xhci_completion_name(uint8_t code);
+
+/* What a command TRB type is called, for the same reason. Never NULL. */
+const char* xhci_command_name(uint8_t trb_type);
 
 #endif

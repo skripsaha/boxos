@@ -682,7 +682,7 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
         debug_printf("[xHCI] controller is 32-bit addressing only\n");
     }
 
-    if (xhci_ring_init(&ctrl->command_ring, 256, true) != 0) {
+    if (xhci_ring_init(&ctrl->command_ring, XHCI_CMD_RING_TRBS, true) != 0) {
         kprintf("[xHCI] ERROR: Failed to allocate command ring\n");
         goto cleanup_resources;
     }
@@ -809,7 +809,6 @@ cleanup_resources:
 
 int xhci_init(void)
 {
-    xhci_command_init();
     xhci_enumeration_init();
 
     for (uint32_t index = 0; index < XHCI_MAX_CONTROLLERS; index++) {
@@ -831,6 +830,11 @@ int xhci_init(void)
         kprintf("[xHCI] controller at %02x:%02x.%u  %04x:%04x\n",
                 dev.bus, dev.device, dev.function,
                 dev.vendor_id, dev.device_id);
+
+        /* The command bookkeeping belongs to the controller and is sized by
+         * its command ring, so it is set up with the controller and not once
+         * for the machine. */
+        xhci_command_init(ctrl);
 
         if (xhci_bring_up(ctrl) == 0) {
             g_controller_count++;
