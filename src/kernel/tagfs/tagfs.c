@@ -212,6 +212,18 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
     return true;
 }
 
+/*
+ * Which volume this is, as opposed to which seat it happens to be in.
+ *
+ * A seat is a socket and a volume is a filesystem, and on a machine you can
+ * unplug things from, the second moves between the first. The identity is the
+ * one the superblock carries and the loader writes on its boarding pass, so it
+ * survives the medium being pulled out and put back in a different socket —
+ * which is exactly the case where a seat number proves nothing.
+ */
+static uint8_t g_volume_uuid[16];
+static bool    g_volume_uuid_known = false;
+
 static void TagFSProbeDrive(void)
 {
     g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, NULL);
@@ -221,6 +233,8 @@ static void TagFSProbeDrive(void)
                 BoardroomSeatCount());
         return;
     }
+
+    g_volume_uuid_known = tagfs_recognise(NULL, g_tagfs_seat, g_volume_uuid);
 
     kprintf("[TagFS] volume on seat %u: %s\n", g_tagfs_seat,
             BoardroomSeatName(g_tagfs_seat));
@@ -282,6 +296,145 @@ static bool volume_medium_gone(void)
     kprintf("[TagFS] the medium the volume lives on has left — every read and "
             "write from here on will say so\n");
     return true;
+}
+
+/*
+ * And what happens when it comes back.
+ *
+ * The latch above is one-way on purpose: while the medium is out of the
+ * machine there is nothing that could make it safe to answer questions about
+ * it. But "out of the machine" is a state that ends — a stick reseated, a
+ * controller that stopped itself and was brought back — and until now it did
+ * not: the volume was gone for the rest of the boot, and on a machine that
+ * boots from a flash drive that is the machine gone with it.
+ *
+ * Coming back is not the same as something being there. Two things have to
+ * hold, and both are read off the medium rather than assumed:
+ *
+ *   it is the SAME VOLUME — the identity in its superblock, not the seat it
+ *   turned up in, because a socket that now has something in it is not
+ *   evidence about what;
+ *
+ *   and NOTHING WROTE TO IT while it was away. A stick pulled, edited on
+ *   another machine and pushed back carries a filesystem whose blocks no
+ *   longer mean what this kernel's in-memory index says they mean, and
+ *   carrying on over that is not a recovered volume, it is a corrupted one.
+ *   The superblock still matching the copy held here is what says so.
+ *
+ * Returns true when the volume was taken back up.
+ */
+static void tagfs_abandon(void);
+
+static bool TagFSVolumeReturned(void)
+{
+    if (!g_medium_left || !g_volume_uuid_known) {
+        return false;
+    }
+
+    for (uint8_t seat = 0; seat < BoardroomSeatCount(); seat++) {
+        uint8_t uuid[16];
+        if (!BoardroomSeatOccupied(seat)) {
+            continue;
+        }
+
+        /* Reached through THIS seat, not through the one the volume used to be
+         * in: that one may have nothing in it, and the read has to go where
+         * the medium actually is. */
+        uint8_t old_seat = g_tagfs_seat;
+        g_tagfs_seat = seat;
+        bool ours = tagfs_recognise(NULL, seat, uuid) &&
+                    memcmp(uuid, g_volume_uuid, 16) == 0;
+        g_tagfs_seat = old_seat;
+
+        if (!ours) {
+            continue;                   /* empty, or a volume that is not ours */
+        }
+
+        /*
+         * Read again rather than carried on from.
+         *
+         * Everything held in memory about this volume was read before the
+         * medium left, and while it was out of the machine anything could have
+         * been done to it — including nothing, which is indistinguishable from
+         * here. So the in-memory picture is dropped WITHOUT being written back
+         * and the volume is mounted from the medium as it now is. Anything
+         * holding a file across the departure has lost it, which is what
+         * happened.
+         */
+        kprintf("[TagFS] the volume is back, in seat %u: %s — reading it "
+                "again, because everything held about it is from before it "
+                "left\n", seat, BoardroomSeatName(seat));
+
+        tagfs_abandon();
+
+        if (tagfs_init() == OK) {
+            return true;
+        }
+
+        kprintf("[TagFS] the volume came back and would not mount\n");
+        return false;
+    }
+
+    return false;
+}
+
+/*
+ * A medium arrived. Is there a filesystem for this machine on it?
+ *
+ * Two ways in, and they are genuinely different questions. If a volume was
+ * mounted and its medium left, the only right answer is the one above: that
+ * volume and no other. If nothing was ever mounted — a machine that came up
+ * with no filesystem at all — then a medium arriving is the first chance it
+ * has had, and the whole of the ordinary mount runs, because a mount that has
+ * not happened yet is not a special case of anything.
+ */
+/*
+ * Until the machine has tried to mount its volume once, an arriving medium is
+ * not news — it is part of the same boot, and the mount that is about to
+ * happen will see it. Without this gate a K-Core running the guide loop and
+ * the boot core both call tagfs_init, and the volume is mounted twice.
+ * Measured: two "volume on seat 0" lines, one boot.
+ */
+static volatile uint32_t g_boot_mount_settled = 0;
+
+void TagFSBootMountSettled(void)
+{
+    __atomic_store_n(&g_boot_mount_settled, 1u, __ATOMIC_RELEASE);
+}
+
+/*
+ * The medium under this volume may have just left. Ask, and latch if it has.
+ *
+ * volume_medium_gone() already knows how to decide and how to say so; what was
+ * missing was anybody asking at the moment it became true rather than at the
+ * next read, which on a machine where nothing reads for a second is a second
+ * during which the seat can come to hold a different medium entirely.
+ */
+void TagFSNoteMediumGone(void)
+{
+    if (!g_state.initialized) {
+        return;
+    }
+    (void)volume_medium_gone();
+}
+
+void TagFSAttendArrival(void)
+{
+    if (__atomic_load_n(&g_boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+
+    if (g_state.initialized) {
+        TagFSVolumeReturned();
+        return;
+    }
+
+    /* Never mounted. tagfs_init only marks itself done at the very end, so a
+     * first attempt that found nothing left everything exactly as it was. */
+    if (tagfs_init() == OK) {
+        kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
+                "had none — mounted from seat %u\n", g_tagfs_seat);
+    }
 }
 
 static uint64_t block_to_sector(uint32_t block);
@@ -1482,12 +1635,24 @@ void tagfs_sync(void)
     tagfs_flush_cache();
 }
 
-void tagfs_shutdown(void)
+/*
+ * Taking the volume down, with or without writing anything back.
+ *
+ * write_back is the ordinary case: the machine is stopping and what is in
+ * memory belongs on the medium. It is exactly wrong in the other one — a
+ * medium that went away and came back. Everything held here was read before
+ * the departure, and writing it back would put a picture of the volume as it
+ * was over whatever the volume actually is now. A volume that left is re-read,
+ * not re-asserted.
+ */
+static void tagfs_teardown(bool write_back)
 {
     if (!g_state.initialized)
         return;
 
-    tagfs_sync();
+    if (write_back) {
+        tagfs_sync();
+    }
 
     tag_registry_destroy(g_state.registry);
     kfree(g_state.registry);
@@ -1534,6 +1699,23 @@ void tagfs_shutdown(void)
     g_state.initialized = false;
     debug_printf("[TagFS] Shutdown complete\n");
 }
+void tagfs_shutdown(void)
+{
+    tagfs_teardown(true);
+}
+
+/*
+ * The medium went away underneath this volume. Let go of everything held about
+ * it without writing a byte, so that whatever comes back is read rather than
+ * assumed.
+ */
+static void tagfs_abandon(void)
+{
+    tagfs_teardown(false);
+    g_medium_left = false;
+    g_tagfs_seat  = BOARDROOM_NO_SEAT;
+}
+
 
 // ----------------------------------------------------------------------------
 // Test runner interface (called from userspace via System Deck)

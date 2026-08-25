@@ -1,4 +1,5 @@
 #include "idle.h"
+#include "boardroom.h"
 #include "xhci_hub.h"
 #include "xhci_enumeration.h"
 #include "process.h"
@@ -166,6 +167,14 @@ void cpu_idle(void) {
      * something the handler that noticed can spend. Same shape as the two
      * above; one load of a flag when nothing has failed. */
     xhci_recover_if_needed();
+
+    /* And a medium that turned up after the room was called to order — a stick
+     * pushed in while the machine runs, or the one that was there all along
+     * coming back after its controller was reset. Seating it means asking it
+     * how large it is and whether it is ready, which is transfers, which is why
+     * it happens here and not where the arrival was noticed. One load of a flag
+     * when nothing has arrived. */
+    BoardroomAttendIfPending();
 
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle

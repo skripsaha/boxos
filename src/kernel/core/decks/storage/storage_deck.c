@@ -17,6 +17,13 @@ void storage_deck_init(void)
     kprintf("[Storage Deck] Initializing...\n");
 
     error_t result = tagfs_init();
+
+    /* The boot mount has been tried, whatever came of it. Until this is said,
+     * a medium arriving belongs to the boot that is still happening and the
+     * guide loop leaves it alone — otherwise a K-Core and this one mount the
+     * same volume at the same time. */
+    TagFSBootMountSettled();
+
     if (result != 0) {
         kprintf("[Storage Deck] ERROR: Failed to initialize TagFS (error=%d)\n", result);
         TagFSState *fs = tagfs_get_state();
