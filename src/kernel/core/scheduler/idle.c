@@ -161,6 +161,12 @@ void cpu_idle(void) {
      * same single atomic load when there is nothing to do. */
     xhci_slot_service_if_pending();
 
+    /* And a controller that stopped itself with an error it cannot continue
+     * past. The reset that brings it back takes up to a second, which is not
+     * something the handler that noticed can spend. Same shape as the two
+     * above; one load of a flag when nothing has failed. */
+    xhci_recover_if_needed();
+
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle
          * process has its own stack), then MWAIT into the deepest
