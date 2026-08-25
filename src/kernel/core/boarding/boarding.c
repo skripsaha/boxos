@@ -200,6 +200,11 @@ static void boarding_describe(unsigned stamps)
         kprintf("[Boarding]   it does not say which volume — the Boardroom "
                 "will have to choose by rule\n");
     }
+
+    /* Four lines that answer "which loader, off what, from where", and the
+     * whole of the boot scrolls over them within the second. Reached once,
+     * from ordinary context, long before any interrupt handler exists. */
+    kscreen_hold(1000);
 }
 
 void BoardingPassInit(void)

@@ -548,6 +548,7 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
 
     kprintf("[xHCI %s] command ring restarted; %u device(s) released\n",
             ctrl->name, orphan_count);
+    xhci_hold_screen();
 }
 
 void xhci_check_command_timeouts(xhci_controller_t* ctrl)
