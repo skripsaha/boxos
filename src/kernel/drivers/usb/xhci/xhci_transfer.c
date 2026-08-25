@@ -248,6 +248,19 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
 
     xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
     if (!slot) {
+        /*
+         * An answer to a transfer nobody is left to hear about.
+         *
+         * Ordinary once — a device unplugged with a transfer in flight — and
+         * a symptom when it is not: whatever posted that transfer is now
+         * waiting for an event that has been delivered and thrown away. Said
+         * out loud for the same reason as everywhere else in this driver:
+         * on the machine where it matters there is no debug build, there is a
+         * screen, and a line that was never printed cannot be read off it.
+         */
+        kprintf("[xHCI %s] a transfer on slot %u endpoint %u was answered (%s) "
+                "and there is no such device\n",
+                ctrl->name, slot_id, endpoint_id, xhci_completion_name(code));
         return;
     }
 

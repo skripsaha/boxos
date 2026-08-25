@@ -436,12 +436,41 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
         cpu_pause();
     }
 
+    /*
+     * And now wait for the conversations this started to finish.
+     *
+     * Two quiet passes prove that no NEW port has anything on it. They prove
+     * nothing whatever about the devices already found: at that moment their
+     * port resets are still in flight, because a USB 2 reset takes tens of
+     * milliseconds and two passes of this loop take microseconds. Returning
+     * there meant the port descriptions below were a snapshot taken mid-reset
+     * and the summary line counted sockets rather than devices — on a machine
+     * whose only diagnostic is a photograph of the screen, the most important
+     * lines in the log were the ones least entitled to be believed.
+     *
+     * Under emulation a reset completes inside the register write that starts
+     * it, so those same three passes really did contain the whole enumeration,
+     * and the difference did not exist.
+     *
+     * The budget is deliberately longer than either watchdog: whether a device
+     * comes up is for them to decide and say out loud, not for this loop to
+     * decide by running out of patience first. A machine where everything
+     * answers leaves as soon as it has.
+     */
+    int unfinished = xhci_enum_settle(ctrl, XHCI_ENUM_TIMEOUT_MS +
+                                            XHCI_CMD_TIMEOUT_MS);
+
     for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
         xhci_port_describe(ctrl, port);
     }
 
     kprintf("[xHCI %s] %u of %u root port(s) had something on them\n",
             ctrl->name, found, ctrl->max_ports);
+
+    if (unfinished > 0) {
+        kprintf("[xHCI %s] %d of them were still being enumerated when the "
+                "survey ended\n", ctrl->name, unfinished);
+    }
 }
 
 static int xhci_bring_up(xhci_controller_t* ctrl) {
