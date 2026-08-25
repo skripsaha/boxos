@@ -12,6 +12,26 @@
 typedef enum {
     ENUM_STATE_IDLE = 0,
     ENUM_STATE_CLAIMING,
+
+    /*
+     * Found, and waiting its turn.
+     *
+     * Only one device on a controller is brought up at a time. Between a port
+     * reset and the address that ends it, a device answers to address zero —
+     * that is what the Default state IS — and a bus with two of them on it is
+     * a bus where the host cannot tell which one replied. USB 2.0 §9.1.1.3 and
+     * §7.1.7.5 say so; the xHCI command ring enforces it the hard way, because
+     * it executes commands strictly in order and one Address Device that will
+     * not complete blocks every command queued behind it.
+     *
+     * Measured on two different machines: five devices found at boot, five
+     * port resets issued together, five Address Devices posted back to back —
+     * and the controller executed three of them and stopped for twenty
+     * seconds, with the other two devices and three Evaluate Contexts stuck
+     * behind the one that never answered. It came up about half the time,
+     * depending on which device won.
+     */
+    ENUM_STATE_QUEUED,
     ENUM_STATE_WAIT_PORT_RESET,
     ENUM_STATE_WAIT_ENABLE_SLOT,
     ENUM_STATE_WAIT_ADDRESS_DEVICE,
@@ -229,6 +249,17 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port);
 /* Report and release any enumeration that stopped being answered. Driven from
  * the timer tick. */
 void xhci_enum_watchdog(xhci_controller_t* ctrl);
+
+/*
+ * Hand the bus to the next device waiting its turn.
+ *
+ * Enumeration is serialised per controller, and this is what moves the queue
+ * along. Written so it cannot leak the turn: it asks whether the device
+ * holding it is still being enumerated and takes it back if it is not, rather
+ * than trusting every path that finishes with a device to say so. Cheap when
+ * there is nothing to do — one lock and two loads.
+ */
+void xhci_enum_pump(xhci_controller_t* ctrl);
 
 /* Wait until nothing is mid-enumeration, draining events while waiting.
  *

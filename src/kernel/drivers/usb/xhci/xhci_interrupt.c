@@ -492,6 +492,7 @@ void xhci_tick(void) {
         xhci_process_events_on(ctrl);
         xhci_check_command_timeouts(ctrl);
         xhci_enum_watchdog(ctrl);
+        xhci_enum_pump(ctrl);
     }
     __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
