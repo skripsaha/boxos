@@ -142,7 +142,9 @@ typedef struct {
 #define XHCI_PLS_U0              0
 #define XHCI_PLS_DISABLED        4
 #define XHCI_PLS_RXDETECT        5
+#define XHCI_PLS_INACTIVE        6   /* SS.Inactive — the link failed for good */
 #define XHCI_PLS_POLLING         7
+#define XHCI_PLS_COMPLIANCE      10  /* electrical test mode, not a bus */
 
 #define XHCI_PORTSC_SPEED_SHIFT  10
 #define XHCI_PORTSC_SPEED(p)     (((p) >> XHCI_PORTSC_SPEED_SHIFT) & 0xF)

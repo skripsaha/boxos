@@ -65,10 +65,15 @@ void     xhci_port_describe(xhci_controller_t* ctrl, uint8_t port);
 
 const char* xhci_port_reset_kind_name(uint8_t kind);
 
-/* Begin a port reset. `out_kind` receives which kind was applied, or
- * XHCI_PORT_RESET_NONE for a port left alone; may be NULL. */
+/* Begin a port reset — every port, at every speed, because that is the only
+ * thing that puts the device on it into the Default state where an Address
+ * Device can reach it. `out_kind` receives which kind was applied; may be NULL.
+ * Returns 0 when a reset is in flight, negative on error. */
 int      xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port,
                                uint8_t* out_kind);
+
+/* Escalate to the out-of-band reset after a hot one left the port disabled. */
+int      xhci_port_warm_reset(xhci_controller_t* ctrl, uint8_t port);
 
 /* True when the port that just reported a reset came out of it usable. */
 bool     xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port);
