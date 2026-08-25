@@ -11,6 +11,7 @@
 #include "touch.h"
 #include "amp.h"
 #include "atomics.h"
+#include "cpu_calibrate.h"
 
 /* ─── Touch tag handle cache (resolved once via xhci_interrupt_touch_init)
  *
@@ -345,6 +346,7 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
     xhci_ring_t* event_ring = &ctrl->event_ring;
     xhci_interrupter_regs_t* intr0 = &ctrl->runtime_regs->interrupters[0];
     uint32_t drained = 0;
+    uint64_t drain_began = rdtsc();
 
 drain_again:
     while (1) {
@@ -457,6 +459,16 @@ drain_again:
      * board is not something to decide by argument — this is the number that
      * settles it, and it costs a comparison per drain.
      */
+    /* How long this drain held the lock, which is how long interrupts were off
+     * on this core. Kept as a maximum because the worst one is the only one
+     * that matters. */
+    {
+        uint32_t took_us = (uint32_t)cpu_tsc_to_us(rdtsc() - drain_began);
+        if (took_us > ctrl->drain_longest_us) {
+            ctrl->drain_longest_us = took_us;
+        }
+    }
+
     if (drained > ctrl->event_high_water) {
         ctrl->event_high_water = drained;
         if (!ctrl->event_pressure_said && drained * 2 > event_ring->num_trbs) {
@@ -470,6 +482,15 @@ drain_again:
 
     __atomic_store_n(&ctrl->drain_owner, 0, __ATOMIC_RELEASE);
     spin_unlock(&ctrl->event_lock);
+}
+
+bool xhci_drain_is_mine(const xhci_controller_t* ctrl)
+{
+    if (!ctrl) {
+        return false;
+    }
+    uint32_t me = (uint32_t)amp_get_core_index() + 1u;
+    return __atomic_load_n(&ctrl->drain_owner, __ATOMIC_ACQUIRE) == me;
 }
 
 void xhci_poll_events(void) {

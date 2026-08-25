@@ -424,6 +424,16 @@ int xhci_command_wait_idle(xhci_controller_t* ctrl, uint32_t timeout_ms)
         return -1;
     }
 
+    /* The completions this is waiting for are drained by a pass that cannot
+     * run until this call returns. Waiting would be spending the whole budget
+     * for an answer this caller is itself standing in front of. */
+    if (xhci_drain_is_mine(ctrl)) {
+        kprintf("[xHCI %s] the command ring was waited on from inside the "
+                "event drain — its answers cannot arrive until this returns\n",
+                ctrl->name);
+        return -2;
+    }
+
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(timeout_ms);
 
     for (;;) {

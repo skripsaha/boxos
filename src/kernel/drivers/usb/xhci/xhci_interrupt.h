@@ -63,6 +63,17 @@ void xhci_interrupt_touch_init(void);
  * three events costs no extra register write at all.
  */
 #define XHCI_ERDP_BATCH 32
+
+/*
+ * True when THIS core is inside the event drain for this controller.
+ *
+ * Anything about to wait for an event has to ask. The drain that would deliver
+ * that event is below the caller on the same stack and cannot run again until
+ * the caller returns, so the wait can only ever end in its own timeout —
+ * five seconds of a core spinning for an answer it has itself blocked. Asking
+ * turns that into a line naming the caller.
+ */
+bool xhci_drain_is_mine(const xhci_controller_t* ctrl);
 void xhci_hold_screen(void);
 
 #endif

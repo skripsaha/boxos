@@ -7,6 +7,7 @@
 #include "xhci_hid.h"
 #include "xhci_endpoint.h"
 #include "xhci_hub.h"
+#include "xhci_interrupt.h"
 #include "pmm.h"
 #include "vmm.h"
 #include "klib.h"
@@ -95,6 +96,16 @@ int xhci_control_transfer_sync(xhci_controller_t* ctrl, xhci_device_slot_t* slot
 {
     if (!ctrl || !slot || !slot->endpoints) {
         return -1;
+    }
+
+    /* Asked before anything is put on the ring: the answer to this would be
+     * drained by a pass that cannot run until this call returns, so posting
+     * the transfer would leave it in flight with nobody able to collect it. */
+    if (xhci_drain_is_mine(ctrl)) {
+        kprintf("[xHCI %s] port %u: a control transfer was waited for from "
+                "inside the event drain — its answer cannot arrive until this "
+                "returns\n", ctrl->name, slot->port_num);
+        return -3;
     }
 
     xhci_endpoint_t* ep0 = &slot->endpoints[1];

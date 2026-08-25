@@ -418,6 +418,16 @@ int xhci_ep_transfer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                      uint8_t dci, uint64_t buffer_phys, uint32_t length,
                      uint32_t timeout_ms, uint32_t* out_transferred)
 {
+    /* Asked before the transfer is posted, not after: the drain that would
+     * answer it is below this caller on the same stack, so posting first would
+     * leave a transfer in flight that nothing can collect. */
+    if (xhci_drain_is_mine(ctrl)) {
+        kprintf("[xHCI %s] slot %u endpoint %u: a transfer was waited for from "
+                "inside the event drain — its answer cannot arrive until this "
+                "returns\n", ctrl->name, slot ? slot->slot_id : 0, dci);
+        return -3;
+    }
+
     int rc = xhci_ep_submit(ctrl, slot, dci, buffer_phys, length);
     if (rc != 0) {
         return rc;
