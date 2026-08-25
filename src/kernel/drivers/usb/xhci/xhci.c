@@ -363,6 +363,173 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
 }
 
 /*
+ * Tell the controller where everything is.
+ *
+ * Order matters here, and the old code had it wrong. The specification lays
+ * initialisation out as: enable the slots, publish the device context array,
+ * publish the command ring, then the interrupter — and within the interrupter,
+ * ERSTSZ and ERDP before ERSTBA, because writing ERSTBA is what makes the
+ * controller read the table. A controller told where the table is before being
+ * told how big it is, or where software will read from, is entitled to act on
+ * what it finds. QEMU forgives the order; hardware need not.
+ *
+ * Separate from the allocation above it because a controller that has had to be
+ * reset needs every word of this said to it again, and needs it said the same
+ * way. A recovery that re-publishes in a different order from the boot is a
+ * recovery that works on the machines it was written on.
+ */
+static void xhci_publish_structures(xhci_controller_t* ctrl)
+{
+    ctrl->op_regs->config = ctrl->max_slots;
+    ctrl->op_regs->dcbaap = ctrl->dcbaa_phys;
+    ctrl->op_regs->crcr   = xhci_ring_get_phys_addr(&ctrl->command_ring)
+                          | XHCI_CRCR_RCS;
+
+    ctrl->interrupters = &ctrl->runtime_regs->interrupters[0];
+
+    xhci_interrupter_regs_t* intr0 = ctrl->interrupters;
+    intr0->erstsz = 1;
+    intr0->erdp   = xhci_ring_get_phys_addr(&ctrl->event_ring);
+    intr0->erstba = xhci_erst_get_phys_addr(&ctrl->event_ring_segment_table);
+    intr0->imod   = XHCI_IMOD_DEFAULT;
+    intr0->iman   = XHCI_IMAN_IE;
+
+    debug_printf("[xHCI] operational registers and interrupter programmed\n");
+}
+
+/*
+ * Bringing a controller back after it has stopped itself.
+ *
+ * Host Controller Error and Host System Error both mean the same thing in
+ * practice: the controller has hit something it cannot continue past and has
+ * halted. The specification's answer is a reset — Section 4.24.1 — and until
+ * now this driver's answer was to write the fact down and leave the machine
+ * without USB until somebody power-cycled it. On a desktop that is a keyboard
+ * that stops working; on a machine booting from a flash drive it is the
+ * filesystem going away underneath itself.
+ *
+ * A reset loses every device: slots, addresses, endpoint state, all of it is
+ * the controller's and the controller has just forgotten it. So everything is
+ * retired first and the bus is surveyed again afterwards, which finds whatever
+ * is still plugged in. The memory the driver holds — rings, contexts, the
+ * scratchpad the controller asked for — is kept and re-published, because none
+ * of it was what went wrong and re-allocating it is a second way to fail.
+ *
+ * Reached from ordinary kernel context, never from the handler that noticed:
+ * this waits up to a second for a reset, and an interrupt handler is not
+ * somewhere to spend a second.
+ */
+static void xhci_controller_recover(xhci_controller_t* ctrl)
+{
+    kprintf("[xHCI %s] resetting the controller after the error it "
+            "reported\n", ctrl->name);
+
+    /* Nothing may believe a device is still there. */
+    for (uint8_t slot_id = 1; slot_id <= ctrl->max_slots; slot_id++) {
+        xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
+        if (slot) {
+            xhci_slot_retire(ctrl, slot);
+        }
+    }
+    xhci_slot_service(ctrl);
+
+    ctrl->running     = false;
+    ctrl->initialized = false;
+
+    if (xhci_reset(ctrl) != 0) {
+        kprintf("[xHCI %s] would not reset — out of service until the machine "
+                "is restarted\n", ctrl->name);
+        return;
+    }
+
+    /* The rings start over. The controller's own pointers into them are
+     * reloaded from the registers below, so software's positions and cycle
+     * states have to be back where the controller will be looking. */
+    xhci_command_init(ctrl);
+    ctrl->command_ring.enqueue_idx = 0;
+    ctrl->command_ring.dequeue_idx = 0;
+    ctrl->command_ring.cycle_state = 1;
+    if (ctrl->command_ring.trbs) {
+        memset(ctrl->command_ring.trbs, 0,
+               (size_t)ctrl->command_ring.num_trbs * sizeof(xhci_trb_t));
+        xhci_trb_t* link = &ctrl->command_ring.trbs[ctrl->command_ring.num_trbs - 1];
+        link->parameter = ctrl->command_ring.trbs_phys;
+        link->status    = 0;
+        link->control   = TRB_SET_TYPE(TRB_TYPE_LINK) | TRB_TC;
+    }
+
+    ctrl->event_ring.enqueue_idx = 0;
+    ctrl->event_ring.dequeue_idx = 0;
+    ctrl->event_ring.cycle_state = 1;
+    if (ctrl->event_ring.trbs) {
+        memset(ctrl->event_ring.trbs, 0,
+               (size_t)ctrl->event_ring.num_trbs * sizeof(xhci_trb_t));
+    }
+
+    /* Slot zero still points at the scratchpad; every other entry named a
+     * device context the controller has just forgotten. */
+    for (uint16_t i = 1; i < 256; i++) {
+        ctrl->dcbaa->device_context_ptrs[i] = 0;
+    }
+    ctrl->dcbaa->device_context_ptrs[0] = ctrl->scratchpad_array_phys;
+
+    xhci_publish_structures(ctrl);
+    ctrl->op_regs->usbcmd |= XHCI_CMD_INTE | XHCI_CMD_HSEE;
+
+    if (xhci_start(ctrl) != 0) {
+        kprintf("[xHCI %s] would not start again — out of service\n",
+                ctrl->name);
+        return;
+    }
+
+    ctrl->running     = true;
+    ctrl->initialized = true;
+    ctrl->error_state = false;
+
+    xhci_map_port_protocols(ctrl);
+    xhci_power_ports(ctrl);
+
+    kprintf("[xHCI %s] back in service — looking again at what is plugged "
+            "in\n", ctrl->name);
+    xhci_survey_root_ports(ctrl);
+}
+
+/*
+ * One core does the recovery, and the rest go away rather than queue up behind
+ * it to do the same thing — the arrangement the hubs and the slot teardown
+ * already use, and for the same reason. Called from the K-Core guide loop,
+ * which is where deferred work in this kernel actually runs: cpu_idle on a
+ * multi-core machine is not entered at all.
+ */
+void xhci_recover_if_needed(void)
+{
+    static volatile uint32_t busy = 0;
+
+    bool any = false;
+    for (uint8_t i = 0; i < g_controller_count; i++) {
+        if (g_controllers[i].error_state) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) {
+        return;
+    }
+
+    if (__atomic_exchange_n(&busy, 1u, __ATOMIC_ACQUIRE) != 0) {
+        return;
+    }
+
+    for (uint8_t i = 0; i < g_controller_count; i++) {
+        if (g_controllers[i].error_state) {
+            xhci_controller_recover(&g_controllers[i]);
+        }
+    }
+
+    __atomic_store_n(&busy, 0u, __ATOMIC_RELEASE);
+}
+
+/*
  * Look at the root ports until they have had the time the bus gives them.
  *
  * A controller that has just been reset has ports that were reset with it. A
@@ -753,31 +920,7 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
     }
     ctrl->dcbaa->device_context_ptrs[0] = ctrl->scratchpad_array_phys;
 
-    /* Order matters here, and the old code had it wrong. The specification
-     * lays out initialisation as: enable the slots, publish the device context
-     * array, publish the command ring, then the interrupter — and within the
-     * interrupter, ERSTSZ and ERDP before ERSTBA, because writing ERSTBA is
-     * what makes the controller read the table. A controller told where the
-     * table is before being told how big it is, or where software will read
-     * from, is entitled to act on what it finds. QEMU forgives the order;
-     * hardware need not. */
-    ctrl->op_regs->config = ctrl->max_slots;
-    ctrl->op_regs->dcbaap = ctrl->dcbaa_phys;
-    ctrl->op_regs->crcr   = xhci_ring_get_phys_addr(&ctrl->command_ring)
-                          | XHCI_CRCR_RCS;
-
-    debug_printf("[xHCI] Operational registers programmed\n");
-
-    ctrl->interrupters = &ctrl->runtime_regs->interrupters[0];
-
-    xhci_interrupter_regs_t* intr0 = &ctrl->runtime_regs->interrupters[0];
-    intr0->erstsz = 1;
-    intr0->erdp   = xhci_ring_get_phys_addr(&ctrl->event_ring);
-    intr0->erstba = xhci_erst_get_phys_addr(&ctrl->event_ring_segment_table);
-    intr0->imod   = XHCI_IMOD_DEFAULT;
-    intr0->iman   = XHCI_IMAN_IE;
-
-    debug_printf("[xHCI] Primary interrupter configured\n");
+    xhci_publish_structures(ctrl);
 
     xhci_setup_interrupts(ctrl);
 

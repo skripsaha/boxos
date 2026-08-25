@@ -272,6 +272,13 @@ void kcore_run_loop(void)
          * single one of them being taken down. */
         xhci_slot_service_if_pending();
 
+        /* And a controller that has stopped itself. Host Controller Error and
+         * Host System Error both mean it has halted and will not start again
+         * on its own; the answer is a reset, which takes up to a second and so
+         * cannot happen where the error was noticed. One core does it and the
+         * rest go away. One load of a flag when nothing has failed. */
+        xhci_recover_if_needed();
+
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before
              * draining the cleanup queue, so a reaped strand's process_destroy
