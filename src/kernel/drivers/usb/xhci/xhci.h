@@ -82,6 +82,13 @@ typedef struct {
      * cannot be acted on — measured: an internal controller error was reported
      * by one of two and there was no way to tell which. */
     char    name[10];               /* "00:14.0" */
+
+    /* How many interrupts this controller has actually delivered. Nothing
+     * depends on it working — see the tick — but a device that never
+     * enumerates is a different fault depending on whether its controller ever
+     * spoke, and that is not something a photograph of a screen can otherwise
+     * answer. */
+    volatile uint32_t irq_count;
 } xhci_controller_t;
 
 int xhci_init(void);

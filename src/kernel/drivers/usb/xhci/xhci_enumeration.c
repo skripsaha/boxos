@@ -367,6 +367,13 @@ int xhci_slot_service(xhci_controller_t* ctrl)
 
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         struct xhci_device_slot* slot = &device_slots[i];
+        /* This controller's devices only. The table is shared; taking down
+         * another controller's device with this one in hand posts its Disable
+         * Slot to silicon that never enabled it, and frees an input context
+         * sized by the wrong controller's context size. */
+        if (slot->ctrl != ctrl) {
+            continue;
+        }
         if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != ENUM_STATE_RETIRING) {
             continue;
         }
@@ -1050,6 +1057,9 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
 
         int busy = 0;
         for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+            if (device_slots[i].ctrl != ctrl) {
+                continue;   /* another controller's bus, not this one's */
+            }
             uint8_t state = __atomic_load_n(&device_slots[i].state,
                                             __ATOMIC_ACQUIRE);
             if (state != ENUM_STATE_IDLE && state != ENUM_STATE_CONFIGURED &&
@@ -1100,6 +1110,20 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
         struct xhci_device_slot* slot = &device_slots[i];
 
+        /*
+         * This controller's devices only.
+         *
+         * The watchdog runs once per controller over a table they share, so
+         * without this the first controller reaps the second one's devices —
+         * and reaps them with itself in hand, which retires a slot against
+         * silicon that never enabled it. Measured on a board with two: four
+         * devices on the chipset controller were given up on, by name, by the
+         * controller inside the graphics card.
+         */
+        if (slot->ctrl != ctrl) {
+            continue;
+        }
+
         uint8_t state = __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE);
         if (state == ENUM_STATE_IDLE || state == ENUM_STATE_CONFIGURED ||
             state == ENUM_STATE_RETIRING) {
@@ -1112,9 +1136,11 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
             continue;
         }
 
-        kprintf("[xHCI %s] port %u: gave up after %u ms while %s\n",
+        kprintf("[xHCI %s] port %u: gave up after %u ms while %s "
+                "(%u interrupt(s) from this controller so far)\n",
                 ctrl->name, slot->port_num, XHCI_ENUM_TIMEOUT_MS,
-                enum_state_name(state));
+                enum_state_name(state),
+                __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
         xhci_slot_retire(ctrl, slot);
     }
 }
