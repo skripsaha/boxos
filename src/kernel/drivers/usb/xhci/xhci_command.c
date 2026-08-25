@@ -1,6 +1,8 @@
 #include "xhci_command.h"
 #include "xhci_interrupt.h"
 #include "xhci_enumeration.h"
+#include "xhci_device.h"
+#include "xhci_port.h"
 #include "xhci_regs.h"
 #include "xhci_rings.h"
 #include "klib.h"
@@ -541,6 +543,29 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
 
     __sync_synchronize();
     ctrl->op_regs->crcr = ctrl->command_ring.trbs_phys | XHCI_CRCR_RCS;
+
+    /*
+     * What the CONTROLLER made of each of them, before they are taken apart.
+     *
+     * The Output Slot Context is written by the controller and never by
+     * software, so its Slot State is the controller's own account: Disabled
+     * means the Address Device never took effect, Addressed or Default mean it
+     * did and the answer went missing. Those are opposite faults with opposite
+     * fixes, nothing else on the machine distinguishes them, and until now the
+     * one line that would have said which never printed here — the enumeration
+     * watchdog would have said it, and this pass retires the slots first, so
+     * the watchdog correctly skips them and the report went with them.
+     */
+    for (unsigned k = 0; k < orphan_count; k++) {
+        xhci_device_slot_t* s = orphans[k];
+        kprintf("[xHCI %s]   port %u (slot %u): controller says slot %s, "
+                "address %u; PORTSC 0x%08x\n",
+                ctrl->name, s->port_num, s->slot_id,
+                xhci_slot_state_name(xhci_slot_context_state(s)),
+                xhci_slot_context_address(s),
+                xhci_get_port_status(ctrl, s->port_num));
+    }
+    xhci_hold_screen();
 
     for (unsigned k = 0; k < orphan_count; k++) {
         xhci_slot_retire(ctrl, orphans[k]);

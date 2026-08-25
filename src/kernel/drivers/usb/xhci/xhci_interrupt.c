@@ -228,6 +228,67 @@ void xhci_touch_device_left(const xhci_device_slot_t* slot)
                               &g_xhci_touch_left_bare);
 }
 
+/*
+ * Has the controller stopped itself?
+ *
+ * Host System Error and Host Controller Error both mean it has hit something
+ * it cannot continue past and halted: it stops executing the command ring,
+ * stops producing events, and answers nothing. From the outside that is
+ * indistinguishable from a command that is merely slow — which is exactly how
+ * it was read, for weeks, on a live board.
+ *
+ * ‼ This used to be asked ONLY from the interrupt handler, and on this kernel
+ * `sti` is the last thing main() does — long after xhci_init, BoardroomInit
+ * and storage_deck_init. So through the whole of USB bring-up no interrupt can
+ * fire, and a controller that failed on its first Address Device was silent by
+ * construction. The single fact that would have explained the failure was
+ * being read from the one place that cannot run when it happens.
+ *
+ * So it is asked here instead, in the drain, which runs continuously while
+ * devices are being enumerated. One register read per pass.
+ */
+static bool xhci_controller_stopped(xhci_controller_t* ctrl)
+{
+    uint32_t usbsts = ctrl->op_regs->usbsts;
+
+    if (usbsts == 0xFFFFFFFFu) {
+        if (!ctrl->error_state) {
+            kprintf("[xHCI %s] the controller has stopped answering its own "
+                    "registers — it is gone from the bus\n", ctrl->name);
+            ctrl->error_state = true;
+            ctrl->running     = false;
+            xhci_hold_screen();
+        }
+        return true;
+    }
+
+    if (!(usbsts & (XHCI_STS_HSE | XHCI_STS_HCE))) {
+        return false;
+    }
+
+    if (!ctrl->error_state) {
+        kprintf("[xHCI %s] %s — the controller has stopped and needs a reset "
+                "(USBSTS=0x%08x USBCMD=0x%08x CRCR=0x%08x DCBAAP=0x%08x "
+                "CONFIG=0x%08x)\n",
+                ctrl->name,
+                (usbsts & XHCI_STS_HCE) ? "internal controller error"
+                                        : "host system error",
+                usbsts,
+                ctrl->op_regs->usbcmd,
+                (uint32_t)ctrl->op_regs->crcr,
+                (uint32_t)ctrl->op_regs->dcbaap,
+                ctrl->op_regs->config);
+        xhci_hold_screen();
+    }
+
+    /* HSE is write-one-to-clear and HCE is not: a controller in HCE stays in
+     * it until it is reset, which is what the recovery pass is for. */
+    ctrl->op_regs->usbsts = usbsts & XHCI_STS_HSE;
+    ctrl->error_state = true;
+    ctrl->running     = false;
+    return true;
+}
+
 /* One controller's event ring. Draining is per-controller because the ring,
  * the lock and the interrupter all are. */
 static void xhci_process_events_on(xhci_controller_t* ctrl) {
@@ -249,6 +310,15 @@ static void xhci_process_events_on(xhci_controller_t* ctrl) {
          * nothing to add by queueing behind them — and a great deal to lose:
          * a drain reached from inside another drain, on the same core, would
          * be waiting for a lock its own caller holds. */
+        return;
+    }
+
+    /* Before anything else: is it still running at all? A halted controller
+     * produces no events, so a drain that does not ask this simply finds an
+     * empty ring, every time, for ever — which is what "the device stopped
+     * being answered" looked like from the outside. */
+    if (xhci_controller_stopped(ctrl)) {
+        spin_unlock(&ctrl->event_lock);
         return;
     }
 
@@ -421,32 +491,7 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      */
     ctrl->runtime_regs->interrupters[0].iman |= XHCI_IMAN_IP;
 
-    if (usbsts & (XHCI_STS_HSE | XHCI_STS_HCE)) {
-        /*
-         * The controller has stopped and will not start again by itself.
-         *
-         * Said once, with the state that explains it and the name of the
-         * controller it happened to — on a machine with two of them, "the
-         * controller has stopped" identifies neither. Everything on it is now
-         * unreachable: every device mid-enumeration will run out its two
-         * seconds and be released, and there is no point pretending otherwise.
-         */
-        if (!ctrl->error_state) {
-            kprintf("[xHCI %s] %s — the controller has stopped and needs a "
-                    "reset (USBSTS=0x%08x USBCMD=0x%08x CRCR=0x%08x "
-                    "DCBAAP=0x%08x CONFIG=0x%08x)\n",
-                    ctrl->name,
-                    (usbsts & XHCI_STS_HCE) ? "internal controller error"
-                                            : "host system error",
-                    usbsts,
-                    ctrl->op_regs->usbcmd,
-                    (uint32_t)ctrl->op_regs->crcr,
-                    (uint32_t)ctrl->op_regs->dcbaap,
-                    ctrl->op_regs->config);
-        }
-        ctrl->error_state = true;
-        ctrl->running     = false;
-    }
+    xhci_controller_stopped(ctrl);
 
     /* Everything the controller has to say arrives on the event ring, port
      * changes included. Port Change Detect above is acknowledged, not acted

@@ -592,6 +592,27 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
         return;
     }
 
+    /*
+     * The recovery the bus is owed, and this driver never paid.
+     *
+     * USB 2.0 §7.1.7.5: after a port reset ends, a device is given TRSTRCY —
+     * 10 ms — before it may be addressed. It spends that time coming up in the
+     * Default state, and it is not obliged to answer anything until it has.
+     * Addressing it early is not a slow device; it is a device that does not
+     * respond to the first thing the host says to it.
+     *
+     * Nothing in an emulator needs this, because an emulated device is ready
+     * inside the register write that reset it — which is why a driver that
+     * went straight from "reset finished" to Enable Slot looked correct for as
+     * long as it was only ever run against one.
+     */
+    {
+        uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_RESET_RECOVERY_MS);
+        while ((int64_t)(rdtsc() - deadline) < 0) {
+            cpu_pause();
+        }
+    }
+
     debug_printf("[xHCI ENUM] Port %u reset complete\n", port);
     enum_begin_slot(ctrl, slot);
 }
