@@ -54,6 +54,23 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
 #define SCSI_WRITE_10         0x2A
 #define SCSI_SYNC_CACHE_10    0x35
 
+/*
+ * The sixteen-byte forms (SBC-3).
+ *
+ * READ CAPACITY(10) answers with a 32-bit last block number, so it can say
+ * nothing larger than two tebibytes. A device bigger than that is required to
+ * answer 0xFFFFFFFF and wait to be asked again properly — and a host that
+ * takes that literally decides the drive is exactly two tebibytes, hands the
+ * top of it to a filesystem, and finds out later. READ CAPACITY(16) is a
+ * SERVICE ACTION IN command: opcode 0x9E with the action in the low five bits
+ * of byte 1.
+ */
+#define SCSI_SERVICE_ACTION_IN_16 0x9E
+#define SCSI_SAI_READ_CAPACITY_16 0x10
+#define SCSI_READ_16              0x88
+#define SCSI_WRITE_16             0x8A
+#define SCSI_SYNC_CACHE_16        0x91
+
 /* One transfer's worth of patience. A flash drive answering a read takes
  * milliseconds; five seconds is the point at which it is not answering. */
 #define MSD_XFER_TIMEOUT_MS   5000
@@ -78,8 +95,20 @@ typedef struct XhciMsdUnit {
     uint8_t  lun;
     bool     ready;
 
-    uint64_t sectors;                   /* in XHCI_MSD_SECTOR_BYTES units */
+    /*
+     * Two counts, because the device and the filesystem measure in different
+     * units and pretending otherwise is how a 4096-byte-sector drive gets read
+     * one eighth of the way through and believed.
+     *
+     *   blocks       what the device has, in ITS logical blocks
+     *   block_bytes  how big one of those is
+     *   sectors      the same medium in the 512-byte sectors BoxOS speaks
+     *   per_sector   block_bytes / 512, which is 1 on almost everything
+     */
+    uint64_t blocks;
+    uint64_t sectors;
     uint32_t block_bytes;
+    uint32_t per_sector;
     uint32_t tag;
 
     void*    cmd_virt;   uint64_t cmd_phys;      /* wrappers, one page */
@@ -107,6 +136,22 @@ static void be32_put(uint8_t* p, uint32_t v)
 {
     p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+
+static void be64_put(uint8_t* p, uint64_t v)
+{
+    p[0] = (uint8_t)(v >> 56); p[1] = (uint8_t)(v >> 48);
+    p[2] = (uint8_t)(v >> 40); p[3] = (uint8_t)(v >> 32);
+    p[4] = (uint8_t)(v >> 24); p[5] = (uint8_t)(v >> 16);
+    p[6] = (uint8_t)(v >> 8);  p[7] = (uint8_t)v;
+}
+
+static uint64_t be64_get(const uint8_t* p)
+{
+    return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) |
+           ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+           ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) |
+           ((uint64_t)p[6] << 8)  |  (uint64_t)p[7];
 }
 
 static uint32_t be32_get(const uint8_t* p)
@@ -357,13 +402,23 @@ static int msd_request_sense(XhciMsdUnit* u, uint8_t* out_key, uint8_t* out_asc)
 
 /* ── attach ─────────────────────────────────────────────────────────────── */
 
+/*
+ * How big it is, asked in whichever form can hold the answer.
+ *
+ * Ten bytes first, because every device answers it. A device whose last block
+ * number does not fit in the thirty-two bits that reply has is required to say
+ * 0xFFFFFFFF, which is not a size — it is the device asking to be asked again
+ * with the sixteen-byte form. Believing it costs the whole of a drive above
+ * two tebibytes, quietly, with a filesystem laid over the part that is not
+ * there.
+ */
 static int msd_read_capacity(XhciMsdUnit* u)
 {
-    uint8_t cdb[10] = { SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t cdb10[10] = { SCSI_READ_CAPACITY_10, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     uint32_t got = 0;
 
     memset(u->bounce_virt, 0, 8);
-    int rc = msd_command(u, cdb, sizeof(cdb), u->bounce_phys, 8, true, &got);
+    int rc = msd_command(u, cdb10, sizeof(cdb10), u->bounce_phys, 8, true, &got);
     if (rc != 0 || got < 8) {
         return -1;
     }
@@ -376,8 +431,37 @@ static int msd_read_capacity(XhciMsdUnit* u)
         return -1;
     }
 
-    u->block_bytes = block;
-    u->sectors     = (uint64_t)last_lba + 1;
+    if (last_lba != 0xFFFFFFFFu) {
+        u->block_bytes = block;
+        u->blocks      = (uint64_t)last_lba + 1;
+        return 0;
+    }
+
+    /* Sixteen bytes: opcode, service action, an eight-byte LBA that is zero
+     * here, a four-byte allocation length, control. */
+    uint8_t cdb16[16] = {0};
+    cdb16[0]  = SCSI_SERVICE_ACTION_IN_16;
+    cdb16[1]  = SCSI_SAI_READ_CAPACITY_16;
+    be32_put(&cdb16[10], 32);
+
+    memset(u->bounce_virt, 0, 32);
+    got = 0;
+    rc = msd_command(u, cdb16, sizeof(cdb16), u->bounce_phys, 32, true, &got);
+    if (rc != 0 || got < 12) {
+        kprintf("[USB disk %u] says it is larger than a ten-byte capacity can "
+                "state and then would not answer the sixteen-byte one\n",
+                u->number);
+        return -1;
+    }
+
+    uint64_t last64 = be64_get(c);
+    uint32_t blk64  = be32_get(c + 8);
+    if (blk64 == 0) {
+        return -1;
+    }
+
+    u->block_bytes = blk64;
+    u->blocks      = last64 + 1;
     return 0;
 }
 
@@ -504,24 +588,43 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 
     msd_read_identity(u);
 
-    if (u->block_bytes != XHCI_MSD_SECTOR_BYTES) {
-        /* Refused rather than misread. A 4096-byte-sector device needs the
-         * layer above to address it in its own units, and pretending its
-         * blocks are 512 bytes would read every eighth sector and call the
-         * result a filesystem. */
-        kprintf("[USB disk %u] %s: %u-byte blocks, and this kernel keeps "
-                "filesystems in %u-byte sectors — not using it\n",
+    /*
+     * A device whose blocks are larger than a sector is addressed in its own
+     * units and translated here, rather than refused.
+     *
+     * Refusing was honest while nothing did the translation, and it meant a
+     * 4096-byte-sector drive was a drive BoxOS could not boot from. What it
+     * needs is arithmetic and, for a write that does not land on a block
+     * boundary, the read-modify-write below — which is not an optimisation to
+     * be skipped but the only way to change part of a block on a device that
+     * will only accept whole ones.
+     *
+     * What cannot be translated is a block that is not a whole number of
+     * sectors, or one larger than the buffer everything moves through. Both
+     * are said out loud rather than guessed at.
+     */
+    if (u->block_bytes < XHCI_MSD_SECTOR_BYTES ||
+        (u->block_bytes % XHCI_MSD_SECTOR_BYTES) != 0 ||
+        u->block_bytes > MSD_BOUNCE_BYTES) {
+        kprintf("[USB disk %u] %s: %u-byte blocks, which this kernel cannot "
+                "express in %u-byte sectors — not using it\n",
                 u->number, u->name, u->block_bytes, XHCI_MSD_SECTOR_BYTES);
         xhci_msd_release(slot);
         return -1;
     }
 
-    u->ready = true;
+    u->per_sector = u->block_bytes / XHCI_MSD_SECTOR_BYTES;
+    u->sectors    = u->blocks * u->per_sector;
+    u->ready      = true;
 
     uint64_t mib = (u->sectors * XHCI_MSD_SECTOR_BYTES) / (1024u * 1024u);
     kprintf("[USB disk %u] %s: %llu sectors, %llu MiB\n",
             u->number, u->name,
             (unsigned long long)u->sectors, (unsigned long long)mib);
+    if (u->per_sector != 1) {
+        kprintf("[USB disk %u] addressed in %u-byte blocks (%llu of them)\n",
+                u->number, u->block_bytes, (unsigned long long)u->blocks);
+    }
     return 0;
 }
 
@@ -645,6 +748,61 @@ const char* xhci_msd_unit_name(uint8_t unit)
     return name;
 }
 
+/*
+ * One run of device blocks, in or out of the bounce buffer.
+ *
+ * The command is chosen by the numbers rather than by a capability the device
+ * was never asked about: ten bytes while the block number fits in the
+ * thirty-two the ten-byte form has room for, sixteen when it does not. A drive
+ * above two tebibytes is addressed correctly at both ends of itself, and one
+ * below never sees a sixteen-byte command it might not implement.
+ */
+static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
+                          uint32_t bytes, bool write)
+{
+    uint8_t cdb[16] = {0};
+    uint8_t cdb_len;
+
+    if (block + nblocks > 0x100000000ULL) {
+        cdb[0] = write ? SCSI_WRITE_16 : SCSI_READ_16;
+        be64_put(&cdb[2], block);
+        be32_put(&cdb[10], nblocks);
+        cdb_len = 16;
+    } else {
+        cdb[0] = write ? SCSI_WRITE_10 : SCSI_READ_10;
+        be32_put(&cdb[2], (uint32_t)block);
+        cdb[7] = (uint8_t)(nblocks >> 8);
+        cdb[8] = (uint8_t)nblocks;
+        cdb_len = 10;
+    }
+
+    uint32_t moved = 0;
+    int rc = msd_command(u, cdb, cdb_len, u->bounce_phys, bytes, !write, &moved);
+    if (rc != 0 || moved != bytes) {
+        uint8_t key = 0, asc = 0;
+        msd_request_sense(u, &key, &asc);
+        kprintf("[USB disk %u] %s of %u block(s) at %llu failed "
+                "(sense key 0x%x, code 0x%x)\n",
+                u->number, write ? "write" : "read", nblocks,
+                (unsigned long long)block, key, asc);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Sectors in, device blocks out.
+ *
+ * Everything above this speaks 512-byte sectors, which is what filesystems on
+ * this kernel are laid out in. Most devices agree and the translation is the
+ * identity. A device with larger blocks does not, and the difference is not
+ * something a caller should have to know: a read is widened to the blocks that
+ * contain it and the wanted part copied out, and a write that does not begin
+ * and end on a block boundary reads the blocks it partly covers first, changes
+ * the middle, and writes them back whole. There is no other way to change part
+ * of a block on a device that will only accept whole ones — and doing it by
+ * writing a partial block instead destroys the sectors on either side.
+ */
 static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
                   void* buffer, bool write)
 {
@@ -665,45 +823,48 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
         return -1;
     }
 
-    const uint32_t per_pass = MSD_BOUNCE_BYTES / XHCI_MSD_SECTOR_BYTES;
+    const uint32_t per_sector  = u->per_sector;          /* sectors per block */
+    const uint32_t block_bytes = u->block_bytes;
+    /* Whole blocks per pass, so a pass never has to split one. */
+    const uint32_t blocks_per_pass = MSD_BOUNCE_BYTES / block_bytes;
+
     uint8_t* caller = (uint8_t*)buffer;
     int result = 0;
 
     spin_lock(&u->lock);
 
     while (count > 0) {
-        uint32_t chunk = (count > per_pass) ? per_pass : count;
-        uint32_t bytes = chunk * XHCI_MSD_SECTOR_BYTES;
+        uint64_t block     = lba / per_sector;
+        uint32_t head      = (uint32_t)(lba % per_sector);   /* sectors in */
+        uint32_t room      = (blocks_per_pass * per_sector) - head;
+        uint32_t chunk     = (count > room) ? room : count;  /* sectors */
+        uint32_t nblocks   = (head + chunk + per_sector - 1) / per_sector;
+        uint32_t bytes     = nblocks * block_bytes;
+        uint32_t head_bytes = head * XHCI_MSD_SECTOR_BYTES;
+        uint32_t chunk_bytes = chunk * XHCI_MSD_SECTOR_BYTES;
+
+        bool whole = (head == 0) && ((chunk % per_sector) == 0);
+
+        /* A write that does not cover the blocks it touches has to read them
+         * first; a read always reads. */
+        if (!write || !whole) {
+            if (msd_run_blocks(u, block, nblocks, bytes, false) != 0) {
+                result = -1;
+                break;
+            }
+        }
 
         if (write) {
-            memcpy(u->bounce_virt, caller, bytes);
+            memcpy((uint8_t*)u->bounce_virt + head_bytes, caller, chunk_bytes);
+            if (msd_run_blocks(u, block, nblocks, bytes, true) != 0) {
+                result = -1;
+                break;
+            }
+        } else {
+            memcpy(caller, (uint8_t*)u->bounce_virt + head_bytes, chunk_bytes);
         }
 
-        uint8_t cdb[10] = {0};
-        cdb[0] = write ? SCSI_WRITE_10 : SCSI_READ_10;
-        be32_put(&cdb[2], (uint32_t)lba);
-        cdb[7] = (uint8_t)(chunk >> 8);
-        cdb[8] = (uint8_t)chunk;
-
-        uint32_t moved = 0;
-        int rc = msd_command(u, cdb, sizeof(cdb), u->bounce_phys, bytes,
-                             !write, &moved);
-        if (rc != 0 || moved != bytes) {
-            uint8_t key = 0, asc = 0;
-            msd_request_sense(u, &key, &asc);
-            kprintf("[USB disk %u] %s of %u sector(s) at %llu failed "
-                    "(sense key 0x%x, code 0x%x)\n",
-                    unit, write ? "write" : "read", chunk,
-                    (unsigned long long)lba, key, asc);
-            result = -1;
-            break;
-        }
-
-        if (!write) {
-            memcpy(caller, u->bounce_virt, bytes);
-        }
-
-        caller += bytes;
+        caller += chunk_bytes;
         lba    += chunk;
         count  -= chunk;
     }
@@ -733,10 +894,18 @@ int xhci_msd_flush(uint8_t unit)
     /* SYNCHRONIZE CACHE with a zero block count means "all of it". A device
      * that does not implement it refuses, and a refusal here is not a failure:
      * a device with no write cache has nothing to synchronise. */
-    uint8_t cdb[10] = { SCSI_SYNC_CACHE_10, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    uint8_t cdb[16] = {0};
+    uint8_t cdb_len;
+    if (u->blocks > 0x100000000ULL) {
+        cdb[0] = SCSI_SYNC_CACHE_16;
+        cdb_len = 16;
+    } else {
+        cdb[0] = SCSI_SYNC_CACHE_10;
+        cdb_len = 10;
+    }
 
     spin_lock(&u->lock);
-    int rc = msd_command(u, cdb, sizeof(cdb), 0, 0, false, NULL);
+    int rc = msd_command(u, cdb, cdb_len, 0, 0, false, NULL);
     spin_unlock(&u->lock);
     msd_give_back(u);
 
