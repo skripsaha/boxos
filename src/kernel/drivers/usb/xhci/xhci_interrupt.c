@@ -342,9 +342,23 @@ void xhci_tick(void) {
         if (!ctrl || !ctrl->running) {
             continue;
         }
-        if (ctrl->use_polling) {
-            xhci_process_events_on(ctrl);
-        }
+        /*
+         * Drained every tick, whether or not this controller has an interrupt.
+         *
+         * It used to be drained here only in the polled fallback, on the
+         * assumption that a controller with MSI would deliver one. A machine
+         * is not obliged to honour that assumption: an interrupt that never
+         * arrives — a message routed nowhere, a chipset erratum, firmware that
+         * left something half-configured — turned into a bus where four
+         * devices had been found, addressed, and then left mid-conversation
+         * until the watchdog gave up on them, with nothing in the log to say
+         * why. Nothing else in this driver polls, and a ring with no events on
+         * it costs one read of one register per hundredth of a second.
+         *
+         * The interrupt is still what makes it quick. This is what makes it
+         * work at all.
+         */
+        xhci_process_events_on(ctrl);
         xhci_check_command_timeouts(ctrl);
         xhci_enum_watchdog(ctrl);
     }
@@ -362,6 +376,7 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
     if (!ctrl || !ctrl->running) {
         return;
     }
+    __atomic_fetch_add(&ctrl->irq_count, 1, __ATOMIC_RELAXED);
 
     uint32_t usbsts = ctrl->op_regs->usbsts;
 
