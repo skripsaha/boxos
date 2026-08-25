@@ -4,6 +4,7 @@
 #include "xhci_enumeration.h"
 #include "xhci_transfer.h"
 #include "xhci_command.h"
+#include "xhci_interrupt.h"
 #include "xhci_trb.h"
 #include "usb_common.h"
 #include "klib.h"
@@ -115,7 +116,9 @@ typedef struct XhciMsdUnit {
     void*    cmd_virt;   uint64_t cmd_phys;      /* wrappers, one page */
     void*    bounce_virt;uint64_t bounce_phys;   /* data */
 
-    spinlock_t lock;
+    /* Whose turn it is on this device. Not a lock — see msd_gate_enter. */
+    volatile uint32_t busy;
+
     char     name[41];                  /* "usb0 VENDOR PRODUCT" and room */
 } XhciMsdUnit;
 
@@ -214,6 +217,87 @@ static void msd_give_back(XhciMsdUnit* u)
     if (u) {
         xhci_slot_leave(u->slot);
     }
+}
+
+/*
+ * ── whose turn it is on this device ─────────────────────────────────────────
+ *
+ * One command at a time, because Bulk-Only Transport is a strictly serial
+ * conversation and every command on this unit passes through the same bounce
+ * buffer. That much was always true. What was wrong was the instrument.
+ *
+ * This was a spinlock, held from the first transfer of a request to the last.
+ * spin_lock() disables interrupts for as long as it is held (klib_lock.c: cli
+ * on the way in, the saved RFLAGS restored on the way out), and what it was
+ * held across is a flash transfer: hundreds of microseconds under emulation,
+ * milliseconds on a real device, and for a request above 64 KiB the whole
+ * multi-pass sequence of them.
+ *
+ * A core that cannot take an interrupt for that long:
+ *   - cannot acknowledge a cross-core TLB shootdown IPI, and the core that
+ *     sent it spins for that acknowledgement and PANICS on the timeout — the
+ *     same real-HW deadlock spin_lock's own wait-service hook exists to avoid;
+ *   - cannot take the timer tick, which is what runs this driver's command and
+ *     enumeration watchdogs — so the one thing that could notice a wedged
+ *     transfer is switched off for exactly the duration of the transfer;
+ *   - cannot take the controller's own interrupt.
+ *
+ * The same fault was found and fixed in enumeration, where a ten-millisecond
+ * TRSTRCY wait was being spun out under the event-ring lock (the reasoning is
+ * written out in xhci_enumeration.h, ENUM_STATE_WAIT_RESET_RECOVERY). The
+ * lesson was applied where it was found and nowhere else; this is the same
+ * fault on the hot path of every file the machine reads.
+ *
+ * The SATA path never had it: ahci_read_sectors_sync takes its port lock only
+ * around the register store and spins for completion with interrupts on. This
+ * is the USB path being brought to the same standard.
+ *
+ * So: a gate rather than a lock. Taking a turn is an exchange; waiting for one
+ * happens with interrupts as the caller left them, and drains the event ring
+ * while it waits — which is what lets the holder's answer arrive and its turn
+ * end.
+ *
+ * There is deliberately NO deadline on the wait for a turn. A deadline here
+ * would abandon a request that was about to succeed, and it would be a
+ * deadline on the wrong thing: the holder cannot wait for ever, because every
+ * transfer it makes carries its own, so the gate is always released. A long
+ * wait is worth SAYING on a board, and it is said once.
+ */
+#define MSD_GATE_COMPLAIN_MS 2000
+
+static void msd_gate_enter(XhciMsdUnit* u)
+{
+    if (__atomic_exchange_n(&u->busy, 1u, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+
+    uint64_t complain_at = rdtsc() + cpu_ms_to_tsc(MSD_GATE_COMPLAIN_MS);
+    bool     complained  = false;
+
+    for (;;) {
+        /* The holder is waiting for an answer off the event ring, and on a core
+         * that is not the one taking the controller's interrupt this is what
+         * brings that answer in. Safe from here precisely because this holds no
+         * lock: the drain takes its own, and a nested call on this core is
+         * refused rather than deadlocked. */
+        xhci_process_events();
+        cpu_pause();
+
+        if (__atomic_exchange_n(&u->busy, 1u, __ATOMIC_ACQUIRE) == 0) {
+            return;
+        }
+
+        if (!complained && (int64_t)(rdtsc() - complain_at) >= 0) {
+            complained = true;
+            kprintf("[USB disk %u] a second request has been waiting %u ms for "
+                    "its turn on this device\n", u->number, MSD_GATE_COMPLAIN_MS);
+        }
+    }
+}
+
+static void msd_gate_leave(XhciMsdUnit* u)
+{
+    __atomic_store_n(&u->busy, 0u, __ATOMIC_RELEASE);
 }
 
 /* Lowest number nobody is using. Numbers are stable for the life of a unit, so
@@ -532,7 +616,6 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         return -1;
     }
     memset(u, 0, sizeof(*u));
-    spinlock_init(&u->lock);
     u->ctrl = ctrl;
     u->slot = slot;
 
@@ -849,7 +932,7 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
     uint8_t* caller = (uint8_t*)buffer;
     int result = 0;
 
-    spin_lock(&u->lock);
+    msd_gate_enter(u);
 
     while (count > 0) {
         uint64_t block     = lba / per_sector;
@@ -887,7 +970,7 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
         count  -= chunk;
     }
 
-    spin_unlock(&u->lock);
+    msd_gate_leave(u);
     msd_give_back(u);
     return result;
 }
@@ -922,9 +1005,9 @@ int xhci_msd_flush(uint8_t unit)
         cdb_len = 10;
     }
 
-    spin_lock(&u->lock);
+    msd_gate_enter(u);
     int rc = msd_command(u, cdb, cdb_len, 0, 0, false, NULL);
-    spin_unlock(&u->lock);
+    msd_gate_leave(u);
     msd_give_back(u);
 
     return (rc >= 0) ? 0 : -1;
