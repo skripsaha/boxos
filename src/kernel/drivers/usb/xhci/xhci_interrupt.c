@@ -171,6 +171,38 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
         }
 
         if ((change_bits & XHCI_PORTSC_CSC) && (portsc & XHCI_PORTSC_CCS)) {
+
+            /*
+             * Connect-change with something connected, on a port that already
+             * has a device on it, means the connection CHANGED — a hand pulled
+             * one thing out and pushed another in between two reads of this
+             * register. There is one connect-change bit and it does not count,
+             * so a swap and a re-seat look the same, and both leave a slot
+             * addressed to a device that is not there.
+             *
+             * The old code called xhci_enumerate_device, which found the live
+             * slot and returned "already enumerating" — so the newcomer was
+             * never spoken to, and every transfer aimed at the departed device
+             * went to whatever now answers on that socket. That is worse than
+             * losing the device: it is a disk driver writing to a stranger.
+             *
+             * Only for a device that had finished coming up. During
+             * enumeration the connect-change is this driver's own port reset,
+             * and tearing the slot down for it would mean no device ever
+             * finished.
+             */
+            xhci_device_slot_t* live = xhci_get_device_slot_by_port(ctrl, port);
+            if (live && __atomic_load_n(&live->state, __ATOMIC_ACQUIRE) ==
+                            ENUM_STATE_CONFIGURED) {
+                kprintf("[xHCI %s] port %u: the connection changed under a "
+                        "device that was already there (%04x:%04x) — letting "
+                        "it go and starting again\n",
+                        ctrl->name, port, live->device_desc.idVendor,
+                        live->device_desc.idProduct);
+                xhci_touch_device_left(live);
+                xhci_slot_retire(ctrl, live);
+            }
+
             debug_printf("[xHCI] Device connected on port %u\n", port);
             xhci_enumerate_device(ctrl, port);
 
