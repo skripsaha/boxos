@@ -48,7 +48,27 @@ void     xhci_port_describe(xhci_controller_t* ctrl, uint8_t port);
 /* Start a port reset and return without waiting. Returns 1 when the port is
  * already usable and no reset was needed, 0 when a reset is now in flight and
  * a port-status change will follow, negative on error. */
-int      xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port);
+/*
+ * What a port had done to it before the device on it was spoken to.
+ *
+ * Kept and printed because a device answers the default address only while it
+ * is in the Default state, and it enters the Default state only through a
+ * reset (USB 2.0 Section 9.1.1). So "was this port reset, and how" is the
+ * first question a silent Address Device has to be checked against — and a
+ * machine that boots from a USB stick reaches this driver with firmware
+ * having already addressed at least two devices on the bus.
+ */
+#define XHCI_PORT_RESET_NONE 0      /* arrived enabled and was left alone */
+#define XHCI_PORT_RESET_HOT  1      /* PORTSC.PR */
+#define XHCI_PORT_RESET_WARM 2      /* PORTSC.WPR, USB 3 only */
+#define XHCI_PORT_RESET_HUB  3      /* a hub reset it, not this driver */
+
+const char* xhci_port_reset_kind_name(uint8_t kind);
+
+/* Begin a port reset. `out_kind` receives which kind was applied, or
+ * XHCI_PORT_RESET_NONE for a port left alone; may be NULL. */
+int      xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port,
+                               uint8_t* out_kind);
 
 /* True when the port that just reported a reset came out of it usable. */
 bool     xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port);

@@ -79,6 +79,30 @@ static struct xhci_device_slot* find_free_slot(void) {
     return NULL;
 }
 
+/*
+ * Everything about the previous tenant, gone.
+ *
+ * Two things survive, and they are about the ENTRY rather than the device in
+ * it: which tenancy this is, so that answers to the last device's questions
+ * are still turned away, and the claim itself.
+ *
+ * What this replaced was two lists of individual assignments, one per claim
+ * path, thirty lines each — and they had already drifted apart: the hub path
+ * did not clear the retry count or the resume state, so a device coming up
+ * behind a hub inherited them from whatever had used the entry before. A list
+ * of fields to remember to zero is a list somebody will add to only once.
+ */
+static void slot_wipe(struct xhci_device_slot* slot)
+{
+    uint32_t epoch = slot->epoch;
+    uint8_t  state = slot->state;
+
+    memset(slot, 0, sizeof(*slot));
+
+    slot->epoch = epoch;
+    slot->state = state;
+}
+
 static struct xhci_device_slot* find_slot_by_port(xhci_controller_t* ctrl,
                                                  uint8_t port) {
     spin_lock(&device_slots_lock);
@@ -202,7 +226,9 @@ static int enum_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
     __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_WAIT_PORT_RESET,
                      __ATOMIC_RELEASE);
 
-    int reset = xhci_port_begin_reset(ctrl, slot->port_num);
+    uint8_t kind = XHCI_PORT_RESET_NONE;
+    int reset = xhci_port_begin_reset(ctrl, slot->port_num, &kind);
+    slot->reset_kind = kind;
     if (reset < 0) {
         debug_printf("[xHCI ENUM] Port %u could not be reset (%d)\n",
                      slot->port_num, reset);
@@ -345,52 +371,15 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -5;
     }
 
-    // slot->state is already ENUM_STATE_CLAIMING — zero individual fields only
+    slot_wipe(slot);
     slot->ctrl = ctrl;
-    slot->slot_id = 0;
     slot->port_num = port;
-    slot->speed = 0;
-    slot->dev_ctx = NULL;
-    slot->dev_ctx_phys = 0;
-    slot->input_ctx_phys = 0;
-    slot->ep0_ring = NULL;
-    slot->ep0_ring_phys = 0;
-    slot->ep0_max_packet = 0;
-    slot->config_total_len = 0;
-    slot->stall_resume = 0;
-    slot->stall_retry = 0;
-    slot->interface_class = 0;
-    slot->interface_subclass = 0;
-    slot->interface_protocol = 0;
-    slot->descriptor_buffer_virt = NULL;
-    slot->descriptor_buffer_phys = 0;
-    slot->endpoints = NULL;
-    slot->max_dci = 0;
-    slot->ep_pending_add = 0;
-    slot->driver = XHCI_DRIVER_NONE;
-    slot->ep_interrupt_in = 0;
-    slot->ep_bulk_in = 0;
-    slot->ep_bulk_out = 0;
-    slot->config_value = 0;
-    slot->interface_num = 0;
-    slot->route_string = 0;
-    slot->depth = 0;
-    slot->parent_slot_id = 0;
-    slot->parent_port = 0;
-    slot->tt_slot_id = 0;
-    slot->tt_port = 0;
-    slot->hub_ports = 0;
-    slot->tt_think_time = 0;
-    slot->multi_tt = false;
-    memset(&slot->device_desc, 0, sizeof(slot->device_desc));
+    slot->born_port = port;
     /* Stamped from the moment it is claimed, so a slot that never gets as far
      * as starting is still something the watchdog can reap. enum_start stamps
      * it again when the device's turn actually comes, so a device is never
      * given up on for the time it spent waiting. */
     slot->timestamp_started = rdtsc();
-    slot->depth = 0;
-    slot->born_port = port;
-    slot->ever_configured = false;
 
     debug_printf("[xHCI ENUM] Starting enumeration for port %u\n", port);
 
@@ -617,35 +606,12 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         return -3;
     }
 
+    slot_wipe(slot);
     slot->ctrl = ctrl;
-    slot->slot_id = 0;
     slot->port_num = hub->port_num;          /* the root port, still */
     slot->speed = speed;
-    slot->dev_ctx = NULL;
-    slot->dev_ctx_phys = 0;
-    slot->input_ctx_phys = 0;
-    slot->ep0_ring = NULL;
-    slot->ep0_ring_phys = 0;
-    slot->ep0_max_packet = 0;
-    slot->config_total_len = 0;
-    slot->interface_class = 0;
-    slot->interface_subclass = 0;
-    slot->interface_protocol = 0;
-    slot->descriptor_buffer_virt = NULL;
-    slot->descriptor_buffer_phys = 0;
-    slot->endpoints = NULL;
-    slot->max_dci = 0;
-    slot->ep_pending_add = 0;
-    slot->driver = XHCI_DRIVER_NONE;
-    slot->ep_interrupt_in = 0;
-    slot->ep_bulk_in = 0;
-    slot->ep_bulk_out = 0;
-    slot->config_value = 0;
-    slot->interface_num = 0;
-    slot->hub_ports = 0;
-    slot->tt_think_time = 0;
-    slot->multi_tt = false;
-    memset(&slot->device_desc, 0, sizeof(slot->device_desc));
+    /* The hub did the resetting, and it is the hub that knows what answered. */
+    slot->reset_kind = XHCI_PORT_RESET_HUB;
 
     /* Four bits per tier, and the tier is how deep the HUB is — a device on a
      * hub that is itself on a root port occupies the first four bits.
@@ -674,8 +640,6 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
     }
 
     slot->timestamp_started = rdtsc();
-    slot->born_port = 0;            /* not a root port; no retry from here */
-    slot->ever_configured = false;
 
     debug_printf("[xHCI ENUM] device on hub slot %u port %u, route 0x%05x, "
                  "depth %u\n", hub->slot_id, hub_port,
@@ -719,6 +683,10 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
      * went straight from "reset finished" to Enable Slot looked correct for as
      * long as it was only ever run against one.
      */
+    /* How long the reset itself took, measured before the recovery is paid so
+     * that the number is the hardware's and not this driver's. */
+    slot->reset_took_ms = (uint32_t)cpu_tsc_to_ms(rdtsc() - slot->timestamp_started);
+
     {
         uint64_t deadline = rdtsc() + cpu_ms_to_tsc(XHCI_PORT_RESET_RECOVERY_MS);
         while ((int64_t)(rdtsc() - deadline) < 0) {
@@ -726,7 +694,21 @@ void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
         }
     }
 
-    debug_printf("[xHCI ENUM] Port %u reset complete\n", port);
+    /*
+     * What the port looks like at the one moment that decides everything after
+     * it: the device is now supposed to be in the Default state, answering to
+     * address zero, and the very next thing said to it is Enable Slot followed
+     * by the Address Device that talks to that address. If this line and the
+     * Address Device that never came back are both on the screen, the reset is
+     * ruled in or out without another boot.
+     */
+    uint32_t portsc = xhci_get_port_status(ctrl, port);
+    kprintf("[xHCI %s] port %u: %s finished in %u ms — PORTSC 0x%08x, link %u, "
+            "speed %u\n",
+            ctrl->name, port, xhci_port_reset_kind_name(slot->reset_kind),
+            slot->reset_took_ms, portsc, XHCI_PORTSC_PLS(portsc),
+            (unsigned)XHCI_PORTSC_SPEED(portsc));
+
     enum_begin_slot(ctrl, slot);
 }
 
@@ -853,7 +835,16 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
     }
 }
 
-/* Ask for `length` bytes of a descriptor into the slot's scratch page. */
+/*
+ * Ask for `length` bytes of a descriptor into the slot's scratch page.
+ *
+ * The page is emptied first. The scratch page is reused for every descriptor
+ * this device is asked for, so a read that comes up short leaves the tail of
+ * the PREVIOUS descriptor sitting exactly where the parser will look — and a
+ * descriptor is self-describing, so the leftovers parse. Zeroing costs a page
+ * memset per step and turns "the read was short" into a bLength of zero, which
+ * every walk in this driver already stops on.
+ */
 static int enum_get_descriptor(xhci_controller_t* ctrl, struct xhci_device_slot* slot,
                                uint8_t type, uint16_t length)
 {
@@ -865,8 +856,61 @@ static int enum_get_descriptor(xhci_controller_t* ctrl, struct xhci_device_slot*
         .wLength = length
     };
 
+    if (slot->descriptor_buffer_virt) {
+        memset(slot->descriptor_buffer_virt, 0, length);
+    }
+
     return xhci_control_transfer(ctrl, slot, &setup,
                                  slot->descriptor_buffer_phys, length, true);
+}
+
+/*
+ * Did the last descriptor read deliver what it was asked for?
+ *
+ * A device is allowed to answer a control read with less than was requested,
+ * and the way it says so is a short packet. Every descriptor step below asks
+ * for exactly the number of bytes the descriptor is supposed to be, so short
+ * here always means the conversation went wrong — and until the data stage
+ * carried Interrupt On Short Packet there was no way to find out, which meant
+ * every one of these steps parsed the scratch page unconditionally.
+ */
+static bool enum_got_it_all(xhci_controller_t* ctrl, struct xhci_device_slot* slot,
+                            uint16_t wanted)
+{
+    if (slot->ctl_received >= wanted) {
+        return true;
+    }
+
+    kprintf("[xHCI %s] port %u: %s — asked for %u bytes and %u came back\n",
+            ctrl->name, slot->port_num, xhci_enum_state_name(slot->state),
+            wanted, slot->ctl_received);
+    return false;
+}
+
+/*
+ * A descriptor step that did not deliver, treated exactly like one the device
+ * refused: clear the control pipe and ask again, up to the same bound. A short
+ * answer and a stalled one are the same fault seen from two sides — the device
+ * did not say what it was asked.
+ */
+static void enum_ask_again(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    if (!xhci_enum_step_can_be_asked_again(slot->state) ||
+        slot->step_retry >= XHCI_STEP_RETRIES) {
+        kprintf("[xHCI %s] port %u: %s never delivered — releasing the slot\n",
+                ctrl->name, slot->port_num, xhci_enum_state_name(slot->state));
+        xhci_slot_retire(ctrl, slot);
+        return;
+    }
+
+    slot->step_retry++;
+    kprintf("[xHCI %s] port %u: asking again (attempt %u of %u)\n",
+            ctrl->name, slot->port_num, slot->step_retry, XHCI_STEP_RETRIES);
+
+    /* A short answer does not halt the pipe, but clearing it costs two
+     * commands and makes the second attempt start from the same place a
+     * recovered one does — which is one path through this instead of two. */
+    xhci_enum_recover_ep0(ctrl, slot, slot->state, true);
 }
 
 /*
@@ -960,42 +1004,152 @@ bool xhci_enum_stall_is_tolerable(uint8_t state)
 }
 
 /*
- * Which steps are worth trying a second time.
+ * Which faults leave a usable device on the other end of a halted pipe.
  *
- * A stall is the device saying no to what was just asked. For an optional
- * class request that is an answer and the step is stepped over. For a step
- * enumeration cannot do without, it is worth asking again on a clean pipe:
- * a device that has just been reset, or one whose bus was disturbed while it
- * was answering, will refuse once and answer the second time. Measured on a
- * live board — a device stalled Set Configuration immediately after the
- * command ring under it had been aborted, and was thrown away for it.
+ * All three halt the control endpoint (xHCI 1.2 Section 4.10.2.1) and none of
+ * them says the device is broken. STALL is the device declining. Babble is the
+ * device sending more than the endpoint was told to expect — which on a bus
+ * that was disturbed mid-answer is what the tail of somebody else's transfer
+ * looks like. USB Transaction Error is the controller giving up after its own
+ * CErr retries, which is what a marginal cable produces.
  *
- * The resume state is the one that ISSUES the request, not the one that waits
- * for it, because that is what running the state machine again performs.
+ * Every USB host asks again after all three. This driver asked again only
+ * after a refusal, and threw the device away for the other two — on the board,
+ * a descriptor read that babbled once cost the device its slot.
  */
-uint8_t xhci_enum_stall_retry_from(uint8_t state)
+bool xhci_enum_fault_is_retryable(uint8_t completion_code)
+{
+    return completion_code == TRB_COMPLETION_STALL ||
+           completion_code == TRB_COMPLETION_BABBLE ||
+           completion_code == TRB_COMPLETION_USB_TRANS_ERR ||
+           completion_code == TRB_COMPLETION_SPLIT_TRANS_ERR;
+}
+
+/*
+ * Ask the current step again — the request only, not the state that led to it.
+ *
+ * ‼ This replaces a table that named, for each step, "the state that issued
+ * it", and resumed the state machine there. That is not the same thing and two
+ * of its five entries could not work: the cases of this state machine BOTH
+ * check the previous answer AND issue the next request, so replaying one
+ * re-checks a scratch page that now holds a different descriptor. Resuming a
+ * failed configuration-header read at "reading the device descriptor" made
+ * that case validate nine bytes of configuration as an eighteen-byte device
+ * descriptor, call it malformed, and release the slot — which is a retry that
+ * could only ever fail.
+ *
+ * Asking again is the second half alone, and this is the only place that knows
+ * what each step actually asks for.
+ */
+static int enum_reissue(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    switch (slot->state) {
+
+    case ENUM_STATE_WAIT_GET_DESC_HEADER:
+        return enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8);
+
+    case ENUM_STATE_WAIT_GET_DESCRIPTOR:
+        return enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18);
+
+    case ENUM_STATE_WAIT_GET_CONFIG_HEADER:
+        return enum_get_descriptor(ctrl, slot, USB_DT_CONFIG, 9);
+
+    case ENUM_STATE_WAIT_GET_CONFIG_DESC:
+        return enum_get_descriptor(ctrl, slot, USB_DT_CONFIG,
+                                   slot->config_total_len);
+
+    case ENUM_STATE_WAIT_SET_CONFIGURATION: {
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x00,
+            .bRequest = USB_REQ_SET_CONFIGURATION,
+            .wValue = slot->config_value,
+            .wIndex = 0,
+            .wLength = 0
+        };
+        return xhci_control_transfer(ctrl, slot, &setup, 0, 0, false);
+    }
+
+    case ENUM_STATE_WAIT_SET_PROTOCOL: {
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x21,
+            .bRequest = HID_REQ_SET_PROTOCOL,
+            .wValue = 0,                /* 0 = boot protocol */
+            .wIndex = slot->interface_num,
+            .wLength = 0
+        };
+        return xhci_control_transfer(ctrl, slot, &setup, 0, 0, false);
+    }
+
+    case ENUM_STATE_WAIT_SET_IDLE: {
+        usb_setup_packet_t setup = {
+            .bmRequestType = 0x21,
+            .bRequest = HID_REQ_SET_IDLE,
+            .wValue = 0,
+            .wIndex = slot->interface_num,
+            .wLength = 0
+        };
+        return xhci_control_transfer(ctrl, slot, &setup, 0, 0, false);
+    }
+
+    default:
+        return -1;              /* not a step made of a control transfer */
+    }
+}
+
+bool xhci_enum_step_can_be_asked_again(uint8_t state)
 {
     switch (state) {
-        case ENUM_STATE_WAIT_SET_CONFIGURATION: return ENUM_STATE_WAIT_GET_CONFIG_DESC;
-        case ENUM_STATE_WAIT_GET_CONFIG_DESC:   return ENUM_STATE_WAIT_GET_CONFIG_HEADER;
-        case ENUM_STATE_WAIT_GET_CONFIG_HEADER: return ENUM_STATE_WAIT_GET_DESCRIPTOR;
-        case ENUM_STATE_WAIT_GET_DESCRIPTOR:    return ENUM_STATE_WAIT_EVALUATE_CONTEXT;
-        case ENUM_STATE_WAIT_GET_DESC_HEADER:   return ENUM_STATE_WAIT_ADDRESS_DEVICE;
-        default:                                return ENUM_STATE_IDLE;
+        case ENUM_STATE_WAIT_GET_DESC_HEADER:
+        case ENUM_STATE_WAIT_GET_DESCRIPTOR:
+        case ENUM_STATE_WAIT_GET_CONFIG_HEADER:
+        case ENUM_STATE_WAIT_GET_CONFIG_DESC:
+        case ENUM_STATE_WAIT_SET_CONFIGURATION:
+        case ENUM_STATE_WAIT_SET_PROTOCOL:
+        case ENUM_STATE_WAIT_SET_IDLE:
+            return true;
+        default:
+            return false;
     }
 }
 
 void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
-                           uint8_t resume_at)
+                           uint8_t resume_at, bool ask_again)
 {
     if (!ctrl || !slot) {
         return;
     }
 
-    slot->stall_resume = resume_at;
+    slot->step_resume  = resume_at;
+    slot->step_reissue = ask_again;
     slot->state = ENUM_STATE_WAIT_EP0_RESET;
 
     if (xhci_post_reset_endpoint_cmd(ctrl, slot, slot->slot_id, 1) < 0) {
+        xhci_slot_retire(ctrl, slot);
+    }
+}
+
+/*
+ * The pipe is clear and enumeration carries on — either by stepping over the
+ * request that failed, or by making it again. One place, because both routes
+ * out of the recovery arrive here and getting them the wrong way round is a
+ * device that skips a step it needed or repeats one it did not.
+ */
+static void enum_resume_after_recovery(xhci_controller_t* ctrl,
+                                       struct xhci_device_slot* slot,
+                                       uint8_t slot_id)
+{
+    slot->state = slot->step_resume;
+
+    if (!slot->step_reissue) {
+        xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
+        return;
+    }
+
+    slot->step_reissue = false;
+    if (enum_reissue(ctrl, slot) < 0) {
+        kprintf("[xHCI %s] port %u: %s could not be asked again — releasing "
+                "the slot\n", ctrl->name, slot->port_num,
+                xhci_enum_state_name(slot->state));
         xhci_slot_retire(ctrl, slot);
     }
 }
@@ -1360,6 +1514,17 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
             xhci_get_port_status(ctrl, slot->port_num),
             __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
 
+    /* And what was done to the port before any of this was said to the device.
+     * A device only answers the default address from the Default state, and it
+     * only reaches the Default state through a reset — so an Address Device
+     * that was never answered on a port that was never reset is a different
+     * fault from the same silence on a port that was. */
+    kprintf("[xHCI %s]   the port was %s%s (USB %u), %u ms; EP0 packet %u\n",
+            ctrl->name, xhci_port_reset_kind_name(slot->reset_kind),
+            slot->depth ? ", behind a hub" : "",
+            xhci_port_protocol(ctrl, slot->port_num),
+            slot->reset_took_ms, slot->ep0_max_packet);
+
     if (waiting) {
         kprintf("[xHCI %s]   still waiting on %s, posted %u ms ago\n",
                 ctrl->name, xhci_command_name(cmd_type), cmd_age);
@@ -1509,8 +1674,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             completion_code == TRB_COMPLETION_CONTEXT_STATE) {
             kprintf("[xHCI %s] port %u: the control pipe was not halted after "
                     "all — carrying on\n", ctrl->name, slot->port_num);
-            slot->state = slot->stall_resume;
-            xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
+            enum_resume_after_recovery(ctrl, slot, slot_id);
             return;
         }
 
@@ -1533,7 +1697,20 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             }
 
             slot->slot_id = slot_id;
-            slot->speed = xhci_get_port_speed(ctrl, slot->port_num);
+
+            /*
+             * A root-port device learns its speed from the port. One behind a
+             * hub was told by the hub, and only the hub can know: port_num is
+             * the ROOT port for every tier, so what the register reports there
+             * is the speed of the link to the hub. A full-speed keyboard on a
+             * high-speed hub was being written into its Slot Context as a
+             * high-speed device — wrong speed for the controller to schedule
+             * by, wrong starting packet size for EP0, and an interval
+             * converted by the rule for the wrong half of the bus.
+             */
+            if (slot->depth == 0) {
+                slot->speed = xhci_get_port_speed(ctrl, slot->port_num);
+            }
 
             debug_printf("[xHCI ENUM] Slot enabled: slot_id=%u port=%u speed=%u\n",
                          slot_id, slot->port_num, slot->speed);
@@ -1589,6 +1766,11 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         }
 
         case ENUM_STATE_WAIT_GET_DESC_HEADER: {
+            if (!enum_got_it_all(ctrl, slot, 8)) {
+                enum_ask_again(ctrl, slot);
+                return;
+            }
+
             usb_device_desc_t* desc = (usb_device_desc_t*)slot->descriptor_buffer_virt;
             uint8_t mps0 = desc->bMaxPacketSize0;
 
@@ -1634,11 +1816,18 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         }
 
         case ENUM_STATE_WAIT_GET_DESCRIPTOR: {
+            if (!enum_got_it_all(ctrl, slot, 18)) {
+                enum_ask_again(ctrl, slot);
+                return;
+            }
+
             usb_device_desc_t* desc = (usb_device_desc_t*)slot->descriptor_buffer_virt;
 
             if (!usb_validate_device_desc(desc)) {
-                kprintf("[xHCI] port %u: device descriptor is malformed\n",
-                        slot->port_num);
+                kprintf("[xHCI] port %u: device descriptor is malformed "
+                        "(length %u, type %u, EP0 packet %u)\n",
+                        slot->port_num, desc->bLength, desc->bDescriptorType,
+                        desc->bMaxPacketSize0);
                 xhci_slot_retire(ctrl, slot);
                 return;
             }
@@ -1663,11 +1852,17 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         }
 
         case ENUM_STATE_WAIT_GET_CONFIG_HEADER: {
+            if (!enum_got_it_all(ctrl, slot, 9)) {
+                enum_ask_again(ctrl, slot);
+                return;
+            }
+
             usb_config_desc_t* cfg = (usb_config_desc_t*)slot->descriptor_buffer_virt;
 
             if (cfg->bDescriptorType != USB_DESC_CONFIGURATION || cfg->bLength < 9) {
-                kprintf("[xHCI] port %u: configuration descriptor is malformed\n",
-                        slot->port_num);
+                kprintf("[xHCI] port %u: configuration descriptor is malformed "
+                        "(length %u, type %u)\n",
+                        slot->port_num, cfg->bLength, cfg->bDescriptorType);
                 xhci_slot_retire(ctrl, slot);
                 return;
             }
@@ -1695,6 +1890,15 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         }
 
         case ENUM_STATE_WAIT_GET_CONFIG_DESC: {
+            /* Asked for exactly what the header said the configuration is, so
+             * anything less is the exchange going wrong rather than the device
+             * being brief. Walking a configuration that only half arrived
+             * reports endpoints out of whatever the page held before. */
+            if (!enum_got_it_all(ctrl, slot, slot->config_total_len)) {
+                enum_ask_again(ctrl, slot);
+                return;
+            }
+
             usb_config_desc_t* cfg = (usb_config_desc_t*)slot->descriptor_buffer_virt;
             slot->config_value = cfg->bConfigurationValue;
 
@@ -1703,6 +1907,22 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                                        &slot->interface_class,
                                        &slot->interface_subclass,
                                        &slot->interface_protocol);
+
+            /*
+             * The number about to be sent, before it is sent.
+             *
+             * A device that refuses Set Configuration refuses the VALUE, and
+             * the value is the one thing the log never said — so three
+             * identical refusals on the board were three refusals of a number
+             * nobody could see. It comes off the wire like everything else
+             * here and there is no reason to believe it without looking.
+             */
+            kprintf("[xHCI %s] port %u: configuration %u of %u, %u byte(s), "
+                    "first interface class %02x/%02x/%02x\n",
+                    ctrl->name, slot->port_num, slot->config_value,
+                    slot->device_desc.bNumConfigurations,
+                    slot->config_total_len, slot->interface_class,
+                    slot->interface_subclass, slot->interface_protocol);
 
             /* Every device gets configured, driver or no driver. Leaving one
              * in the Addressed state is leaving it half spoken to.
@@ -1773,9 +1993,10 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         }
 
         case ENUM_STATE_WAIT_EP0_DEQUEUE: {
-            /* Back where enumeration was, with the refused step behind us. */
-            slot->state = slot->stall_resume;
-            xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
+            /* The pipe is clear and the ring is where software stands. Either
+             * the refused step is now behind us, or it is about to be made
+             * again. */
+            enum_resume_after_recovery(ctrl, slot, slot_id);
             break;
         }
 

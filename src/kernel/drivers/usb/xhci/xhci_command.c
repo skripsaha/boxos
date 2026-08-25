@@ -275,16 +275,31 @@ int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* ow
  * running would arrive as an unexplained completion for a slot in a settled
  * state, and a state machine driven by events it did not ask for is a state
  * machine that will eventually take the wrong branch. */
-static bool cmd_is_enumeration_step(uint8_t trb_type)
+static bool cmd_is_enumeration_step(uint8_t trb_type,
+                                    const xhci_device_slot_t* owner)
 {
+    /*
+     * Once a device is configured, enumeration is over, and every command
+     * posted against it belongs to whoever is driving it.
+     *
+     * A hub sets its own Hub bit with a Configure Endpoint after it has come
+     * up; a disk clears a halted bulk pipe with a Reset Endpoint and a Set TR
+     * Dequeue every time it is refused something. Handing those answers to the
+     * state machine put "slot 1 answered a step it was not on" on the screen
+     * for each of them — a line whose whole purpose is to report an answer
+     * arriving before the question was written down, printed for something
+     * that is neither, on the one screen that has to stay readable.
+     */
+    if (!owner || __atomic_load_n(&owner->state, __ATOMIC_ACQUIRE) ==
+                      ENUM_STATE_CONFIGURED) {
+        return false;
+    }
+
     switch (trb_type) {
         case TRB_TYPE_ENABLE_SLOT:
         case TRB_TYPE_ADDRESS_DEVICE:
         case TRB_TYPE_CONFIGURE_ENDPOINT:
         case TRB_TYPE_EVALUATE_CONTEXT:
-        /* Clearing a stalled control pipe is part of enumeration when it is
-         * enumeration that stalled. On a slot that has finished, the state
-         * machine has no case for these and says so quietly. */
         case TRB_TYPE_RESET_ENDPOINT:
         case TRB_TYPE_SET_TR_DEQUEUE:
             return true;
@@ -392,7 +407,7 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
                 xhci_completion_name(completion_code), completion_code);
     }
 
-    if (cmd_is_enumeration_step(entry.trb_type)) {
+    if (cmd_is_enumeration_step(entry.trb_type, entry.owner)) {
         xhci_enum_advance_state(ctrl, entry.owner, event_slot_id,
                                 completion_code);
     }
@@ -597,11 +612,12 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
     for (unsigned k = 0; k < orphan_count; k++) {
         xhci_device_slot_t* s = orphans[k];
         kprintf("[xHCI %s]   port %u (slot %u): controller says slot %s, "
-                "address %u; PORTSC 0x%08x\n",
+                "address %u; PORTSC 0x%08x; the port was %s\n",
                 ctrl->name, s->port_num, s->slot_id,
                 xhci_slot_state_name(xhci_slot_context_state(s)),
                 xhci_slot_context_address(s),
-                xhci_get_port_status(ctrl, s->port_num));
+                xhci_get_port_status(ctrl, s->port_num),
+                xhci_port_reset_kind_name(s->reset_kind));
     }
     xhci_hold_screen();
 

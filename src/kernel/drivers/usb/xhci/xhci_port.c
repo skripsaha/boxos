@@ -179,8 +179,22 @@ void xhci_port_describe(xhci_controller_t* ctrl, uint8_t port)
  * immediately, 0 when a reset was started and the event will follow, and
  * negative on error.
  */
-int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port)
+const char* xhci_port_reset_kind_name(uint8_t kind)
 {
+    switch (kind) {
+        case XHCI_PORT_RESET_HOT:  return "hot reset";
+        case XHCI_PORT_RESET_WARM: return "warm reset";
+        case XHCI_PORT_RESET_HUB:  return "reset by its hub";
+        default:                   return "NOT reset";
+    }
+}
+
+int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port,
+                          uint8_t* out_kind)
+{
+    if (out_kind) {
+        *out_kind = XHCI_PORT_RESET_NONE;
+    }
     if (!port_valid(ctrl, port)) {
         return -1;
     }
@@ -192,22 +206,42 @@ int xhci_port_begin_reset(xhci_controller_t* ctrl, uint8_t port)
 
     uint8_t major = xhci_port_protocol(ctrl, port);
 
+    /*
+     * Said out loud, once per device, not into a debug build.
+     *
+     * A device answers the default address only in the Default state, and
+     * enters it only through a reset — so on a machine whose only diagnostic
+     * is a photograph of the screen, this line is what an Address Device that
+     * was never answered has to be read against. There is one of these per
+     * device brought up, and only for ports something is plugged into.
+     */
+    if (major >= 3 && (portsc & XHCI_PORTSC_PED)) {
+        kprintf("[xHCI %s] port %u (USB %u): arrived enabled, NOT reset "
+                "(PORTSC 0x%08x, link %u)\n",
+                ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
+        return 1;
+    }
+
     if (major >= 3) {
-        if (portsc & XHCI_PORTSC_PED) {
-            debug_printf("[xHCI Port] port %u is USB 3 and already enabled\n", port);
-            return 1;
-        }
         /* A SuperSpeed port that connected but did not enable itself has a
          * link that failed to train. A warm reset is the one the specification
          * defines for that case; the hot reset used on USB 2 does not
          * re-establish a SuperSpeed link. */
-        debug_printf("[xHCI Port] port %u is USB 3 but not enabled — warm reset\n",
-                     port);
+        kprintf("[xHCI %s] port %u (USB %u): warm reset (PORTSC 0x%08x, "
+                "link %u)\n",
+                ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
+        if (out_kind) {
+            *out_kind = XHCI_PORT_RESET_WARM;
+        }
         portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_WPR);
         return 0;
     }
 
-    debug_printf("[xHCI Port] resetting port %u\n", port);
+    kprintf("[xHCI %s] port %u (USB %u): hot reset (PORTSC 0x%08x, link %u)\n",
+            ctrl->name, port, major, portsc, XHCI_PORTSC_PLS(portsc));
+    if (out_kind) {
+        *out_kind = XHCI_PORT_RESET_HOT;
+    }
     portsc_write(ctrl, port, portsc_base(ctrl, port) | XHCI_PORTSC_PR);
     return 0;
 }
