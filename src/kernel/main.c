@@ -41,6 +41,7 @@
 #include "tagfs.h"
 #include "cpuid.h"
 #include "cpu_caps_page.h"
+#include "boarding.h"
 #include "boot_info.h"
 #include "notify.h"
 #include "amp.h"
@@ -173,6 +174,13 @@ void kernel_main(void)
                     bi->fb_width, bi->fb_height, bi->fb_stride, bi->fb_format);
         }
     }
+
+    /* The loader's account of its own journey — which volume this kernel was
+     * read out of, off what medium, by which loader. Read here because the
+     * block sits in memory the loaders own, below the first megabyte, and
+     * because the Boardroom will want the answer long before there is a
+     * filesystem to keep it in. */
+    BoardingPassInit();
 
     debug_printf("[INIT] MemTag...\n");
     error_t memtag_err = MemTagInit();

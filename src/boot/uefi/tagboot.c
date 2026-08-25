@@ -1488,6 +1488,108 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 }
 
 /* =========================================================================
+ * The Boarding Pass — what this loader tells the kernel about its own arrival
+ *
+ * Mirrors src/include/boarding_pass.h. Duplicated rather than included for the
+ * same reason BootInfoV4 above is: this is a freestanding UEFI application
+ * built against its own headers, and the agreement is enforced by the build
+ * passing the address in and by the kernel's own static assertions on the
+ * layout — not by hoping two copies of a comment stay in step.
+ *
+ * The stamp that matters is the volume. A kernel in long mode cannot ask the
+ * firmware which device it was booted from, so without this the Boardroom
+ * picks by a rule — "the removable medium wins" — which is wrong on any
+ * machine carrying BoxOS on an internal disk with a flash drive in a socket.
+ * This loader knows the answer: it has the superblock in hand.
+ * ========================================================================= */
+#define BOARDING_PASS_ADDR      0xA600ULL
+#define BOARDING_PASS_BYTES     512U
+#define BOARDING_PASS_MAGIC     0x53415042U   /* "BPAS" */
+#define BOARDING_PASS_VERSION   1U
+#define BOARDING_HDR_BYTES      16U
+#define BOARDING_STAMP_VOLUME   1U
+#define BOARDING_STAMP_MEDIUM   2U
+#define BOARDING_STAMP_LOADER   3U
+#define BOARDING_FIRMWARE_UEFI  1U
+
+#ifdef BOARDING_PASS_ADDR_FROM_BUILD
+_Static_assert(BOARDING_PASS_ADDR == BOARDING_PASS_ADDR_FROM_BUILD,
+               "TagBoot writes the boarding pass somewhere the build does not "
+               "expect");
+#endif
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t header_bytes;
+    uint16_t used_bytes;
+    uint16_t capacity;
+    uint16_t count;
+    uint16_t reserved;
+} BoardingPassHeaderV1;
+
+_Static_assert(sizeof(BoardingPassHeaderV1) == 16, "boarding pass header is 16 bytes");
+
+/* Append one stamp. The kind and the length go down first, then the payload,
+ * then the write cursor moves to the next four-byte boundary — which is the
+ * whole of what lets a kernel walk a pass carrying stamps it has never been
+ * taught about. */
+static uint16_t BoardingStamp(uint8_t *base, uint16_t at, uint16_t kind,
+                              const void *payload, uint16_t bytes)
+{
+    uint16_t k = kind, b = bytes;
+    MemCopy(base + at,     &k, 2);
+    MemCopy(base + at + 2, &b, 2);
+    if (bytes) {
+        MemCopy(base + at + 4, payload, bytes);
+    }
+    uint16_t stride = (uint16_t)((4U + bytes + 3U) & ~3U);
+    return (uint16_t)(at + stride);
+}
+
+static void WriteBoardingPass(void)
+{
+    uint8_t *base = (uint8_t *)(uintptr_t)BOARDING_PASS_ADDR;
+    MemZero(base, BOARDING_PASS_BYTES);
+
+    uint16_t at = BOARDING_HDR_BYTES;
+    uint16_t count = 0;
+
+    /* The volume this kernel was read out of, straight out of the superblock
+     * this loader verified on the way in. */
+    at = BoardingStamp(base, at, BOARDING_STAMP_VOLUME,
+                       g_superblock.fs_uuid, 16);
+    count++;
+
+    /* How it was reached. UEFI has no BIOS drive number, and saying 0xFF is
+     * saying so rather than leaving a zero that reads as drive zero. */
+    struct __attribute__((packed)) {
+        uint8_t firmware; uint8_t bios_drive; uint16_t reserved;
+    } medium = { BOARDING_FIRMWARE_UEFI, 0xFF, 0 };
+    at = BoardingStamp(base, at, BOARDING_STAMP_MEDIUM, &medium, sizeof(medium));
+    count++;
+
+    /* Who wrote it. On a board that boots through CSM one week and UEFI the
+     * next, that is a real question with nothing else on the screen to answer
+     * it. */
+    struct __attribute__((packed)) {
+        char name[12]; uint16_t major; uint16_t minor;
+    } loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 }, 1, 0 };
+    at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
+    count++;
+
+    BoardingPassHeaderV1 hdr;
+    hdr.magic        = BOARDING_PASS_MAGIC;
+    hdr.version      = BOARDING_PASS_VERSION;
+    hdr.header_bytes = BOARDING_HDR_BYTES;
+    hdr.used_bytes   = at;
+    hdr.capacity     = BOARDING_PASS_BYTES;
+    hdr.count        = count;
+    hdr.reserved     = 0;
+    MemCopy(base, &hdr, sizeof(hdr));
+}
+
+/* =========================================================================
  * boot_info_t v2 population
  * ========================================================================= */
 
@@ -1879,6 +1981,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 
     /* ----- 9. Fill boot_info_t v4 (includes RSDP + ESRT — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
+    WriteBoardingPass();
 
     Print("TagBoot: boot_info at 0xA000 (v4, method=UEFI)\r\n");
 
