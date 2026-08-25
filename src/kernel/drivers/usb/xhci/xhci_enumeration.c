@@ -946,11 +946,10 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
             return;
         }
 
+        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         if (xhci_ep_configure(ctrl, slot) != 0) {
             xhci_slot_retire(ctrl, slot);
-            return;
         }
-        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         return;
     }
 
@@ -967,6 +966,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         slot->interface_num   = iface;
         slot->ep_interrupt_in = pick.intr_in_dci;
 
+        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         if (xhci_ep_prepare(slot, pick.intr_in_dci, XHCI_EP_TYPE_INTERRUPT_IN,
                             pick.intr_addr, pick.intr_mps, pick.intr_interval,
                             pick.intr_mps) != 0 ||
@@ -974,9 +974,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
             kprintf("[xHCI] port %u: could not configure the hub\n",
                     slot->port_num);
             xhci_slot_retire(ctrl, slot);
-            return;
         }
-        slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
         return;
     }
 
@@ -1137,9 +1135,9 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
             continue;
         }
 
-        kprintf("[xHCI %s] port %u: gave up after %u ms while %s "
+        kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms while %s "
                 "(%u interrupt(s) from this controller so far)\n",
-                ctrl->name, slot->port_num, XHCI_ENUM_TIMEOUT_MS,
+                ctrl->name, slot->port_num, slot->slot_id, XHCI_ENUM_TIMEOUT_MS,
                 enum_state_name(state),
                 __atomic_load_n(&ctrl->irq_count, __ATOMIC_RELAXED));
 
@@ -1235,7 +1233,12 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
     }
 
     if (!slot) {
-        debug_printf("[xHCI ENUM] No slot found for state advance (slot_id=%u)\n", slot_id);
+        /* An answer with nobody left to hear it. Said out loud: a completion
+         * that finds no slot advances nothing, and whatever posted the command
+         * waits until the watchdog gives up on it — which is a device that
+         * never appears, with no line in the log to say why. */
+        kprintf("[xHCI %s] a completion for slot %u found no device waiting "
+                "for it\n", ctrl->name, slot_id);
         return;
     }
 
@@ -1513,13 +1516,12 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
 
         case ENUM_STATE_WAIT_SET_IDLE: {
+            slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
             if (xhci_ep_configure(ctrl, slot) != 0) {
                 kprintf("[xHCI] port %u: could not configure the keyboard "
                         "endpoint\n", slot->port_num);
                 xhci_slot_retire(ctrl, slot);
-                return;
             }
-            slot->state = ENUM_STATE_WAIT_CONFIGURE_ENDPOINT;
             break;
         }
 
@@ -1532,8 +1534,18 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, uint8_t slot_id, uint8_t c
         }
 
         default:
-            debug_printf("[xHCI ENUM] Unexpected state %u for slot %u\n",
-                         slot->state, slot_id);
+            /*
+             * A completion for a step this device was not on.
+             *
+             * This is what it looks like when an answer overtakes the question:
+             * the command was posted, another core drained its completion, and
+             * the state saying what was being waited for had not been written
+             * yet. The slot is then left waiting for an event that has already
+             * been and gone. Silent until now, and the exact shape of a device
+             * that enumerates on an emulator and stops on a real machine.
+             */
+            kprintf("[xHCI %s] slot %u answered a step it was not on (%s)\n",
+                    ctrl->name, slot_id, enum_state_name(slot->state));
             break;
     }
 }
