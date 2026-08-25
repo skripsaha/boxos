@@ -340,6 +340,7 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
     ctrl->pending_cmds[index].state = XHCI_CMD_FREE;
     ctrl->pending_cmds[index].owner = NULL;
     ctrl->last_cmd_answer = rdtsc();
+    ctrl->cmd_nudges      = 0;
     spin_unlock(&ctrl->pending_lock);
 
     /*
@@ -564,6 +565,7 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
     /* Nothing is owed any more, so the stuck-ring clock starts fresh with
      * whatever is posted next rather than counting the abort against it. */
     ctrl->last_cmd_answer = 0;
+    ctrl->cmd_nudges      = 0;
 
     ctrl->command_ring.enqueue_idx = 0;
     ctrl->command_ring.cycle_state = 1;
@@ -672,14 +674,75 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
     }
 
     /*
-     * A command the controller never answered — and, this time, a controller
-     * that has answered nothing else either, which is what makes it a stuck
-     * ring rather than a slow one.
+     * The cheap remedy first.
+     *
+     * A doorbell is how software says "there is work on the ring", and a
+     * controller that did not act on one is indistinguishable, from the
+     * outside, from a controller that has hung. Ringing it again is one
+     * register write, cannot corrupt anything, and does nothing at all if the
+     * controller was simply busy. Aborting the ring destroys every command in
+     * flight — measured on a live board: it killed an Address Device that then
+     * completed with Success — so it is what happens after the cheap thing has
+     * been tried, not instead of it.
      */
-    kprintf("[xHCI %s] nothing answered for %u ms with %u command(s) "
-            "outstanding; the oldest is %s on slot %u, posted %u ms ago\n",
-            ctrl->name, silent, outstanding,
-            xhci_command_name(oldest_type), oldest_slot, oldest_ms);
+    if (ctrl->cmd_nudges < XHCI_CMD_NUDGES) {
+        ctrl->cmd_nudges++;
+        xhci_ring_t* er = &ctrl->event_ring;
+        uint32_t at_dequeue = er->trbs ? er->trbs[er->dequeue_idx].control : 0;
 
+        kprintf("[xHCI %s] nothing answered for %u ms with %u command(s) "
+                "outstanding (oldest %s on slot %u, %u ms) — ringing the "
+                "doorbell again [%u/%u]\n",
+                ctrl->name, silent, outstanding,
+                xhci_command_name(oldest_type), oldest_slot, oldest_ms,
+                ctrl->cmd_nudges, XHCI_CMD_NUDGES);
+
+        /*
+         * And which of the two possible faults it is.
+         *
+         * The controller has executed commands whose completions never
+         * arrived — measured on a live board, three devices reading Addressed
+         * with addresses assigned while this driver was still waiting to be
+         * told. That leaves exactly two possibilities and this line separates
+         * them:
+         *
+         *   the TRB at the dequeue position carries the cycle bit we expect
+         *     ⇒ the events ARE on the ring and nobody is reading them;
+         *   it does not
+         *     ⇒ the controller executed the command and posted nothing.
+         *
+         * The skipped-drain count answers the same question from the other
+         * end: a drain that keeps finding somebody else already draining is a
+         * ring nobody is actually finishing.
+         */
+        kprintf("[xHCI %s]   CRCR=0x%08x USBSTS=0x%08x ERDP=0x%08x "
+                "IMAN=0x%08x | command ring at %u | event ring at %u "
+                "expecting cycle %u, TRB there 0x%08x | %u drain(s) skipped\n",
+                ctrl->name,
+                (uint32_t)ctrl->op_regs->crcr, ctrl->op_regs->usbsts,
+                (uint32_t)ctrl->runtime_regs->interrupters[0].erdp,
+                ctrl->runtime_regs->interrupters[0].iman,
+                ctrl->command_ring.enqueue_idx,
+                er->dequeue_idx, er->cycle_state, at_dequeue,
+                __atomic_load_n(&ctrl->drain_skips, __ATOMIC_RELAXED));
+        xhci_hold_screen();
+
+        __sync_synchronize();
+        ctrl->doorbells->doorbells[0].doorbell = 0;
+
+        /* Give it the same budget again to answer the nudge. */
+        ctrl->last_cmd_answer = now;
+        return;
+    }
+
+    /*
+     * It has been told three times and answered nothing. That is a stopped
+     * controller, and the ring has to be taken away from it.
+     */
+    kprintf("[xHCI %s] still nothing after %u doorbell(s) — the command ring "
+            "has stopped and is being taken back\n",
+            ctrl->name, XHCI_CMD_NUDGES);
+
+    ctrl->cmd_nudges = 0;
     xhci_command_ring_abort(ctrl);
 }

@@ -156,6 +156,32 @@ typedef struct {
      * Success. Two devices were thrown away for being answered late.
      */
     uint64_t last_cmd_answer;
+
+    /* How many times the ring has been nudged since it last answered. Reset by
+     * any completion, because a controller that answered is a controller that
+     * heard. */
+    uint32_t cmd_nudges;
+
+    /*
+     * How many times a drain found somebody else already draining and went
+     * away.
+     *
+     * The drain is a trylock: whoever holds it will reach every event on the
+     * ring, so queueing behind them adds nothing and risks a core waiting for
+     * a lock its own stack frame holds. That is right — but it is also the one
+     * way this driver can stop reading the ring without anything saying so,
+     * and a controller that has executed a command whose completion nobody
+     * collects is indistinguishable from one that never executed it.
+     */
+    volatile uint32_t drain_skips;
+
+    /* Which core is inside the drain, one-based; zero when nobody is. A
+     * nested call from the SAME core must leave — it would be waiting for a
+     * lock its own stack frame holds — while a call from another core can
+     * afford to wait, because the holder will finish. Telling those two apart
+     * is the difference between "somebody is reading the ring" and "nobody
+     * is". */
+    volatile uint32_t drain_owner;
 } xhci_controller_t;
 
 int xhci_init(void);
