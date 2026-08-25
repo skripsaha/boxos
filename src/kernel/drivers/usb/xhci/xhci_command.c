@@ -300,8 +300,20 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl) {
         if (pending_cmds[i].state == CMD_STATE_POSTED) {
             int64_t elapsed = (int64_t)(now - pending_cmds[i].timestamp_posted);
             if (elapsed > (int64_t)timeout_cycles) {
-                debug_printf("[xHCI CMD] Command timeout: TRB=0x%llx slot=%u\n",
-                             pending_cmds[i].trb_phys, pending_cmds[i].slot_id);
+                /*
+                 * A command the controller never answered.
+                 *
+                 * Silent until now, and the one fact that would have settled
+                 * an argument that ran for six flashes: whether four devices
+                 * stuck mid-enumeration were waiting on commands that had been
+                 * reaped here, or on completions that arrived and went
+                 * nowhere. Those are opposite faults and the log could not
+                 * tell them apart.
+                 */
+                kprintf("[xHCI] command type %u on slot %u went unanswered for "
+                        "%u ms — giving up on it\n",
+                        pending_cmds[i].trb_type, pending_cmds[i].slot_id,
+                        XHCI_CMD_TIMEOUT_MS);
 
                 uint8_t slot_id = pending_cmds[i].slot_id;
                 pending_cmds[i].state = CMD_STATE_IDLE;
