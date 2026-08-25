@@ -160,7 +160,14 @@ ISR_NOERROR 129  ; workflow completion notification
 
 ; MSI vectors — message-signalled interrupts, delivered straight to the LAPIC
 ISR_NOERROR 112  ; AHCI MSI  (0x70)
-ISR_NOERROR 113  ; xHCI MSI  (0x71)
+ISR_NOERROR 113  ; xHCI MSI  (0x71) — first USB host controller
+ISR_NOERROR 114  ; xHCI MSI  (0x72)
+ISR_NOERROR 115  ; xHCI MSI  (0x73)
+ISR_NOERROR 116  ; xHCI MSI  (0x74)
+ISR_NOERROR 117  ; xHCI MSI  (0x75)
+ISR_NOERROR 118  ; xHCI MSI  (0x76)
+ISR_NOERROR 119  ; xHCI MSI  (0x77)
+ISR_NOERROR 120  ; xHCI MSI  (0x78) — eighth, and the last this kernel brings up
 
 ; LAPIC special vectors
 ISR_NOERROR 254  ; LAPIC timer
@@ -426,8 +433,18 @@ isr_table:
     ; vector that was actually raised. Adding a vector to irqchip.h and an
     ; IDT entry in idt.c is two thirds of the work; this is the third.
     dq isr113
-    ; Unimplemented (114-127) - use GPF handler
-    times 14 dq isr13
+    ; One per USB host controller (114-120). A vector with no stub of its own
+    ; is the fault handler, which is how the very first xHCI interrupt this
+    ; kernel ever received arrived as a #GP panic naming the wrong vector.
+    dq isr114
+    dq isr115
+    dq isr116
+    dq isr117
+    dq isr118
+    dq isr119
+    dq isr120
+    ; Unimplemented (121-127) - use GPF handler
+    times 7 dq isr13
     ; Syscall (128)
     dq isr128
     ; Completion IRQ (129)

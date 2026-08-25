@@ -21,7 +21,20 @@
 // straight to the LAPIC (acked with LAPIC EOI, not the IOAPIC) so these sit
 // outside the IOAPIC GSI range (32-55). Dispatched explicitly in irq_handler.
 #define AHCI_MSI_VECTOR         0x70    // 112 — AHCI controller
-#define XHCI_MSI_VECTOR         0x71    // 113 — USB xHCI controller
+/* One vector per USB controller, not one for all of them.
+ *
+ * MSI is a message carrying a vector, and two devices told to send the same
+ * message are two devices the processor cannot tell apart. A machine has as
+ * many USB controllers as it has — a chipset one and, very often, another on a
+ * graphics card — and giving them all 0x71 meant every interrupt had to be
+ * offered to every controller in turn, on the chance that it was the one that
+ * spoke. That works and it is not right: an interrupt should name its source.
+ *
+ * Eight is the number of controllers this kernel will bring up, so it is the
+ * number of vectors reserved for them. */
+#define XHCI_MSI_VECTOR         0x71    // 113 — first USB xHCI controller
+#define XHCI_MSI_VECTOR_COUNT   8
+#define XHCI_MSI_VECTOR_LAST    (XHCI_MSI_VECTOR + XHCI_MSI_VECTOR_COUNT - 1)
 
 // AMP inter-processor interrupt vectors
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule

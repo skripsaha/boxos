@@ -49,6 +49,18 @@ xhci_controller_t* xhci_controller_at(uint8_t index) {
 /* The first controller in service. Kept for the callers that genuinely want
  * any one of them — a query, a diagnostic — and not for the ones that mean
  * "all of them", which now say so. */
+/* The vector this controller signals on. Numbered alongside the controllers
+ * themselves, so an interrupt says which one spoke. */
+static uint8_t xhci_vector_for(const xhci_controller_t* ctrl)
+{
+    for (uint8_t i = 0; i < XHCI_MAX_CONTROLLERS; i++) {
+        if (&g_controllers[i] == ctrl) {
+            return (uint8_t)(XHCI_MSI_VECTOR + i);
+        }
+    }
+    return XHCI_MSI_VECTOR;
+}
+
 xhci_controller_t* xhci_get_controller(void) {
     return xhci_controller_at(0);
 }
@@ -224,7 +236,8 @@ static int xhci_alloc_scratchpad(xhci_controller_t* ctrl)
     }
 
     __sync_synchronize();
-    kprintf("[xHCI] scratchpad: %u page(s) the controller asked for\n", count);
+    kprintf("[xHCI %s] scratchpad: %u page(s) the controller asked for\n",
+            ctrl->name, count);
     return 0;
 }
 
@@ -311,24 +324,24 @@ static void xhci_setup_interrupts(xhci_controller_t* ctrl)
      * every test runs against — silently took the legacy path, so the path
      * real hardware uses was never the path being tested. */
     if (pci_msix_enable_vector(ctrl->pci_dev.bus, ctrl->pci_dev.device,
-                               ctrl->pci_dev.function, 0, XHCI_MSI_VECTOR,
+                               ctrl->pci_dev.function, 0, xhci_vector_for(ctrl),
                                g_amp.bsp_lapic_id) == 0) {
-        ctrl->irq_vector  = XHCI_MSI_VECTOR;
+        ctrl->irq_vector  = xhci_vector_for(ctrl);
         ctrl->use_msi     = true;
         ctrl->use_polling = false;
         kprintf("[xHCI] MSI-X enabled (vector 0x%02x -> LAPIC %u)\n",
-                XHCI_MSI_VECTOR, g_amp.bsp_lapic_id);
+                xhci_vector_for(ctrl), g_amp.bsp_lapic_id);
         return;
     }
 
     if (pci_msi_enable(ctrl->pci_dev.bus, ctrl->pci_dev.device,
-                       ctrl->pci_dev.function, XHCI_MSI_VECTOR,
+                       ctrl->pci_dev.function, xhci_vector_for(ctrl),
                        g_amp.bsp_lapic_id) == 0) {
-        ctrl->irq_vector  = XHCI_MSI_VECTOR;
+        ctrl->irq_vector  = xhci_vector_for(ctrl);
         ctrl->use_msi     = true;
         ctrl->use_polling = false;
-        kprintf("[xHCI] MSI enabled (vector 0x%02x -> LAPIC %u)\n",
-                XHCI_MSI_VECTOR, g_amp.bsp_lapic_id);
+        kprintf("[xHCI %s] MSI enabled (vector 0x%02x -> LAPIC %u)\n", ctrl->name,
+                xhci_vector_for(ctrl), g_amp.bsp_lapic_id);
         return;
     }
 
@@ -410,8 +423,8 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
             seen |= (1u << port);
             found++;
             anything_new = true;
-            kprintf("[xHCI] port %u: device attached at boot (USB %u)\n",
-                    port, ctrl->port_major[port]);
+            kprintf("[xHCI %s] port %u: device attached at boot (USB %u)\n",
+                    ctrl->name, port, ctrl->port_major[port]);
             xhci_enumerate_device(ctrl, port);
         }
 
@@ -427,8 +440,8 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
         xhci_port_describe(ctrl, port);
     }
 
-    kprintf("[xHCI] %u of %u root port(s) had something on them\n",
-            found, ctrl->max_ports);
+    kprintf("[xHCI %s] %u of %u root port(s) had something on them\n",
+            ctrl->name, found, ctrl->max_ports);
 }
 
 static int xhci_bring_up(xhci_controller_t* ctrl) {
@@ -511,7 +524,8 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
 
     uint32_t hccparams1 = ctrl->cap_regs->hccparams1;
     ctrl->context_size = (hccparams1 & (1 << 2)) ? 64 : 32;
-    debug_printf("[xHCI] Context size: %u bytes\n", ctrl->context_size);
+
+
 
     if (ctrl->max_slots == 0) {
         debug_printf("[xHCI] ERROR: Invalid max_slots %u\n", ctrl->max_slots);
@@ -587,9 +601,9 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
         /* kprintf: this is a fact about the machine, and the machine is the
          * thing we do not know. It printed nothing on the board where the
          * absence of it cost a kernel #PF. */
-        kprintf("[xHCI] register space: 0x%llx bytes "
+        kprintf("[xHCI %s] register space: 0x%llx bytes "
                 "(BAR0=0x%llx CAPLENGTH=0x%x RTSOFF=0x%x DBOFF=0x%x "
-                "ports=%u intrs=%u slots=%u)\n",
+                "ports=%u intrs=%u slots=%u)\n", ctrl->name,
                 (unsigned long long)need, (unsigned long long)bar_size,
                 caplength, rtsoff, dboff,
                 ctrl->max_ports, ctrl->max_interrupters, ctrl->max_slots);
@@ -611,6 +625,23 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
     ctrl->runtime_regs = (xhci_runtime_regs_t*)((uint8_t*)ctrl->cap_regs + rtsoff);
     ctrl->doorbells = (xhci_doorbell_array_t*)((uint8_t*)ctrl->cap_regs + dboff);
     ctrl->ports = (xhci_port_regs_t*)((uint8_t*)ctrl->op_regs + 0x400);
+
+    /* The capability words, said out loud once.
+     *
+     * Every one of these changes how the structures below are laid out, and
+     * every one of them differs between the emulator this was written against
+     * and the silicon it has to run on: 64-byte contexts, 64-bit addressing,
+     * the page size the controller counts its scratchpad in. A controller that
+     * stops with an internal error is a controller that read one of those
+     * structures and found something it could not accept — and working out
+     * which, from a photograph, means knowing what it said it wanted. */
+    kprintf("[xHCI %s] caps: hcc1=0x%08x hcs1=0x%08x hcs2=0x%08x "
+            "pagesize=0x%04x  contexts=%u bytes, addressing=%u-bit\n",
+            ctrl->name, hccparams1,
+            ctrl->cap_regs->hcsparams1, ctrl->cap_regs->hcsparams2,
+            ctrl->op_regs->pagesize & 0xFFFFu,
+            ctrl->context_size,
+            (hccparams1 & XHCI_HCC1_AC64) ? 64 : 32);
 
     /* Take the controller away from the firmware BEFORE resetting it.
      *
@@ -742,9 +773,9 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
      * why a driver that never wrote this bit appeared to work. */
     xhci_power_ports(ctrl);
 
-    kprintf("[xHCI] %x.%02x controller ready: %u port(s), %u slot(s), "
+    kprintf("[xHCI %s] %x.%02x controller ready: %u port(s), %u slot(s), "
             "%s interrupts\n",
-            hciversion >> 8, hciversion & 0xFF, ctrl->max_ports,
+            ctrl->name, hciversion >> 8, hciversion & 0xFF, ctrl->max_ports,
             ctrl->max_slots,
             ctrl->use_polling ? "polled" : (ctrl->use_msi ? "MSI" : "INTx"));
 
@@ -791,6 +822,8 @@ int xhci_init(void)
         memset(ctrl, 0, sizeof(*ctrl));
         ctrl->pci_dev = dev;
         spinlock_init(&ctrl->event_lock);
+        ksnprintf(ctrl->name, sizeof(ctrl->name), "%02x:%02x.%u",
+                  dev.bus, dev.device, dev.function);
 
         /* Named on the way in, so a photograph of the screen identifies which
          * silicon this is: a chipset controller and one on a graphics card

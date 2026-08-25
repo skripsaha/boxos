@@ -5,6 +5,9 @@
 #include "xhci.h"
 
 void xhci_irq_handler(void);
+
+/* The controller that signals on this vector. Each has one of its own. */
+void xhci_irq_handler_vector(uint8_t vector);
 void xhci_process_events(void);
 void xhci_poll_events(void);
 
