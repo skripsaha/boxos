@@ -6,6 +6,11 @@
 #include "xhci_rings.h"
 #include "usb_descriptors.h"
 
+/* By pointer only: an endpoint may carry somewhere for its answer to go, and
+ * the queue that carries it there belongs to the storage deck. Including that
+ * header here would make every USB translation unit depend on the deck. */
+struct StorageCompletion;
+
 /* Endpoint types as the controller numbers them (xHCI Table 6-9). The value
  * goes straight into the endpoint context, so these are the controller's
  * numbers and not a private encoding. */
@@ -66,6 +71,22 @@ typedef struct xhci_endpoint {
     volatile uint8_t  xfer_state;
     volatile uint8_t  xfer_code;
     volatile uint32_t xfer_residual;   /* bytes the device did NOT transfer */
+
+    /*
+     * Where this endpoint's answer goes when it arrives, for a caller that did
+     * not stay to hear it.
+     *
+     * NULL means the old arrangement: the answer is recorded on the endpoint
+     * and whoever asked is expected to be looking at it. Set, it means the
+     * answer is handed to a K-Core — the completion is posted the instant the
+     * event is drained, from wherever that drain happens to be, and the work
+     * that follows from it runs in a context where waiting is allowed.
+     *
+     * The node lives inside the job it belongs to, so posting it needs no
+     * allocation and cannot fail for want of a slot: a transfer completion
+     * that went missing would leave its caller waiting for ever.
+     */
+    struct StorageCompletion* xfer_done;
 } xhci_endpoint_t;
 
 /* Device Context Index of an endpoint address: the endpoint number doubled,
@@ -99,9 +120,27 @@ int  xhci_ep_prepare(xhci_device_slot_t* slot, uint8_t dci, uint8_t type,
  * not yet know about. The slot advances on the command completion. */
 int  xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
 
-/* Submit one transfer and return without waiting. */
+/* Submit one transfer and return without waiting. The answer is recorded on
+ * the endpoint for whoever is watching it. */
 int  xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                     uint8_t dci, uint64_t buffer_phys, uint32_t length);
+
+/*
+ * The same, for a caller that is not going to stand and watch.
+ *
+ * `done` is posted to a K-Core when the transfer is answered, and the
+ * continuation inside it runs there — which is the difference that matters,
+ * because the drain that receives the answer may be an interrupt handler and
+ * the work that follows from a completed transfer is usually another transfer.
+ *
+ * The node is registered BEFORE the doorbell is rung. It has to be: the
+ * controller may answer inside that write, and an answer that arrives before
+ * anybody has said where to send it is an answer thrown away. That rule was
+ * learned twice in this driver already (34bcee6, ac0fcfd).
+ */
+int  xhci_ep_submit_async(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                          uint8_t dci, uint64_t buffer_phys, uint32_t length,
+                          struct StorageCompletion* done);
 
 /* Wait for the transfer submitted above.
  *
@@ -125,6 +164,16 @@ int  xhci_ep_wait(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
 int  xhci_ep_transfer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                       uint8_t dci, uint64_t buffer_phys, uint32_t length,
                       uint32_t timeout_ms, uint32_t* out_transferred);
+
+/*
+ * Take the answer off an endpoint and leave it ready for the next transfer.
+ *
+ * What xhci_ep_wait does at the end of its wait, for a caller that did not
+ * wait: the completion code and the residual are read out and the endpoint
+ * goes back to idle. Returns false when there is no answer there yet.
+ */
+bool xhci_ep_take_result(xhci_device_slot_t* slot, uint8_t dci,
+                         uint8_t* out_code, uint32_t* out_residual);
 
 /* Clear a halted endpoint and put its dequeue pointer where software is. */
 void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t dci);
