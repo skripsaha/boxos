@@ -136,6 +136,13 @@ static int post_command(xhci_controller_t* ctrl, xhci_trb_t* trb,
         return -1;
     }
 
+    /* The clock the stuck-ring test runs on starts when the ring stops being
+     * empty. Otherwise a controller idle for a minute looks overdue the
+     * instant it is given its first command. */
+    if (ctrl->last_cmd_answer == 0) {
+        ctrl->last_cmd_answer = rdtsc();
+    }
+
     ctrl->pending_cmds[index].owner       = owner;
     ctrl->pending_cmds[index].owner_epoch = xhci_slot_epoch(owner);
     ctrl->pending_cmds[index].posted_at   = rdtsc();
@@ -332,7 +339,22 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
      * whoever is trying to take the device down needs to know. */
     ctrl->pending_cmds[index].state = XHCI_CMD_FREE;
     ctrl->pending_cmds[index].owner = NULL;
+    ctrl->last_cmd_answer = rdtsc();
     spin_unlock(&ctrl->pending_lock);
+
+    /*
+     * How long that took, when it took long enough to matter.
+     *
+     * Silent for the ordinary case — a command answered in microseconds is not
+     * news — and the one fact that separates "this controller is stuck" from
+     * "this controller is slower than somebody's timeout" on a machine that
+     * can only be read by photographing its screen.
+     */
+    uint32_t took = (uint32_t)cpu_tsc_to_ms(rdtsc() - entry.posted_at);
+    if (took >= XHCI_CMD_SLOW_MS) {
+        kprintf("[xHCI %s] %s on slot %u took %u ms\n", ctrl->name,
+                xhci_command_name(entry.trb_type), event_slot_id, took);
+    }
 
     /*
      * The answer goes to the device that asked, and to no other.
@@ -354,8 +376,18 @@ void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event)
     }
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
+        /*
+         * Named by the command, not by the event.
+         *
+         * A Command Ring Stopped event carries the slot id of wherever the
+         * controller had got to, which is not the slot of the command being
+         * answered — measured: two commands belonging to ports 10 and 12 were
+         * both reported against slot 3, which is a third device that had
+         * nothing to do with either of them.
+         */
         kprintf("[xHCI %s] %s on slot %u was refused: %s (code %u)\n",
-                ctrl->name, xhci_command_name(entry.trb_type), event_slot_id,
+                ctrl->name, xhci_command_name(entry.trb_type),
+                entry.slot_id ? entry.slot_id : event_slot_id,
                 xhci_completion_name(completion_code), completion_code);
     }
 
@@ -529,6 +561,10 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
     /* Start the ring over. The controller's own dequeue pointer is reloaded
      * from CRCR, so software's enqueue position and cycle state have to go
      * back to where the controller will be looking. */
+    /* Nothing is owed any more, so the stuck-ring clock starts fresh with
+     * whatever is posted next rather than counting the abort against it. */
+    ctrl->last_cmd_answer = 0;
+
     ctrl->command_ring.enqueue_idx = 0;
     ctrl->command_ring.cycle_state = 1;
     if (ctrl->command_ring.trbs) {
@@ -576,41 +612,74 @@ static void xhci_command_ring_abort(xhci_controller_t* ctrl)
     xhci_hold_screen();
 }
 
+/*
+ * Is the command ring stuck — as opposed to merely slower than somebody hoped?
+ *
+ * The controller works through the ring in order, so a completion for any
+ * command is proof that every command posted before it has been answered too.
+ * The question is therefore about the RING, not about one command: has this
+ * controller answered anything at all recently?
+ *
+ * Asking it the other way round — "has this command been outstanding for five
+ * seconds" — cost two devices on a live board. Four Address Devices went out
+ * together, the first crossed the budget, the ring was aborted, and one of the
+ * commands that abort killed then completed with Success. It had not hung. It
+ * was late.
+ */
 void xhci_check_command_timeouts(xhci_controller_t* ctrl)
 {
     if (!ctrl || !ctrl->running) {
         return;
     }
 
-    uint64_t now     = rdtsc();
-    uint64_t budget  = cpu_ms_to_tsc(XHCI_CMD_TIMEOUT_MS);
-    bool     expired = false;
+    uint64_t now    = rdtsc();
+    uint64_t budget = cpu_ms_to_tsc(XHCI_CMD_TIMEOUT_MS);
 
     spin_lock(&ctrl->pending_lock);
+
+    unsigned outstanding = 0;
+    uint64_t oldest_at   = now;
+    uint8_t  oldest_type = 0;
+    uint8_t  oldest_slot = 0;
+
     for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
         if (ctrl->pending_cmds[i].state != XHCI_CMD_POSTED) {
             continue;
         }
-        if ((int64_t)(now - ctrl->pending_cmds[i].posted_at) <= (int64_t)budget) {
-            continue;
+        outstanding++;
+        if ((int64_t)(ctrl->pending_cmds[i].posted_at - oldest_at) < 0) {
+            oldest_at   = ctrl->pending_cmds[i].posted_at;
+            oldest_type = ctrl->pending_cmds[i].trb_type;
+            oldest_slot = ctrl->pending_cmds[i].slot_id;
         }
-        /*
-         * A command the controller never answered.
-         *
-         * Said out loud, and it is the one fact that settled an argument that
-         * ran for seven photographs of a screen: whether devices stuck
-         * mid-enumeration were waiting on commands that had been quietly
-         * reaped here, or on answers that arrived and went nowhere. Those are
-         * opposite faults and the log could not tell them apart.
-         */
-        kprintf("[xHCI %s] %s on slot %u went unanswered for %u ms\n",
-                ctrl->name, xhci_command_name(ctrl->pending_cmds[i].trb_type),
-                ctrl->pending_cmds[i].slot_id, XHCI_CMD_TIMEOUT_MS);
-        expired = true;
     }
+
+    if (outstanding == 0) {
+        /* Nothing owed. Let the clock start fresh with the next command
+         * rather than counting the idle time against it. */
+        ctrl->last_cmd_answer = 0;
+        spin_unlock(&ctrl->pending_lock);
+        return;
+    }
+
+    bool stuck = (int64_t)(now - ctrl->last_cmd_answer) > (int64_t)budget;
+    uint32_t silent = (uint32_t)cpu_tsc_to_ms(now - ctrl->last_cmd_answer);
+    uint32_t oldest_ms = (uint32_t)cpu_tsc_to_ms(now - oldest_at);
     spin_unlock(&ctrl->pending_lock);
 
-    if (expired) {
-        xhci_command_ring_abort(ctrl);
+    if (!stuck) {
+        return;
     }
+
+    /*
+     * A command the controller never answered — and, this time, a controller
+     * that has answered nothing else either, which is what makes it a stuck
+     * ring rather than a slow one.
+     */
+    kprintf("[xHCI %s] nothing answered for %u ms with %u command(s) "
+            "outstanding; the oldest is %s on slot %u, posted %u ms ago\n",
+            ctrl->name, silent, outstanding,
+            xhci_command_name(oldest_type), oldest_slot, oldest_ms);
+
+    xhci_command_ring_abort(ctrl);
 }

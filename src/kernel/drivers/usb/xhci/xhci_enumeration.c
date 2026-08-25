@@ -212,6 +212,7 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     slot->ep0_max_packet = 0;
     slot->config_total_len = 0;
     slot->stall_resume = 0;
+    slot->stall_retry = 0;
     slot->interface_class = 0;
     slot->interface_subclass = 0;
     slot->interface_protocol = 0;
@@ -811,16 +812,40 @@ bool xhci_enum_stall_is_tolerable(uint8_t state)
            state == ENUM_STATE_WAIT_SET_IDLE;
 }
 
-void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+/*
+ * Which steps are worth trying a second time.
+ *
+ * A stall is the device saying no to what was just asked. For an optional
+ * class request that is an answer and the step is stepped over. For a step
+ * enumeration cannot do without, it is worth asking again on a clean pipe:
+ * a device that has just been reset, or one whose bus was disturbed while it
+ * was answering, will refuse once and answer the second time. Measured on a
+ * live board — a device stalled Set Configuration immediately after the
+ * command ring under it had been aborted, and was thrown away for it.
+ *
+ * The resume state is the one that ISSUES the request, not the one that waits
+ * for it, because that is what running the state machine again performs.
+ */
+uint8_t xhci_enum_stall_retry_from(uint8_t state)
+{
+    switch (state) {
+        case ENUM_STATE_WAIT_SET_CONFIGURATION: return ENUM_STATE_WAIT_GET_CONFIG_DESC;
+        case ENUM_STATE_WAIT_GET_CONFIG_DESC:   return ENUM_STATE_WAIT_GET_CONFIG_HEADER;
+        case ENUM_STATE_WAIT_GET_CONFIG_HEADER: return ENUM_STATE_WAIT_GET_DESCRIPTOR;
+        case ENUM_STATE_WAIT_GET_DESCRIPTOR:    return ENUM_STATE_WAIT_EVALUATE_CONTEXT;
+        case ENUM_STATE_WAIT_GET_DESC_HEADER:   return ENUM_STATE_WAIT_ADDRESS_DEVICE;
+        default:                                return ENUM_STATE_IDLE;
+    }
+}
+
+void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                           uint8_t resume_at)
 {
     if (!ctrl || !slot) {
         return;
     }
 
-    kprintf("[xHCI] port %u: device declined an optional request — clearing "
-            "the control pipe and carrying on\n", slot->port_num);
-
-    slot->stall_resume = slot->state;
+    slot->stall_resume = resume_at;
     slot->state = ENUM_STATE_WAIT_EP0_RESET;
 
     if (xhci_post_reset_endpoint_cmd(ctrl, slot, slot->slot_id, 1) < 0) {
@@ -828,7 +853,10 @@ void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     }
 }
 
-static const char* enum_state_name(uint8_t state) {
+/* What a slot is waiting for, in words. Exported because the transfer path
+ * reports failures against it and "step 10" is not something anybody can
+ * read off a screen. */
+const char* xhci_enum_state_name(uint8_t state) {
     switch (state) {
         case ENUM_STATE_IDLE:                   return "idle";
         case ENUM_STATE_CLAIMING:               return "claiming a slot";
@@ -1173,7 +1201,7 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
 
     kprintf("[xHCI %s] port %u (slot %u): gave up after %u ms while %s\n",
             ctrl->name, slot->port_num, slot->slot_id, XHCI_ENUM_TIMEOUT_MS,
-            enum_state_name(state));
+            xhci_enum_state_name(state));
 
     kprintf("[xHCI %s]   the controller says: slot %s, address %u; "
             "PORTSC 0x%08x; %u interrupt(s) so far\n",
@@ -1316,9 +1344,27 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
      */
 
     if (completion_code != TRB_COMPLETION_SUCCESS) {
+        /*
+         * Clearing a pipe that was not halted is not a failure.
+         *
+         * Reset Endpoint answers Context State Error when the endpoint is not
+         * in the Halted state — which happens when the halt cleared itself, or
+         * when the stall this driver saw belonged to a transfer the controller
+         * had already unwound. The pipe is usable either way, and throwing the
+         * device away for it turns a recovered stall into a lost device.
+         */
+        if (slot->state == ENUM_STATE_WAIT_EP0_RESET &&
+            completion_code == TRB_COMPLETION_CONTEXT_STATE) {
+            kprintf("[xHCI %s] port %u: the control pipe was not halted after "
+                    "all — carrying on\n", ctrl->name, slot->port_num);
+            slot->state = slot->stall_resume;
+            xhci_enum_advance_state(ctrl, slot, slot_id, TRB_COMPLETION_SUCCESS);
+            return;
+        }
+
         kprintf("[xHCI %s] port %u: enumeration step %s failed — %s (code %u); "
                 "releasing the slot\n",
-                ctrl->name, slot->port_num, enum_state_name(slot->state),
+                ctrl->name, slot->port_num, xhci_enum_state_name(slot->state),
                 xhci_completion_name(completion_code), completion_code);
         xhci_slot_retire(ctrl, slot);
         return;
@@ -1611,7 +1657,7 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
              * that enumerates on an emulator and stops on a real machine.
              */
             kprintf("[xHCI %s] slot %u answered a step it was not on (%s)\n",
-                    ctrl->name, slot_id, enum_state_name(slot->state));
+                    ctrl->name, slot_id, xhci_enum_state_name(slot->state));
             break;
     }
 }

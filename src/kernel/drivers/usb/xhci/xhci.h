@@ -139,6 +139,23 @@ typedef struct {
      */
     xhci_pending_cmd_t pending_cmds[XHCI_CMD_RING_TRBS];
     spinlock_t         pending_lock;
+
+    /*
+     * When this controller last answered anything.
+     *
+     * The command ring is a queue and the controller works through it in
+     * order, so a completion for a later command is proof that every earlier
+     * one has already been answered. That makes "nothing has been answered for
+     * N milliseconds" the only honest test for a stuck ring — and "this
+     * particular command has been outstanding for N milliseconds" the wrong
+     * one, because it fires on a controller that is merely slower than the
+     * budget while it is visibly still working.
+     *
+     * Measured on a live board: a driver using the second test aborted the
+     * ring, and the Address Device it had given up on then completed with
+     * Success. Two devices were thrown away for being answered late.
+     */
+    uint64_t last_cmd_answer;
 } xhci_controller_t;
 
 int xhci_init(void);

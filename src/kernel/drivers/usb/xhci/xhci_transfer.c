@@ -278,17 +278,38 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
         }
 
         if (!ok) {
-            /* A stall on an optional class request is the device declining it,
-             * not the device failing. Clear the pipe and carry on from there. */
-            if (code == TRB_COMPLETION_STALL &&
-                xhci_enum_stall_is_tolerable(slot->state)) {
-                xhci_enum_recover_ep0(ctrl, slot);
-                return;
+            if (code == TRB_COMPLETION_STALL) {
+                /* An optional class request the device does not implement.
+                 * Clear the pipe and step over it — that is the answer. */
+                if (xhci_enum_stall_is_tolerable(slot->state)) {
+                    kprintf("[xHCI %s] port %u: device declined an optional "
+                            "request — clearing the control pipe and carrying "
+                            "on\n", ctrl->name, slot->port_num);
+                    xhci_enum_recover_ep0(ctrl, slot, slot->state);
+                    return;
+                }
+
+                /* A step enumeration cannot do without. Clear the pipe and ask
+                 * again: a device whose bus was disturbed while it was
+                 * answering refuses once and answers the second time. */
+                uint8_t again = xhci_enum_stall_retry_from(slot->state);
+                if (again != ENUM_STATE_IDLE &&
+                    slot->stall_retry < XHCI_STALL_RETRIES) {
+                    slot->stall_retry++;
+                    kprintf("[xHCI %s] port %u: %s was refused — clearing the "
+                            "control pipe and asking again (attempt %u of "
+                            "%u)\n", ctrl->name, slot->port_num,
+                            xhci_enum_state_name(slot->state),
+                            slot->stall_retry, XHCI_STALL_RETRIES);
+                    xhci_enum_recover_ep0(ctrl, slot, again);
+                    return;
+                }
             }
 
-            kprintf("[xHCI] slot %u: control transfer failed with completion "
-                    "code %u at enumeration step %u\n",
-                    slot_id, code, slot->state);
+            kprintf("[xHCI %s] port %u: %s failed — %s (code %u); releasing "
+                    "the slot\n", ctrl->name, slot->port_num,
+                    xhci_enum_state_name(slot->state),
+                    xhci_completion_name(code), code);
             xhci_slot_retire(ctrl, slot);
             return;
         }

@@ -105,6 +105,11 @@ struct xhci_device_slot {
      * allowed to refuse an optional request, and refusing it halts the pipe;
      * this is the step that was being attempted when that happened. */
     uint8_t  stall_resume;
+
+    /* How many times the control pipe has been cleared and the same step tried
+     * again. A device is entitled to stall; it is not entitled to stall for
+     * ever, and a slot retried without a bound is a port held hostage. */
+    uint8_t  stall_retry;
     uint8_t  interface_class;
     uint8_t  interface_subclass;
     uint8_t  interface_protocol;
@@ -244,8 +249,27 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
  * optional request rather than the conversation failing. */
 bool xhci_enum_stall_is_tolerable(uint8_t state);
 
+/*
+ * Where to resume so that a stalled step is ISSUED AGAIN rather than skipped.
+ *
+ * The state machine's cases perform the request that leads to the next state,
+ * so "do that step again" means "resume at the state that issued it". Returns
+ * ENUM_STATE_IDLE for a step this driver will not retry.
+ */
+uint8_t xhci_enum_stall_retry_from(uint8_t state);
+
+/* What a slot is waiting for, in words rather than a number. */
+const char* xhci_enum_state_name(uint8_t state);
+
+/* How many times a step may be retried before the device is let go. */
+#define XHCI_STALL_RETRIES 3
+
 /* Clear a halted EP0 and resume enumeration from where it stalled. */
-void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
+/* Clear a halted control pipe and carry on from `resume_at` — which is the
+ * stalled state itself to step over the request, or the state that issued it
+ * to make the request again. */
+void xhci_enum_recover_ep0(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                           uint8_t resume_at);
 xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_id);
 xhci_device_slot_t* xhci_get_device_slot_by_port(xhci_controller_t* ctrl, uint8_t port);
 
