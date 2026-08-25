@@ -631,8 +631,10 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
         xhci_port_describe(ctrl, port);
     }
 
-    kprintf("[xHCI %s] %u of %u root port(s) had something on them\n",
-            ctrl->name, found, ctrl->max_ports);
+    kprintf("[xHCI %s] %u of %u root port(s) had something on them; the "
+            "deepest one drain went was %u event(s) of %u\n",
+            ctrl->name, found, ctrl->max_ports,
+            ctrl->event_high_water, ctrl->event_ring.num_trbs);
 
     if (unfinished > 0) {
         kprintf("[xHCI %s] %d of them were still being enumerated when the "

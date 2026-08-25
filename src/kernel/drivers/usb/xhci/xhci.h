@@ -184,6 +184,23 @@ typedef struct {
     volatile uint32_t drain_owner;
 
     /*
+     * The deepest the event ring has ever been, and whether that has been said.
+     *
+     * The controller writes events into a ring software owns, and when it runs
+     * out of room the events stop being written — a Transfer Event that was
+     * never posted is a transfer nobody will ever be told about. Nothing here
+     * could ever have noticed: the ring's occupancy was not a number anything
+     * kept, so "we are one burst away from losing events" and "we have plenty
+     * of room" looked identical from every line of this driver.
+     *
+     * Kept as the high-water mark of a single drain rather than an instant
+     * reading, because that is the quantity that matters: it is how far behind
+     * the controller software was allowed to fall.
+     */
+    uint32_t event_high_water;
+    bool     event_pressure_said;
+
+    /*
      * The one device this controller is bringing up right now, or NULL.
      *
      * Enumeration is serialised per controller because the bus requires it:

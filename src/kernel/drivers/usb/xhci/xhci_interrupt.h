@@ -51,6 +51,18 @@ void xhci_interrupt_touch_init(void);
  * there and from ordinary context.
  */
 #define XHCI_SCREEN_HOLD_MS 1000
+
+/*
+ * How many events are handled between publications of the dequeue pointer.
+ *
+ * The controller decides the ring is full by comparing its own enqueue
+ * position against the pointer software has published (xHCI 1.2 Section 4.9.4),
+ * so publishing only at the end of a drain means a burst longer than the ring
+ * meets a controller that still believes nothing has been read. Small enough
+ * that the ring never runs down, large enough that an ordinary drain of two or
+ * three events costs no extra register write at all.
+ */
+#define XHCI_ERDP_BATCH 32
 void xhci_hold_screen(void);
 
 #endif
