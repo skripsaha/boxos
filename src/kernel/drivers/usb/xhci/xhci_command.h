@@ -20,6 +20,10 @@
  * a controller that has not stopped by then is not going to. */
 #define XHCI_CMD_ABORT_TIMEOUT_MS 5000
 
+/* How long a single command may take before it is worth a line on the screen.
+ * Not a limit — a command slower than this is reported and then waited for. */
+#define XHCI_CMD_SLOW_MS 250
+
 void xhci_command_init(xhci_controller_t* ctrl);
 
 /*
