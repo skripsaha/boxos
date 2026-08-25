@@ -10,6 +10,7 @@
 #include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "storage_completion.h"
 
 /* Every transfer ring here is 64 TRBs — one page holds 256, and a ring that
  * fits in a page it does not share is a ring whose wrap behaviour is easy to
@@ -312,8 +313,9 @@ int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     return 0;
 }
 
-int xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
-                   uint8_t dci, uint64_t buffer_phys, uint32_t length)
+static int ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                     uint8_t dci, uint64_t buffer_phys, uint32_t length,
+                     StorageCompletion* done)
 {
     if (!ctrl || !slot || !slot->endpoints || dci < 2 || dci > XHCI_MAX_DCI) {
         return -1;
@@ -340,12 +342,17 @@ int xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
      * finish with nothing to say it had. */
     trb.control   = TRB_SET_TYPE(TRB_TYPE_NORMAL) | TRB_IOC | TRB_ISP;
 
+    /* Said before it is asked for. The controller may answer inside the
+     * doorbell write, and the answer looks for somewhere to go the moment it
+     * is drained — so where it goes is written down first. */
+    ep->xfer_done     = done;
     ep->xfer_state    = XHCI_XFER_IN_FLIGHT;
     ep->xfer_code     = 0;
     ep->xfer_residual = 0;
 
     uint64_t trb_phys = xhci_ring_enqueue(ep->ring, &trb);
     if (trb_phys == 0) {
+        ep->xfer_done  = NULL;
         ep->xfer_state = XHCI_XFER_IDLE;
         return -1;
     }
@@ -354,6 +361,19 @@ int xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
     __sync_synchronize();
     ctrl->doorbells->doorbells[slot->slot_id].doorbell = dci;
     return 0;
+}
+
+int xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                   uint8_t dci, uint64_t buffer_phys, uint32_t length)
+{
+    return ep_submit(ctrl, slot, dci, buffer_phys, length, NULL);
+}
+
+int xhci_ep_submit_async(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
+                         uint8_t dci, uint64_t buffer_phys, uint32_t length,
+                         struct StorageCompletion* done)
+{
+    return ep_submit(ctrl, slot, dci, buffer_phys, length, done);
 }
 
 void xhci_ep_complete(xhci_device_slot_t* slot, uint8_t dci,
@@ -376,6 +396,22 @@ void xhci_ep_complete(xhci_device_slot_t* slot, uint8_t dci,
     ep->xfer_residual = residual;
     __sync_synchronize();
     ep->xfer_state    = XHCI_XFER_DONE;
+
+    /*
+     * And if nobody stayed to hear it, it is carried to where the answering
+     * happens.
+     *
+     * This runs inside the event drain, which may be an interrupt handler and
+     * is holding the ring lock either way — so nothing here may wait, and the
+     * post does not: the node lives in the job, so there is no allocation to
+     * fail and no free slot to be short of. The continuation runs later, on a
+     * K-Core, where the next transfer may be sent.
+     */
+    struct StorageCompletion* done = ep->xfer_done;
+    if (done) {
+        ep->xfer_done = NULL;
+        StorageCompletionPush(done);
+    }
 }
 
 int xhci_ep_wait(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
@@ -412,6 +448,24 @@ int xhci_ep_wait(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
     }
     ep->xfer_state = XHCI_XFER_IDLE;
     return code;
+}
+
+bool xhci_ep_take_result(xhci_device_slot_t* slot, uint8_t dci,
+                         uint8_t* out_code, uint32_t* out_residual)
+{
+    if (!slot || !slot->endpoints || dci < 1 || dci > XHCI_MAX_DCI) {
+        return false;
+    }
+
+    xhci_endpoint_t* ep = &slot->endpoints[dci];
+    if (ep->xfer_state != XHCI_XFER_DONE) {
+        return false;
+    }
+
+    if (out_code)     *out_code     = ep->xfer_code;
+    if (out_residual) *out_residual = ep->xfer_residual;
+    ep->xfer_state = XHCI_XFER_IDLE;
+    return true;
 }
 
 int xhci_ep_transfer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,

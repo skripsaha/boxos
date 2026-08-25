@@ -12,6 +12,7 @@
 #include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "storage_completion.h"
 
 /* ── Bulk-Only Transport wire format (USB MSC BOT 1.0) ──────────────────── */
 
@@ -365,11 +366,313 @@ static void msd_bot_reset(XhciMsdUnit* u)
 /* ── one command, three transfers ───────────────────────────────────────── */
 
 /*
+ * A command is a job with a place in it, and the place is what moves.
+ *
+ * Bulk-Only Transport is three transfers — a command wrapper out, a data stage
+ * if the command has one, a status wrapper back — and each of them is finished
+ * by the controller posting an event. The old shape asked for each transfer and
+ * then stood there until the answer came, which meant a core was spent for the
+ * whole length of a flash read and the constitution's rule against waiting by
+ * counting was broken three times per command.
+ *
+ * So the command remembers where it is instead. Each answered transfer decides
+ * the next one, exactly the way enumeration already works in this driver: the
+ * state is what the job is listening for, and nothing anywhere waits.
+ *
+ * Who turns the handle is a separate question from what the handle does, and
+ * there are two answers:
+ *
+ *   - a caller that wants the sectors before it goes on (the filesystem being
+ *     mounted, with nothing else to do until the block arrives) drives the job
+ *     itself, in msd_job_run — draining the ring and stepping the job. It holds
+ *     no lock while it does, so interrupts are served throughout;
+ *
+ *   - a caller that has better things to do registers the job's completion node
+ *     instead. The drain posts it the moment the transfer is answered, and a
+ *     K-Core steps the job from the guide loop. The node lives inside the job,
+ *     so posting it cannot fail for want of a slot — a lost transfer completion
+ *     would leave its owner waiting for ever.
+ *
+ * One machine, two drivers. The second is what lets a process reading a file
+ * park instead of spin.
+ */
+
+#define MSD_PHASE_IDLE 0
+#define MSD_PHASE_CBW  1
+#define MSD_PHASE_DATA 2
+#define MSD_PHASE_CSW  3
+#define MSD_PHASE_DONE 4
+
+/* A device is allowed to stall the status stage once and be asked again; the
+ * class says so, and asking a second time is the whole of the remedy. */
+#define MSD_CSW_TRIES 2
+
+typedef struct MsdJob {
+    /* First, and by value: this is how a completion reaches a K-Core without
+     * an allocation standing between the two. */
+    StorageCompletion node;
+
+    XhciMsdUnit* u;
+
+    uint8_t   cdb[16];
+    uint8_t   cdb_len;
+    uint64_t  data_phys;
+    uint32_t  data_len;
+    bool      data_in;
+
+    uint32_t  tag;                  /* what the status wrapper must echo */
+    uint8_t   phase;
+    uint8_t   dci;                  /* the endpoint the current phase is on */
+    uint8_t   csw_tries;
+    bool      hand_to_kcore;        /* false = the caller is driving */
+
+    uint32_t  transferred;          /* bytes the data stage moved */
+    int       status;               /* 0 carried out, 1 refused, -1 broken */
+    volatile uint8_t finished;
+
+    /* Told when the job is over, for a caller that did not stay. */
+    void (*done)(void* ctx, int status, uint32_t transferred);
+    void*  done_ctx;
+} MsdJob;
+
+static void msd_job_step(void* ctx);
+
+/* Put the next transfer on the wire. The completion node goes with it only for
+ * a job somebody else is driving; a job its own caller is stepping has no use
+ * for the queue and does not touch it. */
+static int msd_job_submit(MsdJob* j, uint8_t dci, uint64_t phys, uint32_t len)
+{
+    j->dci = dci;
+    return xhci_ep_submit_async(j->u->ctrl, j->u->slot, dci, phys, len,
+                                j->hand_to_kcore ? &j->node : NULL);
+}
+
+static void msd_job_finish(MsdJob* j, int status)
+{
+    j->phase  = MSD_PHASE_DONE;
+    j->status = status;
+    __atomic_store_n(&j->finished, 1u, __ATOMIC_RELEASE);
+    if (j->done) {
+        j->done(j->done_ctx, status, j->transferred);
+    }
+}
+
+static void msd_job_begin(MsdJob* j)
+{
+    XhciMsdUnit* u = j->u;
+    MsdCbw* cbw = (MsdCbw*)u->cmd_virt;
+
+    j->tag = ++u->tag;
+
+    /* Where the answer goes and what it runs, set once, before anything can
+     * post it. The node is used only by a job somebody else is driving, but a
+     * half-filled one is not worth the risk of it ever being posted. */
+    j->node.run = msd_job_step;
+    j->node.ctx = j;
+
+    memset(cbw, 0, sizeof(*cbw));
+    cbw->signature   = CBW_SIGNATURE;
+    cbw->tag         = j->tag;
+    cbw->data_length = j->data_len;
+    cbw->flags       = j->data_in ? 0x80 : 0x00;
+    cbw->lun         = u->lun;
+    cbw->cb_length   = j->cdb_len;
+    memcpy(cbw->cb, j->cdb, j->cdb_len);
+
+    /* Written down before it is asked for, for the same reason the endpoint
+     * registers its completion before the doorbell: the answer may arrive
+     * inside the submission, and a job that still says IDLE when its answer
+     * turns up is a job that will never be stepped. */
+    j->phase = MSD_PHASE_CBW;
+
+    if (msd_job_submit(j, u->slot->ep_bulk_out, u->cmd_phys,
+                       sizeof(MsdCbw)) != 0) {
+        msd_job_finish(j, -1);
+    }
+}
+
+/*
+ * One answered transfer, and what follows from it.
+ *
+ * Runs either on the caller's own stack (a job it is driving) or on a K-Core
+ * out of the guide loop. Never inside the event drain, which is why the
+ * recovery below is allowed to be made of control transfers: clearing a halted
+ * pipe means speaking to the device, and speaking to the device is exactly what
+ * the drain cannot do. The hub service in the same loop is made of the same
+ * stuff for the same reason.
+ */
+static void msd_job_step(void* ctx)
+{
+    MsdJob* j = (MsdJob*)ctx;
+    XhciMsdUnit* u = j->u;
+
+    /* Asked before the answer is taken, not after. A job that is over has no
+     * transfer of its own outstanding, and the endpoint it last used belongs
+     * to the next command now — taking a result here would consume somebody
+     * else's answer and leave them waiting for one that had already come. */
+    if (j->phase == MSD_PHASE_IDLE || j->phase == MSD_PHASE_DONE) {
+        return;
+    }
+
+    uint8_t  code     = 0;
+    uint32_t residual = 0;
+    if (!xhci_ep_take_result(u->slot, j->dci, &code, &residual)) {
+        return;                     /* not answered yet */
+    }
+
+    bool ok    = (code == TRB_COMPLETION_SUCCESS);
+    bool short_ok = ok || (code == TRB_COMPLETION_SHORT_PKT);
+
+    switch (j->phase) {
+
+    case MSD_PHASE_CBW:
+        if (!ok) {
+            /* The device would not even take the command. A halted pipe is
+             * cleared so the next command has somewhere to go; there is
+             * nothing to ask about, because nothing was asked. */
+            if (code == TRB_COMPLETION_STALL) {
+                msd_clear_halt(u, u->slot->ep_bulk_out);
+            }
+            msd_job_finish(j, -1);
+            return;
+        }
+
+        if (j->data_len > 0) {
+            j->phase = MSD_PHASE_DATA;
+            uint8_t dci = j->data_in ? u->slot->ep_bulk_in : u->slot->ep_bulk_out;
+            if (msd_job_submit(j, dci, j->data_phys, j->data_len) != 0) {
+                msd_job_finish(j, -1);
+            }
+            return;
+        }
+        /* No data stage: straight to the status wrapper. */
+        j->phase = MSD_PHASE_CSW;
+        memset((uint8_t*)u->cmd_virt + 64, 0, sizeof(MsdCsw));
+        if (msd_job_submit(j, u->slot->ep_bulk_in, u->cmd_phys + 64,
+                           sizeof(MsdCsw)) != 0) {
+            msd_job_finish(j, -1);
+        }
+        return;
+
+    case MSD_PHASE_DATA:
+        if (code == TRB_COMPLETION_STALL) {
+            /* A stalled data stage is not the end of the exchange: the device
+             * still owes a status wrapper, and reading it is how the driver
+             * learns what went wrong. Clear the pipe and carry on to it. */
+            msd_clear_halt(u, j->dci);
+        } else if (!short_ok) {
+            msd_bot_reset(u);
+            msd_job_finish(j, -1);
+            return;
+        } else {
+            j->transferred = (residual <= j->data_len)
+                           ? (j->data_len - residual) : 0;
+        }
+
+        j->phase = MSD_PHASE_CSW;
+        memset((uint8_t*)u->cmd_virt + 64, 0, sizeof(MsdCsw));
+        if (msd_job_submit(j, u->slot->ep_bulk_in, u->cmd_phys + 64,
+                           sizeof(MsdCsw)) != 0) {
+            msd_job_finish(j, -1);
+        }
+        return;
+
+    case MSD_PHASE_CSW: {
+        if (code == TRB_COMPLETION_STALL && j->csw_tries < MSD_CSW_TRIES) {
+            j->csw_tries++;
+            msd_clear_halt(u, u->slot->ep_bulk_in);
+            memset((uint8_t*)u->cmd_virt + 64, 0, sizeof(MsdCsw));
+            if (msd_job_submit(j, u->slot->ep_bulk_in, u->cmd_phys + 64,
+                               sizeof(MsdCsw)) != 0) {
+                msd_job_finish(j, -1);
+            }
+            return;
+        }
+        if (!short_ok) {
+            msd_bot_reset(u);
+            msd_job_finish(j, -1);
+            return;
+        }
+
+        const MsdCsw* csw = (const MsdCsw*)((uint8_t*)u->cmd_virt + 64);
+        if (csw->signature != CSW_SIGNATURE || csw->tag != j->tag) {
+            kprintf("[USB disk %u] status wrapper does not match the command "
+                    "(signature 0x%08x, tag %u for %u)\n",
+                    u->number, csw->signature, csw->tag, j->tag);
+            msd_bot_reset(u);
+            msd_job_finish(j, -1);
+            return;
+        }
+        if (csw->status == CSW_PHASE_ERROR) {
+            msd_bot_reset(u);
+            msd_job_finish(j, -1);
+            return;
+        }
+
+        msd_job_finish(j, (csw->status == CSW_PASSED) ? 0 : 1);
+        return;
+    }
+
+    default:
+        return;
+    }
+}
+
+/*
+ * Drive a job to its end on this stack, for a caller that wants the answer
+ * before it goes on.
+ *
+ * The ring is drained here rather than waited on, because the same call has to
+ * work before interrupts are routed, with them masked, and on a controller with
+ * none — and because during boot there is no guide loop yet to turn the handle.
+ * What it does NOT do is hold a lock while it does so.
+ */
+static void msd_job_run(MsdJob* j)
+{
+    msd_job_begin(j);
+
+    uint64_t deadline   = rdtsc() + cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS);
+    uint8_t  seen_phase = j->phase;
+
+    while (!__atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
+        xhci_process_events();
+        msd_job_step(j);
+
+        if (__atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+
+        /* A stage that finished is progress, and progress starts the clock
+         * again — otherwise a command whose three stages are each answered
+         * slowly is cut off for being long rather than for being stuck. */
+        if (j->phase != seen_phase) {
+            seen_phase = j->phase;
+            deadline   = rdtsc() + cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS);
+        }
+        /*
+         * The one deadline in the exchange, and it is on the exchange rather
+         * than on each of its three transfers: what a caller needs to know is
+         * whether the device answered, and the device stops being answerable
+         * as a whole, not a stage at a time.
+         */
+        if ((int64_t)(rdtsc() - deadline) >= 0) {
+            kprintf("[USB disk %u] no answer in %u ms at stage %u — resetting "
+                    "the transport\n", j->u->number, MSD_XFER_TIMEOUT_MS,
+                    j->phase);
+            msd_bot_reset(j->u);
+            msd_job_finish(j, -1);
+            break;
+        }
+        cpu_pause();
+    }
+}
+
+/*
  * Returns 0 when the device carried the command out, positive when it refused
  * it (a SCSI failure the caller may want to ask about), negative when the
  * conversation itself broke down.
  *
- * The caller holds the unit lock; every buffer used here belongs to the unit.
+ * The caller holds the unit's turn; every buffer used here belongs to the unit.
  */
 static int msd_command(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len,
                        uint64_t data_phys, uint32_t data_len, bool data_in,
@@ -379,93 +682,36 @@ static int msd_command(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len,
         return -1;
     }
 
-    MsdCbw* cbw = (MsdCbw*)u->cmd_virt;
-    MsdCsw* csw = (MsdCsw*)((uint8_t*)u->cmd_virt + 64);
-    uint64_t cbw_phys = u->cmd_phys;
-    uint64_t csw_phys = u->cmd_phys + 64;
+    /* The answer to this cannot arrive until this call returns — the drain
+     * that would carry it is below this frame on the same stack. Asked before
+     * anything is put on the wire, so nothing is left in flight. */
+    if (xhci_drain_is_mine(u->ctrl)) {
+        kprintf("[USB disk %u] a command was waited for from inside the event "
+                "drain — its answer cannot arrive until this returns\n",
+                u->number);
+        return -1;
+    }
 
-    uint32_t tag = ++u->tag;
-
-    memset(cbw, 0, sizeof(*cbw));
-    cbw->signature   = CBW_SIGNATURE;
-    cbw->tag         = tag;
-    cbw->data_length = data_len;
-    cbw->flags       = data_in ? 0x80 : 0x00;
-    cbw->lun         = u->lun;
-    cbw->cb_length   = cdb_len;
-    memcpy(cbw->cb, cdb, cdb_len);
+    MsdJob job;
+    memset(&job, 0, sizeof(job));
+    job.u         = u;
+    job.cdb_len   = cdb_len;
+    job.data_phys = data_phys;
+    job.data_len  = data_len;
+    job.data_in   = data_in;
+    memcpy(job.cdb, cdb, cdb_len);
 
     if (out_transferred) {
         *out_transferred = 0;
     }
 
-    /* ── command ── */
-    uint32_t done = 0;
-    int code = xhci_ep_transfer(u->ctrl, u->slot, u->slot->ep_bulk_out,
-                                cbw_phys, sizeof(MsdCbw),
-                                MSD_XFER_TIMEOUT_MS, &done);
-    if (code != TRB_COMPLETION_SUCCESS) {
-        if (code == TRB_COMPLETION_STALL) {
-            msd_clear_halt(u, u->slot->ep_bulk_out);
-        }
-        return -1;
-    }
+    msd_job_run(&job);
 
-    /* ── data, if the command has any ── */
-    if (data_len > 0) {
-        uint8_t dci = data_in ? u->slot->ep_bulk_in : u->slot->ep_bulk_out;
-        code = xhci_ep_transfer(u->ctrl, u->slot, dci, data_phys, data_len,
-                                MSD_XFER_TIMEOUT_MS, &done);
-
-        if (code == TRB_COMPLETION_STALL) {
-            /* A stalled data stage is not the end of the exchange: the device
-             * still owes a status wrapper, and reading it is how the driver
-             * learns what went wrong. Clear the pipe and carry on to it. */
-            msd_clear_halt(u, dci);
-        } else if (code != TRB_COMPLETION_SUCCESS &&
-                   code != TRB_COMPLETION_SHORT_PKT) {
-            msd_bot_reset(u);
-            return -1;
-        }
-        if (out_transferred) {
-            *out_transferred = done;
-        }
+    if (out_transferred) {
+        *out_transferred = job.transferred;
     }
-
-    /* ── status ── */
-    memset(csw, 0, sizeof(*csw));
-    code = xhci_ep_transfer(u->ctrl, u->slot, u->slot->ep_bulk_in,
-                            csw_phys, sizeof(MsdCsw),
-                            MSD_XFER_TIMEOUT_MS, &done);
-    if (code == TRB_COMPLETION_STALL) {
-        /* One retry: the class allows a device to stall the status stage once,
-         * and expects the host to clear it and ask again. */
-        msd_clear_halt(u, u->slot->ep_bulk_in);
-        code = xhci_ep_transfer(u->ctrl, u->slot, u->slot->ep_bulk_in,
-                                csw_phys, sizeof(MsdCsw),
-                                MSD_XFER_TIMEOUT_MS, &done);
-    }
-    if (code != TRB_COMPLETION_SUCCESS && code != TRB_COMPLETION_SHORT_PKT) {
-        msd_bot_reset(u);
-        return -1;
-    }
-
-    if (csw->signature != CSW_SIGNATURE || csw->tag != tag) {
-        kprintf("[USB disk %u] status wrapper does not match the command "
-                "(signature 0x%08x, tag %u for %u)\n",
-                u->number, csw->signature, csw->tag, tag);
-        msd_bot_reset(u);
-        return -1;
-    }
-
-    if (csw->status == CSW_PHASE_ERROR) {
-        msd_bot_reset(u);
-        return -1;
-    }
-
-    return (csw->status == CSW_PASSED) ? 0 : 1;
+    return job.status;
 }
-
 /* Ask the device why it refused. Used for its own sake — the sense key is what
  * tells "no medium" apart from "still spinning up" apart from "broken". */
 static int msd_request_sense(XhciMsdUnit* u, uint8_t* out_key, uint8_t* out_asc)
