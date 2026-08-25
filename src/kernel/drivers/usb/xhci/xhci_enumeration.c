@@ -174,6 +174,139 @@ static int enum_begin_slot(xhci_controller_t* ctrl, struct xhci_device_slot* slo
     return 0;
 }
 
+/*
+ * Begin the conversation with a device whose turn has come.
+ *
+ * A root-port device starts with its port reset; a device found on a hub has
+ * already been reset by that hub and joins at Enable Slot. The clock the
+ * watchdog runs on starts here rather than when the device was found, so a
+ * device that waited its turn is not given up on for the waiting.
+ */
+static int enum_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    slot->timestamp_started = rdtsc();
+
+    if (slot->depth != 0) {
+        return enum_begin_slot(ctrl, slot) == 0 ? 0 : -4;
+    }
+
+    /* Say what is being waited for BEFORE doing the thing that ends the wait.
+     *
+     * Asserting the reset is a store to a device register, and the device is
+     * entitled to finish the reset and raise its interrupt inside that store.
+     * It does: under emulation the port reset completes synchronously, so the
+     * port-status change handler ran on this very core with the state still
+     * reading "claiming", found nothing waiting on a reset, and returned. The
+     * reset then completed for a slot that spent the rest of the boot waiting
+     * for an event that had already been and gone. */
+    __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_WAIT_PORT_RESET,
+                     __ATOMIC_RELEASE);
+
+    int reset = xhci_port_begin_reset(ctrl, slot->port_num);
+    if (reset < 0) {
+        debug_printf("[xHCI ENUM] Port %u could not be reset (%d)\n",
+                     slot->port_num, reset);
+        xhci_slot_retire(ctrl, slot);
+        return -6;
+    }
+
+    /* A port that needed no reset will never announce one, so this is the only
+     * place that can carry it forward — but only if nothing already has. */
+    if (reset == 1 &&
+        __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == ENUM_STATE_WAIT_PORT_RESET) {
+        return enum_begin_slot(ctrl, slot) == 0 ? 0 : -7;
+    }
+    return 0;
+}
+
+/*
+ * One at a time.
+ *
+ * Between its port reset and the address that ends it, a device answers to
+ * address zero. Two devices doing that at once is a bus on which the host
+ * cannot tell which one replied, and the specification says so plainly
+ * (USB 2.0 §9.1.1.3). The xHCI command ring then enforces it the hard way: it
+ * executes commands strictly in order, so one Address Device that will not
+ * complete blocks every command queued behind it — including the ones that
+ * would have brought up the devices that were fine.
+ *
+ * Measured on two different machines, five devices at boot: five resets
+ * together, five Address Devices back to back, three executed, and the
+ * controller sat on the fourth for twenty seconds with everything else stuck
+ * behind it. Which devices won was a coin toss, which is what "it boots about
+ * half the time" is made of. Under emulation the whole exchange completes
+ * inside the register write that starts it, so five at once and one at a time
+ * are the same thing and always were.
+ */
+static int enum_admit(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+{
+    bool mine;
+
+    spin_lock(&device_slots_lock);
+    mine = (ctrl->enum_active == NULL);
+    if (mine) {
+        ctrl->enum_active = slot;
+    }
+    spin_unlock(&device_slots_lock);
+
+    if (!mine) {
+        __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_QUEUED,
+                         __ATOMIC_RELEASE);
+        return 0;
+    }
+    return enum_start(ctrl, slot);
+}
+
+/*
+ * Hand the bus to whoever is next.
+ *
+ * Written so that it cannot leak the turn: rather than trusting every path
+ * that finishes with a device to say so, this asks whether the device holding
+ * the turn is still being enumerated, and takes it back if it is not. Called
+ * from the settle loop and from the tick, so a turn dropped by any route is
+ * picked up on the next pass rather than stopping the bus for good.
+ */
+void xhci_enum_pump(xhci_controller_t* ctrl)
+{
+    if (!ctrl || !ctrl->initialized) {
+        return;
+    }
+
+    struct xhci_device_slot* next = NULL;
+
+    spin_lock(&device_slots_lock);
+
+    struct xhci_device_slot* active = ctrl->enum_active;
+    if (active) {
+        uint8_t state = __atomic_load_n(&active->state, __ATOMIC_ACQUIRE);
+        bool still_going = (state != ENUM_STATE_IDLE &&
+                            state != ENUM_STATE_QUEUED &&
+                            state != ENUM_STATE_CONFIGURED &&
+                            state != ENUM_STATE_RETIRING);
+        if (still_going) {
+            spin_unlock(&device_slots_lock);
+            return;                     /* its turn is not over */
+        }
+        ctrl->enum_active = NULL;
+    }
+
+    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
+        if (device_slots[i].ctrl == ctrl &&
+            __atomic_load_n(&device_slots[i].state, __ATOMIC_ACQUIRE) ==
+                ENUM_STATE_QUEUED) {
+            next = &device_slots[i];
+            ctrl->enum_active = next;
+            break;
+        }
+    }
+
+    spin_unlock(&device_slots_lock);
+
+    if (next) {
+        enum_start(ctrl, next);
+    }
+}
+
 int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     if (!ctrl || !ctrl->running) {
         debug_printf("[xHCI ENUM] Controller not ready\n");
@@ -237,51 +370,16 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
     slot->tt_think_time = 0;
     slot->multi_tt = false;
     memset(&slot->device_desc, 0, sizeof(slot->device_desc));
+    /* Stamped from the moment it is claimed, so a slot that never gets as far
+     * as starting is still something the watchdog can reap. enum_start stamps
+     * it again when the device's turn actually comes, so a device is never
+     * given up on for the time it spent waiting. */
     slot->timestamp_started = rdtsc();
+    slot->depth = 0;
 
     debug_printf("[xHCI ENUM] Starting enumeration for port %u\n", port);
 
-    /* Say what is being waited for BEFORE doing the thing that ends the wait.
-     *
-     * Asserting the reset is a store to a device register, and the device is
-     * entitled to finish the reset and raise its interrupt inside that store.
-     * It does: under emulation the port reset completes synchronously, so the
-     * port-status change handler ran on this very core with the state still
-     * reading "claiming", found nothing waiting on a reset, and returned. The
-     * reset then completed for a slot that spent the rest of the boot waiting
-     * for an event that had already been and gone — two seconds later the
-     * watchdog said so, which is how this was found at all.
-     *
-     * Real hardware takes tens of milliseconds over the same reset, which
-     * makes the window smaller and the bug no less real. Publishing the state
-     * first closes it: the release store cannot be moved after the register
-     * write, so any handler that runs sees the wait it is meant to satisfy. */
-    __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_WAIT_PORT_RESET,
-                     __ATOMIC_RELEASE);
-
-    /* Ask the port to reset and step away. On a USB 3 port that trained itself
-     * there is nothing to do and this returns 1; otherwise the reset is now in
-     * flight and the port will say when it is finished. Either way this
-     * function does not spend the tens of milliseconds a reset takes — it is
-     * reached from the interrupt handler, and every other interrupt on this
-     * core would have waited behind it. */
-    int reset = xhci_port_begin_reset(ctrl, port);
-
-    if (reset < 0) {
-        debug_printf("[xHCI ENUM] Port %u could not be reset (%d)\n", port, reset);
-        slot->state = ENUM_STATE_IDLE;
-        slot->port_num = 0;
-        return -6;
-    }
-
-    /* A port that needed no reset will never announce one, so this is the only
-     * place that can carry it forward — but only if nothing already has. */
-    if (reset == 1 &&
-        __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == ENUM_STATE_WAIT_PORT_RESET) {
-        return enum_begin_slot(ctrl, slot) == 0 ? 0 : -7;
-    }
-
-    return 0;
+    return enum_admit(ctrl, slot);
 }
 
 xhci_device_slot_t* xhci_get_device_slot_by_id(xhci_controller_t* ctrl,
@@ -566,10 +664,7 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
                  "depth %u\n", hub->slot_id, hub_port,
                  slot->route_string, slot->depth);
 
-    if (enum_begin_slot(ctrl, slot) != 0) {
-        return -4;
-    }
-    return 0;
+    return enum_admit(ctrl, slot);
 }
 
 void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port)
@@ -860,6 +955,7 @@ const char* xhci_enum_state_name(uint8_t state) {
     switch (state) {
         case ENUM_STATE_IDLE:                   return "idle";
         case ENUM_STATE_CLAIMING:               return "claiming a slot";
+        case ENUM_STATE_QUEUED:                 return "waiting its turn on the bus";
         case ENUM_STATE_WAIT_PORT_RESET:        return "waiting for the port reset";
         case ENUM_STATE_WAIT_ENABLE_SLOT:       return "waiting for Enable Slot";
         case ENUM_STATE_WAIT_ADDRESS_DEVICE:    return "waiting for Address Device";
@@ -1128,6 +1224,7 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
          */
         xhci_check_command_timeouts(ctrl);
         xhci_enum_watchdog(ctrl);
+        xhci_enum_pump(ctrl);
 
         /* This is a context that may wait, so anything that departed while the
          * bus was settling gets taken down here rather than waiting for a core
@@ -1265,6 +1362,9 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
         if (state == ENUM_STATE_IDLE || state == ENUM_STATE_CONFIGURED ||
             state == ENUM_STATE_RETIRING) {
             continue;   /* nothing started, finished, or already leaving */
+        }
+        if (state == ENUM_STATE_QUEUED) {
+            continue;   /* waiting its turn is not being stuck */
         }
         if (slot->timestamp_started == 0) {
             continue;

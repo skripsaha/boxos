@@ -182,6 +182,16 @@ typedef struct {
      * is the difference between "somebody is reading the ring" and "nobody
      * is". */
     volatile uint32_t drain_owner;
+
+    /*
+     * The one device this controller is bringing up right now, or NULL.
+     *
+     * Enumeration is serialised per controller because the bus requires it:
+     * a device between its port reset and its address answers to address zero,
+     * and only one may be doing that at a time. Everything else found waits in
+     * ENUM_STATE_QUEUED for its turn.
+     */
+    xhci_device_slot_t* enum_active;
 } xhci_controller_t;
 
 int xhci_init(void);
