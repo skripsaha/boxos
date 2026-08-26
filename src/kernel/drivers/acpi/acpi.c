@@ -409,9 +409,44 @@ static void acpi_sci_handler(void) {
      * for good. Only PM1a was ever read. */
     uint16_t sts_a = g_pm1a_event.status ? inw(g_pm1a_event.status) : 0;
     uint16_t sts_b = g_pm1b_event.status ? inw(g_pm1b_event.status) : 0;
-    uint16_t sts   = (uint16_t)(sts_a | sts_b);
 
     if (g_pm1a_event.status == 0 && g_pm1b_event.status == 0) goto eoi;
+
+    /*
+     * ‼ AN EVENT IS A STATUS BIT **AND** ITS ENABLE BIT (ACPI 6.5 §4.8.3.1.1)
+     *
+     * The hardware raises status bits whether or not the matching event is
+     * enabled — PWRBTN_STS, RTC_STS and WAK_STS all latch on their own — so a
+     * status word on its own says what the chipset has SEEN, not what it is
+     * asking this kernel to act on. The GPE walk further down has always got
+     * this right (`fired = s & e`); this half took the raw word.
+     *
+     * What that cost, on a real board: the machine ran fine for as long as no
+     * ACPI event happened at all, and the FIRST SCI of the session — raised by
+     * the chipset when a flash drive was pulled out of a USB port — made this
+     * handler read PM1, find PWRBTN_STS standing, conclude the power button
+     * had been pressed with nobody listening, and switch the machine off.
+     * Instantly, mid-session, with no warning. Nobody had touched the button.
+     *
+     * A port that is not there answers `inw` with 0xFFFF, which is every bit
+     * set — including the power button's. That is not an event either, and it
+     * is now told apart from one instead of being obeyed.
+     */
+    if (sts_a == 0xFFFF && sts_b == 0xFFFF) {
+        kprintf("[ACPI] both PM1 status ports read 0xFFFF — that is a port "
+                "answering nothing, not every event at once; ignoring\n");
+        goto eoi;
+    }
+
+    uint16_t en_a = g_pm1a_event.enable ? inw(g_pm1a_event.enable) : 0;
+    uint16_t en_b = g_pm1b_event.enable ? inw(g_pm1b_event.enable) : 0;
+    if (en_a == 0xFFFF) en_a = 0;
+    if (en_b == 0xFFFF) en_b = 0;
+
+    /* Decisions are made on what is enabled; the CLEARING below still writes
+     * the raw word back, because a latched bit nobody acknowledges holds a
+     * level-triggered SCI asserted for good whether it was enabled or not. */
+    uint16_t sts = (uint16_t)((sts_a & en_a) | (sts_b & en_b));
 
     /* Every PM1 event class fires both a debug line (keeps the boot log
      * useful) and a Touch publish (lets every userspace listener that
@@ -423,7 +458,12 @@ static void acpi_sci_handler(void) {
      * context where kmalloc + process_snapshot_pids + Touch claim
      * table lookup are safe. */
     if (sts & PM1_STS_PWRBTN) {
-        debug_printf("[ACPI] power button event\n");
+        /* Said out loud, not with debug_printf: the next thing this does is
+         * turn the machine off, and the one line explaining why must survive
+         * into a shipped build. */
+        kprintf("[ACPI] PM1 says the power button was pressed "
+                "(PM1a sts 0x%04x en 0x%04x, PM1b sts 0x%04x en 0x%04x)\n",
+                sts_a, en_a, sts_b, en_b);
         acpi_queue_touch_irq("acpi:power-button", sts);
         /* Answered where waiting is allowed: deciding what a press means ends
          * either in a Touch delivery or in the whole shutdown sequence, and

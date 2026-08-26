@@ -873,6 +873,42 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     void *code_virt = vmm_phys_to_virt((uintptr_t)code_phys);
     memcpy(code_virt, binary_data, size);
 
+    /*
+     * ‼ THE LAST PLACE THAT CAN TELL A PROGRAM FROM A PAGE OF ZEROS
+     *
+     * Every caller is supposed to have read the whole image before getting
+     * here, and each of them now checks. This is the check that does not
+     * depend on any of them being right, because the cost of being wrong is
+     * paid in a way that looks like something else entirely:
+     *
+     *   0x00 0x00  is  add [rax], al
+     *
+     * so a process handed an image of zeros does not fail to start. It starts,
+     * executes the zeros, writes to whatever address RAX holds — which at
+     * entry is zero — and dies with a user-mode page fault at 0x0 with every
+     * register clear. That fault names the process, not the medium that would
+     * not read, and says nothing at all about why.
+     *
+     * A real image begins with something: 0x7F 'E' 'L' 'F', or the first
+     * instruction of a flat binary. Sixteen zero bytes at the front is not a
+     * program under any of those.
+     */
+    {
+        const uint8_t *head = (const uint8_t *)code_virt;
+        size_t look = size < 16 ? size : 16;
+        bool anything = false;
+        for (size_t i = 0; i < look; i++) {
+            if (head[i]) { anything = true; break; }
+        }
+        if (!anything) {
+            kprintf("[PROCESS] refusing to start an image whose first %zu "
+                    "bytes are all zero — this is a read that did not happen, "
+                    "not a program\n", look);
+            pmm_free(code_phys, page_count);
+            return -1;
+        }
+    }
+
     uintptr_t entry_point = VMM_CABIN_CODE_START;
     int result = vmm_map_code_region(proc->cabin->vmm, (uintptr_t)code_phys,
                                      page_count * VMM_PAGE_SIZE, &entry_point);

@@ -1441,8 +1441,16 @@ error_t tagfs_init(void) {
         g_state.registry = NULL;
         return ERR_TAGFS_REGISTRY_FULL;
     }
+    /* Same rule as the bitmap below: a registry that would not read is not an
+     * empty registry. Every tag id on this volume is defined there, so a mount
+     * that continues without it renames nothing and mislabels everything. */
     if (tag_registry_load(g_state.registry, data_block_of(g_state.layout.tag_registry_block)) != OK) {
-        debug_printf("[TagFS] Warning: tag_registry_load failed (empty registry)\n");
+        kprintf("[TagFS] this volume's tag registry would not read — not "
+                "mounting it\n");
+        tag_registry_destroy(g_state.registry);
+        kfree(g_state.registry);
+        g_state.registry = NULL;
+        return ERR_TAGFS_CORRUPTED;
     }
 
     // --- File Table ---
@@ -1500,20 +1508,47 @@ error_t tagfs_init(void) {
     uint32_t bm_sector_count = (g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS);
     uint32_t bm_buf_size = bm_sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
-    if (bm_buf)
+    if (!bm_buf)
     {
-        if (disk_read_sectors((uint64_t)((uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS), (uint16_t)bm_sector_count, bm_buf) == 0)
-        {
-            uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
-            memcpy(g_state.block_bitmap.bitmap, bm_buf, copy_bytes);
-            debug_printf("[TagFS] Block bitmap loaded from disk\n");
-        }
-        else
-        {
-            debug_printf("[TagFS] Warning: failed to read block bitmap from disk\n");
-        }
-        kfree(bm_buf);
+        kprintf("[TagFS] no memory to read this volume's block bitmap\n");
+        return ERR_NO_MEMORY;
     }
+
+    /*
+     * ‼ A bitmap that would not read is NOT an empty bitmap.
+     *
+     * This used to warn and carry on with the all-zero buffer it had just
+     * allocated — and an all-zero bitmap says every block of the volume is
+     * free. The next allocation then hands out block 0, which is the tag
+     * registry, then the file table, then the metadata pool, and writes over
+     * all three. On the following boot the pool reads back as somebody else's
+     * bytes, the mount decides the volume is empty, and every file on it is
+     * gone.
+     *
+     * Measured on the board: a flash drive whose controller dropped a command
+     * mid-boot came up once with everything working, and the boot after that
+     * had no files on it at all. Nothing was said either time, because the
+     * warning was a debug_printf and those compile to nothing in a shipped
+     * build.
+     *
+     * So: a volume whose bitmap cannot be read is a volume this kernel will
+     * not mount. Refusing costs the machine its filesystem for that boot;
+     * carrying on costs it the filesystem permanently.
+     */
+    if (disk_read_sectors((uint64_t)((uint64_t)g_state.layout.block_bitmap_block *
+                                     TAGFS_BLOCK_SECTORS),
+                          (uint16_t)bm_sector_count, bm_buf) != 0)
+    {
+        kprintf("[TagFS] this volume's block bitmap would not read — not "
+                "mounting it, because a bitmap that is missing reads as a "
+                "volume with nothing on it and the next write would take it\n");
+        kfree(bm_buf);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
+    memcpy(g_state.block_bitmap.bitmap, bm_buf, copy_bytes);
+    kfree(bm_buf);
 
     free_list_build();
 
