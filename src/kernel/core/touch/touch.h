@@ -135,12 +135,19 @@ typedef struct TouchBucket {
     uint8_t          flags;        /* bit 0: registered (policy/cap set) */
     uint16_t         tag_id;       /* mirror for diagnostics; == leaf index */
     uint16_t         latched_plen; /* LATCHED on-claim sync: byte count, 0 = no active latch */
+    /* Kernel-side listeners on this tag (TouchWatch below). Counted
+     * separately from sub_count because they are a different kind of
+     * delivery — a call, not a Result — and the publish gate has to see
+     * either. Lives in the padding the 8-byte-aligned pointer below left
+     * behind, so the bucket does not grow for it. */
+    volatile uint32_t watch_count;
     /* LATCHED on-claim sync: payload of the most recent first-of-cycle
      * publish, valid while latched_plen > 0. Heap-allocated (kmalloc) on
      * first publish, kfree'd when any subscriber acks. Pointer fits in
      * the bucket's remaining headroom — payload bytes themselves live
      * outside to keep TouchBucket within its cache-line budget. */
     uint8_t         *latched_payload;
+    struct TouchWatch *watch_head;
 } TouchBucket;
 _Static_assert(sizeof(TouchBucket) <= 64, "TouchBucket must fit one cache line pair");
 
@@ -255,6 +262,62 @@ void   TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
  * (PS/2 ~30 Hz, xHCI ~Hz, ACPI rare-event) because irq_defer drains the
  * ring in microseconds while wraps take seconds. Snapshot only. */
 uint64_t TouchPublishIrqWraps(void);
+
+/*
+ * TouchWatch — the kernel's own ear.
+ *
+ * Touch could always be PUBLISHED by the kernel, but only LISTENED TO by a
+ * process: every subscription path ends in a Result pushed into a cabin, a
+ * REACT manifest, or a user IRQ handler, and all three need a process_t. The
+ * kernel had no way to say "tell me when this tag is published", and paid for
+ * the gap three separate times — the enumeration state machine, storage
+ * completion, and the volume-arrival path — each time by building a private
+ * one-off instead.
+ *
+ * What was missing was never delivery. Delivery the kernel already has
+ * (irq_defer for IRQ context, never-drop StorageCompletion for point-to-point
+ * hand-back). What was missing is SUBSCRIPTION BY TAG, and that is all this
+ * adds: a callback on a bucket, alongside the process subscribers, seen by the
+ * same publish.
+ *
+ * A watch is not a subscription in the process sense and must not be used as
+ * one. It is a multicast announcement, so it can have any number of listeners
+ * and no listener is promised exclusivity. For a completion that exactly one
+ * party is waiting for and whose loss hangs the waiter, use the storage
+ * completion path instead: Touch is the room's public address system, not a
+ * waiter bringing an order to one table.
+ *
+ * CONTRACT FOR THE CALLBACK:
+ *   - Runs on the PUBLISHER's stack, on whichever core published, with no
+ *     touch lock held. It may publish (bounded by the same kernel-stack
+ *     headroom guard that bounds REACT re-entry) and it may call TouchWatch
+ *     Set/Clear for OTHER tags.
+ *   - It may run with interrupts disabled and with the publisher's own locks
+ *     held, because a publisher is free to be inside either. Keep it short,
+ *     take no lock that a slower path holds across I/O, and never block.
+ *     Work that cannot honour that belongs on a K-Core: record the event and
+ *     let the guide loop pick it up.
+ *   - It must not clear its OWN watch from inside itself. Clearing waits for
+ *     in-flight deliveries to finish, and one of them would be this call.
+ */
+typedef void (*TouchWatchFn)(TouchTag tag_id, const void *payload,
+                             uint32_t plen, uint32_t source_pid, void *ctx);
+
+typedef struct TouchWatch TouchWatch;
+
+/* Listen for `tag_id` until cleared. Returns a handle, or NULL if the bucket
+ * or the watch could not be allocated. Safe to call before any process
+ * exists — this is the point, since the kernel listens during bring-up. */
+TouchWatch *TouchWatchSet(TouchTag tag_id, TouchWatchFn fn, void *ctx);
+
+/* Stop listening and free the handle. Unlinks first, so no publish started
+ * after this point can see the watch; a publish already in flight holds a
+ * reference and frees the watch when it finishes. Must not be called from
+ * inside that watch's own callback. */
+void        TouchWatchClear(TouchWatch *w);
+
+/* Diagnostic: how many kernel ears are open on this tag. */
+uint32_t    TouchWatchCount(TouchTag tag_id);
 
 /* Push a Result to one specific subscriber. Used by REST mode. */
 void   TouchRestDeliver(struct process_t *target, TouchTag tag_id,
