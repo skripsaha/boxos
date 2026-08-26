@@ -971,79 +971,94 @@ static TestResult test_integrity_persist_reload(void) {
     return TEST_PASS;
 }
 
+/*
+ * Whether this build is allowed to write to the volume it is testing.
+ *
+ * A build switch rather than a runtime guess: "is this medium somebody's" is
+ * not a question a kernel can answer by looking at it, and guessing wrong in
+ * the permissive direction costs somebody their files.
+ */
+#ifdef CONFIG_VOLUME_TESTS
+static const bool g_volume_tests_allowed = true;
+#else
+static const bool g_volume_tests_allowed = false;
+#endif
+
 error_t TagFS_RunAllTests(TestStats* stats) {
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
+
+    uint32_t skipped_writers = 0;
     
     memset(stats, 0, sizeof(TestStats));
     stats->start_time = get_time_ms();
     
     // Define all tests
     static TestCase core_tests[] = {
-        {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-        {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
-        {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
-        {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
+        {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
     
     static TestCase compression_tests[] = {
-        {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, ""},
-        {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, ""},
-        {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, ""},
-        {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, ""},
-        {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, ""},
-        {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, ""},
+        {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
     };
 
     static TestCase journal_tests[] = {
-        {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, ""},
-        {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, ""},
-        {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, ""},
+        {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
     };
 
     static TestCase snapshot_tests[] = {
-        {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, ""},
-        {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, ""},
+        {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
     };
 
     static TestCase stress_tests[] = {
-        {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, ""},
-        {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, ""},
-        {"stress_compression", test_stress_compression, TEST_SKIP, 0, ""},
-        {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, ""},
-        {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, ""},
+        {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
     static TestCase braid_tests[] = {
-        {"braid_init", test_braid_init, TEST_SKIP, 0, ""},
-        {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, ""},
-        {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, ""},
+        {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
     };
 
     static TestCase cow_tests[] = {
-        {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, ""},
-        {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
-        {"cow_redirect_reboot_survival", test_cow_redirect_reboot_survival, TEST_SKIP, 0, ""},
+        {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"cow_redirect_reboot_survival", test_cow_redirect_reboot_survival, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
     static TestCase boxhash_tests[] = {
-        {"boxhash_determinism", test_boxhash_determinism, TEST_SKIP, 0, ""},
-        {"boxhash_seed_separation", test_boxhash_seed_separation, TEST_SKIP, 0, ""},
-        {"boxhash_avalanche", test_boxhash_avalanche, TEST_SKIP, 0, ""},
-        {"boxhash_sha256_kat", test_boxhash_sha256_kat, TEST_SKIP, 0, ""},
-        {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, ""},
+        {"boxhash_determinism", test_boxhash_determinism, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"boxhash_seed_separation", test_boxhash_seed_separation, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"boxhash_avalanche", test_boxhash_avalanche, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"boxhash_sha256_kat", test_boxhash_sha256_kat, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"boxhash_sizes", test_boxhash_sizes, TEST_SKIP, 0, "", TEST_READS_ONLY},
     };
 
     static TestCase integrity_tests[] = {
-        {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, ""},
-        {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, ""},
+        {"integrity_detects_mismatch", test_integrity_detects_mismatch, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"integrity_persist_reload", test_integrity_persist_reload, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
     static TestCase dedup_tests[] = {
-        {"dedup_delete_unregisters", test_dedup_delete_unregisters, TEST_SKIP, 0, ""},
-        {"dedup_truncate_unregisters", test_dedup_truncate_unregisters, TEST_SKIP, 0, ""},
-        {"dedup_shared_block_survives_release", test_dedup_shared_block_survives_release, TEST_SKIP, 0, ""},
-        {"dedup_reregister_follows_content", test_dedup_reregister_follows_content, TEST_SKIP, 0, ""},
+        {"dedup_delete_unregisters", test_dedup_delete_unregisters, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"dedup_truncate_unregisters", test_dedup_truncate_unregisters, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"dedup_shared_block_survives_release", test_dedup_shared_block_survives_release, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+        {"dedup_reregister_follows_content", test_dedup_reregister_follows_content, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
     // Run all test suites
@@ -1071,9 +1086,32 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         for (uint32_t i = 0; i < suite_sizes[s]; i++) {
             TestCase* test = &all_suites[s][i];
             uint64_t start = get_time_ms();
-            
+
+            /*
+             * A test that writes goes nowhere near a volume somebody is using.
+             *
+             * The mounted volume belongs to whoever switched the machine on.
+             * These tests create files, allocate blocks and checkpoint the
+             * journal — on their medium, in their filesystem, on every boot.
+             * That was found by reading the owner's flash drive back: his own
+             * files with test_file, test_rw and stress_file_0..2 among them.
+             *
+             * Built with VOLUME_TESTS=on they run, which is what the test
+             * images in QEMU are for. Otherwise they are skipped and said to
+             * have been skipped — a test silently not run is worse than one
+             * that never existed.
+             */
+            if (test->reach == TEST_WRITES_TO_VOLUME && !g_volume_tests_allowed) {
+                test->result      = TEST_SKIP;
+                test->duration_ms = 0;
+                skipped_writers++;
+                stats->total_tests++;
+                stats->total_skipped++;
+                continue;
+            }
+
             debug_printf("[TEST] Running %s...\n", test->name);
-            
+
             test->result = test->func();
             test->duration_ms = get_time_ms() - start;
             
@@ -1093,6 +1131,15 @@ error_t TagFS_RunAllTests(TestStats* stats) {
     
     stats->end_time = get_time_ms();
     stats->total_duration_ms = stats->end_time - stats->start_time;
+
+    /* Said with kprintf, and said even when the number is zero on a build that
+     * allows them: "37 run, 35 passed" tells nobody which 37, and a suite that
+     * quietly shrank is how a test stops covering anything. */
+    if (skipped_writers > 0) {
+        kprintf("[TESTS] %u test(s) that write to the volume were not run — "
+                "this volume belongs to whoever is using this machine (build "
+                "with VOLUME_TESTS=on to run them)\n", skipped_writers);
+    }
     
     TagFS_PrintTestResults(stats);
     TagFS_DumpState();
@@ -1109,10 +1156,10 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
 
     if (strcmp(suite_name, "core") == 0) {
         static TestCase core_tests[] = {
-            {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-            {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
-            {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
-            {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
+            {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
         };
         uint32_t count = sizeof(core_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1127,12 +1174,12 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
         }
     } else if (strcmp(suite_name, "compression") == 0) {
         TestCase compression_tests[] = {
-            {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, ""},
-            {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, ""},
-            {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, ""},
-            {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, ""},
-            {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, ""},
-            {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, ""},
+            {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
         };
         uint32_t count = sizeof(compression_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1147,9 +1194,9 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
         }
     } else if (strcmp(suite_name, "journal") == 0) {
         TestCase journal_tests[] = {
-            {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, ""},
-            {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, ""},
-            {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, ""},
+            {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
         };
         uint32_t count = sizeof(journal_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1164,10 +1211,10 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
         }
     } else if (strcmp(suite_name, "snapshot") == 0) {
         TestCase snapshot_tests[] = {
-            {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, ""},
-            {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, ""},
-            {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, ""},
-            {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
+            {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
         };
         uint32_t count = sizeof(snapshot_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1182,9 +1229,9 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
         }
     } else if (strcmp(suite_name, "braid") == 0) {
         TestCase braid_tests[] = {
-            {"braid_init", test_braid_init, TEST_SKIP, 0, ""},
-            {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, ""},
-            {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, ""},
+            {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
         };
         uint32_t count = sizeof(braid_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1199,11 +1246,11 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
         }
     } else if (strcmp(suite_name, "stress") == 0) {
         TestCase stress_tests[] = {
-            {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, ""},
-            {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, ""},
-            {"stress_compression", test_stress_compression, TEST_SKIP, 0, ""},
-            {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, ""},
-            {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, ""},
+            {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+            {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
+            {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
         };
         uint32_t count = sizeof(stress_tests) / sizeof(TestCase);
         for (uint32_t i = 0; i < count; i++) {
@@ -1227,46 +1274,46 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
 }
 
 static TestCase g_core_tests_arr[] = {
-    {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-    {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
-    {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
-    {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
+    {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
 };
 
 static TestCase g_compression_tests_arr[] = {
-    {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, ""},
-    {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, ""},
-    {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, ""},
-    {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, ""},
-    {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, ""},
-    {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, ""},
+    {"bcdc_init", test_bcdc_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"bcdc_compress_decompress_random", test_bcdc_compress_decompress_random, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"bcdc_compress_decompress_zeros", test_bcdc_compress_decompress_zeros, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"bcdc_compress_decompress_pattern", test_bcdc_compress_decompress_pattern, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"bcdc_checksum_verification", test_bcdc_checksum_verification, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"bcdc_stats", test_bcdc_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
 };
 
 static TestCase g_journal_tests_arr[] = {
-    {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, ""},
-    {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, ""},
-    {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, ""},
+    {"diskbook_init", test_diskbook_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"diskbook_checkpoint", test_diskbook_checkpoint, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"diskbook_stats", test_diskbook_stats, TEST_SKIP, 0, "", TEST_READS_ONLY},
 };
 
 static TestCase g_snapshot_tests_arr[] = {
-    {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, ""},
-    {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, ""},
-    {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, ""},
-    {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, ""},
+    {"snapshot_create", test_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"snapshot_list", test_snapshot_list, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"cow_snapshot_create", test_cow_snapshot_create, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"cow_before_after_write", test_cow_before_after_write, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
 };
 
 static TestCase g_braid_tests_arr[] = {
-    {"braid_init", test_braid_init, TEST_SKIP, 0, ""},
-    {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, ""},
-    {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, ""},
+    {"braid_init", test_braid_init, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"braid_add_disk", test_braid_add_disk, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"braid_write_read", test_braid_write_read, TEST_SKIP, 0, "", TEST_READS_ONLY},
 };
 
 static TestCase g_stress_tests_arr[] = {
-    {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, ""},
-    {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, ""},
-    {"stress_compression", test_stress_compression, TEST_SKIP, 0, ""},
-    {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, ""},
-    {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, ""},
+    {"stress_many_files", test_stress_many_files, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"stress_large_file", test_stress_large_file, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
+    {"stress_compression", test_stress_compression, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"stress_braid_operations", test_stress_braid_operations, TEST_SKIP, 0, "", TEST_READS_ONLY},
+    {"stress_concurrent_operations", test_stress_concurrent_operations, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
 };
 
 static TestSuite g_core_suite = {"core", g_core_tests_arr, 4, 0, 0, 0};
