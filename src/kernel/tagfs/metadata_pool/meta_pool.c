@@ -184,7 +184,7 @@ static uint32_t pack_record(const TagFSMetadata* meta, uint8_t* buf) {
 
     if (meta->extent_count > 0 && meta->extents) {
         TagFSState* fs = tagfs_get_state();
-        uint32_t total_blocks = (fs && fs->initialized) ? fs->superblock.total_blocks : 0;
+        uint32_t total_blocks = (fs && fs->initialized) ? fs->layout.data_blocks : 0;
 
         for (uint16_t e = 0; e < meta->extent_count; e++) {
             uint32_t start = meta->extents[e].start_block;
@@ -287,7 +287,7 @@ static int unpack_record(const uint8_t* buf, TagFSMetadata* out) {
         pos += extent_bytes;
 
         TagFSState* fs = tagfs_get_state();
-        uint32_t total_blocks = (fs && fs->initialized) ? fs->superblock.total_blocks : 0;
+        uint32_t total_blocks = (fs && fs->initialized) ? fs->layout.data_blocks : 0;
 
         for (uint16_t e = 0; e < out->extent_count; e++) {
             uint32_t start = out->extents[e].start_block;

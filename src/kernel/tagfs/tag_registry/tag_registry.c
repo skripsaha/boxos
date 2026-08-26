@@ -418,7 +418,11 @@ int tag_registry_flush(TagRegistry* reg) {
     TagFSState* state = tagfs_get_state();
     if (!state) return -1;
 
-    uint32_t current_block = state->superblock.tag_registry_block;
+    /* The Deed states this in blocks of the whole volume; what the registry
+     * reads and writes is a block of the data run. tagfs.c owns that
+     * conversion — see data_block_of() there. */
+    uint32_t current_block = state->layout.tag_registry_block -
+                             state->layout.data_block;
 
     spin_lock(&reg->lock);
 

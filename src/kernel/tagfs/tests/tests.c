@@ -50,15 +50,26 @@ static TestResult test_tagfs_init(void) {
     return TEST_PASS;
 }
 
-static TestResult test_tagfs_superblock(void) {
+/* What the mounted volume says about itself — out of its Deed and its Ledger,
+ * which is where it now lives. There is no magic number to check here: a
+ * volume whose deed did not check out never became a mount at all. */
+static TestResult test_tagfs_deed(void) {
     TagFSState* fs = tagfs_get_state();
     TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-    
-    TEST_ASSERT_EQ(fs->superblock.magic, TAGFS_MAGIC, "Superblock magic mismatch");
-    TEST_ASSERT_EQ(fs->superblock.version, TAGFS_VERSION, "Superblock version mismatch");
-    TEST_ASSERT(fs->superblock.total_blocks > 0, "Total blocks should be > 0");
-    TEST_ASSERT(fs->superblock.free_blocks > 0, "Free blocks should be > 0");
-    
+
+    TEST_ASSERT(fs->layout.data_block > 0,
+                "The data run cannot begin at block 0 — the Deed is there");
+    TEST_ASSERT(fs->layout.data_blocks > 0, "A volume with no data run");
+    TEST_ASSERT(fs->layout.state_blocks >= VOLUME_LEDGER_COPIES,
+                "The layout leaves no room for both copies of the Ledger");
+    TEST_ASSERT_EQ(fs->geometry.block_bytes, TAGFS_BLOCK_SIZE,
+                   "Volume block size is not the one this kernel speaks");
+    TEST_ASSERT(fs->ledger.free_blocks > 0, "Free blocks should be > 0");
+
+    uint8_t named = 0;
+    for (int i = 0; i < 16; i++) named |= fs->uuid[i];
+    TEST_ASSERT(named != 0, "The volume has no identity");
+
     return TEST_PASS;
 }
 
@@ -218,9 +229,9 @@ static TestResult test_dedup_shared_block_survives_release(void) {
     TEST_ASSERT_OK(TagFS_DedupRegister(block, g_test_buffer, 0xBEEF), "register");
     TEST_ASSERT_OK(TagFS_DedupAddRef(block), "a second owner takes a reference");
 
-    uint32_t free_before = fs->superblock.free_blocks;
+    uint32_t free_before = fs->ledger.free_blocks;
     TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "first release");
-    TEST_ASSERT_EQ(fs->superblock.free_blocks, free_before,
+    TEST_ASSERT_EQ(fs->ledger.free_blocks, free_before,
                    "a shared block must NOT go back to the allocator");
 
     uint32_t found = 0;
@@ -229,7 +240,7 @@ static TestResult test_dedup_shared_block_survives_release(void) {
     TEST_ASSERT(is_dup && found == block, "its entry survives the first release");
 
     TEST_ASSERT_EQ(tagfs_free_blocks(block, 1), 0, "last release");
-    TEST_ASSERT_EQ(fs->superblock.free_blocks, free_before + 1,
+    TEST_ASSERT_EQ(fs->ledger.free_blocks, free_before + 1,
                    "the last release hands the block back");
 
     is_dup = false;
@@ -753,10 +764,10 @@ void TagFS_DumpState(void) {
     
     TagFSState* fs = tagfs_get_state();
     if (fs && fs->initialized) {
-        debug_printf("Total blocks:   %u\n", fs->superblock.total_blocks);
-        debug_printf("Free blocks:    %u\n", fs->superblock.free_blocks);
-        debug_printf("Total files:    %u\n", fs->superblock.total_files);
-        debug_printf("Total tags:     %u\n", fs->superblock.total_tags);
+        debug_printf("Total blocks:   %u\n", fs->layout.data_blocks);
+        debug_printf("Free blocks:    %u\n", fs->ledger.free_blocks);
+        debug_printf("Total files:    %u\n", fs->ledger.total_files);
+        debug_printf("Total tags:     %u\n", fs->ledger.total_tags);
     }
     
     BcdcStats bcdc_stats;
@@ -970,7 +981,7 @@ error_t TagFS_RunAllTests(TestStats* stats) {
     // Define all tests
     static TestCase core_tests[] = {
         {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-        {"tagfs_superblock", test_tagfs_superblock, TEST_SKIP, 0, ""},
+        {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
         {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
         {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
     };
@@ -1099,7 +1110,7 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
     if (strcmp(suite_name, "core") == 0) {
         static TestCase core_tests[] = {
             {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-            {"tagfs_superblock", test_tagfs_superblock, TEST_SKIP, 0, ""},
+            {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
             {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
             {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
         };
@@ -1217,7 +1228,7 @@ error_t TagFS_RunSuite(const char* suite_name, TestStats* stats) {
 
 static TestCase g_core_tests_arr[] = {
     {"tagfs_init", test_tagfs_init, TEST_SKIP, 0, ""},
-    {"tagfs_superblock", test_tagfs_superblock, TEST_SKIP, 0, ""},
+    {"tagfs_deed", test_tagfs_deed, TEST_SKIP, 0, ""},
     {"tagfs_create_file", test_tagfs_create_file, TEST_SKIP, 0, ""},
     {"tagfs_write_read", test_tagfs_write_read, TEST_SKIP, 0, ""},
 };

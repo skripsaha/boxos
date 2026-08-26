@@ -155,7 +155,7 @@ error_t TagFS_DedupInit(void) {
 
     // Deterministic per-volume hash seed (fs_uuid) — content keys are stable
     // across reboots (the old per-boot RTC salt broke cross-mount dedup).
-    BoxHashInit(&g_dedup_state.hash_ctx, tagfs_get_state()->superblock.fs_uuid, 16);
+    BoxHashInit(&g_dedup_state.hash_ctx, tagfs_get_state()->uuid, 16);
 
     g_dedup_state.hash_buckets = DEDUP_HASH_BUCKETS;
     debug_printf("[Dedup] Allocating hash table (%u buckets)...\n", DEDUP_HASH_BUCKETS);

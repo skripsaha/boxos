@@ -9,6 +9,11 @@
 
 #include "uefi.h"
 
+/* The volume's own formats, shared with the kernel and the tool that writes
+ * them. <stdint.h> is not available here; uefi.h defines the fixed-width types
+ * these headers take from their includer. */
+#include "volume_deed.h"
+
 /* =========================================================================
  * Constants (must match tagfs.h / create_tagfs.c)
  * ========================================================================= */
@@ -23,8 +28,11 @@
 #define TAGFS_SECTOR_SIZE        512
 #define TAGFS_SECTORS_PER_BLOCK  (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)  /* 8 */
 
-#define TAGFS_SUPERBLOCK_SECTOR  1034U
-#define TAGFS_BACKUP_SB_SECTOR   1035U
+/* No superblock sector here any more: this loader reads the medium's partition
+ * table to find the volume's ground, and the Deed at the head of that ground
+ * to find everything else. See src/include/volume_deed.h — which this header
+ * includes rather than restating, because a second copy of a format is a
+ * format that will disagree with itself. */
 
 #define TAGFS_FILE_ACTIVE        (1U << 0)
 #define TAGFS_FILE_TRASHED       (1U << 1)
@@ -34,11 +42,13 @@
 #define TAGFS_FTABLE_PER_BLOCK    510
 #define TAGFS_INVALID_TAG_ID      0xFFFFU
 
-/* Boot hint byte offsets within superblock reserved[] (absolute byte offsets 108+) */
-#define BOOT_HINT_KERNEL_BLOCK    0    /* reserved[0..3]  — start block of kernel file */
-#define BOOT_HINT_KERNEL_BLOCKS   4    /* reserved[4..7]  — number of blocks */
-#define BOOT_HINT_KERNEL_SIZE     8    /* reserved[8..11] — file size in bytes */
-#define BOOT_HINT_DATA_START     12    /* reserved[12..15]— data_start_sector */
+/* Registry record flags, from the kernel's tagfs_constants.h. Bit 0 is set on
+ * a tag that carries a value; bit 1 is set by the kernel on its own reserved
+ * vocabulary the first time it writes the registry back — so a loader that
+ * tests for "flags == 0" stops recognising those tags after the volume's
+ * first boot. */
+#define TAGFS_TAG_FLAG_HAS_VALUE  0x01U
+#define TAGFS_TAG_FLAG_SYSTEM     0x02U
 
 /* Metadata record header layout (must match pack_metadata_record in create_tagfs.c):
  *   uint16_t record_len     +0
@@ -67,40 +77,6 @@
 /* =========================================================================
  * On-disk structures (packed, must be 512 / 4096 bytes exactly)
  * ========================================================================= */
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t block_size;
-    uint32_t total_blocks;
-    uint32_t free_blocks;
-    uint32_t total_files;
-    uint32_t next_file_id;
-    uint32_t next_tag_id;
-    uint32_t total_tags;
-
-    uint32_t tag_registry_block;
-    uint32_t tag_registry_block_count;
-    uint32_t file_table_block;
-    uint32_t file_table_block_count;
-    uint32_t metadata_pool_block;
-    uint32_t metadata_pool_block_count;
-    uint32_t block_bitmap_sector;
-    uint32_t block_bitmap_sector_count;
-    uint32_t disk_book_superblock_sector;
-
-    uint64_t fs_created_time;
-    uint64_t fs_modified_time;
-    uint8_t  fs_uuid[16];
-    uint32_t backup_superblock_sector;
-
-    /* reserved[0..15]  — boot hints (bytes 108-123)
-     * reserved[16..19] — CoW snapshot manifest block
-     * reserved[20..23] — CoW snapshot backup block
-     * reserved[399]    — CRC sentinel
-     * reserved[400..403] — CRC32 */
-    uint8_t  reserved[404];
-} TagBootSuperblock;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -155,7 +131,6 @@ typedef struct __attribute__((packed)) {
 #define TAG_RECORD_KEY_OFF      6
 
 /* Compile-time size checks */
-_Static_assert(sizeof(TagBootSuperblock)      == 512,  "TagBootSuperblock must be 512 bytes");
 _Static_assert(sizeof(TagBootRegistryBlock)   == 4096, "TagBootRegistryBlock must be 4096 bytes");
 _Static_assert(sizeof(TagBootFileTableBlock)  == 4096, "TagBootFileTableBlock must be 4096 bytes");
 _Static_assert(sizeof(TagBootMetaPoolBlock)   == 4096, "TagBootMetaPoolBlock must be 4096 bytes");

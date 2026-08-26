@@ -184,11 +184,20 @@ typedef struct __attribute__((packed)) {
  *
  * `state_block` is the one that changes: free counts, next ids, how many files,
  * when it was last written. It is named here and kept out of the Deed for the
- * reason at the top of this file.
+ * reason at the top of this file — and there are `state_blocks` of it, because
+ * a record that is rewritten continuously is the one record that will be found
+ * half-written. Two copies, written alternately, each stating which is newer:
+ * the older one is intact by construction while the newer one is being made.
+ *
+ * `data_block` is where file contents start and `data_blocks` is how many
+ * there are. Everything the filesystem allocates is counted inside that run,
+ * so a block number in a file's metadata means the same thing forever, no
+ * matter what is added in front of the data or left spare behind it.
  */
 typedef struct __attribute__((packed)) {
-    uint64_t total_blocks;
+    uint64_t total_blocks;      /* the whole volume, Deed and all */
     uint32_t state_block;
+    uint32_t state_blocks;
     uint32_t tag_registry_block;
     uint32_t tag_registry_blocks;
     uint32_t file_table_block;
@@ -200,6 +209,7 @@ typedef struct __attribute__((packed)) {
     uint32_t disk_book_block;
     uint32_t disk_book_blocks;
     uint32_t data_block;        /* first block that holds file contents */
+    uint32_t data_blocks;       /* how many, and the bitmap covers exactly these */
 } VolumeLayout;
 
 /*

@@ -96,7 +96,7 @@ error_t BraidInit(BraidMode mode) {
     
     // Deterministic per-volume hash seed (fs_uuid) — survives reboot so block
     // checksums re-verify across mounts (the old per-boot RTC salt did not).
-    BoxHashInit(&g_braid_state.hash_ctx, tagfs_get_state()->superblock.fs_uuid, 16);
+    BoxHashInit(&g_braid_state.hash_ctx, tagfs_get_state()->uuid, 16);
 
     g_braid_state.magic = BRAID_MAGIC;
     g_braid_state.version = BRAID_VERSION;

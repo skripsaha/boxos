@@ -20,9 +20,9 @@ DEFAULT ABS
 ; 0x07C00             - Stage1 (512 bytes)
 ; 0x08000..0x09FFF    - Stage2 (16 sectors — the whole window, always loaded)
 ; 0x0A000             - Boot info for kernel (structured, versioned)
-; 0x0A200             - TagFS superblock buffer (512 bytes)
-; 0x0A400             - TagFS metadata buffer (512 bytes)
+; 0x0A200             - Sector 0 of the medium: its partition table (512 bytes)
 ; 0x0A600             - Boarding pass for kernel (512 bytes, stamped)
+; 0x0B000..0x0BFFF    - The volume's Deed (4096 bytes — one whole block)
 ; 0x10000             - Bounce buffer for INT 13h reads (32KB)
 ; 0x100000            - Kernel run address (1MB, linked address, loaded via Unreal Mode)
 ; kernel_end + 4KB    - Page tables (32KB: PML4, PDPT, up to 4 PDs) - DYNAMIC
@@ -90,23 +90,57 @@ BOARDING_STAMP_VOLUME equ 1
 BOARDING_STAMP_MEDIUM equ 2
 BOARDING_STAMP_LOADER equ 3
 BOARDING_FIRMWARE_BIOS equ 0
-; Where the volume identity sits inside a TagFS superblock. Asserted on the
-; kernel side against the structure itself, so the two cannot drift.
-TAGFS_SB_UUID_OFFSET  equ 88
+; ---------------------------------------------------------------------------
+; The Deed, by offset.
+;
+; This loader used to read a superblock at absolute sector 1034 and take the
+; volume's identity from byte 88 of it. Both numbers were spelled out here, in
+; two kernel headers and in the UEFI loader, and a volume could therefore exist
+; in exactly one place on any medium.
+;
+; Now the medium's partition table says where the volume's ground is, and the
+; Deed at the head of that ground says what is on it. An assembler cannot ask a
+; C structure where its fields are, so these offsets are that structure written
+; out — and src/include/volume_deed.h carries the static assertions that stop
+; the two from drifting.
+; ---------------------------------------------------------------------------
+DEED_OFF_MAGIC          equ 0
+DEED_OFF_PROLOGUE_BYTES equ 8
+DEED_OFF_STAMP_BYTES    equ 10
+DEED_OFF_CRC32          equ 12
+DEED_OFF_UUID           equ 16
+DEED_OFF_SECTORS        equ 32
+DEED_OFF_TAIL_SECTOR    equ 40
+DEED_OFF_ROLE           equ 48
+DEED_PROLOGUE_BYTES     equ 52
 
-TAGFS_SUPERBLOCK_SECTOR equ 1034
-TAGFS_METADATA_START    equ 1035
-TAGFS_MAGIC             equ 0x54414746  ; "TAGF"
-TAGFS_METADATA_MAGIC    equ 0x544D4554  ; "TMET"
-TAGFS_FILE_ACTIVE       equ 1
+DEED_MAGIC_LO           equ 0x44584F42  ; 'B','O','X','D'
+DEED_MAGIC_HI           equ 0x00444545  ; 'E','E','D',0
+DEED_ROLE_HEAD          equ 1
+DEED_ROLE_TAIL          equ 2
+DEED_SECTORS            equ 8
+DEED_BYTES              equ DEED_SECTORS * 512
 
-TAGFS_SUPERBLOCK_ADDR   equ 0xA200
-TAGFS_METADATA_ADDR     equ 0xA400
-; Segment forms of the two buffers. Derived, never spelled a second time: the
-; addresses above and the bare segment literals that used to accompany them
-; were two statements of one fact, and moving a buffer meant finding each one.
-TAGFS_SUPERBLOCK_SEG    equ TAGFS_SUPERBLOCK_ADDR >> 4
-TAGFS_METADATA_SEG      equ TAGFS_METADATA_ADDR >> 4
+; The one stamp this loader needs: where the kernel is, in the volume's blocks.
+VOLUME_STAMP_BOOT       equ 4
+BOOT_KERNEL_BLOCK       equ 0
+BOOT_KERNEL_BLOCKS      equ 4
+BOOT_KERNEL_BYTES       equ 8
+
+; The MBR, by offset. Four sixteen-byte entries at 446, then 0xAA55.
+MBR_TABLE_OFFSET        equ 446
+MBR_ENTRY_BYTES         equ 16
+MBR_ENTRY_COUNT         equ 4
+MBR_ENTRY_TYPE          equ 4
+MBR_ENTRY_START_LBA     equ 8
+MBR_ENTRY_SECTORS       equ 12
+MBR_TYPE_BOXOS          equ 0x7F
+MBR_TYPE_PROTECTIVE     equ 0xEE
+
+MBR_ADDR                equ 0xA200
+MBR_SEG                 equ MBR_ADDR >> 4
+DEED_ADDR               equ 0xB000
+DEED_SEG                equ DEED_ADDR >> 4
 
 KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
@@ -137,7 +171,7 @@ KERNEL_MAX_BLOCKS             equ KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE     ; 8192
 ; drive number — losing it breaks the entire raw-PIO disk path. QEMU
 ; happened to land on register values that survived the sub-by-accident;
 ; Bochs and various real-HW BIOSes leave different state and the boot
-; would silently fail with "TagFS superblock read failed!".
+; would silently fail to find the volume at all.
 jmp short past_sig
 dw STAGE2_SIGNATURE
 past_sig:
@@ -412,9 +446,8 @@ long_mode_start:
 ; The Boarding Pass.
 ;
 ; Three stamps, and the one that matters is the first: the identity of the
-; volume this kernel was just read out of. It is sitting in the superblock this
-; loader read at the start, sixteen bytes at TAGFS_SB_UUID_OFFSET, and until
-; now it was thrown away with the rest of that buffer.
+; volume this kernel was just read out of. It is sitting in the Deed this
+; loader read at the start, sixteen bytes at DEED_OFF_UUID.
 ;
 ; Without it the kernel reaches long mode with no way to ask the firmware which
 ; device it booted from, and the Boardroom picks a volume by a rule — "the
@@ -436,12 +469,12 @@ write_boarding_pass:
     mov word  [BOARDING_PASS_ADDR+12],  3                       ; +12 count
     mov word  [BOARDING_PASS_ADDR+14],  0                       ; +14 reserved
 
-    ; Stamp 1 at +16: the volume, sixteen bytes out of the superblock.
+    ; Stamp 1 at +16: the volume, sixteen bytes out of its Deed.
     mov word  [BOARDING_PASS_ADDR+16],  BOARDING_STAMP_VOLUME
     mov word  [BOARDING_PASS_ADDR+18],  16
-    mov rax, [TAGFS_SUPERBLOCK_ADDR + TAGFS_SB_UUID_OFFSET]
+    mov rax, [DEED_ADDR + DEED_OFF_UUID]
     mov [BOARDING_PASS_ADDR+20], rax
-    mov rax, [TAGFS_SUPERBLOCK_ADDR + TAGFS_SB_UUID_OFFSET + 8]
+    mov rax, [DEED_ADDR + DEED_OFF_UUID + 8]
     mov [BOARDING_PASS_ADDR+28], rax
 
     ; Stamp 2 at +36: the medium. The drive number is the one this loader
@@ -776,18 +809,21 @@ load_kernel_tagfs:
     ; One fallback survives, and only one: 0x80, the first hard disk by every
     ; convention there is, for firmware that hands out a handle it then does
     ; not honour.
-    call tagfs_read_superblock
-    jnc .got_superblock
+    call find_ground
+    jnc .got_ground
 
     cmp byte [boot_drive_saved], 0x80
-    je .tagfs_error
+    je .ground_error
     mov byte [boot_drive_saved], 0x80
-    call tagfs_read_superblock
-    jc  .tagfs_error
+    call find_ground
+    jc  .ground_error
 
-.got_superblock:
-    call tagfs_find_kernel
-    jc .try_header_fallback
+.got_ground:
+    call read_deed
+    jc .deed_error
+
+    call find_kernel_in_deed
+    jc .no_kernel
 
     call tagfs_load_kernel_file
     jc .load_error
@@ -796,27 +832,19 @@ load_kernel_tagfs:
     call print_string_16
     ret
 
-.try_header_fallback:
-    mov si, msg_kernel_tag_not_found
-    call print_string_16
-
-    call tagfs_find_kernel_by_header
-    jc .kernel_not_found
-
-    call tagfs_load_kernel_file
-    jc .load_error
-
-    mov si, msg_kernel_loaded_header
-    call print_string_16
-    ret
-
-.tagfs_error:
-    mov si, msg_tagfs_error
+.ground_error:
+    mov si, msg_no_ground
     call print_string_16
     call print_disk_status
     jmp .halt
 
-.kernel_not_found:
+.deed_error:
+    mov si, msg_no_deed
+    call print_string_16
+    call print_disk_status
+    jmp .halt
+
+.no_kernel:
     mov si, msg_kernel_not_found
     call print_string_16
     jmp .halt
@@ -830,113 +858,386 @@ load_kernel_tagfs:
     hlt
     jmp $
 
-; Returns: CF=0 on success, CF=1 on error
+; ---------------------------------------------------------------------------
+; find_ground — where on this medium is the volume?
 ;
-; Reads the TagFS superblock at LBA = TAGFS_SUPERBLOCK_SECTOR via raw ATA
-; the firmware (see disk_read_dap). Verifies the magic ("TAGF") at offset 0.
-; PIO is deterministic — no retry needed; either the disk yields the data
-; or it doesn't.
-tagfs_read_superblock:
-    push ax
-    push dx
-    push si
-
-    mov si, dap_tagfs_superblock
-    mov dl, [boot_drive_saved]
-    call disk_read_dap
-    jc .error
-
-    mov ax, TAGFS_SUPERBLOCK_SEG
-    mov es, ax
-    xor bx, bx
-    mov eax, [es:bx]
-    cmp eax, TAGFS_MAGIC
-    jne .error
-
-    xor ax, ax
-    mov es, ax
-    clc
-    pop si
-    pop dx
-    pop ax
-    ret
-
-.error:
-    xor ax, ax
-    mov es, ax
-    stc
-    pop si
-    pop dx
-    pop ax
-    ret
-
-; Returns: CF=0 on success (kernel_start_block, block_count, tagfs_data_start set), CF=1 on error
-; Reads boot hints from superblock reserved[] area (offsets 108-123).
-; New TagFS v1 format stores boot hints directly in the superblock so the
-; bootloader does not need to understand the metadata pool format.
-tagfs_find_kernel:
+; Read sector 0 and take the first partition claimed for BoxOS. This is the
+; same question the kernel asks of the same bytes (core/boardroom/ground.c),
+; and asking it here is what replaced "the volume begins at sector 1034".
+;
+; MBR only. A GPT disk says so with a protective entry and is refused out loud
+; rather than misread: verifying a GPT means two CRC32s over a 16 KiB entry
+; array, and this loader runs in real mode with 3 KiB of window left. The UEFI
+; loader, which is the one that boots a GPT disk in practice, reads both.
+;
+; Returns: CF=0 with [ground_start_lba] and [ground_sectors] set, CF=1 with a
+;          reason already on screen.
+; ---------------------------------------------------------------------------
+find_ground:
     push ax
     push bx
+    push cx
+    push dx
+    push si
     push es
 
-    ; Superblock already loaded at TAGFS_SUPERBLOCK_ADDR by tagfs_read_superblock
-    mov ax, TAGFS_SUPERBLOCK_SEG
+    mov si, dap_sector0
+    mov dl, [boot_drive_saved]
+    call disk_read_dap
+    jc .fail
+
+    mov ax, MBR_SEG
     mov es, ax
-    xor bx, bx
+    cmp word [es:510], 0xAA55
+    jne .no_table
 
-    ; Boot hints in reserved[]:
-    ;   offset 108: boot_kernel_block  (uint32_t)
-    ;   offset 112: boot_kernel_blocks (uint32_t)
-    ;   offset 116: boot_kernel_size   (uint32_t)
-    ;   offset 120: boot_data_start    (uint32_t)
-    mov eax, [es:bx + 108]
-    mov [kernel_start_block], eax
+    ; A protective entry anywhere in the four means the real table is a GPT,
+    ; and the MBR beside it describes a disk that does not exist.
+    mov bx, MBR_TABLE_OFFSET
+    mov cx, MBR_ENTRY_COUNT
+.scan_protective:
+    cmp byte [es:bx + MBR_ENTRY_TYPE], MBR_TYPE_PROTECTIVE
+    je .is_gpt
+    add bx, MBR_ENTRY_BYTES
+    loop .scan_protective
 
-    mov eax, [es:bx + 112]
-    mov [kernel_block_count], eax
+    mov bx, MBR_TABLE_OFFSET
+    mov cx, MBR_ENTRY_COUNT
+.scan_ours:
+    cmp byte [es:bx + MBR_ENTRY_TYPE], MBR_TYPE_BOXOS
+    je .found
+    add bx, MBR_ENTRY_BYTES
+    loop .scan_ours
 
-    mov eax, [es:bx + 116]
-    mov [kernel_size_bytes], eax
+    mov si, msg_no_boxos_partition
+    call print_string_16
+    jmp .fail_quiet
 
-    mov eax, [es:bx + 120]
-    mov [tagfs_data_start], eax
+.found:
+    mov eax, [es:bx + MBR_ENTRY_START_LBA]
+    mov [ground_start_lba], eax
+    mov eax, [es:bx + MBR_ENTRY_SECTORS]
+    mov [ground_sectors], eax
+    cmp dword [ground_sectors], DEED_SECTORS
+    jb .too_small
 
     xor ax, ax
     mov es, ax
+    clc
+    jmp .out
 
-    ; Validate: kernel_start_block must be nonzero
-    cmp dword [kernel_start_block], 0
-    je .no_boot_hints
+.is_gpt:
+    mov si, msg_gpt_disk
+    call print_string_16
+    jmp .fail_quiet
 
-    cmp dword [kernel_block_count], 0
-    je .no_boot_hints
+.no_table:
+    mov si, msg_no_table
+    call print_string_16
+    jmp .fail_quiet
 
-    ; Bound kernel_block_count by KERNEL_MAX_BLOCKS (KERNEL_MAX_SIZE /
-    ; TAGFS_BLOCK_SIZE). Defends against corrupted/malicious TagFS metadata
-    ; that would otherwise drive tagfs_load_kernel_file into a multi-GB read
-    ; loop.
-    cmp dword [kernel_block_count], KERNEL_MAX_BLOCKS
-    ja  .no_boot_hints
+.too_small:
+    mov si, msg_ground_too_small
+    call print_string_16
+    jmp .fail_quiet
 
+.fail:
+.fail_quiet:
+    xor ax, ax
+    mov es, ax
+    stc
+.out:
     pop es
+    pop si
+    pop dx
+    pop cx
     pop bx
     pop ax
-    clc
     ret
 
-.no_boot_hints:
+; ---------------------------------------------------------------------------
+; read_deed — fetch the volume's title and satisfy this loader that it is one.
+;
+; The head sits at the first block of the ground. If it does not check out, the
+; copy at the far end does — the last block of the ground, which is where the
+; tool that made the volume puts it. That is a real second chance, unlike the
+; scan-the-first-64-blocks-for-a-kernel-header fallback it replaces: that one
+; found A kernel, not THIS volume's kernel, and could not tell the difference.
+;
+; Returns: CF=0 with a validated Deed at DEED_ADDR, CF=1 otherwise.
+; ---------------------------------------------------------------------------
+read_deed:
+    push ax
+    push bx
+    push cx
+    push dx
+    push si
+    push es
+
+    mov eax, [ground_start_lba]
+    mov [dap_deed + 8], eax
+    mov dword [dap_deed + 12], 0
+    mov si, dap_deed
+    mov dl, [boot_drive_saved]
+    call disk_read_dap
+    jc .try_tail
+
+    mov al, DEED_ROLE_HEAD
+    call validate_deed
+    jnc .ok
+
+.try_tail:
+    mov si, msg_deed_head_bad
+    call print_string_16
+
+    ; The last whole block of the ground.
+    mov eax, [ground_sectors]
+    shr eax, TAGFS_SECTORS_PER_BLOCK_LOG2
+    dec eax
+    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
+    add eax, [ground_start_lba]
+    mov [dap_deed + 8], eax
+    mov dword [dap_deed + 12], 0
+    mov si, dap_deed
+    mov dl, [boot_drive_saved]
+    call disk_read_dap
+    jc .fail
+
+    mov al, DEED_ROLE_TAIL
+    call validate_deed
+    jc .fail
+
+    mov si, msg_deed_from_tail
+    call print_string_16
+
+.ok:
+    clc
+    jmp .out
+.fail:
+    stc
+.out:
     pop es
+    pop si
+    pop dx
+    pop cx
     pop bx
     pop ax
+    ret
+
+; ---------------------------------------------------------------------------
+; validate_deed — AL = the role this copy is required to claim.
+;
+; Magic, then the two lengths (bounded BEFORE anything is summed over them),
+; then the checksum, then the role. Nothing here is believed until the sum has
+; passed, which is why only the fields needed to know how much to sum are read
+; first.
+;
+; Returns: CF=0 if the Deed at DEED_ADDR is one, CF=1 otherwise.
+; ---------------------------------------------------------------------------
+validate_deed:
+    push bx
+    push cx
+    push dx
+    push si
+    push es
+    push eax
+
+    mov [deed_want_role], al
+
+    mov ax, DEED_SEG
+    mov es, ax
+
+    cmp dword [es:DEED_OFF_MAGIC], DEED_MAGIC_LO
+    jne .bad
+    cmp dword [es:DEED_OFF_MAGIC + 4], DEED_MAGIC_HI
+    jne .bad
+
+    mov ax, [es:DEED_OFF_PROLOGUE_BYTES]
+    cmp ax, DEED_PROLOGUE_BYTES
+    jb .bad
+    cmp ax, DEED_BYTES
+    ja .bad
+    mov cx, [es:DEED_OFF_STAMP_BYTES]
+    mov bx, DEED_BYTES
+    sub bx, ax
+    cmp cx, bx
+    ja .bad
+
+    add cx, ax                      ; prologue + stamps = what the sum covers
+    call deed_crc32                 ; ES:0..CX, crc32 field read as zero
+    cmp edx, [es:DEED_OFF_CRC32]
+    jne .bad_crc
+
+    mov al, [deed_want_role]
+    movzx eax, al
+    cmp eax, [es:DEED_OFF_ROLE]
+    jne .bad_role
+
+    pop eax
+    clc
+    jmp .out
+
+.bad_crc:
+    mov si, msg_deed_crc
+    call print_string_16
+    jmp .fail
+.bad_role:
+    mov si, msg_deed_role
+    call print_string_16
+    jmp .fail
+.bad:
+    mov si, msg_deed_not_one
+    call print_string_16
+.fail:
+    pop eax
     stc
+.out:
+    pop es
+    pop si
+    pop dx
+    pop cx
+    pop bx
+    ret
+
+; ---------------------------------------------------------------------------
+; deed_crc32 — CRC-32 (ISO 3309) over ES:0 .. ES:CX, with the four bytes of
+; the checksum field itself read as zero, which is how it was written.
+;
+; Bitwise: a table would be 1 KiB of this loader's remaining window to save
+; microseconds on 200 bytes, once, at boot.
+;
+; Returns: EDX = the sum. Clobbers nothing else.
+; ---------------------------------------------------------------------------
+deed_crc32:
+    push eax
+    push bx
+    push cx
+    push si
+
+    mov edx, 0xFFFFFFFF
+    xor bx, bx
+.byte_loop:
+    cmp bx, cx
+    jae .done
+
+    xor eax, eax
+    cmp bx, DEED_OFF_CRC32
+    jb .take
+    cmp bx, DEED_OFF_CRC32 + 4
+    jb .have                        ; inside the checksum field: read as zero
+.take:
+    mov al, [es:bx]
+.have:
+    xor edx, eax
+    mov si, 8
+.bit_loop:
+    test edx, 1
+    jz .no_poly
+    shr edx, 1
+    xor edx, 0xEDB88320
+    jmp .next_bit
+.no_poly:
+    shr edx, 1
+.next_bit:
+    dec si
+    jnz .bit_loop
+
+    inc bx
+    jmp .byte_loop
+
+.done:
+    not edx
+    pop si
+    pop cx
+    pop bx
+    pop eax
+    ret
+
+; ---------------------------------------------------------------------------
+; find_kernel_in_deed — walk the stamps for the one that says where the kernel
+; is, and take the three numbers out of it.
+;
+; A stamp names itself, states its own length, and is followed by the next at
+; the following four-byte boundary. A reader that meets a stamp it does not
+; know steps over it — which is the whole of the format's forward
+; compatibility, and is why this loader can be older than the volume.
+;
+; Returns: CF=0 with kernel_start_block / kernel_block_count / kernel_size_bytes
+;          set, CF=1 if this volume names no kernel.
+; ---------------------------------------------------------------------------
+find_kernel_in_deed:
+    push ax
+    push bx
+    push cx
+    push si
+    push es
+
+    mov ax, DEED_SEG
+    mov es, ax
+
+    mov si, [es:DEED_OFF_PROLOGUE_BYTES]
+    mov cx, [es:DEED_OFF_STAMP_BYTES]
+
+.walk:
+    cmp cx, 4
+    jb .missing
+
+    mov ax, [es:si + 2]             ; payload length
+    add ax, 4 + 3
+    and ax, 0xFFFC                  ; header + payload, rounded up to four
+    cmp cx, ax
+    jb .missing                     ; claims more than is left
+
+    cmp word [es:si], VOLUME_STAMP_BOOT
+    je .found
+
+    sub cx, ax
+    add si, ax
+    jmp .walk
+
+.found:
+    cmp word [es:si + 2], 12         ; three numbers is the least it can carry
+    jb .missing
+    add si, 4
+
+    mov eax, [es:si + BOOT_KERNEL_BLOCK]
+    mov [kernel_start_block], eax
+    mov eax, [es:si + BOOT_KERNEL_BLOCKS]
+    mov [kernel_block_count], eax
+    mov eax, [es:si + BOOT_KERNEL_BYTES]
+    mov [kernel_size_bytes], eax
+
+    cmp dword [kernel_start_block], 0
+    je .missing
+    cmp dword [kernel_block_count], 0
+    je .missing
+    ; Bound the block count by what a kernel can be. Without it a corrupted
+    ; Deed drives the load loop into a multi-gigabyte read.
+    cmp dword [kernel_block_count], KERNEL_MAX_BLOCKS
+    ja .missing
+
+    xor ax, ax
+    mov es, ax
+    clc
+    jmp .out
+
+.missing:
+    xor ax, ax
+    mov es, ax
+    stc
+.out:
+    pop es
+    pop si
+    pop cx
+    pop bx
+    pop ax
     ret
 
 ; Validate the loaded kernel binary's header magic before handing control to
 ; long-mode entry. The kernel binary places "KERN" at offset +2 and "EL" at
-; offset +6 of its very first sector (matching tagfs_find_kernel_by_header's
-; scan pattern). If the load is corrupted (bad disk read, wrong file, mis-
-; aligned TagFS metadata), jumping to it would triple-fault silently — so
-; halt here with a clear message instead.
+; offset +6 of its very first sector. If the load is corrupted (a bad read, a
+; deed pointing at the wrong blocks), jumping to it would triple-fault
+; silently — so halt here with a clear message instead.
 ;
 ; Requires: Unreal Mode active (a32 access to 0x100000 needed).
 validate_kernel_magic:
@@ -992,10 +1293,13 @@ tagfs_load_kernel_file:
     push esi
     push edi
 
-    ; sector = tagfs_data_start + (start_block * 8)
+    ; The Deed states the kernel's position in the volume's own blocks, so the
+    ; sector on the medium is the ground it stands on plus that many blocks.
+    ; Nothing here is an absolute address: move the partition, and the same
+    ; arithmetic finds the same kernel.
     mov eax, [kernel_start_block]
-    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2   ; block → sector LBA
-    add eax, [tagfs_data_start]
+    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2   ; block → sector within the volume
+    add eax, [ground_start_lba]
     mov [kernel_load_sector], eax
 
     ; total sectors = block_count * sectors_per_block
@@ -1103,107 +1407,6 @@ tagfs_load_kernel_file:
     pop ecx
     pop ebx
     pop eax
-    stc
-    ret
-
-; Fallback: find kernel by reading each data block and checking for
-; a KERNEL header magic. Uses data_start from superblock offsets 60+64.
-; Returns: CF=0 on success (kernel_start_block, kernel_block_count, tagfs_data_start set), CF=1 on error
-tagfs_find_kernel_by_header:
-    push ax
-    push bx
-    push cx
-    push dx
-    push si
-    push es
-
-    ; Compute data_start_sector from superblock (already in its buffer):
-    ;   data_start = block_bitmap_sector (offset 60) + block_bitmap_sector_count (offset 64)
-    mov ax, TAGFS_SUPERBLOCK_SEG
-    mov es, ax
-    xor bx, bx
-    mov eax, [es:bx + 60]          ; block_bitmap_sector
-    add eax, [es:bx + 64]          ; + block_bitmap_sector_count
-    mov [tagfs_data_start], eax
-    xor ax, ax
-    mov es, ax
-
-    ; Scan data blocks 3..66 (first 64 file blocks after reserved blocks)
-    mov cx, 64
-    mov edx, 3                      ; start at block 3
-
-.hdr_scan_loop:
-    push cx
-
-    ; Calculate data sector: data_start + block * sectors_per_block
-    mov eax, edx
-    shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
-    add eax, [tagfs_data_start]
-
-    ; Read first sector of this block into the metadata buffer
-    mov [dap_tagfs_metadata + 8], eax
-    ; +12, not +10. The LBA is 64 bits at offset 8; zeroing a dword at +10
-    ; wrote over the top half of the 32-bit value the line above had just
-    ; stored, which is invisible while every sector we ask for is below
-    ; 65536 and silently reads the wrong sector on the first image that
-    ; isn't.
-    mov dword [dap_tagfs_metadata + 12], 0
-    mov si, dap_tagfs_metadata
-    mov dl, [boot_drive_saved]
-    call disk_read_dap
-    jc .hdr_scan_next
-
-    ; Check for KERNEL magic at offset 2
-    mov ax, TAGFS_METADATA_SEG
-    mov es, ax
-    xor bx, bx
-    cmp dword [es:bx + 2], KERNEL_HDR_MAGIC
-    jne .hdr_scan_next_clean
-    cmp word [es:bx + 6], KERNEL_HDR_MAGIC_HI
-    jne .hdr_scan_next_clean
-
-    ; Found kernel by header!
-    mov [kernel_start_block], edx
-
-    ; Estimate block count from total blocks (overestimate is safe)
-    mov ax, TAGFS_SUPERBLOCK_SEG
-    mov es, ax
-    xor bx, bx
-    mov eax, [es:bx + 12]          ; total_blocks
-    sub eax, edx                    ; remaining blocks from this point
-    mov [kernel_block_count], eax
-
-    xor ax, ax
-    mov es, ax
-
-    pop cx
-    pop es
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
-    clc
-    ret
-
-.hdr_scan_next_clean:
-    xor ax, ax
-    mov es, ax
-
-.hdr_scan_next:
-    inc edx
-    pop cx
-    dec cx
-    jnz .hdr_scan_loop
-
-    xor ax, ax
-    mov es, ax
-    pop es
-    pop si
-    pop dx
-    pop cx
-    pop bx
-    pop ax
     stc
     ret
 
@@ -2023,21 +2226,26 @@ unreal_gdt_descriptor:
     dw unreal_gdt_end - unreal_gdt_start - 1
     dd unreal_gdt_start
 
+; Sector 0 of the medium — its partition table, which is what says where this
+; volume's ground is. A fixed LBA, and the only one left in this loader: it is
+; where every partition table on every medium has always been.
 align 4
-dap_tagfs_superblock:
+dap_sector0:
     db 0x10, 0
     dw 1
     dw 0x0000
-    dw TAGFS_SUPERBLOCK_SEG
-    dq TAGFS_SUPERBLOCK_SECTOR
+    dw MBR_SEG
+    dq 0
 
+; The Deed. Its LBA is filled in at run time from the partition table — first
+; the head of the ground, then, if that will not check out, the far end.
 align 4
-dap_tagfs_metadata:
+dap_deed:
     db 0x10, 0
-    dw 1
+    dw DEED_SECTORS
     dw 0x0000
-    dw TAGFS_METADATA_SEG
-    dq TAGFS_METADATA_START
+    dw DEED_SEG
+    dq 0
 
 align 4
 dap_kernel_chunk:
@@ -2074,7 +2282,9 @@ guard2_base:            dd 0            ; 2 MB guard between page tables and boo
 kernel_file_id:         dw 0
 kernel_start_block:     dd 0
 kernel_block_count:     dd 0
-tagfs_data_start:       dd 0
+ground_start_lba:       dd 0            ; first sector of the volume's ground
+ground_sectors:         dd 0            ; how far it runs
+deed_want_role:         db 0            ; which copy validate_deed is checking
 kernel_load_sector:     dd 0
 kernel_load_sectors:    dd 0
 kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
@@ -2090,10 +2300,20 @@ msg_memory_fallback   db '[OK] Fallback memory detection', 13, 10, 0
 msg_memory_error      db '[ERROR] Memory detection failed!', 13, 10, 0
 msg_unreal_mode       db '[OK] Unreal Mode (4GB addressing) active', 13, 10, 0
 msg_kernel_too_large  db '[ERROR] Kernel exceeds 32MB limit!', 13, 10, 0
-msg_loading_tagfs     db 'Loading kernel via TagFS (Unreal Mode)...', 13, 10, 0
+msg_loading_tagfs     db 'Finding the volume and loading its kernel...', 13, 10, 0
 msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
-msg_tagfs_error       db '[ERROR] TagFS superblock read failed!', 13, 10, 0
-msg_kernel_not_found  db '[ERROR] Kernel not found in TagFS!', 13, 10, 0
+msg_no_ground         db '[ERROR] This medium says nothing about where BoxOS lives', 13, 10, 0
+msg_no_table          db '[ERROR] No partition table on this medium', 13, 10, 0
+msg_no_boxos_partition db '[ERROR] A partition table with no BoxOS partition in it', 13, 10, 0
+msg_gpt_disk          db '[ERROR] This disk is a GPT; this loader reads MBR (boot it as UEFI)', 13, 10, 0
+msg_ground_too_small  db '[ERROR] The BoxOS partition is too small to hold a deed', 13, 10, 0
+msg_no_deed           db '[ERROR] Neither copy of this volume deed can be read', 13, 10, 0
+msg_deed_head_bad     db '[WARN] The deed at the head is unreadable; trying the far end', 13, 10, 0
+msg_deed_from_tail    db '[OK] Read the deed from the far end of the volume', 13, 10, 0
+msg_deed_not_one      db '[ERROR] What is at this sector is not a deed', 13, 10, 0
+msg_deed_crc          db '[ERROR] The deed does not match its own checksum', 13, 10, 0
+msg_deed_role         db '[ERROR] The deed is the wrong end of the volume', 13, 10, 0
+msg_kernel_not_found  db '[ERROR] This volume does not say where its kernel is', 13, 10, 0
 msg_kernel_load_error_pre db '[ERROR] Kernel file load failed!', 13, 10, 0
 msg_bios_status       db '        last BIOS disk status: 0x', 0
 msg_crlf              db 13, 10, 0
@@ -2102,8 +2322,6 @@ msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 ; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
-msg_kernel_tag_not_found  db '[WARN] Kernel tag not found, searching by header...', 13, 10, 0
-msg_kernel_loaded_header  db '[OK] Kernel loaded via header scan', 13, 10, 0
 msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
 msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild required!', 13, 10, 0
 
@@ -2132,17 +2350,17 @@ msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild
 %if 0x8000 + STAGE2_SECTORS * 512 > BOOT_INFO_ADDR
   %error "stage2's load window runs into boot_info"
 %endif
-%if BOOT_INFO_ADDR + 256 > TAGFS_SUPERBLOCK_ADDR
-  %error "boot_info runs into the TagFS superblock buffer"
+%if BOOT_INFO_ADDR + 256 > MBR_ADDR
+  %error "boot_info runs into the partition-table buffer"
 %endif
-%if TAGFS_SUPERBLOCK_ADDR + TAGFS_SECTOR_SIZE > TAGFS_METADATA_ADDR
-  %error "the TagFS superblock buffer runs into the metadata buffer"
+%if MBR_ADDR + TAGFS_SECTOR_SIZE > BOARDING_PASS_ADDR
+  %error "the partition-table buffer runs into the boarding pass"
 %endif
-%if TAGFS_METADATA_ADDR + TAGFS_SECTOR_SIZE > BOARDING_PASS_ADDR
-  %error "the TagFS metadata buffer runs into the boarding pass"
+%if BOARDING_PASS_ADDR + BOARDING_PASS_BYTES > DEED_ADDR
+  %error "the boarding pass runs into the deed buffer"
 %endif
-%if BOARDING_PASS_ADDR + BOARDING_PASS_BYTES > KERNEL_BOUNCE_ADDR
-  %error "the boarding pass runs into the bounce buffer"
+%if DEED_ADDR + DEED_BYTES > KERNEL_BOUNCE_ADDR
+  %error "the deed buffer runs into the bounce buffer"
 %endif
 
 ; The other half of a claim stage1 makes: its scratch sits at 0x1200 because

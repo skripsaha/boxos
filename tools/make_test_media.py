@@ -155,8 +155,17 @@ def stamp(kind, payload):
 def build_deed_bytes(vol_uuid, ground_sectors, tail_sector, role):
     stamps = b''
     stamps += stamp(1, struct.pack('<IIII', 512, 4096, 1024 * 1024, 4096))
-    stamps += stamp(2, struct.pack('<QIIIIIIIIIIII',
-                                   1024, 1, 2, 4, 6, 8, 14, 4, 22, 2, 24, 8, 32))
+    # VolumeLayout: total_blocks, then state/registry/ftable/mpool/bitmap/
+    # DiskBook/data, each a first block and a count — all in volume blocks.
+    stamps += stamp(2, struct.pack('<Q' + 'I' * 14,
+                                   1024,          # total_blocks
+                                   1, 2,          # state (the Ledger, two copies)
+                                   32, 1,         # tag registry
+                                   33, 1,         # file table
+                                   34, 1,         # metadata pool
+                                   4, 1,          # block bitmap
+                                   5, 26,         # DiskBook
+                                   32, 991))      # data run
     stamps += stamp(3, struct.pack('<Q16s', int(time.time()), b'boxos-mkfs'))
     stamps += stamp(4, struct.pack('<IIII', 64, 128, 520000, 0))
 

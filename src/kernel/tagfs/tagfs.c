@@ -1,5 +1,7 @@
 #include "tagfs.h"
 #include "boardroom.h"
+#include "boarding.h"
+#include "deed/deed.h"
 #include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
 #include "tag_bitmap/tag_bitmap.h"
@@ -195,22 +197,48 @@ uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
 static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
 {
     (void)ctx;
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    uint32_t magic;
 
-    if (BoardroomRead(seat, TAGFS_SUPERBLOCK_SECTOR, 1, buf) != 0) {
-        return false;
-    }
-    __builtin_memcpy(&magic, buf, 4);
-    if (magic != TAGFS_MAGIC) {
-        return false;
+    MediumGround ground[GROUND_MAX_PER_MEDIUM];
+    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+    if (claimed == 0) return false;
+
+    /*
+     * A medium may carry more than one BoxOS partition, and then "is there a
+     * volume here" has more than one answer. The one this kernel came out of
+     * is the answer that matters, so the pass is consulted here rather than
+     * only by the Boardroom afterwards — the Boardroom compares one identity
+     * per seat and would otherwise be handed whichever ground happened to be
+     * first in the table.
+     */
+    uint8_t want[16];
+    bool    have_pass = BoardingPassVolume(want);
+
+    uint8_t first[16];
+    bool    any = false;
+
+    for (uint8_t g = 0; g < claimed; g++) {
+        DeedCopy head;
+        if (DeedReadHead(seat, &ground[g], &head) != OK) {
+            /* The head is what is damaged, not the volume. Its far copy names
+             * the same volume and is the reason there are two. */
+            if (DeedReadTailAlone(seat, &ground[g], &head) != OK) continue;
+        }
+
+        bool wanted = have_pass && memcmp(head.head.uuid, want, 16) == 0;
+        if (!any) {
+            memcpy(first, head.head.uuid, 16);
+            any = true;
+        }
+        DeedRelease(&head);
+
+        if (wanted) {
+            if (out_uuid) memcpy(out_uuid, want, 16);
+            return true;
+        }
     }
 
-    if (out_uuid) {
-        const TagFSSuperblock *sb = (const TagFSSuperblock *)buf;
-        __builtin_memcpy(out_uuid, sb->fs_uuid, 16);
-    }
-    return true;
+    if (any && out_uuid) memcpy(out_uuid, first, 16);
+    return any;
 }
 
 /*
@@ -224,6 +252,17 @@ static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])
  */
 static uint8_t g_volume_uuid[16];
 static bool    g_volume_uuid_known = false;
+
+/*
+ * Where this volume's ground begins on the medium it is sitting on.
+ *
+ * The one absolute address TagFS holds, and it is not written down anywhere
+ * inside the volume: it is discovered from the medium's partition table every
+ * time the volume is met. Zero until a volume has been taken up, which is
+ * safe — nothing reads sectors before then, and reading sector 0 of the medium
+ * is not something a filesystem should be able to do by accident.
+ */
+static uint64_t g_volume_base;
 
 static void TagFSProbeDrive(void)
 {
@@ -241,14 +280,166 @@ static void TagFSProbeDrive(void)
             BoardroomSeatName(g_tagfs_seat));
 }
 
-static int disk_read_sectors(uint64_t lba, uint16_t count, void *buffer)
+int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)
 {
-    return BoardroomRead(g_tagfs_seat, lba, count, buffer);
+    return BoardroomRead(g_tagfs_seat, g_volume_base + vlba, count, buffer);
 }
 
-static int disk_write_sectors(uint64_t lba, uint16_t count, const void *buffer)
+int tagfs_volume_write(uint64_t vlba, uint32_t count, const void *buffer)
 {
-    return BoardroomWrite(g_tagfs_seat, lba, count, buffer);
+    return BoardroomWrite(g_tagfs_seat, g_volume_base + vlba, count, buffer);
+}
+
+static int disk_read_sectors(uint64_t vlba, uint16_t count, void *buffer)
+{
+    return tagfs_volume_read(vlba, count, buffer);
+}
+
+static int disk_write_sectors(uint64_t vlba, uint16_t count, const void *buffer)
+{
+    return tagfs_volume_write(vlba, count, buffer);
+}
+
+/*
+ * Stand the volume on its ground.
+ *
+ * Everything the filesystem knows about where things are comes from here: the
+ * medium's partition table says which run of sectors is ours, the Deed at the
+ * head of that run says what is laid out inside it, and both are read fresh
+ * every time a volume is met. Nothing is remembered between boots and nothing
+ * is assumed.
+ */
+static error_t volume_take_ground(uint8_t seat)
+{
+    MediumGround ground[GROUND_MAX_PER_MEDIUM];
+    uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
+    if (claimed == 0) {
+        kprintf("[TagFS] seat %u claims no ground for BoxOS\n", seat);
+        return ERR_FILE_NOT_FOUND;
+    }
+
+    uint8_t want[16];
+    bool    have_pass = BoardingPassVolume(want);
+
+    DeedCopy head;
+    bool     took = false;
+
+    /* Two passes rather than one with a "best so far": the volume named on the
+     * pass is the one this kernel came out of, and taking a different one
+     * because it happened to be listed first is how a machine mounts the
+     * stick it booted next to instead of the stick it booted from. */
+    for (int pass = 0; pass < 2 && !took; pass++) {
+        for (uint8_t g = 0; g < claimed; g++) {
+            DeedCopy candidate;
+            bool from_tail = false;
+            if (DeedReadHead(seat, &ground[g], &candidate) != OK) {
+                if (DeedReadTailAlone(seat, &ground[g], &candidate) != OK) continue;
+                from_tail = true;
+            }
+
+            bool wanted = have_pass &&
+                          memcmp(candidate.head.uuid, want, 16) == 0;
+            if (pass == 0 && !wanted) {
+                DeedRelease(&candidate);
+                continue;
+            }
+
+            head          = candidate;
+            g_volume_base = ground[g].start_sector;
+            took          = true;
+
+            if (from_tail) {
+                kprintf("[TagFS] seat %u: the deed at the head of this volume "
+                        "is gone; standing on the copy at the far end\n", seat);
+            }
+
+            kprintf("[TagFS] volume on seat %u stands on %s ground: sectors "
+                    "%llu..%llu\n", seat, GroundOriginName(ground[g].origin),
+                    (unsigned long long)ground[g].start_sector,
+                    (unsigned long long)(ground[g].start_sector +
+                                         ground[g].sectors - 1));
+            break;
+        }
+        if (!have_pass) break;   /* nothing to prefer; the second pass IS the first */
+    }
+
+    if (!took) {
+        kprintf("[TagFS] seat %u has ground claimed for BoxOS and no deed on "
+                "it this kernel can read\n", seat);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    DeedDescribe(seat, &head);
+
+    uint16_t bytes = 0;
+    const VolumeLayout *layout =
+        (const VolumeLayout *)DeedStamp(&head, VOLUME_STAMP_LAYOUT, &bytes);
+    if (!layout || bytes < sizeof(VolumeLayout)) {
+        kprintf("[TagFS] the deed on seat %u does not say where anything is — "
+                "it carries no layout this kernel understands\n", seat);
+        DeedRelease(&head);
+        return ERR_TAGFS_CORRUPTED;
+    }
+    memcpy(&g_state.layout, layout, sizeof(g_state.layout));
+
+    const VolumeGeometry *geo =
+        (const VolumeGeometry *)DeedStamp(&head, VOLUME_STAMP_GEOMETRY, &bytes);
+    if (geo && bytes >= sizeof(VolumeGeometry)) {
+        memcpy(&g_state.geometry, geo, sizeof(g_state.geometry));
+    }
+
+    memcpy(g_state.uuid, head.head.uuid, 16);
+
+    /*
+     * The layout has to fit inside the volume that states it. Everything below
+     * this line turns these numbers into sector addresses without checking
+     * them again, so a deed that says its data run ends past its own end would
+     * otherwise be read into whatever is beyond the partition.
+     */
+    uint64_t blocks_in_volume = head.head.sectors / TAGFS_BLOCK_SECTORS;
+    if (g_state.layout.data_block == 0 ||
+        g_state.layout.data_blocks == 0 ||
+        (uint64_t)g_state.layout.data_block +
+        (uint64_t)g_state.layout.data_blocks > blocks_in_volume ||
+        (uint64_t)g_state.layout.state_block +
+        (uint64_t)g_state.layout.state_blocks > blocks_in_volume ||
+        g_state.layout.state_blocks < VOLUME_LEDGER_COPIES) {
+        kprintf("[TagFS] the deed on seat %u lays out %u data blocks at %u "
+                "inside a volume of %llu — that does not fit\n",
+                seat, g_state.layout.data_blocks, g_state.layout.data_block,
+                (unsigned long long)blocks_in_volume);
+        DeedRelease(&head);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    if (g_state.geometry.block_bytes != TAGFS_BLOCK_SIZE) {
+        kprintf("[TagFS] the volume on seat %u was laid out in %u-byte blocks "
+                "and this kernel speaks %u\n",
+                seat, g_state.geometry.block_bytes, TAGFS_BLOCK_SIZE);
+        DeedRelease(&head);
+        return ERR_TAGFS_CORRUPTED;
+    }
+
+    /* And whether the whole of it is present. A volume with only a head still
+     * mounts — this is not the reason to refuse one — but it is a volume whose
+     * far end no longer agrees, and nobody finds that out later by accident. */
+    DeedCopy tail;
+    MediumGround stood = { .start_sector = g_volume_base,
+                           .sectors      = head.head.sectors,
+                           .origin       = GROUND_FROM_MBR,
+                           .entry        = 0 };
+    if (head.head.role == VOLUME_DEED_ROLE_TAIL) {
+        /* Already standing on the far copy — there is nothing further out to
+         * ask, and asking would only re-read what is already in hand. */
+    } else if (DeedReadTail(seat, &stood, &head, &tail) == OK) {
+        DeedRelease(&tail);
+    } else {
+        kprintf("[TagFS] seat %u: the far end of this volume does not answer; "
+                "it is mounted on one deed\n", seat);
+    }
+
+    DeedRelease(&head);
+    return OK;
 }
 
 /*
@@ -496,7 +687,7 @@ void TagFSAttendArrival(void)
     }
 }
 
-static uint64_t block_to_sector(uint32_t block);
+static uint64_t block_to_vlba(uint32_t block);
 static int read_block(uint32_t block, void *buffer);
 static int write_block(uint32_t block, const void *buffer);
 
@@ -573,7 +764,7 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
     // Phase 2: do disk I/O without holding the lock
     for (uint32_t i = 0; i < n_fetch; i++) {
         uint8_t tmp[TAGFS_BLOCK_SIZE];
-        if (disk_read_sectors(block_to_sector(to_fetch[i]), 8, tmp) == 0) {
+        if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
             spin_lock(&g_read_ahead_lock);
             memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
             g_read_ahead_cache[slots[i]].block = to_fetch[i];
@@ -608,16 +799,43 @@ static void ReadAheadForget(void) {
     spin_unlock(&g_read_ahead_lock);
 }
 
-static uint64_t block_to_sector(uint32_t block)
+/*
+ * A block the Deed names → the block TagFS allocates in.
+ *
+ * The Deed states where the registry, the file table and the metadata pool are
+ * in blocks of the whole volume, because that is what makes a volume readable
+ * by something that has not mounted it — a loader, a repair tool, another
+ * kernel. TagFS itself counts from the start of the data run, because that is
+ * what every file's extents on disk are counted in. This is the seam.
+ */
+static uint32_t data_block_of(uint32_t volume_block)
 {
-    uint32_t data_start = g_state.superblock.block_bitmap_sector +
-                          g_state.superblock.block_bitmap_sector_count;
-    return (uint64_t)data_start + (uint64_t)block * 8;
+    return volume_block - g_state.layout.data_block;
 }
 
+/*
+ * A block of the DATA RUN → a sector inside the volume.
+ *
+ * The two coordinate systems meet here and nowhere else. What a file's
+ * metadata carries, and what the bitmap indexes, is a block of the data run
+ * counted from zero; where the data run sits inside the volume is
+ * `layout.data_block`, out of the Deed.
+ */
+static uint64_t block_to_vlba(uint32_t block)
+{
+    return ((uint64_t)g_state.layout.data_block + block) * TAGFS_BLOCK_SECTORS;
+}
+
+/*
+ * And the same block as a sector of the MEDIUM.
+ *
+ * For the paths that hand an LBA straight to the Boardroom instead of going
+ * through this file's door — the asynchronous storage ops, and Braid, which
+ * addresses other media that have no ground of their own.
+ */
 uint64_t tagfs_block_to_sector(uint32_t block)
 {
-    return block_to_sector(block);
+    return g_volume_base + block_to_vlba(block);
 }
 
 static int read_block(uint32_t block, void *buffer)
@@ -634,13 +852,13 @@ static int read_block(uint32_t block, void *buffer)
     // Route through Braid when it has active disks (provides redundancy/checksumming).
     // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
     if (BraidIsHealthy()) {
-        error_t braid_result = BraidReadBlock(block_to_sector(block), buffer, NULL);
+        error_t braid_result = BraidReadBlock(tagfs_block_to_sector(block), buffer, NULL);
         if (braid_result == OK)
             return 0;
         // Braid failed — fall through to direct disk read as recovery path
     }
 
-    int rc = disk_read_sectors(block_to_sector(block), 8, buffer);
+    int rc = disk_read_sectors(block_to_vlba(block), 8, buffer);
     if (rc == 0)
         (void)IntegrityVerify(block, buffer);   // detect silent bit-rot on read
     return rc;
@@ -657,12 +875,12 @@ static int write_block(uint32_t block, const void *buffer)
     // Route through Braid when it has active disks (provides redundancy).
     // Pass the physical LBA so Braid operates in sector-space, not TagFS block-space.
     if (BraidIsHealthy()) {
-        if (BraidWriteBlock(block_to_sector(block), buffer, NULL) == OK)
+        if (BraidWriteBlock(tagfs_block_to_sector(block), buffer, NULL) == OK)
             rc = 0;
         // Braid failed — fall through to direct disk write as recovery path
     }
     if (rc != 0)
-        rc = disk_write_sectors(block_to_sector(block), 8, (void *)buffer);
+        rc = disk_write_sectors(block_to_vlba(block), 8, (void *)buffer);
 
     // Drop any stale read-ahead copy + record the new integrity digest.
     if (rc == 0) {
@@ -694,101 +912,151 @@ error_t tagfs_write_block(uint32_t block, const void *buffer) {
     return OK;
 }
 
+static const uint8_t g_ledger_magic[8] = {
+    VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
+    VOLUME_LEDGER_MAGIC_3, VOLUME_LEDGER_MAGIC_4, VOLUME_LEDGER_MAGIC_5,
+    VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
+};
+
 // ----------------------------------------------------------------------------
-// CRC32 wrapper using shared crypto library
+// The Ledger — what is true of the volume today (volume_ledger.h)
+//
+// Two copies, one block apart. A read takes the newer of the two that is
+// intact; a write goes to the older one with a sequence number one higher. So
+// the copy that survives a torn write is never the copy being written, and
+// recovery is a comparison rather than a repair.
 // ----------------------------------------------------------------------------
 
-static uint32_t tagfs_crc32(const uint8_t *data, uint32_t len)
+/* Which of the two copies was written last. The next write goes to the other
+ * one — this is the whole of the alternation. */
+static uint32_t g_ledger_current = 0;
+
+static uint64_t ledger_vlba(uint32_t copy)
 {
-    return KCrc32(data, len);
+    return ((uint64_t)g_state.layout.state_block + copy) * TAGFS_BLOCK_SECTORS;
 }
 
-static void superblock_stamp_crc(TagFSSuperblock *sb)
+/*
+ * Read one copy. Returns true when it is present, intact, and long enough to
+ * hold what this kernel knows how to read — a Ledger written by a newer kernel
+ * is longer than this one expects and is read up to what is understood, which
+ * is what `bytes` is for.
+ */
+static bool ledger_read_copy(uint32_t copy, VolumeLedger *out)
 {
-    memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
-    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
-    uint32_t crc = tagfs_crc32((const uint8_t *)sb, sizeof(TagFSSuperblock));
-    memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
-    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = TAGFS_SB_CRC_SENTINEL;
-}
-
-static bool superblock_verify_crc(const TagFSSuperblock *sb)
-{
-    uint8_t sentinel = sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET];
-    if (sentinel != TAGFS_SB_CRC_SENTINEL)
-    {
-        debug_printf("[TagFS] WARNING: superblock has no CRC sentinel (legacy format) — accepted, will re-stamp on next write\n");
-        return true;
-    }
-
-    uint32_t stored_crc;
-    memcpy(&stored_crc, sb->reserved + TAGFS_SB_CRC_OFFSET, 4);
-
-    TagFSSuperblock copy;
-    memcpy(&copy, sb, sizeof(TagFSSuperblock));
-    copy.reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
-    memset(copy.reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
-    uint32_t computed = tagfs_crc32((const uint8_t *)&copy, sizeof(TagFSSuperblock));
-    if (computed != stored_crc)
-    {
-        debug_printf("[TagFS] ERROR: superblock CRC mismatch (stored=0x%08x computed=0x%08x)\n",
-                     stored_crc, computed);
+    uint8_t buf[TAGFS_SECTOR_SIZE];
+    if (disk_read_sectors(ledger_vlba(copy), 1, buf) != 0) {
+        kprintf("[Ledger] copy %u could not be read off the medium\n", copy);
         return false;
     }
+
+    VolumeLedger led;
+    memcpy(&led, buf, sizeof(led));
+
+    if (memcmp(led.magic, g_ledger_magic, sizeof(g_ledger_magic)) != 0) {
+        kprintf("[Ledger] copy %u carries no ledger\n", copy);
+        return false;
+    }
+
+    /* Bounded before it is summed: `bytes` came off the medium and a stated
+     * length longer than the sector it lives in would sum over memory this
+     * does not own. */
+    if (led.bytes < sizeof(VolumeLedger) || led.bytes > TAGFS_SECTOR_SIZE) {
+        kprintf("[Ledger] copy %u states a length of %u, which cannot be one\n",
+                copy, led.bytes);
+        return false;
+    }
+
+    uint8_t probe[TAGFS_SECTOR_SIZE];
+    memcpy(probe, buf, led.bytes);
+    memset(probe + __builtin_offsetof(VolumeLedger, crc32), 0, sizeof(uint32_t));
+    uint32_t have = KCrc32(probe, led.bytes);
+    if (have != led.crc32) {
+        kprintf("[Ledger] copy %u does not match its own checksum "
+                "(0x%08x against 0x%08x) — it was torn mid-write\n",
+                copy, have, led.crc32);
+        return false;
+    }
+
+    *out = led;
     return true;
 }
 
-// ----------------------------------------------------------------------------
-// Superblock I/O
-// ----------------------------------------------------------------------------
-
-static int read_superblock(uint32_t sector, TagFSSuperblock *out)
+/*
+ * Take up the newer of the two.
+ *
+ * One unreadable copy is survivable and is said out loud, because a volume
+ * running on a single Ledger has no second opinion left. Both unreadable is
+ * not survivable: the counters are gone, and inventing them would hand out
+ * block numbers that belong to files.
+ */
+static error_t ledger_load(void)
 {
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    if (disk_read_sectors((uint64_t)sector, 1, buf) != 0)
-    {
-        return -1;
+    VolumeLedger led[VOLUME_LEDGER_COPIES];
+    bool         ok[VOLUME_LEDGER_COPIES];
+    uint32_t     live = 0;
+
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        ok[c] = ledger_read_copy(c, &led[c]);
+        if (ok[c]) live++;
     }
-    memcpy(out, buf, sizeof(TagFSSuperblock));
-    return 0;
-}
 
-static error_t write_superblock_to_sector(uint32_t sector, const TagFSSuperblock *sb) {
-    if (!sb)
-        return ERR_NULL_POINTER;
+    if (live == 0) {
+        kprintf("[Ledger] neither copy is readable — this volume cannot say "
+                "what is on it\n");
+        return ERR_TAGFS_CORRUPTED;
+    }
 
-    uint8_t buf[TAGFS_SECTOR_SIZE];
-    memset(buf, 0, TAGFS_SECTOR_SIZE);
-    memcpy(buf, sb, sizeof(TagFSSuperblock));
-    
-    error_t err = disk_write_sectors((uint64_t)sector, 1, buf);
-    if (err != OK)
-        return ERR_WRITE_FAILED;
-    
+    uint32_t newest = 0;
+    bool     have   = false;
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        if (!ok[c]) continue;
+        if (!have || led[c].seq > led[newest].seq) {
+            newest = c;
+            have   = true;
+        }
+    }
+
+    g_state.ledger   = led[newest];
+    g_ledger_current = newest;
+
+    if (live < VOLUME_LEDGER_COPIES) {
+        kprintf("[Ledger] running on copy %u alone (seq %llu); the other one "
+                "did not survive\n",
+                newest, (unsigned long long)led[newest].seq);
+    }
     return OK;
 }
 
-error_t tagfs_write_superblock(const TagFSSuperblock *sb) {
-    if (!sb)
-        return ERR_NULL_POINTER;
-    
-    // Stamp CRC before writing
-    TagFSSuperblock stamped;
-    memcpy(&stamped, sb, sizeof(TagFSSuperblock));
-    superblock_stamp_crc(&stamped);
-
-    error_t err = write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &stamped);
-    if (err != OK) {
-        debug_printf("[TagFS] Failed to write primary superblock\n");
+error_t tagfs_write_ledger(void)
+{
+    if (g_state.layout.state_blocks < VOLUME_LEDGER_COPIES) {
         return ERR_TAGFS_METADATA_ERROR;
     }
-    
-    err = write_superblock_to_sector(TAGFS_BACKUP_SB_SECTOR, &stamped);
-    if (err != OK) {
-        debug_printf("[TagFS] Warning: failed to write backup superblock\n");
-        // Don't fail - primary was written successfully
+
+    uint32_t target = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
+
+    VolumeLedger led = g_state.ledger;
+    memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
+    led.bytes        = sizeof(VolumeLedger);
+    led.seq          = g_state.ledger.seq + 1;
+    led.written_unix = rtc_get_unix64();
+    led.crc32        = 0;
+    led.crc32        = KCrc32((const uint8_t *)&led, sizeof(led));
+
+    uint8_t buf[TAGFS_SECTOR_SIZE];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, &led, sizeof(led));
+
+    if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {
+        debug_printf("[Ledger] copy %u would not take the write\n", target);
+        return ERR_TAGFS_METADATA_ERROR;
     }
-    
+
+    /* Only now is the new one the current one — if the write failed, the older
+     * copy is still what the volume stands on. */
+    g_state.ledger   = led;
+    g_ledger_current = target;
     return OK;
 }
 
@@ -867,230 +1135,6 @@ static void free_list_build(void)
         tail = &ext->next;
         g_state.block_bitmap.extent_count++;
     }
-}
-
-// ----------------------------------------------------------------------------
-// tagfs_format
-// ----------------------------------------------------------------------------
-
-error_t tagfs_format(uint32_t total_blocks) {
-    debug_printf("[TagFS] Formatting: total_blocks=%u\n", total_blocks);
-
-    if (total_blocks == 0)
-        return ERR_INVALID_ARGUMENT;
-
-    // --- Compute layout ---
-    //
-    // Sector layout (all fixed):
-    //   1034 : primary superblock
-    //   1035 : backup superblock
-    //   1036 : journal superblock
-    //   1037 : journal superblock backup
-    //   1038 : journal entries  (512 entries * 2 sectors = 1024 sectors -> 1038..2061)
-    //   2062 : block bitmap start
-    //
-    uint32_t bitmap_sector_start = TAGFS_BITMAP_SECTOR_START;
-    uint32_t bitmap_bytes = (total_blocks + 7) / 8;
-    uint32_t bitmap_sectors = (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
-
-    // --- Build initial block bitmap in memory ---
-    uint8_t *bitmap = kmalloc(bitmap_bytes);
-    if (!bitmap) {
-        debug_printf("[TagFS] format: failed to allocate bitmap\n");
-        return ERR_NO_MEMORY;
-    }
-    memset(bitmap, 0, bitmap_bytes);
-
-    // Blocks 0, 1, 2 are reserved (tag registry, file table, metadata pool).
-    // Block 3 is the first data block, available for file allocation.
-    bitmap_set_bit(bitmap, 0);
-    bitmap_set_bit(bitmap, 1);
-    bitmap_set_bit(bitmap, 2);
-
-    // --- Write initial TagRegistryBlock at block 0 ---
-    TagRegistryBlock *reg_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!reg_block) {
-        debug_printf("[TagFS] format: failed to allocate registry block\n");
-        kfree(bitmap);
-        return ERR_NO_MEMORY;
-    }
-    memset(reg_block, 0, TAGFS_BLOCK_SIZE);
-    reg_block->magic = TAGFS_REGISTRY_MAGIC;
-    reg_block->next_block = 0;
-    reg_block->entry_count = 0;
-    reg_block->used_bytes = 0;
-
-    // Temporarily set up g_state.superblock enough for block_to_sector to work
-    g_state.superblock.block_bitmap_sector = bitmap_sector_start;
-    g_state.superblock.block_bitmap_sector_count = bitmap_sectors;
-
-    if (write_block(0, reg_block) != OK) {
-        debug_printf("[TagFS] format: failed to write registry block\n");
-        kfree(reg_block);
-        kfree(bitmap);
-        return ERR_WRITE_FAILED;
-    }
-    kfree(reg_block);
-
-    // --- Write initial FileTableBlock at block 1 ---
-    FileTableBlock *ft_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!ft_block) {
-        debug_printf("[TagFS] format: failed to allocate file table block\n");
-        kfree(bitmap);
-        return ERR_NO_MEMORY;
-    }
-    memset(ft_block, 0, TAGFS_BLOCK_SIZE);
-    ft_block->magic = TAGFS_FILETBL_MAGIC;
-    ft_block->next_block = 0;
-    ft_block->entry_count = 0;
-    ft_block->reserved = 0;
-
-    if (write_block(1, ft_block) != OK) {
-        debug_printf("[TagFS] format: failed to write file table block\n");
-        kfree(ft_block);
-        kfree(bitmap);
-        return ERR_WRITE_FAILED;
-    }
-    kfree(ft_block);
-
-    // --- Write initial MetaPoolBlock at block 2 ---
-    MetaPoolBlock *mp_block = kmalloc(TAGFS_BLOCK_SIZE);
-    if (!mp_block) {
-        debug_printf("[TagFS] format: failed to allocate meta pool block\n");
-        kfree(bitmap);
-        return ERR_NO_MEMORY;
-    }
-    memset(mp_block, 0, TAGFS_BLOCK_SIZE);
-    mp_block->magic = TAGFS_MPOOL_MAGIC;
-    mp_block->next_block = 0;
-    mp_block->used_bytes = 0;
-    mp_block->record_count = 0;
-
-    if (write_block(2, mp_block) != OK) {
-        debug_printf("[TagFS] format: failed to write meta pool block\n");
-        kfree(mp_block);
-        kfree(bitmap);
-        return ERR_WRITE_FAILED;
-    }
-    kfree(mp_block);
-
-    // --- Write block bitmap to disk ---
-    uint32_t bitmap_buf_size = bitmap_sectors * TAGFS_SECTOR_SIZE;
-    uint8_t *bitmap_buf = kmalloc(bitmap_buf_size);
-    if (!bitmap_buf) {
-        debug_printf("[TagFS] format: failed to allocate bitmap write buffer\n");
-        kfree(bitmap);
-        return ERR_NO_MEMORY;
-    }
-    memset(bitmap_buf, 0, bitmap_buf_size);
-    memcpy(bitmap_buf, bitmap, bitmap_bytes);
-
-    if (disk_write_sectors((uint64_t)bitmap_sector_start, (uint16_t)bitmap_sectors, bitmap_buf) != OK) {
-        debug_printf("[TagFS] format: failed to write block bitmap\n");
-        kfree(bitmap_buf);
-        kfree(bitmap);
-        return ERR_WRITE_FAILED;
-    }
-    kfree(bitmap_buf);
-    kfree(bitmap);
-
-    // --- Fill superblock ---
-    TagFSSuperblock sb;
-    memset(&sb, 0, sizeof(sb));
-
-    sb.magic = TAGFS_MAGIC;
-    sb.version = TAGFS_VERSION;
-    sb.block_size = TAGFS_BLOCK_SIZE;
-    sb.total_blocks = total_blocks;
-    sb.free_blocks = total_blocks - 3;  // blocks 0, 1, 2 reserved
-    sb.total_files = 0;
-    sb.next_file_id = 1;
-    sb.next_tag_id = 1;
-    sb.total_tags = 0;
-
-    sb.tag_registry_block = 0;
-    sb.tag_registry_block_count = 1;
-    sb.file_table_block = 1;
-    sb.file_table_block_count = 1;
-    sb.metadata_pool_block = 2;
-    sb.metadata_pool_block_count = 1;
-    sb.block_bitmap_sector = bitmap_sector_start;
-    sb.block_bitmap_sector_count = bitmap_sectors;
-    sb.disk_book_superblock_sector = TAGFS_DISK_BOOK_SB_SECTOR;
-
-    sb.fs_created_time = 0;
-    sb.fs_modified_time = 0;
-    sb.backup_superblock_sector = TAGFS_BACKUP_SB_SECTOR;
-    // CoW manifest block: not allocated at format time (lazy allocation on first snapshot).
-    // reserved[16..19] and reserved[20..23] hold these values; initialize to 0.
-    TAGFS_SB_COW_SNAPSHOT(&sb)        = 0;
-    TAGFS_SB_COW_SNAPSHOT_BACKUP(&sb) = 0;
-
-    if (tagfs_write_superblock(&sb) != OK) {
-        debug_printf("[TagFS] format: failed to write superblock\n");
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    // Pre-intern the reserved vocabulary so it gets deterministic low IDs: the
-    // on-disk id contract (tagfs_reserved.h) and the trashed/hidden membership
-    // masks (register_well_known, 1ULL<<tag_id) both rely on it. The auth tags
-    // no longer need a low id — their authority is the fixed cabin auth_bits.
-    // g_state.superblock must have block_bitmap_sector and tag_registry_block
-    // set before tag_registry_flush (it uses tagfs_get_state() internally).
-    memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
-
-    TagRegistry *tmp_reg = kmalloc(sizeof(TagRegistry));
-    if (!tmp_reg) {
-        debug_printf("[TagFS] format: failed to allocate tmp registry\n");
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    if (tag_registry_init(tmp_reg) != 0) {
-        debug_printf("[TagFS] format: tag_registry_init failed\n");
-        kfree(tmp_reg);
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    // Intern in fixed order so IDs are deterministic (0-based sequential).
-    // Same vocabulary + order as the host mkfs tool — tagfs_reserved.h is the
-    // single source, so the on-disk ID contract cannot drift between them.
-#define X(k) tag_registry_intern(tmp_reg, k, NULL);
-    TAGFS_RESERVED_KEYS(X)
-#undef X
-
-    // Use the tmp registry as g_state.registry so flush writes to block 0
-    g_state.registry = tmp_reg;
-    if (tag_registry_flush(tmp_reg) != 0) {
-        debug_printf("[TagFS] format: tag_registry_flush failed\n");
-        tag_registry_destroy(tmp_reg);
-        kfree(tmp_reg);
-        g_state.registry = NULL;
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-    g_state.registry = NULL;
-
-    // Read counts before destroying the registry
-    uint16_t wk_next_id    = tmp_reg->next_id;
-    uint32_t wk_total_tags = tmp_reg->total_tags;
-
-    tag_registry_destroy(tmp_reg);
-    kfree(tmp_reg);
-
-    sb.next_tag_id = wk_next_id;
-    sb.total_tags  = wk_total_tags;
-
-    // Update superblock with actual tag counts
-    if (tagfs_write_superblock(&sb) != OK) {
-        debug_printf("[TagFS] format: failed to write updated superblock\n");
-        return ERR_TAGFS_METADATA_ERROR;
-    }
-
-    // Keep g_state.superblock current
-    memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
-
-    debug_printf("[TagFS] Format complete: %u total blocks, %u free, %u well-known tags\n",
-                 total_blocks, sb.free_blocks, sb.total_tags);
-    return OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -1247,66 +1291,36 @@ error_t tagfs_init(void) {
     // Initialize read-ahead cache FIRST — read_block uses it before the rest of init
     ReadAheadInit();
 
-    // --- Read superblock ---
-    TagFSSuperblock sb;
-    bool used_backup = false;
-    if (read_superblock(TAGFS_SUPERBLOCK_SECTOR, &sb) != OK || sb.magic != TAGFS_MAGIC) {
-        debug_printf("[TagFS] Primary superblock invalid, trying backup at sector %u\n",
-                     TAGFS_BACKUP_SB_SECTOR);
-        if (read_superblock(TAGFS_BACKUP_SB_SECTOR, &sb) != OK || sb.magic != TAGFS_MAGIC) {
-            debug_printf("[TagFS] CRITICAL: Both superblocks invalid — not formatted?\n");
-            return ERR_TAGFS_CORRUPTED;
-        }
-        used_backup = true;
-        debug_printf("[TagFS] Using backup superblock\n");
+    /* --- Stand on the ground, and read the deed that describes it --- */
+    error_t ground_rc = volume_take_ground(g_tagfs_seat);
+    if (ground_rc != OK) {
+        return ground_rc;
     }
 
-    // Verify CRC32 integrity
-    if (!superblock_verify_crc(&sb)) {
-        debug_printf("[TagFS] CRC32 mismatch on %s superblock\n",
-                     used_backup ? "backup" : "primary");
-        if (!used_backup)
-        {
-            // Primary corrupted — try backup
-            if (read_superblock(TAGFS_BACKUP_SB_SECTOR, &sb) == 0 &&
-                sb.magic == TAGFS_MAGIC && superblock_verify_crc(&sb))
-            {
-                debug_printf("[TagFS] Backup superblock CRC OK, recovering\n");
-                used_backup = true;
-            }
-            else
-            {
-                debug_printf("[TagFS] CRITICAL: Both superblocks corrupted\n");
-                return -1;
-            }
-        }
-        else
-        {
-            debug_printf("[TagFS] CRITICAL: Backup superblock CRC also bad\n");
-            return -1;
-        }
+    /* --- And the Ledger beside it: what is true of the volume today --- */
+    error_t ledger_rc = ledger_load();
+    if (ledger_rc != OK) {
+        return ledger_rc;
     }
 
-    // Restore primary from backup if needed
-    if (used_backup)
-    {
-        write_superblock_to_sector(TAGFS_SUPERBLOCK_SECTOR, &sb);
-    }
+    kprintf("[TagFS] %u data blocks, %llu free, %llu files\n",
+            g_state.layout.data_blocks,
+            (unsigned long long)g_state.ledger.free_blocks,
+            (unsigned long long)g_state.ledger.total_files);
 
-    if (sb.version != TAGFS_VERSION)
-    {
-        debug_printf("[TagFS] Unsupported version %u (expected %u)\n", sb.version, TAGFS_VERSION);
-        return -1;
-    }
-
-    memcpy(&g_state.superblock, &sb, sizeof(TagFSSuperblock));
-    debug_printf("[TagFS] Superblock OK: %u blocks, %u free, %u files\n",
-                 sb.total_blocks, sb.free_blocks, sb.total_files);
-
-    // --- DiskBook init (CoW redirect log). Replay is deferred until AFTER
-    //     CoW init + manifest restore below, so restored redirects attach to
-    //     the live snapshots they belong to.
-    if (DiskBookInit(sb.disk_book_superblock_sector) != OK)
+    /* --- DiskBook init (CoW redirect log). Replay is deferred until AFTER
+     *     CoW init + manifest restore below, so restored redirects attach to
+     *     the live snapshots they belong to.
+     *
+     *     Its head, the copy of its head and its records are three separate
+     *     runs of the volume, in the volume's own sectors — the DiskBook is
+     *     handed where they are rather than deriving them from one number,
+     *     because "the backup is the next sector along" is what put a record
+     *     and its only copy inside one physical block. */
+    if (DiskBookInit(
+            (uint64_t)g_state.layout.disk_book_block * TAGFS_BLOCK_SECTORS,
+            (uint64_t)(g_state.layout.disk_book_block + 1) * TAGFS_BLOCK_SECTORS,
+            (uint64_t)(g_state.layout.disk_book_block + 2) * TAGFS_BLOCK_SECTORS) != OK)
     {
         debug_printf("[TagFS] Warning: DiskBookInit failed\n");
     }
@@ -1319,7 +1333,7 @@ error_t tagfs_init(void) {
 
     // --- Restore CoW snapshots from on-disk manifest ---
     {
-        uint32_t cow_sector = TAGFS_SB_COW_SNAPSHOT(&g_state.superblock);
+        uint32_t cow_sector = g_state.ledger.cow_manifest_block;
         if (cow_sector != 0) {
             CowManifest *manifest = kmalloc(sizeof(CowManifest));
             if (manifest) {
@@ -1391,12 +1405,12 @@ error_t tagfs_init(void) {
         g_state.registry = NULL;
         return ERR_TAGFS_REGISTRY_FULL;
     }
-    if (tag_registry_load(g_state.registry, sb.tag_registry_block) != OK) {
+    if (tag_registry_load(g_state.registry, data_block_of(g_state.layout.tag_registry_block)) != OK) {
         debug_printf("[TagFS] Warning: tag_registry_load failed (empty registry)\n");
     }
 
     // --- File Table ---
-    if (file_table_init(sb.file_table_block, sb.file_table_block_count) != OK) {
+    if (file_table_init(data_block_of(g_state.layout.file_table_block), g_state.layout.file_table_blocks) != OK) {
         debug_printf("[TagFS] file_table_init failed\n");
         tag_registry_destroy(g_state.registry);
         kfree(g_state.registry);
@@ -1405,7 +1419,7 @@ error_t tagfs_init(void) {
     }
 
     // --- Metadata Pool ---
-    if (meta_pool_init(sb.metadata_pool_block, sb.metadata_pool_block_count) != OK) {
+    if (meta_pool_init(data_block_of(g_state.layout.metadata_pool_block), g_state.layout.metadata_pool_blocks) != OK) {
         debug_printf("[TagFS] meta_pool_init failed\n");
         file_table_shutdown();
         tag_registry_destroy(g_state.registry);
@@ -1427,7 +1441,7 @@ error_t tagfs_init(void) {
     }
 
     // --- Block Bitmap ---
-    uint32_t bitmap_bytes = (sb.total_blocks + 7) / 8;
+    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
     g_state.block_bitmap.bitmap = kmalloc(bitmap_bytes);
     if (!g_state.block_bitmap.bitmap)
     {
@@ -1442,17 +1456,17 @@ error_t tagfs_init(void) {
         return -1;
     }
     memset(g_state.block_bitmap.bitmap, 0, bitmap_bytes);
-    g_state.block_bitmap.total_blocks = sb.total_blocks;
+    g_state.block_bitmap.total_blocks = g_state.layout.data_blocks;
     g_state.block_bitmap.free_list = NULL;
     g_state.block_bitmap.extent_count = 0;
 
     // Read block bitmap from disk
-    uint32_t bm_sector_count = sb.block_bitmap_sector_count;
+    uint32_t bm_sector_count = (g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS);
     uint32_t bm_buf_size = bm_sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (bm_buf)
     {
-        if (disk_read_sectors((uint64_t)sb.block_bitmap_sector, (uint16_t)bm_sector_count, bm_buf) == 0)
+        if (disk_read_sectors((uint64_t)((uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS), (uint16_t)bm_sector_count, bm_buf) == 0)
         {
             uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
             memcpy(g_state.block_bitmap.bitmap, bm_buf, copy_bytes);
@@ -1469,14 +1483,14 @@ error_t tagfs_init(void) {
 
     // --- Mount-time fsck: cross-check file extents vs bitmap ---
     {
-        uint32_t bitmap_bytes_sz = (sb.total_blocks + 7) / 8;
+        uint32_t bitmap_bytes_sz = (g_state.layout.data_blocks + 7) / 8;
         uint8_t *computed_bm = kmalloc(bitmap_bytes_sz);
         if (computed_bm)
         {
             memset(computed_bm, 0, bitmap_bytes_sz);
 
             // Mark reserved blocks: 0 = tag registry, 1 = file table, 2 = metadata pool
-            for (uint32_t r = 0; r < 3 && r < sb.total_blocks; r++)
+            for (uint32_t r = 0; r < 3 && r < g_state.layout.data_blocks; r++)
             {
                 bitmap_set_bit(computed_bm, r);
             }
@@ -1486,7 +1500,7 @@ error_t tagfs_init(void) {
             uint32_t orphan_blocks = 0;
             uint32_t missing_blocks = 0;
 
-            for (uint32_t fid = 1; fid < sb.next_file_id; fid++)
+            for (uint32_t fid = 1; fid < g_state.ledger.next_file_id; fid++)
             {
                 uint32_t mb, mo;
                 if (file_table_lookup(fid, &mb, &mo) != 0)
@@ -1517,7 +1531,7 @@ error_t tagfs_init(void) {
                 {
                     uint32_t start = meta.extents[e].start_block;
                     uint32_t count = meta.extents[e].block_count;
-                    for (uint32_t b = start; b < start + count && b < sb.total_blocks; b++)
+                    for (uint32_t b = start; b < start + count && b < g_state.layout.data_blocks; b++)
                     {
                         bitmap_set_bit(computed_bm, b);
                     }
@@ -1549,8 +1563,8 @@ error_t tagfs_init(void) {
             #define MARK_CHAIN_BLOCKS(first_block, expected_magic) do {       \
                 uint32_t _cb = (first_block);                                  \
                 uint32_t _hops = 0;                                            \
-                while (_cb != 0 && _hops < sb.total_blocks) {                  \
-                    if (_cb < sb.total_blocks)                                 \
+                while (_cb != 0 && _hops < g_state.layout.data_blocks) {                  \
+                    if (_cb < g_state.layout.data_blocks)                                 \
                         bitmap_set_bit(computed_bm, _cb);                      \
                     uint8_t _bbuf[TAGFS_BLOCK_SIZE];                           \
                     if (tagfs_read_block(_cb, _bbuf) != OK) break;             \
@@ -1562,17 +1576,17 @@ error_t tagfs_init(void) {
                     _hops++;                                                   \
                 }                                                              \
             } while (0)
-            MARK_CHAIN_BLOCKS(sb.tag_registry_block,    TAGFS_REGISTRY_MAGIC);
-            MARK_CHAIN_BLOCKS(sb.file_table_block,      TAGFS_FILETBL_MAGIC);
-            MARK_CHAIN_BLOCKS(sb.metadata_pool_block,   TAGFS_MPOOL_MAGIC);
+            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.tag_registry_block),    TAGFS_REGISTRY_MAGIC);
+            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.file_table_block),      TAGFS_FILETBL_MAGIC);
+            MARK_CHAIN_BLOCKS(data_block_of(g_state.layout.metadata_pool_block),   TAGFS_MPOOL_MAGIC);
             #undef MARK_CHAIN_BLOCKS
 
             // Integrity-map blocks are used on disk but referenced by no file —
             // mark them so they are not treated as orphans or reused.
-            IntegrityMarkMapBlocks(computed_bm, sb.total_blocks);
+            IntegrityMarkMapBlocks(computed_bm, g_state.layout.data_blocks);
 
             // Compare computed vs on-disk bitmap
-            for (uint32_t b = 0; b < sb.total_blocks; b++)
+            for (uint32_t b = 0; b < g_state.layout.data_blocks; b++)
             {
                 bool on_disk = bitmap_test_bit(g_state.block_bitmap.bitmap, b);
                 bool computed = bitmap_test_bit(computed_bm, b);
@@ -1598,7 +1612,7 @@ error_t tagfs_init(void) {
                  * and go. The opposite (release-into-allocator a
                  * block that's still live metadata) corrupts the
                  * filesystem. */
-                for (uint32_t b = 0; b < sb.total_blocks; b++) {
+                for (uint32_t b = 0; b < g_state.layout.data_blocks; b++) {
                     if (bitmap_test_bit(computed_bm, b))
                         bitmap_set_bit(g_state.block_bitmap.bitmap, b);
                 }
@@ -1606,12 +1620,12 @@ error_t tagfs_init(void) {
 
                 // Count actual free blocks
                 uint32_t used = 0;
-                for (uint32_t b = 0; b < sb.total_blocks; b++)
+                for (uint32_t b = 0; b < g_state.layout.data_blocks; b++)
                 {
                     if (bitmap_test_bit(g_state.block_bitmap.bitmap, b))
                         used++;
                 }
-                g_state.superblock.free_blocks = sb.total_blocks - used;
+                g_state.ledger.free_blocks = g_state.layout.data_blocks - used;
             }
 
             debug_printf("[TagFS FSCK] Checked %u files, bitmap %s\n",
@@ -1625,7 +1639,7 @@ error_t tagfs_init(void) {
     tagfs_init_well_known_tags();
 
     // Load mirror cache so future meta reads skip disk
-    meta_pool_mirror_init(g_state.superblock.next_file_id + 64);
+    meta_pool_mirror_init(g_state.ledger.next_file_id + 64);
 
     g_state.initialized = true;
 
@@ -1656,8 +1670,8 @@ void tagfs_sync(void)
     IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
     // Write block bitmap to disk
-    uint32_t bitmap_bytes = (g_state.superblock.total_blocks + 7) / 8;
-    uint32_t sector_count = g_state.superblock.block_bitmap_sector_count;
+    uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
+    uint32_t sector_count = (g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS);
     uint32_t bm_buf_size = sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (bm_buf)
@@ -1665,7 +1679,7 @@ void tagfs_sync(void)
         memset(bm_buf, 0, bm_buf_size);
         uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
         memcpy(bm_buf, g_state.block_bitmap.bitmap, copy_bytes);
-        if (disk_write_sectors((uint64_t)g_state.superblock.block_bitmap_sector,
+        if (disk_write_sectors(((uint64_t)g_state.layout.block_bitmap_block * TAGFS_BLOCK_SECTORS),
                                (uint16_t)sector_count, bm_buf) != 0)
         {
             debug_printf("[TagFS] sync: failed to write block bitmap\n");
@@ -1673,7 +1687,7 @@ void tagfs_sync(void)
         kfree(bm_buf);
     }
 
-    tagfs_write_superblock(&g_state.superblock);
+    tagfs_write_ledger();
 
     /* Drive write-cache flush.
      *
@@ -1811,7 +1825,7 @@ int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t ta
 
     spin_lock(&g_state.lock);
 
-    uint32_t file_id = g_state.superblock.next_file_id++;
+    uint32_t file_id = g_state.ledger.next_file_id++;
 
     // Derive auto-label tag from filename stem (e.g. "kernel.bin" → "kernel")
     char stem[128];
@@ -1950,7 +1964,7 @@ int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t ta
         }
     }
 
-    g_state.superblock.total_files++;
+    g_state.ledger.total_files++;
 
     *out_file_id = file_id;
 
@@ -2012,9 +2026,9 @@ int tagfs_delete_file(uint32_t file_id)
     // Delete from metadata pool (last: safe to zero after file_table is gone)
     meta_pool_delete(meta_block, meta_offset);
 
-    if (g_state.superblock.total_files > 0)
+    if (g_state.ledger.total_files > 0)
     {
-        g_state.superblock.total_files--;
+        g_state.ledger.total_files--;
     }
 
     spin_unlock(&g_state.lock);
@@ -2442,7 +2456,7 @@ int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
      * Snapshot then release so the per-fid file_table locking below stays
      * unnested. */
     spin_lock(&g_state.lock);
-    uint32_t max_id = g_state.superblock.next_file_id;
+    uint32_t max_id = g_state.ledger.next_file_id;
     spin_unlock(&g_state.lock);
 
     for (uint32_t fid = 1; fid < max_id && found < max_results; fid++)
@@ -3128,9 +3142,9 @@ int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
                 cur->count -= count;
             }
 
-            if (g_state.superblock.free_blocks >= count)
+            if (g_state.ledger.free_blocks >= count)
             {
-                g_state.superblock.free_blocks -= count;
+                g_state.ledger.free_blocks -= count;
             }
 
             return 0;
@@ -3171,7 +3185,7 @@ static void free_run_locked(uint32_t start_block, uint32_t count)
     {
         bitmap_clear_bit(g_state.block_bitmap.bitmap, start_block + i);
     }
-    g_state.superblock.free_blocks += count;
+    g_state.ledger.free_blocks += count;
 
     // Insert into free list in sorted order, merging adjacent extents
     FreeExtent *prev = NULL;
@@ -3398,7 +3412,7 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 
     // Allocate contiguous space at target location or first available
     uint32_t new_start;
-    if (target_block != 0 && target_block < g_state.superblock.total_blocks) {
+    if (target_block != 0 && target_block < g_state.layout.data_blocks) {
         // Try to allocate at specific target block
         // Check if target area is free
         bool area_free = true;
@@ -3414,7 +3428,7 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
             for (uint32_t b = 0; b < total_blocks; b++) {
                 bitmap_set_bit(g_state.block_bitmap.bitmap, new_start + b);
             }
-            g_state.superblock.free_blocks -= total_blocks;
+            g_state.ledger.free_blocks -= total_blocks;
         } else {
             // Target not available, allocate first available
             spin_unlock(&g_state.lock);
@@ -3472,7 +3486,7 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
             bitmap_clear_bit(g_state.block_bitmap.bitmap,
                              meta.extents[i].start_block + b);
         }
-        g_state.superblock.free_blocks += meta.extents[i].block_count;
+        g_state.ledger.free_blocks += meta.extents[i].block_count;
     }
 
     if (meta.extents)
@@ -3511,7 +3525,7 @@ uint32_t tagfs_get_fragmentation_score(void)
         return 0;
 
     uint32_t score = 0;
-    uint32_t max_id = g_state.superblock.next_file_id;
+    uint32_t max_id = g_state.ledger.next_file_id;
 
     for (uint32_t fid = 1; fid < max_id; fid++)
     {

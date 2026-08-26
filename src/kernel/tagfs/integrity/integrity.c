@@ -4,12 +4,12 @@
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 
-// Superblock reserved[] layout: 0..15 boot hints, 16..23 CoW manifest blocks,
-// 24..27 integrity-map first block, 28..31 integrity-map block count.
-#define INTEG_MAP_ROFF    24
-#define INTEG_COUNT_ROFF  28
-#define SB_MAP_BLOCK(sb)  (*(uint32_t *)((sb)->reserved + INTEG_MAP_ROFF))
-#define SB_MAP_COUNT(sb)  (*(uint32_t *)((sb)->reserved + INTEG_COUNT_ROFF))
+/* Where the map is, and how much of it there is, are two fields of the volume's
+ * Ledger (volume_ledger.h). They used to be two four-byte windows into the
+ * superblock's reserved[] area, at offsets this file chose and the CoW layer
+ * had to be told to stay out of. */
+#define SB_MAP_BLOCK(fs)  ((fs)->ledger.integrity_map_block)
+#define SB_MAP_COUNT(fs)  ((fs)->ledger.integrity_map_blocks)
 
 #define ENTRIES_PER_BLOCK (TAGFS_BLOCK_SIZE / (uint32_t)sizeof(uint64_t))  // 512
 #define MAP_CACHE_SLOTS   16          // bounded RAM: 16 * 4 KB = 64 KB, ANY disk size
@@ -89,13 +89,13 @@ error_t IntegrityInit(void) {
         return ERR_ALREADY_INITIALIZED;
 
     TagFSState *fs = tagfs_get_state();
-    if (!fs || fs->superblock.total_blocks == 0)
+    if (!fs || fs->layout.data_blocks == 0)
         return ERR_NOT_INITIALIZED;
 
     spinlock_init(&g_lock);
-    g_map_entries = fs->superblock.total_blocks;
+    g_map_entries = fs->layout.data_blocks;
     g_map_count   = (g_map_entries + ENTRIES_PER_BLOCK - 1) / ENTRIES_PER_BLOCK;
-    BoxHashInit(&g_ctx, fs->superblock.fs_uuid, 16);
+    BoxHashInit(&g_ctx, fs->uuid, 16);
 
     for (uint32_t s = 0; s < MAP_CACHE_SLOTS; s++) {
         g_cache[s].map_idx = SLOT_EMPTY;
@@ -104,7 +104,7 @@ error_t IntegrityInit(void) {
     g_lru_tick = 0;
     g_rot_count = 0;
 
-    uint32_t first = SB_MAP_BLOCK(&fs->superblock);
+    uint32_t first = SB_MAP_BLOCK(fs);
     if (first == 0) {
         // First mount: lazily allocate a contiguous map region (first-mount only;
         // later mounts just reuse it). Bounded RAM regardless of how big it is.
@@ -114,15 +114,15 @@ error_t IntegrityInit(void) {
             return ERR_NO_MEMORY;
         }
         g_map_first_block = start;
-        SB_MAP_BLOCK(&fs->superblock) = start;
-        SB_MAP_COUNT(&fs->superblock) = g_map_count;
+        SB_MAP_BLOCK(fs) = start;
+        SB_MAP_COUNT(fs) = g_map_count;
 
         uint8_t zero[TAGFS_BLOCK_SIZE];
         memset(zero, 0, sizeof(zero));
         for (uint32_t i = 0; i < g_map_count; i++)
             tagfs_write_block(start + i, zero);
 
-        tagfs_write_superblock(&fs->superblock);
+        tagfs_write_ledger();
         debug_printf("[Integrity] fresh map: %u blocks at %u (covers %u, %u-slot cache)\n",
                      g_map_count, start, g_map_entries, MAP_CACHE_SLOTS);
     } else {
@@ -244,8 +244,8 @@ void IntegrityMarkMapBlocks(uint8_t *computed_bm, uint32_t total_blocks) {
     TagFSState *fs = tagfs_get_state();
     if (!fs)
         return;
-    uint32_t first = SB_MAP_BLOCK(&fs->superblock);
-    uint32_t cnt   = SB_MAP_COUNT(&fs->superblock);
+    uint32_t first = SB_MAP_BLOCK(fs);
+    uint32_t cnt   = SB_MAP_COUNT(fs);
     if (first == 0)
         return;
     for (uint32_t i = 0; i < cnt; i++) {

@@ -1,14 +1,31 @@
 /*
- * create_tagfs.c — Format a TagFS filesystem on a disk image.
+ * create_tagfs.c — Make a BoxOS volume on ground somebody has claimed for it.
  *
- * Writes the NEW on-disk format (version 1) matching the kernel's tagfs.h:
- *   - TagFSSuperblock at sector 1034 (primary) and 1035 (backup)
- *   - TagRegistryBlock at data block 0
- *   - FileTableBlock at data block 1
- *   - MetaPoolBlock at data block 2
- *   - Block bitmap starting at sector 2062
- *   - File data at blocks 3+
- *   - Boot hints in superblock reserved[0..15] for stage2 bootloader
+ * ‼ IT DOES NOT DECIDE WHERE THE VOLUME GOES
+ *
+ * It reads the medium's partition table, exactly as the kernel does, and lays
+ * the volume down on the run of sectors claimed for BoxOS. So the tool that
+ * writes a volume and the kernel that mounts it answer "where is it?" the same
+ * way, out of the same bytes, instead of both being told the same number by a
+ * build script and drifting apart the first time one of them is edited.
+ *
+ * That is what replaced sector 1034 — an absolute address the tool, the kernel
+ * twice, and the UEFI loader each spelled out for themselves.
+ *
+ * ‼ EVERYTHING IT WRITES IS COUNTED FROM THE START OF THAT GROUND
+ *
+ *   block 0            the Deed — the volume's title to its ground
+ *   block 1, 2         the Ledger, two copies, written alternately
+ *   block 3, 4         the DiskBook's own head and its backup
+ *   block 5 +          the DiskBook's records
+ *   then               the block bitmap, covering exactly the data run
+ *   then               the data: registry, file table, metadata pool, files
+ *   last block         the Deed again, so the far end proves the volume is
+ *                      all there
+ *
+ * Nothing shares a 4096-byte physical block with its own backup, which is what
+ * the old layout did with the superblock, its copy, and the journal head — all
+ * three inside sectors 1032..1039, one failed erase away from going together.
  *
  * Usage: create_tagfs <disk_image> [<file> <tags>] ...
  */
@@ -20,6 +37,8 @@
 #include <time.h>
 
 #include "tagfs_reserved.h"  /* shared reserved-tag vocabulary (-I src/include) */
+#include "volume_deed.h"     /* the title; types come from <stdint.h> above    */
+#include "volume_ledger.h"   /* and what is true of the volume today           */
 
 /* ====================================================================
  * Constants — must match kernel's tagfs.h and boxos_magic.h
@@ -35,13 +54,28 @@
 #define TAGFS_BLOCK_SIZE       4096
 #define TAGFS_FILE_ACTIVE      (1 << 0)
 
-#define TAGFS_SUPERBLOCK_SECTOR       1034
-#define TAGFS_BACKUP_SB_SECTOR        1035
-#define TAGFS_JOURNAL_SB_SECTOR       1036
-#define TAGFS_JOURNAL_BACKUP_SECTOR   1037
-#define TAGFS_JOURNAL_ENTRIES_START   1038
-#define TAGFS_JOURNAL_ENTRY_COUNT     512
-#define TAGFS_BITMAP_SECTOR_START     2062  /* 1038 + 512*2 = 2062 */
+#define TAGFS_SECTOR_BYTES     512
+#define TAGFS_BLOCK_SECTORS    (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_BYTES)   /* 8 */
+
+/* The DiskBook's on-disk geometry, from the kernel's disk_book.h. Its head and
+ * the copy of its head get a block each — they were one sector apart, which on
+ * every medium in use is the same physical block. */
+#define DISK_BOOK_SB_MAGIC            0x44425342  /* "DBSB" */
+#define DISK_BOOK_VERSION             2
+#define DISK_BOOK_CAPACITY            512
+#define DISK_BOOK_SECTORS_PER_ENTRY   2
+#define DISK_BOOK_ENTRY_BLOCKS \
+    ((DISK_BOOK_CAPACITY * DISK_BOOK_SECTORS_PER_ENTRY) / TAGFS_BLOCK_SECTORS)
+
+/* A Deed occupies one block wherever it sits — see DEED_SECTORS in deed.c. */
+#define DEED_BLOCKS   1
+#define DEED_SECTORS  TAGFS_BLOCK_SECTORS
+
+/* What a BoxOS partition looks like from the outside. The MBR type byte and
+ * the GPT type GUID are the same two constants the kernel's ground.c reads;
+ * they are permanent and are never reissued. */
+#define GROUND_MBR_TYPE_BOXOS      0x7F
+#define GROUND_MBR_TYPE_PROTECTIVE 0xEE
 
 #define TAGFS_REGISTRY_DATA_SIZE   4080
 #define TAGFS_MPOOL_DATA_SIZE      4080
@@ -52,48 +86,9 @@
 #define RECORD_CRC_OFFSET     40   /* CRC16 stored at bytes [40..41] of packed record */
 #define MPOOL_BLOCK_HEADER    16   /* MetaPoolBlock header before payload */
 
-/* Boot hint offsets within superblock (in reserved[] area, byte offset 108+) */
-#define BOOT_HINT_KERNEL_BLOCK    0   /* reserved[0..3]  */
-#define BOOT_HINT_KERNEL_BLOCKS   4   /* reserved[4..7]  */
-#define BOOT_HINT_KERNEL_SIZE     8   /* reserved[8..11] */
-#define BOOT_HINT_DATA_START     12   /* reserved[12..15] */
-
-#define TAGFS_SB_CRC_OFFSET     400   /* CRC32 stored at reserved[400..403] */
-#define TAGFS_SB_CRC_SENTINEL_OFFSET 399   /* reserved[399] = 0xCC marks "CRC present" */
-#define TAGFS_SB_CRC_SENTINEL        0xCC
-
 /* ====================================================================
  * On-disk structures — must match kernel's tagfs.h exactly
  * ==================================================================== */
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t block_size;
-    uint32_t total_blocks;
-    uint32_t free_blocks;
-    uint32_t total_files;
-    uint32_t next_file_id;
-    uint32_t next_tag_id;
-    uint32_t total_tags;
-
-    uint32_t tag_registry_block;
-    uint32_t tag_registry_block_count;
-    uint32_t file_table_block;
-    uint32_t file_table_block_count;
-    uint32_t metadata_pool_block;
-    uint32_t metadata_pool_block_count;
-    uint32_t block_bitmap_sector;
-    uint32_t block_bitmap_sector_count;
-    uint32_t journal_superblock_sector;
-
-    uint64_t fs_created_time;
-    uint64_t fs_modified_time;
-    uint8_t  fs_uuid[16];
-    uint32_t backup_superblock_sector;
-
-    uint8_t  reserved[404];
-} TagFSSuperblock;
 
 typedef struct __attribute__((packed)) {
     uint32_t magic;
@@ -262,22 +257,46 @@ static void parse_tags(const char* tag_string, const char* filename,
  * Disk helpers
  * ==================================================================== */
 
-static int write_at_sector(FILE* disk, uint32_t sector, const void* data, size_t size) {
-    if (fseek(disk, (long)sector * 512, SEEK_SET) != 0) return -1;
+/* ====================================================================
+ * The ground, and everything written onto it
+ *
+ * `g_ground_start` is the only absolute address this tool ever holds, it is
+ * read out of the medium's own partition table, and every write below is
+ * counted from it. Move the partition and the same bytes land in the right
+ * place; hand the tool a disk that is not ours and it writes nothing at all.
+ * ==================================================================== */
+
+static uint64_t g_ground_start;    /* first sector of the volume's ground */
+static uint64_t g_ground_sectors;  /* how far it runs */
+
+/* One place where a volume-relative sector becomes a place in the file. */
+static int write_at_sector(FILE* disk, uint64_t vsector, const void* data, size_t size) {
+    uint64_t at = (g_ground_start + vsector) * TAGFS_SECTOR_BYTES;
+    if (fseek(disk, (long)at, SEEK_SET) != 0) return -1;
     if (fwrite(data, size, 1, disk) != 1) return -1;
     return 0;
 }
 
-static int write_block(FILE* disk, uint32_t data_start_sector, uint32_t block,
-                        const void* data) {
-    uint32_t sector = data_start_sector + block * 8;
-    return write_at_sector(disk, sector, data, TAGFS_BLOCK_SIZE);
+static int read_at_sector(FILE* disk, uint64_t abs_sector, void* data, size_t size) {
+    if (fseek(disk, (long)(abs_sector * TAGFS_SECTOR_BYTES), SEEK_SET) != 0) return -1;
+    if (fread(data, size, 1, disk) != 1) return -1;
+    return 0;
 }
 
-static int write_file_data(FILE* disk, uint32_t data_start_sector, uint32_t block,
+/* `data_start_block` is where the data run begins, in the volume's blocks; the
+ * block number inside it is what a file's metadata carries, so it means the
+ * same thing forever no matter what is laid down in front of it. */
+static int write_block(FILE* disk, uint32_t data_start_block, uint32_t block,
+                        const void* data) {
+    uint64_t vsector = (uint64_t)(data_start_block + block) * TAGFS_BLOCK_SECTORS;
+    return write_at_sector(disk, vsector, data, TAGFS_BLOCK_SIZE);
+}
+
+static int write_file_data(FILE* disk, uint32_t data_start_block, uint32_t block,
                             FILE* src, uint64_t file_size, uint32_t block_count) {
-    uint32_t sector = data_start_sector + block * 8;
-    if (fseek(disk, (long)sector * 512, SEEK_SET) != 0) return -1;
+    uint64_t vsector = (uint64_t)(data_start_block + block) * TAGFS_BLOCK_SECTORS;
+    if (fseek(disk, (long)((g_ground_start + vsector) * TAGFS_SECTOR_BYTES), SEEK_SET) != 0)
+        return -1;
 
     uint8_t buf[TAGFS_BLOCK_SIZE];
     uint64_t remaining = file_size;
@@ -299,31 +318,360 @@ static int write_file_data(FILE* disk, uint32_t data_start_sector, uint32_t bloc
 }
 
 /* ====================================================================
- * Layout computation
+ * CRC32 (ISO 3309) — the same sum the kernel's KCrc32 takes, which is also
+ * the one GPT is specified in, so one routine checks a partition table, a
+ * Deed and a Ledger.
  * ==================================================================== */
 
-static void compute_layout(uint32_t disk_sectors,
-                            uint32_t* out_total_blocks,
-                            uint32_t* out_bitmap_sectors,
-                            uint32_t* out_data_start_sector) {
-    /* Iterate to convergence (typically 1-2 iterations) */
-    uint32_t bitmap_sectors = 1;
-    uint32_t data_start, total_blocks;
+static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
+        }
+    }
+    return ~crc;
+}
 
-    for (int i = 0; i < 10; i++) {
-        data_start   = TAGFS_BITMAP_SECTOR_START + bitmap_sectors;
-        total_blocks = (disk_sectors - data_start) / 8;
+/* ====================================================================
+ * Reading the medium's partition table — the same two tables, checked the
+ * same way, as the kernel's core/boardroom/ground.c. This is deliberately a
+ * second implementation and not a shared one: the kernel's speaks to a medium
+ * through the Boardroom and this one seeks in a file, and the day they
+ * disagree about where a volume is, is a day worth finding out about at mkfs
+ * time rather than at boot.
+ * ==================================================================== */
 
-        uint32_t bitmap_bytes   = (total_blocks + 7) / 8;
-        uint32_t new_bm_sectors = (bitmap_bytes + 511) / 512;
+#define MBR_TABLE_OFFSET     446u
+#define MBR_ENTRY_BYTES      16u
+#define MBR_ENTRY_COUNT      4u
+#define MBR_ENTRY_TYPE       4u
+#define MBR_ENTRY_START_LBA  8u
+#define MBR_ENTRY_SECTORS    12u
 
-        if (new_bm_sectors == bitmap_sectors) break;
-        bitmap_sectors = new_bm_sectors;
+#define GPT_HEADER_LBA          1u
+#define GPT_HEADER_SIZE_OFFSET  0x0Cu
+#define GPT_HEADER_CRC_OFFSET   0x10u
+#define GPT_ENTRY_LBA_OFFSET    0x48u
+#define GPT_ENTRY_COUNT_OFFSET  0x50u
+#define GPT_ENTRY_BYTES_OFFSET  0x54u
+#define GPT_ENTRY_CRC_OFFSET    0x58u
+#define GPT_ENTRY_TYPE_OFFSET   0u
+#define GPT_ENTRY_FIRST_OFFSET  0x20u
+#define GPT_ENTRY_LAST_OFFSET   0x28u
+#define GPT_HEADER_MIN_BYTES    92u
+#define GPT_ENTRY_MIN_BYTES     128u
+#define GPT_ARRAY_MAX_BYTES     (128u * 1024u)
+
+/* cf8ae49a-d26a-4959-9a6f-71c932e0c9eb, in the mixed-endian order GPT stores a
+ * type GUID in — byte for byte what ground.c compares against. */
+static const uint8_t g_boxos_type_guid[16] = {
+    0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
+    0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb
+};
+
+static uint32_t le32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t le64(const uint8_t* p) {
+    return (uint64_t)le32(p) | ((uint64_t)le32(p + 4) << 32);
+}
+
+static int ground_from_gpt(FILE* disk) {
+    uint8_t header[TAGFS_SECTOR_BYTES];
+    if (read_at_sector(disk, GPT_HEADER_LBA, header, sizeof(header)) != 0) {
+        fprintf(stderr, "This image says it is a GPT and has no header behind it\n");
+        return -1;
+    }
+    if (memcmp(header, "EFI PART", 8) != 0) {
+        fprintf(stderr, "A protective MBR with no GPT behind it\n");
+        return -1;
     }
 
-    *out_total_blocks      = total_blocks;
-    *out_bitmap_sectors    = bitmap_sectors;
-    *out_data_start_sector = TAGFS_BITMAP_SECTOR_START + bitmap_sectors;
+    uint32_t header_bytes = le32(header + GPT_HEADER_SIZE_OFFSET);
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > TAGFS_SECTOR_BYTES) {
+        fprintf(stderr, "Its GPT header states a length of %u, which cannot be one\n",
+                header_bytes);
+        return -1;
+    }
+
+    uint8_t probe[TAGFS_SECTOR_BYTES];
+    memcpy(probe, header, header_bytes);
+    memset(probe + GPT_HEADER_CRC_OFFSET, 0, 4);
+    if (tagfs_crc32(probe, header_bytes) != le32(header + GPT_HEADER_CRC_OFFSET)) {
+        fprintf(stderr, "Its GPT header does not match its own checksum\n");
+        return -1;
+    }
+
+    uint64_t entry_lba   = le64(header + GPT_ENTRY_LBA_OFFSET);
+    uint32_t entry_count = le32(header + GPT_ENTRY_COUNT_OFFSET);
+    uint32_t entry_bytes = le32(header + GPT_ENTRY_BYTES_OFFSET);
+
+    if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
+        entry_bytes > GPT_ARRAY_MAX_BYTES ||
+        entry_count > GPT_ARRAY_MAX_BYTES / entry_bytes) {
+        fprintf(stderr, "Its GPT states %u entries of %u bytes, which is not a table\n",
+                entry_count, entry_bytes);
+        return -1;
+    }
+
+    uint32_t array_bytes = entry_count * entry_bytes;
+    uint8_t* array = calloc(1, array_bytes);
+    if (!array) { fprintf(stderr, "No memory for its GPT entries\n"); return -1; }
+
+    int rc = -1;
+    if (read_at_sector(disk, entry_lba, array, array_bytes) != 0) {
+        fprintf(stderr, "Could not read its GPT entries\n");
+        goto done;
+    }
+    if (tagfs_crc32(array, array_bytes) != le32(header + GPT_ENTRY_CRC_OFFSET)) {
+        fprintf(stderr, "Its GPT entries do not match their own checksum\n");
+        goto done;
+    }
+
+    for (uint32_t i = 0; i < entry_count; i++) {
+        const uint8_t* e = array + (uint64_t)i * entry_bytes;
+        if (memcmp(e + GPT_ENTRY_TYPE_OFFSET, g_boxos_type_guid, 16) != 0) continue;
+
+        uint64_t first = le64(e + GPT_ENTRY_FIRST_OFFSET);
+        uint64_t last  = le64(e + GPT_ENTRY_LAST_OFFSET);
+        if (last < first) continue;
+
+        g_ground_start   = first;
+        g_ground_sectors = last - first + 1;    /* GPT's last is inclusive */
+        printf("  Ground:        sectors %llu..%llu, from GPT entry %u\n",
+               (unsigned long long)first, (unsigned long long)last, i);
+        rc = 0;
+        goto done;
+    }
+    fprintf(stderr, "Its GPT has no BoxOS partition in it\n");
+
+done:
+    free(array);
+    return rc;
+}
+
+/*
+ * Find the run of this image claimed for BoxOS. Nothing is written anywhere
+ * else — a tool that formats "the whole file" is a tool that eats a disk
+ * somebody handed it by mistake.
+ */
+static int survey_ground(FILE* disk) {
+    uint8_t sector0[TAGFS_SECTOR_BYTES];
+    if (read_at_sector(disk, 0, sector0, sizeof(sector0)) != 0) {
+        fprintf(stderr, "Could not read sector 0 of the image\n");
+        return -1;
+    }
+    if (sector0[510] != 0x55 || sector0[511] != 0xAA) {
+        fprintf(stderr, "No partition table on this image — nothing has claimed "
+                        "ground for BoxOS, so there is nowhere to put a volume\n");
+        return -1;
+    }
+
+    for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+        if (sector0[MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES + MBR_ENTRY_TYPE] ==
+            GROUND_MBR_TYPE_PROTECTIVE) {
+            return ground_from_gpt(disk);
+        }
+    }
+
+    for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+        const uint8_t* e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
+        if (e[MBR_ENTRY_TYPE] != GROUND_MBR_TYPE_BOXOS) continue;
+
+        uint64_t start = le32(e + MBR_ENTRY_START_LBA);
+        uint64_t count = le32(e + MBR_ENTRY_SECTORS);
+        if (count == 0) continue;
+
+        g_ground_start   = start;
+        g_ground_sectors = count;
+        printf("  Ground:        sectors %llu..%llu, from MBR entry %u\n",
+               (unsigned long long)start,
+               (unsigned long long)(start + count - 1), i);
+        return 0;
+    }
+
+    fprintf(stderr, "This image has a partition table with no BoxOS partition in it\n");
+    return -1;
+}
+
+/* ====================================================================
+ * Layout computation — in the volume's own 4096-byte blocks, counted from
+ * the start of its ground. Nothing here is a sector number on a medium.
+ * ==================================================================== */
+
+typedef struct {
+    uint32_t volume_blocks;     /* the whole ground, in blocks           */
+    uint32_t deed_block;        /* 0 — the title                         */
+    uint32_t ledger_block;      /* two copies, ledger_block and +1       */
+    uint32_t disk_book_block;   /* head, backup, then the records        */
+    uint32_t disk_book_blocks;
+    uint32_t bitmap_block;
+    uint32_t bitmap_blocks;
+    uint32_t data_block;
+    uint32_t data_blocks;
+    uint64_t tail_sector;       /* where the far copy of the Deed goes   */
+} VolumeShape;
+
+static void compute_layout(uint64_t ground_sectors, VolumeShape* out) {
+    memset(out, 0, sizeof(*out));
+
+    out->volume_blocks    = (uint32_t)(ground_sectors / TAGFS_BLOCK_SECTORS);
+    out->deed_block       = 0;
+    out->ledger_block     = DEED_BLOCKS;
+    out->disk_book_block  = out->ledger_block + VOLUME_LEDGER_COPIES;
+    out->disk_book_blocks = 2 + DISK_BOOK_ENTRY_BLOCKS;  /* head, backup, records */
+    out->bitmap_block     = out->disk_book_block + out->disk_book_blocks;
+
+    /* The bitmap covers the data run and lives in front of it, so its size and
+     * the run's size define each other. Two or three passes settle it; the
+     * loop is bounded because each pass can only shrink the run. */
+    uint32_t bitmap_blocks = 1;
+    for (int i = 0; i < 10; i++) {
+        uint32_t data_block  = out->bitmap_block + bitmap_blocks;
+        uint32_t data_blocks = out->volume_blocks - data_block - DEED_BLOCKS;
+        uint32_t need = ((data_blocks + 7) / 8 + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
+        if (need == bitmap_blocks) break;
+        bitmap_blocks = need;
+    }
+
+    out->bitmap_blocks = bitmap_blocks;
+    out->data_block    = out->bitmap_block + bitmap_blocks;
+    out->data_blocks   = out->volume_blocks - out->data_block - DEED_BLOCKS;
+
+    /* The far copy goes in the last block of the volume — as far from the head
+     * as the ground allows, which is the whole point of having it. */
+    out->tail_sector = (uint64_t)(out->volume_blocks - DEED_BLOCKS) * TAGFS_BLOCK_SECTORS;
+}
+
+/* ====================================================================
+ * Writing the Deed
+ *
+ * Two copies of one record, at opposite ends of the volume. Both are built
+ * here from the same numbers, so the only thing that differs between them is
+ * the one byte that says which is which — and a head read where a tail should
+ * be is then a misdirected read that says so, instead of a valid-looking Deed.
+ * ==================================================================== */
+
+static const uint8_t g_deed_magic[8] = {
+    VOLUME_DEED_MAGIC_0, VOLUME_DEED_MAGIC_1, VOLUME_DEED_MAGIC_2,
+    VOLUME_DEED_MAGIC_3, VOLUME_DEED_MAGIC_4, VOLUME_DEED_MAGIC_5,
+    VOLUME_DEED_MAGIC_6, VOLUME_DEED_MAGIC_7
+};
+
+/* Lay one stamp down and return where the next one starts. The reader steps to
+ * the next four-byte boundary after each payload, so the writer must leave it
+ * exactly there — the buffer is already zeroed, so the padding is zeroes and
+ * the checksum covers them. */
+static uint32_t append_stamp(uint8_t* buf, uint32_t at, uint16_t kind,
+                             const void* payload, uint16_t bytes) {
+    VolumeStamp s;
+    s.kind  = kind;
+    s.bytes = bytes;
+    memcpy(buf + at, &s, sizeof(s));
+    memcpy(buf + at + sizeof(s), payload, bytes);
+    return (at + (uint32_t)sizeof(s) + bytes + 3u) & ~3u;
+}
+
+static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
+                      const uint8_t uuid[16], const VolumeShape* shape,
+                      const VolumeBoot* boot, uint32_t mpool_blocks) {
+    uint8_t block[TAGFS_BLOCK_SIZE];
+    memset(block, 0, sizeof(block));
+
+    VolumeGeometry geo;
+    memset(&geo, 0, sizeof(geo));
+    geo.logical_bytes  = TAGFS_SECTOR_BYTES;
+    /* What the volume was laid out FOR, which is a decision made here and not
+     * a fact about the image file: everything below sits on a 4096-byte grid.
+     * The kernel compares this against what the medium says of itself, and
+     * says so when a volume assumed a finer grid than the medium has. */
+    geo.physical_bytes = TAGFS_BLOCK_SIZE;
+    geo.grain_bytes    = 1024u * 1024u;      /* the volume starts on a 1 MiB step */
+    geo.block_bytes    = TAGFS_BLOCK_SIZE;
+
+    VolumeLayout layout;
+    memset(&layout, 0, sizeof(layout));
+    layout.total_blocks         = shape->volume_blocks;
+    layout.state_block          = shape->ledger_block;
+    layout.state_blocks         = VOLUME_LEDGER_COPIES;
+    layout.tag_registry_block   = shape->data_block + 0;
+    layout.tag_registry_blocks  = 1;
+    layout.file_table_block     = shape->data_block + 1;
+    layout.file_table_blocks    = 1;
+    layout.metadata_pool_block  = shape->data_block + 2;
+    layout.metadata_pool_blocks = mpool_blocks;
+    layout.block_bitmap_block   = shape->bitmap_block;
+    layout.block_bitmap_blocks  = shape->bitmap_blocks;
+    layout.disk_book_block      = shape->disk_book_block;
+    layout.disk_book_blocks     = shape->disk_book_blocks;
+    layout.data_block           = shape->data_block;
+    layout.data_blocks          = shape->data_blocks;
+
+    VolumeBorn born;
+    memset(&born, 0, sizeof(born));
+    born.created_unix = (uint64_t)time(NULL);
+    memcpy(born.maker, "create_tagfs", 12);
+
+    uint32_t at = sizeof(VolumeDeed);
+    at = append_stamp(block, at, VOLUME_STAMP_GEOMETRY, &geo,    sizeof(geo));
+    at = append_stamp(block, at, VOLUME_STAMP_LAYOUT,   &layout, sizeof(layout));
+    at = append_stamp(block, at, VOLUME_STAMP_BORN,     &born,   sizeof(born));
+    at = append_stamp(block, at, VOLUME_STAMP_BOOT,     boot,    sizeof(*boot));
+
+    VolumeDeed deed;
+    memset(&deed, 0, sizeof(deed));
+    memcpy(deed.magic, g_deed_magic, sizeof(g_deed_magic));
+    deed.prologue_bytes = sizeof(VolumeDeed);
+    deed.stamp_bytes    = (uint16_t)(at - sizeof(VolumeDeed));
+    deed.crc32          = 0;
+    memcpy(deed.uuid, uuid, 16);
+    deed.sectors     = (uint64_t)shape->volume_blocks * TAGFS_BLOCK_SECTORS;
+    deed.tail_sector = shape->tail_sector;
+    deed.role        = role;
+
+    memcpy(block, &deed, sizeof(deed));
+    deed.crc32 = tagfs_crc32(block, sizeof(deed) + deed.stamp_bytes);
+    memcpy(block, &deed, sizeof(deed));
+
+    return write_at_sector(disk, vsector, block, sizeof(block));
+}
+
+/* ====================================================================
+ * Writing the Ledger
+ *
+ * Both copies, identical, both valid: a volume that has never been written to
+ * still has to mount, and a mount reads whichever copy is newer. They carry
+ * the same seq here, and the first write the kernel makes goes to the other
+ * one with seq+1 — from then on the pair alternates forever.
+ * ==================================================================== */
+
+static int write_ledger(FILE* disk, const VolumeShape* shape,
+                        const VolumeLedger* src) {
+    static const uint8_t magic[8] = {
+        VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
+        VOLUME_LEDGER_MAGIC_3, VOLUME_LEDGER_MAGIC_4, VOLUME_LEDGER_MAGIC_5,
+        VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
+    };
+
+    VolumeLedger led = *src;
+    memcpy(led.magic, magic, sizeof(magic));
+    led.bytes = sizeof(VolumeLedger);
+    led.crc32 = 0;
+    led.crc32 = tagfs_crc32((const uint8_t*)&led, sizeof(led));
+
+    for (uint32_t copy = 0; copy < VOLUME_LEDGER_COPIES; copy++) {
+        uint8_t block[TAGFS_BLOCK_SIZE];
+        memset(block, 0, sizeof(block));
+        memcpy(block, &led, sizeof(led));
+
+        uint64_t vsector = (uint64_t)(shape->ledger_block + copy) * TAGFS_BLOCK_SECTORS;
+        if (write_at_sector(disk, vsector, block, sizeof(block)) != 0) return -1;
+    }
+    return 0;
 }
 
 /* ====================================================================
@@ -462,33 +810,6 @@ static void generate_uuid(uint8_t uuid[16]) {
 }
 
 /* ====================================================================
- * CRC32 (ISO 3309 — must match kernel's tagfs_crc32 exactly)
- * ==================================================================== */
-
-static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-        }
-    }
-    return ~crc;
-}
-
-static void superblock_stamp_crc(TagFSSuperblock* sb) {
-    /* Match the kernel's superblock_stamp_crc exactly: zero the sentinel and
-     * CRC region for the computation, write the CRC, then set the 0xCC
-     * sentinel. Without the sentinel the kernel treats a freshly-imaged volume
-     * as "legacy, CRC absent" and never validates it on first mount. */
-    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = 0;
-    memset(sb->reserved + TAGFS_SB_CRC_OFFSET, 0, 4);
-    uint32_t crc = tagfs_crc32((const uint8_t*)sb, sizeof(TagFSSuperblock));
-    memcpy(sb->reserved + TAGFS_SB_CRC_OFFSET, &crc, 4);
-    sb->reserved[TAGFS_SB_CRC_SENTINEL_OFFSET] = TAGFS_SB_CRC_SENTINEL;
-}
-
-/* ====================================================================
  * Main
  * ==================================================================== */
 
@@ -496,9 +817,11 @@ int main(int argc, char* argv[]) {
     if (argc < 2 || (argc > 2 && (argc - 2) % 2 != 0)) {
         fprintf(stderr, "Usage: %s <disk_image> [<file> <tags>] ...\n", argv[0]);
         fprintf(stderr, "\n");
-        fprintf(stderr, "Creates TagFS v1 filesystem on a disk image.\n");
-        fprintf(stderr, "Layout is fixed: superblock=1034, bitmap=2062, blocks after bitmap.\n");
-        fprintf(stderr, "First file tagged 'kernel' gets boot hints in superblock.\n");
+        fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
+        fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
+        fprintf(stderr, "type GUID in a GPT). Nothing outside that run is touched.\n");
+        fprintf(stderr, "The file whose name stems to 'kernel' is the one the Deed\n");
+        fprintf(stderr, "points a loader at.\n");
         return 1;
     }
 
@@ -511,24 +834,41 @@ int main(int argc, char* argv[]) {
 
     fseek(disk, 0, SEEK_END);
     long disk_size = ftell(disk);
-    uint32_t disk_sectors = (uint32_t)(disk_size / 512);
 
-    printf("[create_tagfs] Formatting TagFS v1 on %s (%u sectors, %lu bytes)\n",
-           disk_path, disk_sectors, disk_size);
+    printf("[create_tagfs] Making a BoxOS volume on %s (%lu bytes)\n",
+           disk_path, disk_size);
 
-    /* ---- Compute layout ---- */
-    uint32_t total_blocks, bitmap_sectors, data_start_sector;
-    compute_layout(disk_sectors, &total_blocks, &bitmap_sectors, &data_start_sector);
+    /* ---- Find the ground somebody claimed for us ---- */
+    if (survey_ground(disk) != 0) { fclose(disk); return 1; }
 
-    printf("  Superblock:    sector %u (backup %u)\n", TAGFS_SUPERBLOCK_SECTOR, TAGFS_BACKUP_SB_SECTOR);
-    printf("  Journal:       sector %u (backup %u, entries %u-%u)\n",
-           TAGFS_JOURNAL_SB_SECTOR, TAGFS_JOURNAL_BACKUP_SECTOR,
-           TAGFS_JOURNAL_ENTRIES_START,
-           TAGFS_JOURNAL_ENTRIES_START + TAGFS_JOURNAL_ENTRY_COUNT * 2 - 1);
-    printf("  Block bitmap:  sector %u (%u sectors)\n", TAGFS_BITMAP_SECTOR_START, bitmap_sectors);
-    printf("  Data start:    sector %u\n", data_start_sector);
-    printf("  Total blocks:  %u (%u MB)\n", total_blocks, (total_blocks * 4) / 1024);
-    printf("  Reserved:      block 0 (registry), 1 (file table), 2 (metadata pool)\n");
+    if ((long)((g_ground_start + g_ground_sectors) * TAGFS_SECTOR_BYTES) > disk_size) {
+        fprintf(stderr, "The BoxOS partition runs to sector %llu and the image "
+                        "ends at %llu — it was copied short\n",
+                (unsigned long long)(g_ground_start + g_ground_sectors),
+                (unsigned long long)(disk_size / TAGFS_SECTOR_BYTES));
+        fclose(disk); return 1;
+    }
+
+    /* ---- Compute layout, in the volume's own blocks ---- */
+    VolumeShape shape;
+    compute_layout(g_ground_sectors, &shape);
+    uint32_t total_blocks      = shape.data_blocks;
+    uint32_t data_start_block  = shape.data_block;
+
+    printf("  Deed:          block %u, far copy at sector %llu\n",
+           shape.deed_block, (unsigned long long)shape.tail_sector);
+    printf("  Ledger:        blocks %u..%u\n",
+           shape.ledger_block, shape.ledger_block + VOLUME_LEDGER_COPIES - 1);
+    printf("  DiskBook:      blocks %u..%u (head, backup, %u record blocks)\n",
+           shape.disk_book_block,
+           shape.disk_book_block + shape.disk_book_blocks - 1,
+           DISK_BOOK_ENTRY_BLOCKS);
+    printf("  Block bitmap:  blocks %u..%u\n",
+           shape.bitmap_block, shape.bitmap_block + shape.bitmap_blocks - 1);
+    printf("  Data:          blocks %u..%u — %u of them (%u MiB)\n",
+           shape.data_block, shape.data_block + shape.data_blocks - 1,
+           shape.data_blocks, (shape.data_blocks * 4) / 1024);
+    printf("  Reserved:      data block 0 (registry), 1 (file table), 2 (metadata pool)\n");
 
     /* ---- Parse files and tags ---- */
     FileInfo* files = NULL;
@@ -600,7 +940,7 @@ int main(int argc, char* argv[]) {
     if (build_registry_block(&reg_blk) != 0) {
         fclose(disk); return 1;
     }
-    if (write_block(disk, data_start_sector, 0, &reg_blk) != 0) {
+    if (write_block(disk, data_start_block, 0, &reg_blk) != 0) {
         fprintf(stderr, "Failed to write registry block\n");
         fclose(disk); return 1;
     }
@@ -613,7 +953,7 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "Failed to open %s for data write\n", files[i].filepath);
             fclose(disk); return 1;
         }
-        if (write_file_data(disk, data_start_sector, files[i].start_block,
+        if (write_file_data(disk, data_start_block, files[i].start_block,
                             f, files[i].file_size, files[i].block_count) != 0) {
             fprintf(stderr, "Failed to write data for %s\n", files[i].filename);
             fclose(f); fclose(disk); return 1;
@@ -655,7 +995,7 @@ int main(int argc, char* argv[]) {
 
             /* Link old block → new block, write old block to disk */
             mpool.next_block = new_mpool_block;
-            if (write_block(disk, data_start_sector, current_mpool_block, &mpool) != 0) {
+            if (write_block(disk, data_start_block, current_mpool_block, &mpool) != 0) {
                 fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
                 fclose(disk); return 1;
             }
@@ -689,7 +1029,7 @@ int main(int argc, char* argv[]) {
     }
 
     /* Write final (or only) mpool block */
-    if (write_block(disk, data_start_sector, current_mpool_block, &mpool) != 0) {
+    if (write_block(disk, data_start_block, current_mpool_block, &mpool) != 0) {
         fprintf(stderr, "Failed to write metadata pool block %u\n", current_mpool_block);
         fclose(disk); return 1;
     }
@@ -699,14 +1039,14 @@ int main(int argc, char* argv[]) {
 
     /* ---- Write file table (block 1) ---- */
     printf("[create_tagfs] Writing file table...\n");
-    if (write_block(disk, data_start_sector, 1, &ftable) != 0) {
+    if (write_block(disk, data_start_block, 1, &ftable) != 0) {
         fprintf(stderr, "Failed to write file table block\n");
         fclose(disk); return 1;
     }
 
     /* ---- Write block bitmap ---- */
     printf("[create_tagfs] Writing block bitmap...\n");
-    uint32_t bitmap_buf_size = bitmap_sectors * 512;
+    uint32_t bitmap_buf_size = shape.bitmap_blocks * TAGFS_BLOCK_SIZE;
     uint8_t* bitmap = calloc(1, bitmap_buf_size);
     if (!bitmap) { fprintf(stderr, "calloc failed for bitmap\n"); fclose(disk); return 1; }
 
@@ -716,25 +1056,27 @@ int main(int argc, char* argv[]) {
         bitmap[b / 8] |= (uint8_t)(1u << (b % 8));
     }
 
-    if (write_at_sector(disk, TAGFS_BITMAP_SECTOR_START, bitmap, bitmap_buf_size) != 0) {
+    if (write_at_sector(disk, (uint64_t)shape.bitmap_block * TAGFS_BLOCK_SECTORS,
+                        bitmap, bitmap_buf_size) != 0) {
         fprintf(stderr, "Failed to write block bitmap\n");
         free(bitmap); fclose(disk); return 1;
     }
     free(bitmap);
 
-    /* ---- Write DiskBook superblock (DBSB v2, empty redirect log) ---- */
-    printf("[create_tagfs] Writing DiskBook superblock...\n");
+    /* ---- Write the DiskBook's head, its backup, and an empty record run ---- */
+    printf("[create_tagfs] Writing DiskBook...\n");
     {
         /* Must match the kernel's DiskBookSuperblock (disk_book.h):
          *   u32 magic, u32 version, u64 start_sector, u32 capacity,
-         *   u32 count, u32 generation, u32 flags, u8 uuid[16], ...
-         * start_sector = sb_sector + 2 = first record sector. */
-        uint8_t dbuf[512];
-        memset(dbuf, 0, 512);
-        uint32_t dmag   = 0x44425342;                  /* "DBSB" */
-        uint32_t dver   = 2;                            /* DISK_BOOK_VERSION  */
-        uint64_t dstart = TAGFS_JOURNAL_ENTRIES_START;  /* 1038 = 1036 + 2    */
-        uint32_t dcap   = 512;                          /* DISK_BOOK_CAPACITY */
+         *   u32 count, u32 generation, u32 flags, u32 crc32, u8 uuid[16], ...
+         * `start_sector` is counted from the start of the volume, like every
+         * other number the volume keeps about itself. */
+        uint8_t dbuf[TAGFS_SECTOR_BYTES];
+        memset(dbuf, 0, sizeof(dbuf));
+        uint32_t dmag   = DISK_BOOK_SB_MAGIC;
+        uint32_t dver   = DISK_BOOK_VERSION;
+        uint64_t dstart = (uint64_t)(shape.disk_book_block + 2) * TAGFS_BLOCK_SECTORS;
+        uint32_t dcap   = DISK_BOOK_CAPACITY;
         uint32_t dcount = 0;
         memcpy(dbuf + 0,  &dmag,   4);
         memcpy(dbuf + 4,  &dver,   4);
@@ -744,98 +1086,89 @@ int main(int argc, char* argv[]) {
         /* crc32 at offset 32 (after generation@24, flags@28), over the 512-byte
          * block with the crc field zeroed — matches the kernel's DiskBook SB CRC
          * so a freshly-imaged volume validates without a first-mount reformat. */
-        uint32_t dcrc = tagfs_crc32(dbuf, 512);
+        uint32_t dcrc = tagfs_crc32(dbuf, sizeof(dbuf));
         memcpy(dbuf + 32, &dcrc, 4);
 
-        write_at_sector(disk, TAGFS_JOURNAL_SB_SECTOR, dbuf, 512);
-        write_at_sector(disk, TAGFS_JOURNAL_BACKUP_SECTOR, dbuf, 512);
-    }
+        /* A block apart, not a sector: the head and the copy of the head were
+         * inside one physical block, so the copy died with what it was for. */
+        write_at_sector(disk, (uint64_t)shape.disk_book_block * TAGFS_BLOCK_SECTORS,
+                        dbuf, sizeof(dbuf));
+        write_at_sector(disk, (uint64_t)(shape.disk_book_block + 1) * TAGFS_BLOCK_SECTORS,
+                        dbuf, sizeof(dbuf));
 
-    /* Zero journal entries area */
-    {
-        uint8_t zero[512];
-        memset(zero, 0, 512);
-        for (uint32_t s = TAGFS_JOURNAL_ENTRIES_START;
-             s < TAGFS_JOURNAL_ENTRIES_START + TAGFS_JOURNAL_ENTRY_COUNT * 2; s++) {
-            write_at_sector(disk, s, zero, 512);
+        uint8_t zero[TAGFS_BLOCK_SIZE];
+        memset(zero, 0, sizeof(zero));
+        for (uint32_t b = 0; b < DISK_BOOK_ENTRY_BLOCKS; b++) {
+            write_at_sector(disk,
+                            (uint64_t)(shape.disk_book_block + 2 + b) * TAGFS_BLOCK_SECTORS,
+                            zero, sizeof(zero));
         }
     }
 
-    /* ---- Build and write superblock ---- */
-    printf("[create_tagfs] Writing superblock...\n");
+    /* ---- The Ledger: what is true of this volume the moment it is made ---- */
+    printf("[create_tagfs] Writing the Ledger...\n");
 
     uint32_t used_blocks = next_block;
     uint32_t free_blocks = total_blocks - used_blocks;
 
-    TagFSSuperblock sb;
-    memset(&sb, 0, sizeof(sb));
+    uint64_t made_at = (uint64_t)time(NULL);
+    srand((unsigned int)made_at);
 
-    sb.magic                    = TAGFS_MAGIC;
-    sb.version                  = TAGFS_VERSION;
-    sb.block_size               = TAGFS_BLOCK_SIZE;
-    sb.total_blocks             = total_blocks;
-    sb.free_blocks              = free_blocks;
-    sb.total_files              = (uint32_t)file_count;
-    sb.next_file_id             = (uint32_t)(file_count + 1);
-    sb.next_tag_id              = (uint32_t)g_tag_count;
-    sb.total_tags               = (uint32_t)g_tag_count;
+    uint8_t volume_uuid[16];
+    generate_uuid(volume_uuid);
 
-    sb.tag_registry_block       = 0;
-    sb.tag_registry_block_count = 1;
-    sb.file_table_block         = 1;
-    sb.file_table_block_count   = 1;
-    sb.metadata_pool_block      = 2;
-    sb.metadata_pool_block_count = mpool_block_count;
-    sb.block_bitmap_sector       = TAGFS_BITMAP_SECTOR_START;
-    sb.block_bitmap_sector_count = bitmap_sectors;
-    sb.journal_superblock_sector = TAGFS_JOURNAL_SB_SECTOR;
+    VolumeLedger led;
+    memset(&led, 0, sizeof(led));
+    led.seq          = 1;
+    led.written_unix = made_at;
+    led.free_blocks  = free_blocks;
+    led.total_files  = (uint64_t)file_count;
+    led.next_file_id = (uint32_t)(file_count + 1);
+    led.next_tag_id  = g_tag_count;
+    led.total_tags   = g_tag_count;
 
-    sb.fs_created_time          = (uint64_t)time(NULL);
-    sb.fs_modified_time         = sb.fs_created_time;
-    sb.backup_superblock_sector = TAGFS_BACKUP_SB_SECTOR;
-
-    srand((unsigned int)sb.fs_created_time);
-    generate_uuid(sb.fs_uuid);
-
-    /* ---- Boot hints in reserved[] ---- */
-    if (kernel_file_index >= 0) {
-        FileInfo* kf = &files[kernel_file_index];
-        uint32_t kblock  = kf->start_block;
-        uint32_t kblocks = kf->block_count;
-        uint32_t ksize   = (uint32_t)kf->file_size;
-
-        memcpy(sb.reserved + BOOT_HINT_KERNEL_BLOCK,  &kblock,            4);
-        memcpy(sb.reserved + BOOT_HINT_KERNEL_BLOCKS, &kblocks,           4);
-        memcpy(sb.reserved + BOOT_HINT_KERNEL_SIZE,   &ksize,             4);
-        memcpy(sb.reserved + BOOT_HINT_DATA_START,    &data_start_sector, 4);
-
-        printf("  Boot hints: kernel at block %u (%u blocks, %u bytes), data_start=%u\n",
-               kblock, kblocks, ksize, data_start_sector);
-    } else {
-        printf("  WARNING: No file tagged 'kernel' found — boot hints empty!\n");
-
-        /* Fallback: put data_start anyway */
-        memcpy(sb.reserved + BOOT_HINT_DATA_START, &data_start_sector, 4);
-    }
-
-    /* Stamp CRC32 and write primary + backup */
-    superblock_stamp_crc(&sb);
-
-    if (write_at_sector(disk, TAGFS_SUPERBLOCK_SECTOR, &sb, sizeof(sb)) != 0) {
-        fprintf(stderr, "Failed to write primary superblock\n");
+    if (write_ledger(disk, &shape, &led) != 0) {
+        fprintf(stderr, "Failed to write the Ledger\n");
         fclose(disk); return 1;
     }
-    if (write_at_sector(disk, TAGFS_BACKUP_SB_SECTOR, &sb, sizeof(sb)) != 0) {
-        fprintf(stderr, "Failed to write backup superblock\n");
+
+    /* ---- The Deed: at the head of the ground, and again at the far end ---- */
+    printf("[create_tagfs] Writing the Deed...\n");
+
+    VolumeBoot boot;
+    memset(&boot, 0, sizeof(boot));
+    if (kernel_file_index >= 0) {
+        FileInfo* kf = &files[kernel_file_index];
+        /* In the volume's own blocks, not the data run's — so a loader that has
+         * the Deed and nothing else can turn it into a sector without first
+         * understanding where the data run begins. */
+        boot.kernel_block  = shape.data_block + kf->start_block;
+        boot.kernel_blocks = kf->block_count;
+        boot.kernel_bytes  = (uint32_t)kf->file_size;
+        printf("  Boot:          kernel at volume block %u (%u blocks, %u bytes)\n",
+               boot.kernel_block, boot.kernel_blocks, boot.kernel_bytes);
+    } else {
+        printf("  WARNING: nothing here is tagged 'kernel' — this volume carries "
+               "no kernel and no loader will boot from it\n");
+    }
+
+    if (write_deed(disk, VOLUME_DEED_ROLE_HEAD, 0,
+                   volume_uuid, &shape, &boot, mpool_block_count) != 0) {
+        fprintf(stderr, "Failed to write the Deed\n");
+        fclose(disk); return 1;
+    }
+    if (write_deed(disk, VOLUME_DEED_ROLE_TAIL, shape.tail_sector,
+                   volume_uuid, &shape, &boot, mpool_block_count) != 0) {
+        fprintf(stderr, "Failed to write the far copy of the Deed\n");
         fclose(disk); return 1;
     }
 
     fclose(disk);
 
-    printf("\n[create_tagfs] TagFS v1 formatting complete!\n");
+    printf("\n[create_tagfs] The volume is made.\n");
     printf("  Files:  %d\n", file_count);
     printf("  Tags:   %u\n", g_tag_count);
-    printf("  Blocks: %u used / %u total (%u free)\n", used_blocks, total_blocks, free_blocks);
+    printf("  Blocks: %u used / %u data (%u free)\n", used_blocks, total_blocks, free_blocks);
 
     /* Cleanup */
     for (int i = 0; i < file_count; i++) {

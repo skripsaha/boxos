@@ -87,7 +87,13 @@ typedef struct {
 } DiskBookStats;
 
 // Public API
-error_t  DiskBookInit(uint32_t superblock_sector);
+/* Where the DiskBook's three parts are, each counted from the start of the
+ * volume: its head, the copy of its head, and the run its records live in.
+ * Three numbers rather than one, because "the backup is the next sector along"
+ * is what put a record and its only copy inside one physical block of the
+ * medium — see the Deed's layout stamp, which now names all three. */
+error_t  DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
+                     uint64_t records_sector);
 error_t  DiskBookValidateAndReplay(void);   /* restore redirects into CoW    */
 void     DiskBookShutdown(void);
 

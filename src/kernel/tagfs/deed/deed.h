@@ -15,6 +15,31 @@
  * it is checked here and said out loud rather than carried forward.
  */
 
+/*
+ * The other half of an agreement with two assemblers' worth of code.
+ *
+ * src/boot/stage2/stage2.asm reads a Deed by offsets it spells for itself —
+ * an assembler cannot ask a C structure where a field is. The old superblock
+ * had exactly this arrangement for one field, and it held only because
+ * somebody remembered. These are the whole prologue, checked by the compiler:
+ * move a field and the build stops, instead of the boarding pass quietly
+ * naming sixteen bytes of something else.
+ */
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, magic)          == 0,  "stage2 DEED_OFF_MAGIC");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, prologue_bytes) == 8,  "stage2 DEED_OFF_PROLOGUE_BYTES");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, stamp_bytes)    == 10, "stage2 DEED_OFF_STAMP_BYTES");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, crc32)          == 12, "stage2 DEED_OFF_CRC32");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, uuid)           == 16, "stage2 DEED_OFF_UUID");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, sectors)        == 32, "stage2 DEED_OFF_SECTORS");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, tail_sector)    == 40, "stage2 DEED_OFF_TAIL_SECTOR");
+STATIC_ASSERT(__builtin_offsetof(VolumeDeed, role)           == 48, "stage2 DEED_OFF_ROLE");
+STATIC_ASSERT(sizeof(VolumeDeed)                             == 52, "stage2 DEED_PROLOGUE_BYTES");
+
+/* And the one stamp stage2 walks to, whose three numbers it reads by offset. */
+STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_block)  == 0, "stage2 BOOT_KERNEL_BLOCK");
+STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_blocks) == 4, "stage2 BOOT_KERNEL_BLOCKS");
+STATIC_ASSERT(__builtin_offsetof(VolumeBoot, kernel_bytes)  == 8, "stage2 BOOT_KERNEL_BYTES");
+
 /* What a read produced. The head and tail are both full Deeds; `stamps` points
  * into `raw` and is walked by DeedStamp. */
 typedef struct {
@@ -48,6 +73,21 @@ error_t DeedReadHead(uint8_t seat, const MediumGround *ground, DeedCopy *out);
  */
 error_t DeedReadTail(uint8_t seat, const MediumGround *ground,
                      const DeedCopy *head, DeedCopy *out);
+
+/*
+ * The far copy when there is no head to ask.
+ *
+ * The head states where its own tail is, so the ordinary path reads it from
+ * there. When the head is the thing that is damaged, that number is gone too —
+ * and the ground itself still says how long it is, which is enough: the tail
+ * sits in the last whole block of it, because that is where it is put.
+ *
+ * This is what makes two copies worth having rather than merely reassuring. A
+ * volume whose head was lost to one bad erase block still mounts, off the copy
+ * at the other end of the medium, and says that is what happened.
+ */
+error_t DeedReadTailAlone(uint8_t seat, const MediumGround *ground,
+                          DeedCopy *out);
 
 void DeedRelease(DeedCopy *copy);
 
