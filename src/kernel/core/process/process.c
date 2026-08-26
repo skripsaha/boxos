@@ -1630,12 +1630,49 @@ int process_add_tag(process_t *proc, const char *tag)
     if (!proc || !proc->cabin || !tag || tag[0] == '\0')
         return -1;
 
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry)
-        return -1;
-
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+
+    TagFSState *fs = tagfs_get_state();
+    if (!fs || !fs->registry)
+    {
+        /*
+         * No volume, so no membership — a tag id is the volume's to issue and
+         * there is nowhere to record one. But AUTHORITY is not the volume's to
+         * grant, and refusing it here is what left a machine unable to use its
+         * own shell.
+         *
+         * The auth bit for a bare privilege key is FIXED by the key string
+         * (auth_tags.h), has never depended on a registry id, and names one of
+         * the seven keys the kernel declares for itself in tagfs_reserved.h.
+         * They are the machine's constitution, not somebody's data.
+         *
+         * What the old refusal cost, measured end to end: on a diskless boot
+         * every process came up with auth_bits == 0, so auth_level_permits()
+         * denied every OP_AUTH_APP op there is — broadcast, touch.intern,
+         * touch.claim, all of storage. The fallback shell still printed its
+         * banner, because writing the text buffer is a store and not an op,
+         * and then could not read one keystroke, because claiming the keyboard
+         * IS an op. Typing "help" into that machine does nothing at all; the
+         * same keystrokes on a mounted one run the command. That is the second
+         * reason a live board with a working keyboard could not be typed on,
+         * and it is not a USB problem either.
+         *
+         * No new way in: userspace reaches tags through SysTagAdd, which still
+         * requires authority over the target AND that the grant not exceed the
+         * caller's own. This path is the kernel deciding what it gives its own
+         * processes, which is what it was always for.
+         *
+         * Membership is not backfilled when a volume turns up later. The cabin
+         * carries the authority and not the tag id, so anything ADDRESSED to
+         * the tag will not reach it until the process is retagged.
+         */
+        uint32_t bit = value[0] ? 0u : auth_bit_for_key(key);
+        if (bit == 0)
+            return -1;          /* an ordinary tag genuinely has nowhere to go */
+        __atomic_or_fetch(&proc->cabin->auth_bits, bit, __ATOMIC_RELAXED);
+        return 0;
+    }
 
     spin_lock(&process_lock);
 
