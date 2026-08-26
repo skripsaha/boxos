@@ -115,6 +115,21 @@ bool        BoardroomSeatIsRemovable(uint8_t seat);
  */
 bool        BoardroomSeatOccupied(uint8_t seat);
 
+/*
+ * What the medium in this seat is BUILT from, in bytes, as opposed to what it
+ * is addressed in — which is always 512 here, on every kind of seat.
+ *
+ * Almost every flash device made is addressed in 512-byte blocks and built
+ * from 4096-byte ones. A volume laid out on the finer grid works and costs
+ * the device a read, a patch and a write for every metadata write that does
+ * not cover a whole physical block. Nothing could ask this until now: the
+ * answer was known to each driver and to nobody else, so a volume's own
+ * statement of the grid it was laid out for had nothing to be checked against.
+ *
+ * Zero means the medium would not say, which is an answer and not a failure.
+ */
+uint32_t BoardroomSeatPhysicalBytes(uint8_t seat);
+
 /* The controller-specific index behind a seat — an AHCI port, an ATA drive, a
  * USB unit. This is a deliberate way out of the abstraction, for the one thing
  * the abstraction cannot express: a fast path that exists on one kind of

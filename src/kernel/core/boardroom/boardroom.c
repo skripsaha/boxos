@@ -324,6 +324,28 @@ const char* BoardroomSeatName(uint8_t seat)
     return s ? s->name : "";
 }
 
+uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
+{
+    BoardSeat* s = seat_find(seat);
+    if (!s) return 0;
+
+    switch (s->kind) {
+    case BOARD_USB:
+        return xhci_msd_unit_physical_bytes(s->index);
+    case BOARD_AHCI: {
+        ahci_port_t* p = ahci_get_port_state(s->index);
+        return p ? p->physical_sector_size : 0;
+    }
+    case BOARD_ATA:
+        if (s->index < 4) {
+            return g_ata_devices[s->index].physical_sector_size;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 uint8_t BoardroomSeatIndex(uint8_t seat)
 {
     BoardSeat* s = seat_find(seat);

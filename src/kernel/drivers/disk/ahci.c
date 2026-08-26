@@ -793,6 +793,19 @@ static int ahci_port_init(uint8_t port_num) {
     }
     port->logical_sector_size = logical;
 
+    /* And the physical one. Same word: bit 13 says the drive has more than one
+     * logical sector per physical, and bits 3:0 are the exponent — one
+     * physical block holds 2^N logical ones (ATA8-ACS §7.16.7.74). This is
+     * what a 512e drive uses to say "I am addressed in 512 and built from
+     * 4096", which nothing in this kernel asked until now. */
+    port->physical_sector_size = logical;
+    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 13))) {
+        uint32_t exponent = id[106] & 0x0Fu;
+        if (exponent < 16 && logical <= (0xFFFFFFFFu >> exponent)) {
+            port->physical_sector_size = logical << exponent;
+        }
+    }
+
     port->lba48 = (id[83] & (1u << 10)) != 0;
     if (port->lba48) {
         uint64_t s = 0;

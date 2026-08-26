@@ -113,6 +113,10 @@ typedef struct {
     uint8_t  dma_type;           /* AtaDmaType */
     uint8_t  dma_mode;           /* 0..6; meaning depends on dma_type */
     uint32_t logical_sector_size;
+    /* What the drive is built from — see the same field in ahci.h. Zero when
+     * the drive would not say; equal to the logical size when it says one
+     * physical block is one logical sector. */
+    uint32_t physical_sector_size;
     uint64_t total_sectors;
     uint64_t size_mb;
     char     model[41];

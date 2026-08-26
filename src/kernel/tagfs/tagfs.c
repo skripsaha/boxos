@@ -412,6 +412,42 @@ static error_t volume_take_ground(uint8_t seat)
         return ERR_TAGFS_CORRUPTED;
     }
 
+    /*
+     * What the volume was laid out for, against what the medium says it is
+     * made of. Three answers, and each of them is worth having:
+     *
+     *   they agree            — nothing to say
+     *   the volume is coarser — harmless; it simply uses whole blocks of a
+     *                           medium built from smaller ones
+     *   the volume is finer   — it works, and every metadata write that does
+     *                           not cover a whole physical block costs the
+     *                           device a read, a patch and a write. That is
+     *                           the case the old layout was in on every flash
+     *                           device made, for years, and nothing said so.
+     *
+     * A medium that will not say what it is built from is not an error: it is
+     * a medium that will not say, and the volume stands on it either way.
+     */
+    uint32_t medium_physical = BoardroomSeatPhysicalBytes(seat);
+    if (medium_physical == 0) {
+        kprintf("[TagFS] seat %u would not say what it is built from; the "
+                "volume's %u-byte grid is taken on trust\n",
+                seat, g_state.geometry.physical_bytes);
+    } else if (g_state.geometry.physical_bytes < medium_physical) {
+        kprintf("[TagFS] seat %u: this volume was laid out for %u-byte blocks "
+                "and the medium is built from %u — every metadata write costs "
+                "it a read and a rewrite\n",
+                seat, g_state.geometry.physical_bytes, medium_physical);
+    } else if (g_state.geometry.physical_bytes > medium_physical) {
+        kprintf("[TagFS] seat %u: this volume assumed %u-byte blocks and the "
+                "medium is built from %u — coarser than it needs, which costs "
+                "nothing\n",
+                seat, g_state.geometry.physical_bytes, medium_physical);
+    } else {
+        kprintf("[TagFS] seat %u: the volume's grid and the medium's are the "
+                "same %u bytes\n", seat, medium_physical);
+    }
+
     if (g_state.geometry.block_bytes != TAGFS_BLOCK_SIZE) {
         kprintf("[TagFS] the volume on seat %u was laid out in %u-byte blocks "
                 "and this kernel speaks %u\n",

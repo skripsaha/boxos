@@ -362,6 +362,12 @@ typedef struct {
      * non-queued commands outstanding on one port): ncq -> FPDMA QUEUED with
      * PxSACT completion; !ncq -> READ/WRITE DMA EXT with PxCI completion. */
     uint32_t  logical_sector_size;     // bytes; only 512 is supported by the stack
+    /* What the drive is BUILT from, as opposed to what it is addressed in.
+     * A 512e disk is addressed in 512-byte sectors and made of 4096-byte
+     * ones, and a volume laid out on the finer grid costs the drive a read
+     * and a rewrite for every write that does not cover a whole physical
+     * block. Zero when the drive would not say. */
+    uint32_t  physical_sector_size;
     uint64_t  total_sectors;           // device capacity in logical sectors
     bool      ncq;                     // HBA SNCQ && device IDENTIFY word 76 bit 8
     bool      lba48;                   // 48-bit LBA addressing supported
