@@ -139,6 +139,41 @@ MBR_TYPE_PROTECTIVE     equ 0xEE
 
 MBR_ADDR                equ 0xA200
 MBR_SEG                 equ MBR_ADDR >> 4
+
+; ---------------------------------------------------------------------------
+; GPT, by offset. UEFI 2.10 §5.3. The header states its own length, which is
+; what its checksum covers — not a fixed 92, because a later revision may be
+; longer and a reader that assumes the length gets the sum wrong on hardware
+; it has never seen.
+; ---------------------------------------------------------------------------
+GPT_HEADER_LBA          equ 1
+GPT_SIG_LO              equ 0x20494645  ; 'E','F','I',' '
+GPT_SIG_HI              equ 0x54524150  ; 'P','A','R','T'
+GPT_OFF_HEADER_BYTES    equ 0x0C
+GPT_OFF_HEADER_CRC      equ 0x10
+GPT_OFF_ENTRY_LBA       equ 0x48
+GPT_OFF_ENTRY_COUNT     equ 0x50
+GPT_OFF_ENTRY_BYTES     equ 0x54
+GPT_OFF_ENTRY_CRC       equ 0x58
+GPT_HEADER_MIN_BYTES    equ 92
+GPT_ENTRY_MIN_BYTES     equ 128
+; The spec reserves 16 KiB for the array and every tool in use writes exactly
+; that. This is the ceiling on what will be read, so a header stating an absurd
+; array cannot talk this loader into an unbounded scan.
+GPT_ARRAY_MAX_BYTES     equ 65536
+
+GPT_ENTRY_OFF_TYPE      equ 0
+GPT_ENTRY_OFF_FIRST     equ 0x20
+GPT_ENTRY_OFF_LAST      equ 0x28
+
+; The scratch the GPT is read through: one 4 KiB window, reused for the header
+; and then for the entry array a chunk at a time. The array is never held whole
+; — its checksum is taken as it streams past, which is what lets a 16 KiB table
+; be verified by a loader with 4 KiB to spare.
+GPT_SCRATCH_ADDR        equ 0xC000
+GPT_SCRATCH_SEG         equ GPT_SCRATCH_ADDR >> 4
+GPT_SCRATCH_BYTES       equ 4096
+GPT_SCRATCH_SECTORS     equ GPT_SCRATCH_BYTES / 512
 DEED_ADDR               equ 0xB000
 DEED_SEG                equ DEED_ADDR >> 4
 
@@ -916,6 +951,7 @@ find_ground:
 .found:
     mov eax, [es:bx + MBR_ENTRY_START_LBA]
     mov [ground_start_lba], eax
+    mov dword [ground_start_lba + 4], 0
     mov eax, [es:bx + MBR_ENTRY_SECTORS]
     mov [ground_sectors], eax
     cmp dword [ground_sectors], DEED_SECTORS
@@ -927,9 +963,11 @@ find_ground:
     jmp .out
 
 .is_gpt:
-    mov si, msg_gpt_disk
-    call print_string_16
-    jmp .fail_quiet
+    xor ax, ax
+    mov es, ax
+    call find_ground_gpt
+    jc .fail_quiet
+    jmp .out
 
 .no_table:
     mov si, msg_no_table
@@ -956,6 +994,376 @@ find_ground:
     ret
 
 ; ---------------------------------------------------------------------------
+; find_ground_gpt — the same question of a GPT disk.
+;
+; Both checksums are verified, because both exist for a reason: a header that
+; passes its own sum can still point at an entry array that was interrupted
+; mid-write, and taking a partition out of that array is taking it out of
+; whatever was there before.
+;
+; The array is streamed rather than held: one 4 KiB window at a time, with the
+; checksum carried across chunks and the entries examined as they pass. A
+; 16 KiB table is therefore verified by a loader that has 4 KiB to spare, and a
+; table larger than any tool writes is refused rather than half-read.
+;
+; The candidate is remembered while the sum is still unknown and only ACCEPTED
+; at the end, if the sum agrees — reading a partition out of an array that
+; fails its checksum is the thing this is here to prevent.
+;
+; Returns: CF=0 with [ground_start_lba]/[ground_sectors] set, CF=1 otherwise
+;          with a reason on screen.
+; ---------------------------------------------------------------------------
+find_ground_gpt:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push si
+    push di
+    push es
+
+    mov dword [gpt_found], 0
+
+    ;-- the header ---------------------------------------------------------
+    mov dword [dap_gpt + 8], GPT_HEADER_LBA
+    mov dword [dap_gpt + 12], 0
+    mov word  [dap_gpt + 2], 1
+    mov si, dap_gpt
+    mov dl, [boot_drive_saved]
+    call disk_read_dap
+    jc .no_header
+
+    mov ax, GPT_SCRATCH_SEG
+    mov es, ax
+    cmp dword [es:0], GPT_SIG_LO
+    jne .not_gpt
+    cmp dword [es:4], GPT_SIG_HI
+    jne .not_gpt
+
+    mov eax, [es:GPT_OFF_HEADER_BYTES]
+    cmp eax, GPT_HEADER_MIN_BYTES
+    jb .bad_header
+    cmp eax, 512
+    ja .bad_header
+    mov [gpt_header_bytes], eax
+
+    ; Keep what the header says before the sum is taken over it: the sum needs
+    ; its own field read as zero, and the fields are needed afterwards.
+    mov eax, [es:GPT_OFF_HEADER_CRC]
+    mov [gpt_want_crc], eax
+    mov eax, [es:GPT_OFF_ENTRY_LBA]
+    mov [gpt_entry_lba], eax
+    mov eax, [es:GPT_OFF_ENTRY_LBA + 4]
+    mov [gpt_entry_lba + 4], eax
+    mov eax, [es:GPT_OFF_ENTRY_COUNT]
+    mov [gpt_entry_count], eax
+    mov eax, [es:GPT_OFF_ENTRY_BYTES]
+    mov [gpt_entry_bytes], eax
+    mov eax, [es:GPT_OFF_ENTRY_CRC]
+    mov [gpt_array_crc], eax
+
+    mov edx, 0xFFFFFFFF             ; running sum, pre-inversion
+    mov ecx, [gpt_header_bytes]
+    mov bx, GPT_OFF_HEADER_CRC
+    call crc32_chunk_hole           ; four bytes at BX counted as zero
+    not edx
+    cmp edx, [gpt_want_crc]
+    jne .bad_header_crc
+
+    ;-- the entry array, one window at a time ------------------------------
+    mov eax, [gpt_entry_bytes]
+    cmp eax, GPT_ENTRY_MIN_BYTES
+    jb .bad_array
+    cmp eax, GPT_ARRAY_MAX_BYTES
+    ja .bad_array
+    mov ecx, [gpt_entry_count]
+    test ecx, ecx
+    jz .bad_array
+    mul ecx                         ; EDX:EAX = count * size
+    test edx, edx
+    jnz .bad_array
+    cmp eax, GPT_ARRAY_MAX_BYTES
+    ja .bad_array
+    mov [gpt_array_bytes], eax
+
+    ; An entry must not straddle two windows, or the walk below would have to
+    ; stitch one together. Every table in use has 128-byte entries and a
+    ; 4096-byte window holds 32 of them exactly.
+    mov eax, GPT_SCRATCH_BYTES
+    xor edx, edx
+    div dword [gpt_entry_bytes]
+    test edx, edx
+    jnz .bad_array
+
+    mov eax, [gpt_entry_lba]
+    mov [dap_gpt + 8], eax
+    mov eax, [gpt_entry_lba + 4]
+    mov [dap_gpt + 12], eax
+
+    mov ecx, [gpt_array_bytes]      ; bytes still to sum and walk
+    mov edx, 0xFFFFFFFF             ; running sum across every window
+
+.window:
+    test ecx, ecx
+    jz .array_done
+
+    mov word [dap_gpt + 2], GPT_SCRATCH_SECTORS
+    push ecx
+    push edx
+    mov si, dap_gpt
+    mov dl, [boot_drive_saved]
+    call disk_read_dap
+    pop edx
+    pop ecx
+    jc .no_array
+
+    mov ax, GPT_SCRATCH_SEG
+    mov es, ax
+
+    ; How much of this window belongs to the array — the last one is short.
+    mov eax, ecx
+    cmp eax, GPT_SCRATCH_BYTES
+    jbe .have_len
+    mov eax, GPT_SCRATCH_BYTES
+.have_len:
+    mov [gpt_window_bytes], eax
+
+    push ecx
+    mov ecx, eax
+    call crc32_chunk                ; carries EDX across windows
+    pop ecx
+
+    call gpt_scan_window            ; remembers a match; does not act on it
+
+    sub ecx, [gpt_window_bytes]
+
+    ; Next window: advance the packet by the sectors just consumed.
+    push ecx
+    mov eax, [gpt_window_bytes]
+    add eax, 511
+    shr eax, 9
+    add [dap_gpt + 8], eax
+    adc dword [dap_gpt + 12], 0
+    pop ecx
+    jmp .window
+
+.array_done:
+    not edx
+    cmp edx, [gpt_array_crc]
+    jne .bad_array_crc
+
+    cmp dword [gpt_found], 0
+    je .none_of_ours
+
+    ; Only now, with the array proven, is the candidate the answer.
+    mov eax, [gpt_cand_first]
+    mov [ground_start_lba], eax
+    mov eax, [gpt_cand_first + 4]
+    mov [ground_start_lba + 4], eax
+
+    ; last - first + 1, and it has to fit what this loader can address.
+    mov eax, [gpt_cand_last]
+    mov edx, [gpt_cand_last + 4]
+    sub eax, [gpt_cand_first]
+    sbb edx, [gpt_cand_first + 4]
+    add eax, 1
+    adc edx, 0
+    test edx, edx
+    jnz .too_long
+    mov [ground_sectors], eax
+    cmp eax, DEED_SECTORS
+    jb .gpt_too_small
+
+    xor ax, ax
+    mov es, ax
+    clc
+    jmp .out
+
+.no_header:
+    mov si, msg_gpt_no_header
+    call print_string_16
+    jmp .fail
+.not_gpt:
+    mov si, msg_gpt_absent
+    call print_string_16
+    jmp .fail
+.bad_header:
+    mov si, msg_gpt_header_len
+    call print_string_16
+    jmp .fail
+.bad_header_crc:
+    mov si, msg_gpt_header_crc
+    call print_string_16
+    jmp .fail
+.bad_array:
+    mov si, msg_gpt_array_shape
+    call print_string_16
+    jmp .fail
+.no_array:
+    mov si, msg_gpt_no_array
+    call print_string_16
+    jmp .fail
+.bad_array_crc:
+    mov si, msg_gpt_array_crc
+    call print_string_16
+    jmp .fail
+.none_of_ours:
+    mov si, msg_gpt_not_ours
+    call print_string_16
+    jmp .fail
+.too_long:
+    mov si, msg_gpt_too_long
+    call print_string_16
+    jmp .fail
+.gpt_too_small:
+    mov si, msg_ground_too_small
+    call print_string_16
+.fail:
+    xor ax, ax
+    mov es, ax
+    stc
+.out:
+    pop es
+    pop di
+    pop si
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; ---------------------------------------------------------------------------
+; gpt_scan_window — look through the entries in the window at ES:0 for one
+; whose type is ours, and remember the FIRST such.
+;
+; Remembering rather than returning: the array this window came out of has not
+; been proven yet, and a partition taken from an unverified table is exactly
+; what the checksum is for.
+;
+; Clobbers nothing the caller is carrying (ECX and EDX are the sum and the
+; remaining length).
+; ---------------------------------------------------------------------------
+gpt_scan_window:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    push si
+    push di
+
+    xor si, si                      ; offset of the entry in this window
+    mov ecx, [gpt_window_bytes]
+
+.entry:
+    cmp ecx, [gpt_entry_bytes]
+    jb .done
+
+    cmp dword [gpt_found], 0
+    jne .step                       ; already have one; keep summing only
+
+    ; Sixteen bytes of type GUID, four dwords at a time.
+    mov di, si
+    add di, GPT_ENTRY_OFF_TYPE
+    mov eax, [es:di]
+    cmp eax, BOXOS_TYPE_GUID_0
+    jne .step
+    mov eax, [es:di + 4]
+    cmp eax, BOXOS_TYPE_GUID_1
+    jne .step
+    mov eax, [es:di + 8]
+    cmp eax, BOXOS_TYPE_GUID_2
+    jne .step
+    mov eax, [es:di + 12]
+    cmp eax, BOXOS_TYPE_GUID_3
+    jne .step
+
+    mov di, si
+    add di, GPT_ENTRY_OFF_FIRST
+    mov eax, [es:di]
+    mov [gpt_cand_first], eax
+    mov eax, [es:di + 4]
+    mov [gpt_cand_first + 4], eax
+    mov di, si
+    add di, GPT_ENTRY_OFF_LAST
+    mov eax, [es:di]
+    mov [gpt_cand_last], eax
+    mov eax, [es:di + 4]
+    mov [gpt_cand_last + 4], eax
+    mov dword [gpt_found], 1
+
+.step:
+    mov eax, [gpt_entry_bytes]
+    add si, ax
+    sub ecx, eax
+    jmp .entry
+
+.done:
+    pop di
+    pop si
+    pop edx
+    pop ecx
+    pop eax
+    pop ebx
+    ret
+
+; ---------------------------------------------------------------------------
+; crc32_chunk — CRC-32 (ISO 3309) over ES:0 .. ES:ECX, carrying EDX in and out
+; so a sum can span reads. Pre-inverted on entry, NOT inverted on exit: the
+; caller inverts once, after the last chunk.
+;
+; crc32_chunk_hole is the same with the four bytes at BX read as zero, which is
+; how a checksum field is summed over itself.
+; ---------------------------------------------------------------------------
+crc32_chunk:
+    mov bx, 0xFFFF                  ; a hole nothing can be at
+crc32_chunk_hole:
+    push eax
+    push ecx
+    push si
+    push di
+
+    xor di, di
+.byte_loop:
+    test ecx, ecx
+    jz .done
+
+    xor eax, eax
+    cmp di, bx
+    jb .take
+    push bx
+    add bx, 4
+    cmp di, bx
+    pop bx
+    jb .have                        ; inside the hole: read as zero
+.take:
+    mov al, [es:di]
+.have:
+    xor edx, eax
+    mov si, 8
+.bit_loop:
+    test edx, 1
+    jz .no_poly
+    shr edx, 1
+    xor edx, 0xEDB88320
+    jmp .next_bit
+.no_poly:
+    shr edx, 1
+.next_bit:
+    dec si
+    jnz .bit_loop
+
+    inc di
+    dec ecx
+    jmp .byte_loop
+
+.done:
+    pop di
+    pop si
+    pop ecx
+    pop eax
+    ret
+
+; ---------------------------------------------------------------------------
 ; read_deed — fetch the volume's title and satisfy this loader that it is one.
 ;
 ; The head sits at the first block of the ground. If it does not check out, the
@@ -976,7 +1384,8 @@ read_deed:
 
     mov eax, [ground_start_lba]
     mov [dap_deed + 8], eax
-    mov dword [dap_deed + 12], 0
+    mov eax, [ground_start_lba + 4]
+    mov [dap_deed + 12], eax
     mov si, dap_deed
     mov dl, [boot_drive_saved]
     call disk_read_dap
@@ -996,8 +1405,10 @@ read_deed:
     dec eax
     shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2
     add eax, [ground_start_lba]
+    mov edx, [ground_start_lba + 4]
+    adc edx, 0
     mov [dap_deed + 8], eax
-    mov dword [dap_deed + 12], 0
+    mov [dap_deed + 12], edx
     mov si, dap_deed
     mov dl, [boot_drive_saved]
     call disk_read_dap
@@ -1300,7 +1711,10 @@ tagfs_load_kernel_file:
     mov eax, [kernel_start_block]
     shl eax, TAGFS_SECTORS_PER_BLOCK_LOG2   ; block → sector within the volume
     add eax, [ground_start_lba]
+    mov edx, [ground_start_lba + 4]
+    adc edx, 0
     mov [kernel_load_sector], eax
+    mov [kernel_load_sector_hi], edx
 
     ; total sectors = block_count * sectors_per_block
     mov eax, [kernel_block_count]
@@ -1322,11 +1736,17 @@ tagfs_load_kernel_file:
     push ecx
     push eax
 
-    ; Set up DAP for this chunk
+    ; Set up DAP for this chunk. The sector number is 64 bits: its top half
+    ; lives beside the bottom one rather than being assumed zero, because a
+    ; volume can sit anywhere a GPT can name and those go past two tebibytes.
     mov [dap_kernel_chunk + 2], ax
     mov word [dap_kernel_chunk + 4], 0x0000
     mov word [dap_kernel_chunk + 6], KERNEL_BOUNCE_SEG
     mov [dap_kernel_chunk + 8], ebx
+    push eax
+    mov eax, [kernel_load_sector_hi]
+    mov [dap_kernel_chunk + 12], eax
+    pop eax
 
     ; No retry loop here. disk_read_dap retries with a controller reset, falls
     ; back from EDD to CHS, and resumes from the sectors that actually landed
@@ -1357,9 +1777,10 @@ tagfs_load_kernel_file:
     a32 rep movsd           ; 32-bit address override, 4GB-limited DS:ESI and ES:EDI
     pop ecx
 
-    ; Advance LBA and decrement remaining count
+    ; Advance LBA and decrement remaining count, carrying into the top half.
     movzx eax, ax
     add ebx, eax
+    adc dword [kernel_load_sector_hi], 0
     sub ecx, eax
 
     ; Sanity: kernel must not exceed KERNEL_MAX_SIZE
@@ -1704,6 +2125,8 @@ disk_read_dap:
     mov [drd_left], ax
     mov eax, [si + 8]
     mov [drd_pkt + 8], eax
+    mov eax, [si + 12]              ; and the top half of the sector number
+    mov [drd_pkt + 12], eax
 
     ; Fold the caller's offset into the segment. Afterwards the offset is
     ; under 16 bytes, so DRD_CHUNK sectors of transfer cannot reach 0x10000
@@ -1719,7 +2142,10 @@ disk_read_dap:
 
     mov byte [drd_pkt + 0], 0x10
     mov byte [drd_pkt + 1], 0
-    mov dword [drd_pkt + 12], 0     ; LBA high — we address 32 bits of sector
+    ; The top half of the LBA is the caller's, not zero. It used to be zeroed
+    ; here, which is correct for every sector below two tebibytes and silently
+    ; reads the wrong place for any above — and a GPT names a partition in 64
+    ; bits precisely because those exist.
 
     ; Probe once per drive. A second AH=41h per read would be honest and
     ; pointless; a drive does not gain or lose EDD between reads.
@@ -1779,6 +2205,11 @@ disk_read_dap:
     ;-- CHS, one sector per call -------------------------------------------
     cmp word [drd_spt], 0
     je .exhausted
+    ; CHS cannot name a sector above 2 TiB in any encoding. A drive that holds
+    ; one answers AH=42h; if it does not, the read is impossible and saying so
+    ; beats computing a cylinder out of the bottom half of the address.
+    cmp dword [drd_pkt + 12], 0
+    jne .exhausted
 
     ; sector   = (LBA % SPT) + 1
     ; head     = (LBA / SPT) % HEADS
@@ -1835,7 +2266,8 @@ disk_read_dap:
 .advance:                           ; AX = sectors that actually landed
     sub [drd_left], ax
     movzx ecx, ax
-    add [drd_pkt + 8], ecx          ; next LBA
+    add [drd_pkt + 8], ecx          ; next LBA, carrying into its top half
+    adc dword [drd_pkt + 12], 0
     shl cx, 5                       ; sectors * 0x20 = segment step
     add [drd_pkt + 6], cx           ; next destination
     mov byte [drd_try], DRD_RETRIES
@@ -2239,6 +2671,16 @@ dap_sector0:
 
 ; The Deed. Its LBA is filled in at run time from the partition table — first
 ; the head of the ground, then, if that will not check out, the far end.
+; The GPT: header first, then the entry array a window at a time. Its LBA and
+; length are both filled in at run time.
+align 4
+dap_gpt:
+    db 0x10, 0
+    dw 1
+    dw 0x0000
+    dw GPT_SCRATCH_SEG
+    dq 0
+
 align 4
 dap_deed:
     db 0x10, 0
@@ -2282,10 +2724,39 @@ guard2_base:            dd 0            ; 2 MB guard between page tables and boo
 kernel_file_id:         dw 0
 kernel_start_block:     dd 0
 kernel_block_count:     dd 0
-ground_start_lba:       dd 0            ; first sector of the volume's ground
+; The ground, as this loader holds it: a 64-bit start, because a GPT names a
+; partition in 64 bits and disks that need them exist, and a 32-bit length,
+; because a BoxOS volume longer than two tebibytes is refused out loud below
+; rather than truncated in silence.
+align 4
+ground_start_lba:       dq 0            ; first sector of the volume's ground
 ground_sectors:         dd 0            ; how far it runs
 deed_want_role:         db 0            ; which copy validate_deed is checking
+
+; What the GPT header said, held while its own checksum is still being taken.
+align 4
+gpt_header_bytes:       dd 0
+gpt_want_crc:           dd 0
+gpt_entry_lba:          dq 0
+gpt_entry_count:        dd 0
+gpt_entry_bytes:        dd 0
+gpt_array_crc:          dd 0
+gpt_array_bytes:        dd 0
+gpt_window_bytes:       dd 0
+gpt_found:              dd 0
+gpt_cand_first:         dq 0
+gpt_cand_last:          dq 0
+
+; The BoxOS partition type, cf8ae49a-d26a-4959-9a6f-71c932e0c9eb, in the
+; mixed-endian order GPT stores a type GUID in — which is the order it appears
+; on the medium, and therefore the order to compare in. The same sixteen bytes
+; the kernel's ground.c and the UEFI loader carry; permanent, never reissued.
+BOXOS_TYPE_GUID_0       equ 0xcf8ae49a
+BOXOS_TYPE_GUID_1       equ 0x4959d26a
+BOXOS_TYPE_GUID_2       equ 0xc9716f9a
+BOXOS_TYPE_GUID_3       equ 0xebc9e032
 kernel_load_sector:     dd 0
+kernel_load_sector_hi:  dd 0
 kernel_load_sectors:    dd 0
 kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
 kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
@@ -2305,7 +2776,15 @@ msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13,
 msg_no_ground         db '[ERROR] This medium says nothing about where BoxOS lives', 13, 10, 0
 msg_no_table          db '[ERROR] No partition table on this medium', 13, 10, 0
 msg_no_boxos_partition db '[ERROR] A partition table with no BoxOS partition in it', 13, 10, 0
-msg_gpt_disk          db '[ERROR] This disk is a GPT; this loader reads MBR (boot it as UEFI)', 13, 10, 0
+msg_gpt_no_header     db '[ERROR] This disk says it is a GPT and would not give up its header', 13, 10, 0
+msg_gpt_absent        db '[ERROR] A protective MBR with no GPT behind it', 13, 10, 0
+msg_gpt_header_len    db '[ERROR] Its GPT header states a length that cannot be one', 13, 10, 0
+msg_gpt_header_crc    db '[ERROR] Its GPT header does not match its own checksum', 13, 10, 0
+msg_gpt_array_shape   db '[ERROR] Its GPT entry table is not a shape this loader reads', 13, 10, 0
+msg_gpt_no_array      db '[ERROR] Its GPT entries would not read', 13, 10, 0
+msg_gpt_array_crc     db '[ERROR] Its GPT entries do not match their own checksum', 13, 10, 0
+msg_gpt_not_ours      db '[ERROR] Its GPT has no BoxOS partition in it', 13, 10, 0
+msg_gpt_too_long      db '[ERROR] That BoxOS partition is longer than this loader can address', 13, 10, 0
 msg_ground_too_small  db '[ERROR] The BoxOS partition is too small to hold a deed', 13, 10, 0
 msg_no_deed           db '[ERROR] Neither copy of this volume deed can be read', 13, 10, 0
 msg_deed_head_bad     db '[WARN] The deed at the head is unreadable; trying the far end', 13, 10, 0

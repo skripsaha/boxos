@@ -67,7 +67,19 @@ SCRATCH_WORDS   equ 12                  ; 24 bytes, covering everything above
 
 STAGE2_SEG      equ 0x0000
 STAGE2_OFF      equ 0x8000
-STAGE2_LBA      equ 1
+
+; Where stage2 is on THIS medium — a field, not a constant, at a fixed offset
+; inside this sector, filled in by whatever put stage2 there.
+;
+; It was 1, because on an image we lay out ourselves stage2 is the sector after
+; this one. On a GPT disk it cannot be: sector 1 is the GPT header and the
+; sectors after it are its entry array, so stage2 has to live somewhere else
+; and this sector has to be told where. That is what a BIOS boot partition is
+; for, and this is how its address gets here.
+;
+; Sixteen bytes before the disk signature at 440. Those eight bytes belong to
+; the boot code by every convention there is, and no tool writes them.
+STAGE2_LBA_OFFSET equ 432
 ; How many sectors of stage2 to load. The image build owns this number — it
 ; decides where stage2 is written and where the kernel begins — and passes it
 ; in with -D, so the loader and the layout cannot drift apart. No default:
@@ -149,7 +161,7 @@ start:
 .no_geom:
 
     ;-- Load stage2 -------------------------------------------------------
-    mov eax, STAGE2_LBA
+    mov eax, [stage2_lba]
     mov cx, STAGE2_SECTORS
     mov bx, STAGE2_OFF
     mov dx, STAGE2_SEG
@@ -390,6 +402,18 @@ rs_err          db 0xFF             ; last BIOS status; 0xFF = never got one
 ; becomes an emulated 1.44 MB floppy whose sectors run out under the kernel.
 ; The space is reserved and asserted now; the image build fills it.
 ;=============================================================================
+%if ($ - $$) > STAGE2_LBA_OFFSET
+  %error "stage1 has grown into the sector where stage2's address is kept"
+%endif
+
+times STAGE2_LBA_OFFSET-($-$$) db 0
+
+; The address itself. Written here as 1 — the value that is right for an image
+; whose stage2 is the sector after this one — and overwritten by the build (or
+; by an installer, on a disk that already belongs to somebody) when it is not.
+stage2_lba      dd 1
+                dd 0                ; and its top half: 64 bits, like the DAP's
+
 %if ($ - $$) > 446
   %error "stage1 exceeds 446 bytes — the MBR partition table has no room"
 %endif
