@@ -20,6 +20,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "touch.h"
+#include "logbook.h"
 #include "irq_defer.h"
 
 /* ─── Request ring (static — no allocation in IRQ context) ──────── */
@@ -116,13 +117,13 @@ void mce_migrate_init(void) {
         __atomic_store_n(&g_migration_aborted[c], 0, __ATOMIC_RELAXED);
     }
 
-    /* Resolve Touch tag handles upfront. TouchTagIntern is OK in normal
+    /* Resolve Touch tag handles upfront. TouchLogbookIntern is OK in normal
      * kernel context but not in IRQ — we cache here so the deferred
      * worker can publish without a registry lookup, matching the Phase
      * 2F pattern used by mce.c for the IRQ-side tags. */
-    g_tag_completed = TouchTagIntern("mce:migration:completed");
-    g_tag_failed    = TouchTagIntern("mce:migration:failed");
-    g_tag_unmapped  = TouchTagIntern("mce:migration:unmapped");
+    g_tag_completed = TouchLogbookIntern("mce:migration:completed");
+    g_tag_failed    = TouchLogbookIntern("mce:migration:failed");
+    g_tag_unmapped  = TouchLogbookIntern("mce:migration:unmapped");
 
     debug_printf("[MCE] migrate init: ring=%u tags{completed=0x%x failed=0x%x "
                  "unmapped=0x%x}\n",

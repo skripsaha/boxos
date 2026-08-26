@@ -16,6 +16,7 @@
 #include "pmm.h"
 #include "fpu.h"
 #include "touch.h"
+#include "logbook.h"
 #include "process.h"
 #include "per_core.h"      /* PerCoreData fields for PL0_SSP infrastructure */
 #include "amp.h"           /* MAX_CORES                                       */
@@ -229,9 +230,9 @@ error_t cet_lifecycle_init_bsp(void) {
     }
 
     /* Pre-resolve Touch tag handles for lifecycle publishes. */
-    g_tag_enabled      = TouchTagIntern("cet:enabled");
-    g_tag_shstk_active = TouchTagIntern("shstk:enabled");
-    g_tag_ibt_active   = TouchTagIntern("ibt:enabled");
+    g_tag_enabled      = TouchLogbookIntern("cet:enabled");
+    g_tag_shstk_active = TouchLogbookIntern("shstk:enabled");
+    g_tag_ibt_active   = TouchLogbookIntern("ibt:enabled");
 
     /* Register XSAVE components 11 (CET_S) + 12 (CET_U) so per-process
      * SSP is saved + restored on context switch. fpu_xsave_register_extension

@@ -1,4 +1,5 @@
 #include "touch.h"
+#include "logbook.h"
 #include "touch_queue.h"
 #include "touch_ring.h"
 #include "pit.h"
@@ -127,6 +128,15 @@ void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
     *out_bare = TOUCH_TAG_INVALID;
     if (!tag || tag[0] == '\0') return;
 
+    /* The kernel's own book first. A name the kernel has already spoken is
+     * an occurrence, and a process asking by that name has to land on the id
+     * the kernel publishes to — not on a second, private id in the volume.
+     * Lookup only: a process may hear what the kernel named, never add to it.
+     * A bare hit with no full hit is the honest answer for a value the kernel
+     * never used, so it ends the search either way. */
+    TouchLogbookLookup(tag, out_full, out_bare);
+    if (*out_bare != TOUCH_TAG_INVALID) return;
+
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->registry) return;
 
@@ -150,12 +160,6 @@ void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
     }
 }
 
-TouchTag TouchTagIntern(const char *tag)
-{
-    TouchTag full, bare;
-    TouchTagResolve(tag, &full, &bare);
-    return (full != TOUCH_TAG_INVALID) ? full : bare;
-}
 
 /* ────────────────────────────────────────────────────────────────────────
  * Policy / capability table. Lives inside each TouchBucket — no global table.
@@ -700,7 +704,7 @@ void TouchPublishPair(TouchTag full_id, TouchTag bare_id,
 void TouchPublish(const char *tag, const void *kpayload, uint32_t plen)
 {
     TouchTag full, bare;
-    TouchTagResolve(tag, &full, &bare);
+    TouchLogbookResolve(tag, &full, &bare);
     TouchPublishPair(full, bare, kpayload, plen, 0, TOUCH_FLAG_KERNEL);
 }
 

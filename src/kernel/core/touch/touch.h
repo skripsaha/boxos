@@ -168,18 +168,21 @@ void TouchStatsSnapshot(uint64_t out[5]);
 
 void TouchInit(void);
 
-/* Resolve a tag string into one or two TouchTags via the TagFS registry.
- * Interns the string if not yet present. Returns:
+/* Resolve a tag string into one or two TouchTags. THE READER DOOR: it looks
+ * the name up in the kernel's Logbook first (logbook.h — occurrences the
+ * kernel named), and only if that misses does it reach the mounted volume's
+ * registry, interning there if needed. Returns:
  *   *out_full = (key, value) id when string has explicit non-wildcard value
  *   *out_bare = (key, NULL)  id — also serves wildcard "key:..." subscribers
- * Either may be TOUCH_TAG_INVALID if the registry refuses interning.
+ * Either may be TOUCH_TAG_INVALID if neither book will issue an id.
  * Hot path callers should cache the returned ids in a static.
+ *
+ * This is what SysTouchIntern gives a process, so a process subscribing by
+ * name lands on the id the kernel publishes to. It never CREATES a Logbook
+ * name: kernel code that means to name an occurrence calls
+ * TouchLogbookResolve / TouchLogbookIntern instead.
  */
 void    TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare);
-
-/* Single-id convenience. Returns full_id if present, else bare_id, else
- * TOUCH_TAG_INVALID. Used by kernel publishers that don't care about wildcards. */
-TouchTag TouchTagIntern(const char *tag);
 
 /* Policy / capability management. */
 error_t TouchPolicySet(TouchTag tag_id, TouchPolicy policy, TouchCapability capability);
@@ -207,7 +210,7 @@ void   TouchPublishPair(TouchTag full_id, TouchTag bare_id,
                         uint32_t source_pid, uint16_t flags);
 
 /* Kernel-side string convenience. Resolves once per call (no cache), so
- * cold paths use it freely; hot paths should cache via TouchTagIntern. */
+ * cold paths use it freely; hot paths should cache via TouchLogbookIntern. */
 void   TouchPublish(const char *tag, const void *kpayload, uint32_t plen);
 
 /* IRQ-context Touch publisher.

@@ -18,6 +18,7 @@
 #include "pmm.h"
 #include "memtag.h"
 #include "touch.h"
+#include "logbook.h"
 
 /* ─── State ────────────────────────────────────────────────────────── */
 
@@ -179,13 +180,13 @@ void mce_init(void) {
                  (unsigned long)cap);
 
     /* Pre-resolve Touch tag handles for the IST-safe publish path. Done
-     * here (outside IRQ context) because TouchTagResolve takes registry
+     * here (outside IRQ context) because TouchLogbookIntern takes
      * locks. The handles are stored as globals for mce_handle to use
      * via TouchPublishIrqPair (which is the only Touch publisher safe
      * to call from IST). Tags are MemTag-reserved in SeedReservedTags. */
-    g_mce_tag_detected  = TouchTagIntern("mce:fault:detected");
-    g_mce_tag_recovered = TouchTagIntern("mce:fault:recovered");
-    g_mce_tag_fatal     = TouchTagIntern("mce:fault:fatal");
+    g_mce_tag_detected  = TouchLogbookIntern("mce:fault:detected");
+    g_mce_tag_recovered = TouchLogbookIntern("mce:fault:recovered");
+    g_mce_tag_fatal     = TouchLogbookIntern("mce:fault:fatal");
     debug_printf("[MCE] Touch handles cached: detected=0x%x recovered=0x%x "
                  "fatal=0x%x\n",
                  (unsigned)g_mce_tag_detected,

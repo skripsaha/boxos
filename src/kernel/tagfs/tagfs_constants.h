@@ -22,7 +22,13 @@
 
 // Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
-#define TAGFS_MAX_TAG_ID            0xFFFE
+/* Volume tag ids stop one short of bit 15. Bit 15 belongs to the kernel's
+ * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
+ * exist on a machine that never mounted a volume. Capping here is what makes
+ * the split an invariant instead of a convention: the volume cannot issue an
+ * id that collides with an occurrence even in principle. 32766 distinct tags
+ * per volume; the largest volume seen carries ~120. */
+#define TAGFS_MAX_TAG_ID            0x7FFE
 
 // TagRegistryEntry.flags bits.
 //   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).

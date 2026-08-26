@@ -1372,8 +1372,19 @@ static int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
             tagfs_metadata_free(&wmeta);
         }
     }
-    /* Always also publish on the bare "anchor" tag — generic listeners. */
-    TouchPublish("anchor", &ev, sizeof(ev));
+    /* Always also publish on the bare "anchor" tag — generic listeners.
+     *
+     * The one kernel publisher that deliberately does NOT name into the
+     * Logbook. "anchor" is a durability event in the SHARED vocabulary,
+     * keyed the same way as the per-file tag ids published just above, and
+     * a process subscribes to it by name (box::tagfs::on_anchor) — usually
+     * before this code has ever run. Naming it in the kernel's own book
+     * would put publisher and subscriber on two different ids depending on
+     * who spoke first. The reader door gives both sides the same id. */
+    TouchTag anchor_full, anchor_bare;
+    TouchTagResolve("anchor", &anchor_full, &anchor_bare);
+    TouchPublishPair(anchor_full, anchor_bare, &ev, sizeof(ev),
+                     pid, TOUCH_FLAG_TAGFS);
     return OK;
 }
 
