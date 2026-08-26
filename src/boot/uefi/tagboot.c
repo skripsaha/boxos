@@ -3,9 +3,10 @@
  *
  * Boot sequence:
  *   1. Locate Block IO on boot device via loaded image device handle
- *   2. Read TagFS superblock from sector 1034; verify magic
+ *   2. Read the medium's partition table for the ground claimed for BoxOS,
+ *      and the Deed at the head of it
  *   3. Search tag registry + metadata pool for kernel by tag priority:
- *      "god" → "boot" → "system". Fall back to superblock boot hints.
+ *      "god" → "boot" → "system". Fall back to what the Deed itself says.
  *   4. Allocate pages at 0x100000 and load kernel binary
  *   5. Query GOP framebuffer; record address and parameters
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
@@ -380,37 +381,310 @@ static uint64_t FindAcpiRsdp(void)
 
 static EFI_BLOCK_IO_PROTOCOL *g_block_io = NULL;
 
-/*
- * Probe a single BlockIO handle for the TagFS superblock magic.
- * Returns TRUE if the magic is found at the expected sector.
- */
-static int BlockIoProbeTagFs(EFI_BLOCK_IO_PROTOCOL *bio)
+/* =========================================================================
+ * The ground, and the Deed on it
+ *
+ * This loader used to read a superblock at absolute sector 1034 of whatever
+ * device it was looking at. Now it reads the medium's partition table for the
+ * run claimed for BoxOS, and the Deed at the head of that run — the same two
+ * steps, over the same bytes, that the kernel takes when it mounts the volume
+ * (core/boardroom/ground.c and tagfs/deed/deed.c).
+ * ========================================================================= */
+
+/* Where the volume being read begins on the medium, in 512-byte sectors. The
+ * one absolute address this loader holds, and it is discovered, never assumed.
+ * Every ReadSectors below is counted from it. */
+static uint64_t g_ground_start   = 0;
+static uint64_t g_ground_sectors = 0;
+
+/* What the Deed said. Filled by DeedRead once the device is chosen. */
+static VolumeLayout g_layout;
+static VolumeBoot   g_boot;
+static uint8_t      g_volume_uuid[16];
+static int          g_have_boot = 0;
+
+#define MBR_TABLE_OFFSET     446U
+#define MBR_ENTRY_BYTES      16U
+#define MBR_ENTRY_COUNT      4U
+#define MBR_ENTRY_TYPE       4U
+#define MBR_ENTRY_START_LBA  8U
+#define MBR_ENTRY_SECTORS    12U
+#define MBR_TYPE_BOXOS       0x7FU
+#define MBR_TYPE_PROTECTIVE  0xEEU
+
+#define GPT_HEADER_LBA          1U
+#define GPT_HEADER_SIZE_OFFSET  0x0CU
+#define GPT_HEADER_CRC_OFFSET   0x10U
+#define GPT_ENTRY_LBA_OFFSET    0x48U
+#define GPT_ENTRY_COUNT_OFFSET  0x50U
+#define GPT_ENTRY_BYTES_OFFSET  0x54U
+#define GPT_ENTRY_CRC_OFFSET    0x58U
+#define GPT_ENTRY_TYPE_OFFSET   0U
+#define GPT_ENTRY_FIRST_OFFSET  0x20U
+#define GPT_ENTRY_LAST_OFFSET   0x28U
+#define GPT_HEADER_MIN_BYTES    92U
+#define GPT_ENTRY_MIN_BYTES     128U
+#define GPT_ARRAY_MAX_BYTES     (64U * 1024U)
+
+/* cf8ae49a-d26a-4959-9a6f-71c932e0c9eb, in the order GPT stores a type GUID —
+ * the same sixteen bytes ground.c compares against. */
+static const uint8_t g_boxos_type_guid[16] = {
+    0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
+    0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb
+};
+
+static const uint8_t g_deed_magic[8] = {
+    VOLUME_DEED_MAGIC_0, VOLUME_DEED_MAGIC_1, VOLUME_DEED_MAGIC_2,
+    VOLUME_DEED_MAGIC_3, VOLUME_DEED_MAGIC_4, VOLUME_DEED_MAGIC_5,
+    VOLUME_DEED_MAGIC_6, VOLUME_DEED_MAGIC_7
+};
+
+/* CRC-32 (ISO 3309), bitwise. The same sum GPT is specified in and the same
+ * one a Deed carries, so one routine checks both. A table would be a kilobyte
+ * of a loader that runs once. */
+static uint32_t Crc32(const uint8_t *data, uint32_t len)
 {
-    if (!bio || !bio->media) return 0;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; b++)
+            crc = (crc >> 1) ^ (0xEDB88320U & (uint32_t)(-(int32_t)(crc & 1)));
+    }
+    return ~crc;
+}
+
+static uint32_t Le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t Le64(const uint8_t *p)
+{
+    return (uint64_t)Le32(p) | ((uint64_t)Le32(p + 4) << 32);
+}
+
+/* Read 512-byte logical sectors straight off a device, with no volume in the
+ * picture — the partition table, and the probe that follows it. Handles a
+ * device whose physical block size is not 512. */
+static EFI_STATUS ReadMediumSectors(EFI_BLOCK_IO_PROTOCOL *bio,
+                                    uint64_t lba_512, uint32_t count_512,
+                                    void *buffer)
+{
+    if (!bio || !bio->media) return EFI_NOT_READY;
     uint32_t bsz = bio->media->block_size;
-    if (bsz == 0 || !bio->media->media_present) return 0;
+    if (bsz == 0) bsz = 512;
 
-    /* Map 512-byte logical sector 1034 to the device's physical block AND the
-     * byte offset within it. On a 4Kn device sector 1034 lives at byte 1024 of
-     * physical block 129, not at offset 0 — reading magic from probe_buf[0]
-     * would wrongly reject every 4Kn disk. Mirror ReadSectors' alignment math.
-     * Sized to the same 8 KB ceiling; larger physical blocks are skipped, never
-     * overflowed (the old probe_buf[4096] overflowed on 8Kn). */
-    uint64_t byte_off = (uint64_t)TAGFS_SUPERBLOCK_SECTOR * TAGFS_SECTOR_SIZE;
-    uint64_t sb_lba   = byte_off / bsz;
-    uint32_t off_in   = (uint32_t)(byte_off % bsz);
-    uint32_t read_sz  = bsz < TAGFS_SECTOR_SIZE ? TAGFS_SECTOR_SIZE : bsz;
+    if (bsz == 512) {
+        return bio->read_blocks(bio, bio->media->media_id, (EFI_LBA)lba_512,
+                                (UINTN)count_512 * 512, buffer);
+    }
 
-    static uint8_t probe_buf[8192];   /* covers up to 8 KB physical sectors */
-    if (read_sz > sizeof(probe_buf)) return 0;
-    if (off_in + 4 > read_sz)        return 0;   /* magic must lie within the read */
-    if (EFI_ERROR(bio->read_blocks(bio, bio->media->media_id,
-                                   (EFI_LBA)sb_lba, read_sz, probe_buf)))
+    static uint8_t align_buf[8192];
+    if (bsz > sizeof(align_buf)) return EFI_UNSUPPORTED;
+
+    uint8_t *out = (uint8_t *)buffer;
+    uint64_t byte_off = lba_512 * 512ULL;
+    uint32_t left = count_512 * 512;
+
+    while (left > 0) {
+        uint64_t phys = byte_off / bsz;
+        uint32_t off  = (uint32_t)(byte_off % bsz);
+        uint32_t can  = bsz - off;
+        if (can > left) can = left;
+
+        EFI_STATUS st = bio->read_blocks(bio, bio->media->media_id,
+                                         (EFI_LBA)phys, bsz, align_buf);
+        if (EFI_ERROR(st)) return st;
+        MemCopy(out, align_buf + off, can);
+        out += can; byte_off += can; left -= can;
+    }
+    return EFI_SUCCESS;
+}
+
+/*
+ * Is there a Deed at this sector, and is it the head of a volume?
+ *
+ * Same order of checks as the kernel's reader: magic, then the two lengths
+ * bounded BEFORE anything is summed over them, then the checksum, then the
+ * role. `out` gets the whole block so the stamps can be walked afterwards.
+ */
+static int DeedAt(EFI_BLOCK_IO_PROTOCOL *bio, uint64_t lba, uint32_t want_role,
+                  uint8_t *out /* 4096 bytes */)
+{
+    if (EFI_ERROR(ReadMediumSectors(bio, lba, 8, out))) return 0;
+
+    VolumeDeed deed;
+    MemCopy(&deed, out, sizeof(deed));
+
+    for (int i = 0; i < 8; i++)
+        if (deed.magic[i] != g_deed_magic[i]) return 0;
+
+    if (deed.prologue_bytes < sizeof(VolumeDeed) || deed.prologue_bytes > 4096)
+        return 0;
+    if (deed.stamp_bytes > 4096 - deed.prologue_bytes)
         return 0;
 
-    uint32_t magic_val;
-    MemCopy(&magic_val, probe_buf + off_in, 4);
-    return magic_val == TAGFS_MAGIC;
+    uint32_t summed = (uint32_t)deed.prologue_bytes + deed.stamp_bytes;
+    static uint8_t probe[4096];
+    MemCopy(probe, out, summed);
+    MemZero(probe + __builtin_offsetof(VolumeDeed, crc32), 4);
+    if (Crc32(probe, summed) != deed.crc32) {
+        Print("TagBoot: a deed here does not match its own checksum\r\n");
+        return 0;
+    }
+
+    if (deed.role != want_role) return 0;
+    return 1;
+}
+
+/* Walk the stamps for one kind. Returns a pointer into `raw`, or NULL. */
+static const void *DeedStampOf(const uint8_t *raw, uint16_t kind, uint16_t *out_bytes)
+{
+    VolumeDeed deed;
+    MemCopy(&deed, raw, sizeof(deed));
+
+    uint32_t left = deed.stamp_bytes;
+    const uint8_t *p = raw + deed.prologue_bytes;
+
+    while (left >= sizeof(VolumeStamp)) {
+        VolumeStamp st;
+        MemCopy(&st, p, sizeof(st));
+        if (st.bytes > left - sizeof(VolumeStamp)) return NULL;
+
+        if (st.kind == kind) {
+            if (out_bytes) *out_bytes = st.bytes;
+            return p + sizeof(VolumeStamp);
+        }
+        uint32_t step = (sizeof(VolumeStamp) + st.bytes + 3U) & ~3U;
+        if (step > left) return NULL;
+        p += step; left -= step;
+    }
+    return NULL;
+}
+
+/*
+ * Find the run of this device claimed for BoxOS that carries a readable Deed.
+ *
+ * MBR and GPT both, because a medium BoxOS was installed onto by somebody
+ * else's partitioning tool is the ordinary case on a real machine — and
+ * because a GPT that does not check out must be refused rather than half-read.
+ *
+ * On success, sets the ground and leaves the Deed's block in `deed_out`.
+ */
+static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
+                        uint64_t *out_start, uint64_t *out_sectors)
+{
+    static uint8_t sector0[512];
+    if (EFI_ERROR(ReadMediumSectors(bio, 0, 1, sector0))) return 0;
+    if (sector0[510] != 0x55 || sector0[511] != 0xAA)     return 0;
+
+    int protective = 0;
+    for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+        if (sector0[MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES + MBR_ENTRY_TYPE] ==
+            MBR_TYPE_PROTECTIVE) { protective = 1; break; }
+    }
+
+    if (!protective) {
+        for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+            const uint8_t *e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
+            if (e[MBR_ENTRY_TYPE] != MBR_TYPE_BOXOS) continue;
+
+            uint64_t start = Le32(e + MBR_ENTRY_START_LBA);
+            uint64_t count = Le32(e + MBR_ENTRY_SECTORS);
+            if (count < 8) continue;
+
+            if (DeedAt(bio, start, VOLUME_DEED_ROLE_HEAD, deed_out)) {
+                *out_start = start; *out_sectors = count; return 1;
+            }
+            /* The head is gone; the copy at the far end of the ground is the
+             * volume's own second opinion, and it says the same things. */
+            uint64_t tail = start + ((count / 8) - 1) * 8;
+            if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
+                Print("TagBoot: read the deed from the far end of the volume\r\n");
+                *out_start = start; *out_sectors = count; return 1;
+            }
+        }
+        return 0;
+    }
+
+    /* GPT. Both checksums, because a header that passes its own sum can still
+     * point at an entry array that was interrupted mid-write. */
+    static uint8_t header[512];
+    if (EFI_ERROR(ReadMediumSectors(bio, GPT_HEADER_LBA, 1, header))) return 0;
+
+    const char sig[8] = { 'E','F','I',' ','P','A','R','T' };
+    for (int i = 0; i < 8; i++)
+        if (header[i] != (uint8_t)sig[i]) return 0;
+
+    uint32_t header_bytes = Le32(header + GPT_HEADER_SIZE_OFFSET);
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > 512) return 0;
+
+    static uint8_t hprobe[512];
+    MemCopy(hprobe, header, header_bytes);
+    MemZero(hprobe + GPT_HEADER_CRC_OFFSET, 4);
+    if (Crc32(hprobe, header_bytes) != Le32(header + GPT_HEADER_CRC_OFFSET)) {
+        Print("TagBoot: this disk's GPT header fails its own checksum\r\n");
+        return 0;
+    }
+
+    uint64_t entry_lba   = Le64(header + GPT_ENTRY_LBA_OFFSET);
+    uint32_t entry_count = Le32(header + GPT_ENTRY_COUNT_OFFSET);
+    uint32_t entry_bytes = Le32(header + GPT_ENTRY_BYTES_OFFSET);
+    if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
+        entry_bytes > GPT_ARRAY_MAX_BYTES ||
+        entry_count > GPT_ARRAY_MAX_BYTES / entry_bytes) return 0;
+
+    uint32_t array_bytes = entry_count * entry_bytes;
+    static uint8_t array[GPT_ARRAY_MAX_BYTES];
+    uint32_t array_secs = (array_bytes + 511) / 512;
+    if (EFI_ERROR(ReadMediumSectors(bio, entry_lba, array_secs, array))) return 0;
+
+    if (Crc32(array, array_bytes) != Le32(header + GPT_ENTRY_CRC_OFFSET)) {
+        Print("TagBoot: this disk's GPT entries fail their own checksum\r\n");
+        return 0;
+    }
+
+    for (uint32_t i = 0; i < entry_count; i++) {
+        const uint8_t *e = array + (uint64_t)i * entry_bytes;
+        int ours = 1;
+        for (int b = 0; b < 16; b++)
+            if (e[GPT_ENTRY_TYPE_OFFSET + b] != g_boxos_type_guid[b]) { ours = 0; break; }
+        if (!ours) continue;
+
+        uint64_t first = Le64(e + GPT_ENTRY_FIRST_OFFSET);
+        uint64_t last  = Le64(e + GPT_ENTRY_LAST_OFFSET);
+        if (last < first || (last - first + 1) < 8) continue;
+        uint64_t count = last - first + 1;
+
+        if (DeedAt(bio, first, VOLUME_DEED_ROLE_HEAD, deed_out)) {
+            *out_start = first; *out_sectors = count; return 1;
+        }
+        uint64_t tail = first + ((count / 8) - 1) * 8;
+        if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
+            Print("TagBoot: read the deed from the far end of the volume\r\n");
+            *out_start = first; *out_sectors = count; return 1;
+        }
+    }
+    return 0;
+}
+
+/* The block the chosen device's Deed was read into, kept so its stamps can be
+ * walked after the device is settled. */
+static uint8_t g_deed_block[4096];
+
+/* Does this device carry a BoxOS volume? */
+static int BlockIoProbeVolume(EFI_BLOCK_IO_PROTOCOL *bio)
+{
+    if (!bio || !bio->media) return 0;
+    if (bio->media->block_size == 0 || !bio->media->media_present) return 0;
+
+    uint64_t start = 0, sectors = 0;
+    if (!FindGroundOn(bio, g_deed_block, &start, &sectors)) return 0;
+
+    g_ground_start   = start;
+    g_ground_sectors = sectors;
+    return 1;
 }
 
 /*
@@ -419,11 +693,12 @@ static int BlockIoProbeTagFs(EFI_BLOCK_IO_PROTOCOL *bio)
  * Strategy:
  *   1. Try the loaded-image device first (common case: booting from same disk
  *      that holds both ESP and TagFS, e.g. on real hardware with GPT layout).
- *   2. Scan every non-partition BlockIO handle and probe sector 1034 for the
- *      TagFS magic (handles the QEMU two-drive setup and GPT/MBR edge cases).
+ *   2. Scan every non-partition BlockIO handle, reading each one's partition
+ *      table for BoxOS ground and each ground for a Deed (handles the QEMU
+ *      two-drive setup and GPT/MBR alike).
  *
- * The probe is safe: reading one sector from a disk that lacks TagFS does no
- * harm and the magic check is a 4-byte compare.
+ * The probe is safe: it reads a partition table and, at most, one 4 KiB block
+ * from a disk that may have nothing of ours on it, and writes nothing.
  */
 static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
 {
@@ -442,8 +717,8 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
         status = g_bs->handle_protocol(loaded_image->device_handle,
                                        &block_io_guid,
                                        (void **)&bio);
-        if (!EFI_ERROR(status) && BlockIoProbeTagFs(bio)) {
-            Print("TagBoot: TagFS found on loaded-image device\r\n");
+        if (!EFI_ERROR(status) && BlockIoProbeVolume(bio)) {
+            Print("TagBoot: the volume is on the device this loader came from\r\n");
             g_block_io = bio;
             return EFI_SUCCESS;
         }
@@ -482,7 +757,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
             if (!bio->media->media_present) continue;
         }
 
-        if (BlockIoProbeTagFs(bio)) {
+        if (BlockIoProbeVolume(bio)) {
             g_block_io = bio;
             found = EFI_SUCCESS;
             break;
@@ -492,94 +767,65 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     g_bs->free_pool(handles);
 
     if (EFI_ERROR(found))
-        Print("TagBoot: no BlockIO handle has valid TagFS superblock\r\n");
+        Print("TagBoot: no medium here carries a BoxOS volume with a readable deed\r\n");
 
     return found;
 }
 
-/* Read raw sectors (always 512-byte logical sectors from the caller's view).
- * Internally handles block devices whose physical block size != 512. */
-static EFI_STATUS ReadSectors(uint64_t lba_512, uint32_t count_512, void *buffer)
+/* Read 512-byte logical sectors of the VOLUME — counted from the start of its
+ * ground, never from the start of the medium. The one place the base is
+ * applied, which is what makes "nothing inside a volume is an absolute
+ * address" hold here as well as in the kernel. */
+static EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer)
 {
     if (!g_block_io) return EFI_NOT_READY;
-
-    uint32_t bsz = g_block_io->media->block_size;
-    if (bsz == 0) bsz = 512;
-
-    if (bsz == 512) {
-        return g_block_io->read_blocks(g_block_io,
-                                       g_block_io->media->media_id,
-                                       (EFI_LBA)lba_512,
-                                       (UINTN)count_512 * 512,
-                                       buffer);
-    }
-
-    /* Block size != 512: must align reads to physical block boundary. */
-    uint8_t *out     = (uint8_t *)buffer;
-    uint64_t byte_off = lba_512 * 512ULL;
-    uint32_t bytes_remaining = count_512 * 512;
-
-    /* Most NVMe/UFS devices report 4 KB physical blocks today, but some
-     * enterprise SSDs and SMR drives expose 8 KB. Sized for that. If a
-     * device reports something larger we still bail with EFI_UNSUPPORTED,
-     * but practical real hardware in 2026 fits in 8 KB. */
-    static uint8_t align_buf[8192];
-    if (bsz > sizeof(align_buf)) return EFI_UNSUPPORTED;
-
-    while (bytes_remaining > 0) {
-        uint64_t phys_block = byte_off / bsz;
-        uint32_t offset_in  = (uint32_t)(byte_off % bsz);
-        uint32_t can_copy   = bsz - offset_in;
-        if (can_copy > bytes_remaining) can_copy = bytes_remaining;
-
-        EFI_STATUS st = g_block_io->read_blocks(g_block_io,
-                                                 g_block_io->media->media_id,
-                                                 (EFI_LBA)phys_block,
-                                                 bsz,
-                                                 align_buf);
-        if (EFI_ERROR(st)) return st;
-
-        MemCopy(out, align_buf + offset_in, can_copy);
-        out             += can_copy;
-        byte_off        += can_copy;
-        bytes_remaining -= can_copy;
-    }
-    return EFI_SUCCESS;
+    return ReadMediumSectors(g_block_io, g_ground_start + vlba, count_512, buffer);
 }
 
-/* Read one 4 KB TagFS block (8 sectors) into buffer. */
-static EFI_STATUS ReadTagFsBlock(uint32_t data_start_sector, uint32_t block, void *buf)
+/* One 4 KB block of the DATA RUN. What a file's metadata carries is a block
+ * counted from the start of that run; where the run sits inside the volume is
+ * the Deed's business. */
+static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
 {
-    uint64_t lba = (uint64_t)data_start_sector + (uint64_t)block * TAGFS_SECTORS_PER_BLOCK;
-    return ReadSectors(lba, TAGFS_SECTORS_PER_BLOCK, buf);
+    uint64_t vlba = ((uint64_t)g_layout.data_block + block) * TAGFS_SECTORS_PER_BLOCK;
+    return ReadSectors(vlba, TAGFS_SECTORS_PER_BLOCK, buf);
 }
 
 /* =========================================================================
- * TagFS: superblock
+ * TagFS: what the Deed said
  * ========================================================================= */
 
-static TagBootSuperblock g_superblock;
-
-static EFI_STATUS TagFsReadSuperblock(void)
+/* Take the layout, the identity and (if it carries one) the kernel's position
+ * out of the Deed this loader already read while choosing the device. */
+static EFI_STATUS DeedTakeUp(void)
 {
-    EFI_STATUS status = ReadSectors(TAGFS_SUPERBLOCK_SECTOR, 1, &g_superblock);
-    if (EFI_ERROR(status)) return status;
+    VolumeDeed deed;
+    MemCopy(&deed, g_deed_block, sizeof(deed));
+    MemCopy(g_volume_uuid, deed.uuid, 16);
 
-    if (g_superblock.magic != TAGFS_MAGIC) {
-        Print("TagFS: bad magic on primary superblock, trying backup\r\n");
-        status = ReadSectors(TAGFS_BACKUP_SB_SECTOR, 1, &g_superblock);
-        if (EFI_ERROR(status)) return status;
-        if (g_superblock.magic != TAGFS_MAGIC) return EFI_NOT_FOUND;
+    uint16_t bytes = 0;
+    const VolumeLayout *layout =
+        (const VolumeLayout *)DeedStampOf(g_deed_block, VOLUME_STAMP_LAYOUT, &bytes);
+    if (!layout || bytes < sizeof(VolumeLayout)) {
+        Print("TagBoot: this deed does not say where anything is\r\n");
+        return EFI_UNSUPPORTED;
     }
-    if (g_superblock.version != TAGFS_VERSION) return EFI_UNSUPPORTED;
-    return EFI_SUCCESS;
-}
+    MemCopy(&g_layout, layout, sizeof(g_layout));
 
-/* Returns data_start_sector (first sector of block 0). */
-static uint32_t TagFsDataStartSector(void)
-{
-    return g_superblock.block_bitmap_sector +
-           g_superblock.block_bitmap_sector_count;
+    uint64_t blocks_in_volume = deed.sectors / TAGFS_SECTORS_PER_BLOCK;
+    if (g_layout.data_block == 0 || g_layout.data_blocks == 0 ||
+        (uint64_t)g_layout.data_block + g_layout.data_blocks > blocks_in_volume) {
+        Print("TagBoot: this deed lays out a data run that does not fit inside it\r\n");
+        return EFI_UNSUPPORTED;
+    }
+
+    const VolumeBoot *boot =
+        (const VolumeBoot *)DeedStampOf(g_deed_block, VOLUME_STAMP_BOOT, &bytes);
+    if (boot && bytes >= sizeof(VolumeBoot)) {
+        MemCopy(&g_boot, boot, sizeof(g_boot));
+        g_have_boot = (g_boot.kernel_block != 0 && g_boot.kernel_blocks != 0);
+    }
+    return EFI_SUCCESS;
 }
 
 /* =========================================================================
@@ -599,14 +845,16 @@ static uint32_t TagFsDataStartSector(void)
  * Returns TAGFS_INVALID_TAG_ID if not found. */
 static uint16_t TagRegistryFindLabel(const char *key)
 {
-    uint32_t data_start = TagFsDataStartSector();
-    uint32_t block_idx  = g_superblock.tag_registry_block;
+    /* The Deed states the registry in blocks of the whole volume; the chain
+     * inside it runs in blocks of the data run, which is what a block number
+     * on disk always means. */
+    uint32_t block_idx = g_layout.tag_registry_block - g_layout.data_block;
     size_t   key_len    = StrLen8(key);
 
     static TagBootRegistryBlock reg_blk;
 
     for (uint32_t chain = 0; chain < 64; chain++) {
-        if (EFI_ERROR(ReadTagFsBlock(data_start, block_idx, &reg_blk))) break;
+        if (EFI_ERROR(ReadDataBlock(block_idx, &reg_blk))) break;
         if (reg_blk.magic != TAGFS_REGISTRY_MAGIC)                      break;
 
         uint32_t pos = 0;
@@ -627,8 +875,21 @@ static uint16_t TagRegistryFindLabel(const char *key)
             uint32_t record_size = 6 + this_key_len + this_val_len;
             if (pos + record_size > reg_blk.used_bytes) break;
 
-            /* Label tag: flags == 0, no value */
-            if (flags == 0 && this_val_len == 0 &&
+            /*
+             * A label tag is one with no value. It is NOT "flags == 0":
+             * bit 0 says the tag carries a value, bit 1 says the kernel
+             * considers it one of its own (TAGFS_TAG_FLAG_SYSTEM), and the
+             * kernel stamps that second bit onto the reserved vocabulary the
+             * first time it writes the registry back.
+             *
+             * So a volume straight from mkfs matched here and the same volume
+             * after one boot did not — the tags this loader looks for ("god",
+             * "boot", "system") are exactly the ones that get stamped. The
+             * search quietly stopped working the moment the machine had run
+             * once, and fell through to the boot hints that used to sit in the
+             * superblock. Nothing broke, so nothing said anything.
+             */
+            if ((flags & TAGFS_TAG_FLAG_HAS_VALUE) == 0 && this_val_len == 0 &&
                 this_key_len == (uint8_t)key_len &&
                 MemEqual(p + TAG_RECORD_KEY_OFF, key, key_len)) {
                 return tag_id;
@@ -651,13 +912,12 @@ static int TagFsFindFileByTagId(uint16_t target_tag_id,
                                 uint32_t *out_block_count,
                                 uint64_t *out_file_size)
 {
-    uint32_t data_start = TagFsDataStartSector();
-    uint32_t block_idx  = g_superblock.metadata_pool_block;
+    uint32_t block_idx = g_layout.metadata_pool_block - g_layout.data_block;
 
     static TagBootMetaPoolBlock mpool;
 
     for (uint32_t chain = 0; chain < 256; chain++) {
-        if (EFI_ERROR(ReadTagFsBlock(data_start, block_idx, &mpool))) break;
+        if (EFI_ERROR(ReadDataBlock(block_idx, &mpool))) break;
         if (mpool.magic != TAGFS_MPOOL_MAGIC)                         break;
 
         uint32_t pos = 0;
@@ -742,21 +1002,21 @@ static int TagFsFindKernelByTags(uint32_t *out_start_block, uint32_t *out_block_
     return 0;
 }
 
-/* Extract kernel location from superblock boot hints. */
-static int TagFsBootHints(uint32_t *out_start_block, uint32_t *out_block_count,
-                           uint32_t *out_data_start_sector, uint64_t *out_file_size)
+/*
+ * Where the Deed says the kernel is — in the volume's own blocks, so a loader
+ * holding nothing but the Deed can turn it into a sector.
+ *
+ * This is the answer when the tag search finds nothing, and it is a better
+ * answer than the one it replaces: the boot hints used to live in the
+ * superblock's reserved[] area at offsets four files agreed on by comment.
+ */
+static int TagFsBootStamp(uint32_t *out_volume_block, uint32_t *out_block_count,
+                          uint64_t *out_file_size)
 {
-    uint32_t kblock, kblocks, ksize, dstart;
-    MemCopy(&kblock,  g_superblock.reserved + BOOT_HINT_KERNEL_BLOCK,  4);
-    MemCopy(&kblocks, g_superblock.reserved + BOOT_HINT_KERNEL_BLOCKS, 4);
-    MemCopy(&ksize,   g_superblock.reserved + BOOT_HINT_KERNEL_SIZE,   4);
-    MemCopy(&dstart,  g_superblock.reserved + BOOT_HINT_DATA_START,    4);
-
-    if (kblock == 0 || kblocks == 0) return 0;
-    *out_start_block        = kblock;
-    *out_block_count        = kblocks;
-    *out_data_start_sector  = dstart;
-    *out_file_size          = (uint64_t)ksize;
+    if (!g_have_boot) return 0;
+    *out_volume_block = g_boot.kernel_block;
+    *out_block_count  = g_boot.kernel_blocks;
+    *out_file_size    = (uint64_t)g_boot.kernel_bytes;
     return 1;
 }
 
@@ -767,8 +1027,7 @@ static int TagFsBootHints(uint32_t *out_start_block, uint32_t *out_block_count,
 /* Loads kernel file blocks to KERNEL_LOAD_ADDR.
  * Reads all block_count blocks from disk; returns file_size as the actual byte count,
  * or 0 on error. */
-static uint64_t TagFsLoadKernel(uint32_t data_start_sector,
-                                uint32_t start_block,
+static uint64_t TagFsLoadKernel(uint32_t volume_block,
                                 uint32_t block_count,
                                 uint64_t file_size)
 {
@@ -809,13 +1068,12 @@ static uint64_t TagFsLoadKernel(uint32_t data_start_sector,
     uint8_t *dst = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
 
     for (uint32_t b = 0; b < block_count; b++) {
-        uint64_t lba = (uint64_t)data_start_sector +
-                       (uint64_t)(start_block + b) * TAGFS_SECTORS_PER_BLOCK;
-        status = ReadSectors(lba, TAGFS_SECTORS_PER_BLOCK,
+        uint64_t vlba = (uint64_t)(volume_block + b) * TAGFS_SECTORS_PER_BLOCK;
+        status = ReadSectors(vlba, TAGFS_SECTORS_PER_BLOCK,
                              dst + (uint64_t)b * TAGFS_BLOCK_SIZE);
         if (EFI_ERROR(status)) {
-            Print("TagBoot: disk read error at block ");
-            PrintDec(start_block + b);
+            Print("TagBoot: disk read error at volume block ");
+            PrintDec(volume_block + b);
             Print("\r\n");
             return 0;
         }
@@ -1500,7 +1758,7 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
  * firmware which device it was booted from, so without this the Boardroom
  * picks by a rule — "the removable medium wins" — which is wrong on any
  * machine carrying BoxOS on an internal disk with a flash drive in a socket.
- * This loader knows the answer: it has the superblock in hand.
+ * This loader knows the answer: it has the volume's Deed in hand.
  * ========================================================================= */
 #define BOARDING_PASS_ADDR      0xA600ULL
 #define BOARDING_PASS_BYTES     512U
@@ -1555,10 +1813,10 @@ static void WriteBoardingPass(void)
     uint16_t at = BOARDING_HDR_BYTES;
     uint16_t count = 0;
 
-    /* The volume this kernel was read out of, straight out of the superblock
+    /* The volume this kernel was read out of, straight out of the Deed
      * this loader verified on the way in. */
     at = BoardingStamp(base, at, BOARDING_STAMP_VOLUME,
-                       g_superblock.fs_uuid, 16);
+                       g_volume_uuid, 16);
     count++;
 
     /* How it was reached. UEFI has no BIOS drive number, and saying 0xFF is
@@ -1815,47 +2073,51 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     PrintDec(g_block_io->media->block_size);
     Print("\r\n");
 
-    /* ----- 2. Read TagFS superblock ----- */
-    Print("TagBoot: reading TagFS superblock...\r\n");
-    status = TagFsReadSuperblock();
-    if (EFI_ERROR(status)) Panic("TagFS superblock not found or invalid");
-    Print("TagBoot: TagFS v");
-    PrintDec(g_superblock.version);
-    Print(", total_blocks=");
-    PrintDec(g_superblock.total_blocks);
-    Print("\r\n");
-
-    uint32_t data_start_sector = TagFsDataStartSector();
+    /* ----- 2. Take up the deed the probe already read ----- */
+    status = DeedTakeUp();
+    if (EFI_ERROR(status)) Panic("the volume's deed cannot be read by this loader");
+    Print("TagBoot: volume on ground at sector ");
+    PrintDec(g_ground_start);
+    Print(", data run of ");
+    PrintDec(g_layout.data_blocks);
+    Print(" blocks\r\n");
 
     /* ----- 3. Find kernel file ----- */
-    uint32_t kernel_start_block = 0;
-    uint32_t kernel_block_count = 0;
-    uint64_t kernel_file_size   = 0;
+    uint32_t kernel_volume_block = 0;
+    uint32_t kernel_block_count  = 0;
+    uint64_t kernel_file_size    = 0;
 
-    int found_by_tag = TagFsFindKernelByTags(&kernel_start_block, &kernel_block_count,
-                                              &kernel_file_size);
-    if (!found_by_tag) {
-        Print("TagBoot: tag search failed, trying boot hints...\r\n");
-        uint32_t hint_data_start = 0;
-        if (!TagFsBootHints(&kernel_start_block, &kernel_block_count,
-                             &hint_data_start, &kernel_file_size)) {
-            Panic("kernel not found — no matching tag and no boot hints in superblock");
-        }
-        if (hint_data_start != 0) data_start_sector = hint_data_start;
-        Print("TagBoot: kernel from boot hints: block=");
-        PrintDec(kernel_start_block);
-        Print(", blocks=");
-        PrintDec(kernel_block_count);
-        Print("\r\n");
+    /*
+     * The Deed first, the tag search second.
+     *
+     * The Deed names one file — the kernel this volume was made with — and its
+     * checksum covers that answer. The tag search answers "the first file
+     * carrying 'god', 'boot' or 'system'", which is a different question: on
+     * this image the shell and the display daemon carry 'system' too, and
+     * which one comes first is an accident of the order they were written in.
+     *
+     * So the exact answer is asked for first, and the search is what happens
+     * when a volume's Deed carries no boot stamp — an older volume, or one
+     * made by something that did not know to write one.
+     */
+    uint32_t kernel_data_block = 0;
+    if (TagFsBootStamp(&kernel_volume_block, &kernel_block_count,
+                       &kernel_file_size)) {
+        Print("TagBoot: the deed names the kernel\r\n");
+    } else if (TagFsFindKernelByTags(&kernel_data_block, &kernel_block_count,
+                                     &kernel_file_size)) {
+        /* The tag search answers in data-run blocks, which is what a file's
+         * extents on disk are counted in. */
+        kernel_volume_block = g_layout.data_block + kernel_data_block;
+    } else {
+        Panic("kernel not found — this deed names none and no file carries a boot tag");
     }
 
-    Print("TagBoot: kernel at data block ");
-    PrintDec(kernel_start_block);
+    Print("TagBoot: kernel at volume block ");
+    PrintDec(kernel_volume_block);
     Print(" (");
     PrintDec(kernel_block_count);
-    Print(" blocks, data_start=");
-    PrintDec(data_start_sector);
-    Print(")\r\n");
+    Print(" blocks)\r\n");
 
     /* Defensive bound: kernel_block_count comes from TagFS metadata which is
      * built by tools/create_tagfs.c at image-build time. A corrupted or
@@ -1872,8 +2134,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 
     /* ----- 4. Load kernel ----- */
     Print("TagBoot: loading kernel to 0x100000...\r\n");
-    uint64_t loaded_bytes = TagFsLoadKernel(data_start_sector,
-                                             kernel_start_block,
+    uint64_t loaded_bytes = TagFsLoadKernel(kernel_volume_block,
                                              kernel_block_count,
                                              kernel_file_size);
     if (loaded_bytes == 0) Panic("kernel load failed");

@@ -6,6 +6,8 @@
 #include "tagfs_constants.h"
 #include "../../include/boxos_magic.h"
 #include "../../include/boxos_limits.h"
+#include "../../include/volume_deed.h"
+#include "../../include/volume_ledger.h"
 #include "../core/error/error.h"
 
 // ============================================================================
@@ -24,26 +26,21 @@
 #define TAGFS_VERSION               1
 #define TAGFS_BLOCK_SIZE            4096
 
-// CRC configuration (offsets within TagFSSuperblock.reserved[])
-// reserved[] starts at struct byte 108; sentinel at absolute byte 507, CRC at 508.
-// reserved[399] = sentinel (byte 507), reserved[400..403] = CRC32 (bytes 508-511).
-#define TAGFS_SB_CRC_OFFSET         400
-#define TAGFS_SB_CRC_SENTINEL_OFFSET 399
-#define TAGFS_SB_CRC_SENTINEL       0xCC
-
-// Boot hints in reserved[0..15] (absolute bytes 108-123) — used by stage2.
-// CoW manifest block numbers stored in reserved[16..23] (absolute bytes 124-131).
-// These do NOT conflict with boot hints and do NOT interfere with stage2.
-#define TAGFS_SB_COW_SNAPSHOT_ROFF        16
-#define TAGFS_SB_COW_SNAPSHOT_BACKUP_ROFF 20
-#define TAGFS_SB_COW_SNAPSHOT(sb)         (*(uint32_t *)((sb)->reserved + TAGFS_SB_COW_SNAPSHOT_ROFF))
-#define TAGFS_SB_COW_SNAPSHOT_BACKUP(sb)  (*(uint32_t *)((sb)->reserved + TAGFS_SB_COW_SNAPSHOT_BACKUP_ROFF))
-
-// Disk Layout (sectors)
-#define TAGFS_SUPERBLOCK_SECTOR     1034
-#define TAGFS_BACKUP_SB_SECTOR      1035
-#define TAGFS_DISK_BOOK_SB_SECTOR   1036
-#define TAGFS_DISK_BOOK_START       1038
+/*
+ * Where the volume is, and what it is made of, is no longer written here.
+ *
+ * It was: a superblock at absolute sector 1034, its backup at 1035, the
+ * DiskBook's head at 1036 — three numbers spelled out in this header, in
+ * tagfs_constants.h, in the UEFI loader and in stage2's assembly, each copy
+ * holding the others in place by comment alone. A volume could exist in
+ * exactly one place on any medium.
+ *
+ * Now the medium's partition table says where the ground is (ground.h), the
+ * Deed at the head of that ground says what is on it (volume_deed.h), and the
+ * Ledger beside it says what is true of it today (volume_ledger.h). Every
+ * number in both is counted from the start of the volume, so the volume can
+ * be anywhere and can be moved.
+ */
 
 // Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFF
@@ -79,50 +76,6 @@
 // ============================================================================
 // On-Disk Structures
 // ============================================================================
-
-typedef struct __packed {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t block_size;
-    uint32_t total_blocks;
-    uint32_t free_blocks;
-    uint32_t total_files;
-    uint32_t next_file_id;
-    uint32_t next_tag_id;
-    uint32_t total_tags;
-
-    uint32_t tag_registry_block;
-    uint32_t tag_registry_block_count;
-    uint32_t file_table_block;
-    uint32_t file_table_block_count;
-    uint32_t metadata_pool_block;
-    uint32_t metadata_pool_block_count;
-    uint32_t block_bitmap_sector;
-    uint32_t block_bitmap_sector_count;
-    uint32_t disk_book_superblock_sector;
-
-    uint64_t fs_created_time;
-    uint64_t fs_modified_time;
-    uint8_t  fs_uuid[16];
-    uint32_t backup_superblock_sector;
-
-    // reserved[0..15]  — boot hints (absolute bytes 108-123), read by stage2
-    // reserved[16..19] — CoW snapshot manifest block (TAGFS_SB_COW_SNAPSHOT)
-    // reserved[20..23] — CoW snapshot backup block  (TAGFS_SB_COW_SNAPSHOT_BACKUP)
-    // reserved[399]    — CRC sentinel (TAGFS_SB_CRC_SENTINEL_OFFSET)
-    // reserved[400..403] — CRC32 (TAGFS_SB_CRC_OFFSET)
-    uint8_t  reserved[404];
-} TagFSSuperblock;
-
-STATIC_ASSERT(sizeof(TagFSSuperblock) == 512, "TagFSSuperblock must be 512 bytes");
-
-/* stage2.asm copies the volume identity straight out of the superblock buffer
- * it already read, by a number it spells for itself (TAGFS_SB_UUID_OFFSET). An
- * assembler cannot ask a C structure where a field is, so this is the other
- * half of that agreement: move fs_uuid and the build stops rather than the
- * boarding pass quietly naming sixteen bytes of something else. */
-STATIC_ASSERT(__builtin_offsetof(TagFSSuperblock, fs_uuid) == 88,
-              "stage2.asm reads the volume identity from superblock byte 88");
 
 // Header: 4+4+2+2+4 = 16 bytes. data[4080] = 4096 total.
 // Entries are packed variable-length records in data[]:
@@ -338,8 +291,29 @@ typedef struct {
     uint16_t  overflow_capacity;
 } TagFSContext;
 
+/*
+ * What the mounted volume is, split the way the medium splits it.
+ *
+ * `layout` and `geometry` come out of the Deed and never change while the
+ * volume is mounted; `ledger` is the part that does, and is written back to
+ * the medium in two alternating copies (volume_ledger.h).
+ *
+ * ‼ TWO COUNTS OF BLOCKS LIVE HERE AND THEY ARE NOT THE SAME
+ *
+ * Everything in `layout` is counted in blocks of the WHOLE VOLUME, because
+ * that is what a Deed states and what makes a volume movable. Everything
+ * TagFS itself allocates — file extents, the bitmap, the registry, the file
+ * table, the metadata pool — is counted in blocks of the DATA RUN, from zero,
+ * because that is what a file's metadata carries on disk and what the bitmap
+ * indexes. `layout.data_block` is the one number that converts between them,
+ * and tagfs.c's block_to_vlba() is the one place that applies it.
+ */
 typedef struct {
-    TagFSSuperblock  superblock;
+    uint8_t          uuid[16];      /* which volume this is */
+    VolumeLayout     layout;        /* where its parts are, in volume blocks */
+    VolumeGeometry   geometry;      /* what it was laid out for */
+    VolumeLedger     ledger;        /* what is true of it today */
+
     TagRegistry*     registry;
     TagBitmapIndex*  bitmap_index;
     BlockBitmap      block_bitmap;
@@ -465,7 +439,11 @@ error_t  tagfs_flush_cache(void);
  * the read_block helper. */
 uint64_t tagfs_block_to_sector(uint32_t block);
 
-error_t  tagfs_format(uint32_t total_blocks);
+/* There is no tagfs_format() here. A volume is made by the tool that lays it
+ * out on ground it read from a partition table (tools/create_tagfs.c), and by
+ * nothing else. The kernel used to carry a second formatter that nothing
+ * called — so nothing ever ran it, nothing ever checked it, and it went on
+ * writing the layout the rest of the kernel had already left behind. */
 
 int  tagfs_create_file(const char* filename, const uint16_t* tag_ids, uint16_t tag_count,
                        uint32_t* out_file_id);
@@ -518,7 +496,27 @@ error_t  tagfs_write_block(uint32_t block, const void* buffer);
  * The sync write path calls this internally; the async path (write_job) must
  * call it after each block write since it bypasses tagfs_write_block. */
 void     tagfs_readahead_invalidate(uint32_t block);
-error_t  tagfs_write_superblock(const TagFSSuperblock* sb);
+
+/*
+ * Write the Ledger back — the counters, not the identity.
+ *
+ * It goes to whichever of the two copies is currently older, with a sequence
+ * number one higher than the newer one, so the copy that is intact is never
+ * the copy being overwritten. See volume_ledger.h.
+ */
+error_t  tagfs_write_ledger(void);
+
+/*
+ * Read one sector run of the mounted volume, counted from the start of its
+ * ground rather than from the start of the medium.
+ *
+ * This is the only door TagFS and everything under it uses to reach the
+ * medium — the DiskBook included. The base is applied here and nowhere else,
+ * which is what makes "no absolute addresses inside a volume" an invariant
+ * instead of a convention.
+ */
+int      tagfs_volume_read (uint64_t vlba, uint32_t count, void* buffer);
+int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
 
 // ----------------------------------------------------------------------------
 // Context API

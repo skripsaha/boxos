@@ -186,6 +186,34 @@ error_t DeedReadTail(uint8_t seat, const MediumGround *ground,
     return OK;
 }
 
+error_t DeedReadTailAlone(uint8_t seat, const MediumGround *ground,
+                          DeedCopy *out)
+{
+    if (!ground || !out) return ERR_INVALID_ARGUMENT;
+    memset(out, 0, sizeof(*out));
+
+    /* The last whole DEED_SECTORS-aligned block of the ground — where a volume
+     * that fills its ground puts its far copy. A volume shorter than the
+     * partition it was given does not have its tail here, and this says so by
+     * finding nothing rather than by reading something else. */
+    uint64_t blocks = ground->sectors / DEED_SECTORS;
+    if (blocks == 0) return ERR_INVALID_ARGUMENT;
+
+    uint64_t at = ground->start_sector + (blocks - 1) * DEED_SECTORS;
+    error_t rc = deed_read_at(seat, at, VOLUME_DEED_ROLE_TAIL, out);
+    if (rc != OK) return rc;
+
+    if (out->head.sectors > ground->sectors) {
+        kprintf("[Deed] seat %u: the far copy claims %llu sectors and the "
+                "ground it stands on has %llu\n",
+                seat, (unsigned long long)out->head.sectors,
+                (unsigned long long)ground->sectors);
+        DeedRelease(out);
+        return ERR_CORRUPTED;
+    }
+    return OK;
+}
+
 void DeedRelease(DeedCopy *copy)
 {
     if (!copy || !copy->raw) return;
@@ -279,10 +307,18 @@ void DeedSurveyAll(void)
 
         for (uint8_t g = 0; g < claimed; g++) {
             DeedCopy head;
+            bool from_tail = false;
             if (DeedReadHead(seat, &ground[g], &head) != OK) {
-                kprintf("[Deed] seat %u ground %u is claimed for BoxOS and "
-                        "carries no deed this kernel can read\n", seat, g);
-                continue;
+                /* Ask the far end before reporting nothing. A survey that only
+                 * ever looks at the head says "no deed here" about a volume
+                 * that has one and is mounted off it — which is the survey
+                 * lying about the very case the second copy exists for. */
+                if (DeedReadTailAlone(seat, &ground[g], &head) != OK) {
+                    kprintf("[Deed] seat %u ground %u is claimed for BoxOS and "
+                            "carries no deed this kernel can read\n", seat, g);
+                    continue;
+                }
+                from_tail = true;
             }
 
             DeedDescribe(seat, &head);
@@ -291,7 +327,10 @@ void DeedSurveyAll(void)
              * still mounts — a medium may have lost its tail — but it is a
              * volume with no second opinion left, and that is worth a line. */
             DeedCopy tail;
-            if (DeedReadTail(seat, &ground[g], &head, &tail) == OK) {
+            if (from_tail) {
+                kprintf("[Deed] seat %u: this volume's head is gone and its "
+                        "far copy is what is left of it\n", seat);
+            } else if (DeedReadTail(seat, &ground[g], &head, &tail) == OK) {
                 kprintf("[Deed] seat %u: its far copy agrees — the whole "
                         "volume is present\n", seat);
                 DeedRelease(&tail);

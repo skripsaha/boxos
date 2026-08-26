@@ -39,15 +39,19 @@ DEBUG    ?= off
 # not move it — which is why every LBA below is the one it always was.
 #   Sector 0        : Stage1 (446 bytes of code, then the MBR partition table)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
-#   Sectors 17+     : Kernel (dynamic size, loaded via TagFS + Unreal Mode)
-#   Sector 1034     : TagFS Superblock (primary)
-#   Sector 1035     : TagFS Superblock (backup)
-#   Sector 1036-1037: Journal Superblock (primary + backup)
-#   Sectors 1038-2061: Journal Entries (512 entries * 2 sectors)
-#   Sector 2062+    : Block Bitmap (dynamic size)
-#   After bitmap    : Data Blocks (block 0=registry, 1=ftable, 2=mpool, 3+=files)
-#   Sector 49152+   : EFI System Partition (FAT32) — the UEFI half of the
-#                     medium, appended AFTER the BoxOS region on purpose
+#   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose
+#   Sector 2048+    : the BoxOS partition. Everything inside it is the volume's
+#                     own business and is counted from HERE, not from sector 0:
+#                     its Deed, its Ledger, its DiskBook, its bitmap, its data.
+#                     The kernel finds it by reading this table, exactly as the
+#                     tool that made it did.
+#   Sector 51200+   : EFI System Partition (FAT32) — the UEFI half of the
+#                     medium, appended AFTER the BoxOS partition on purpose
+#
+# The kernel is a FILE in the volume. It is not written to a sector of its own:
+# the loaders find it through the Deed, which says which block it starts at.
+# It used to be dd'd to sector 17 as well, where the volume then overwrote its
+# tail — a copy nothing read and nothing could have booted.
 STAGE2_SECTORS      = 16
 
 # Physical address of the boot_info handoff block. ONE number, four consumers:
@@ -69,16 +73,21 @@ BOARDING_PASS_ADDR  = 0xA600
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 KERNEL_START_SECTOR = 17
 
-# The BoxOS region: sector 0 through BOXOS_SECTORS-1. Every absolute LBA the
-# loaders and the kernel already use lives inside it, and none of them moved
-# when the image became partitioned — the EFI System Partition was appended
-# AFTER this region precisely so that they would not have to.
-BOXOS_SECTORS       = 49152
+# Where the volume's ground begins. One mebibyte in: the step every
+# partitioning tool has used for fifteen years, and the one every flash
+# translation layer and 4Kn medium is built around. It is also what makes the
+# volume's own 4096-byte grid line up with the medium's — the old layout put
+# the superblock at sector 1034, three sectors into a physical block, so every
+# metadata write cost the device a read, a patch and a write.
+GROUND_START_SECTOR = 2048
 
-# Where the ESP begins. 2048-aligned, which is what every partitioning tool
-# has produced for fifteen years and what firmware and flash translation
-# layers are tuned for.
-ESP_START_SECTOR    = 49152
+# The whole BoxOS region: sector 0 through BOXOS_SECTORS-1. The volume is the
+# part of it from GROUND_START_SECTOR on — 24 MiB exactly.
+BOXOS_SECTORS       = 51200
+
+# Where the ESP begins, immediately after the BoxOS partition and on the same
+# 2048-sector step.
+ESP_START_SECTOR    = 51200
 
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
@@ -322,7 +331,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
                   -Wall -Wextra -Os \
                   -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                   -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                  -I$(SRCDIR)/boot/uefi
+                  -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
 # relocations natively via the .reloc section.
@@ -333,7 +342,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
                     -target x86_64-unknown-windows \
                     -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                     -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                    -I$(SRCDIR)/boot/uefi
+                    -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
 
 # Detect whether lld-link is available for direct PE output via clang.
 # Apple clang does not ship lld-link, so we fall through to the gcc+objcopy path
@@ -412,7 +421,9 @@ TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 # No in-body skip guard: that previously kept a stale tool after a
 # create_tagfs.c / tagfs_reserved.h edit, which silently formats a divergent
 # on-disk tag-id layout (the new kernel then panics: reserved vocab not 0..11).
-$(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
+$(TAGFS_TOOL): tools/create_tagfs.c $(SRCDIR)/include/tagfs_reserved.h \
+               $(SRCDIR)/include/volume_deed.h $(SRCDIR)/include/volume_ledger.h \
+               $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $< -Wall -Wextra
 	@echo "TagFS tool built: $@"
@@ -461,12 +472,13 @@ $(STAGE2_BIN): $(STAGE2_SRC) | $(BUILDDIR)
 	max=$$(( $(STAGE2_SECTORS) * 512 )); \
 	if [ "$$sz" -gt "$$max" ]; then \
 	    echo "ERROR: stage2.bin is $$sz bytes, over its $(STAGE2_SECTORS)-sector window ($$max)."; \
-	    echo "       dd would write the overflow across sector $(KERNEL_START_SECTOR), where the kernel begins,"; \
-	    echo "       and stage1 would load a truncated stage2 that still passes its signature check."; \
+	    echo "       stage1 would load a truncated stage2 that still passes its signature check."; \
 	    rm -f $@; exit 1; \
 	fi
-	@if [ $$(( 1 + $(STAGE2_SECTORS) )) -gt $(KERNEL_START_SECTOR) ]; then \
-	    echo "ERROR: stage2 occupies sectors 1..$$(( $(STAGE2_SECTORS) )) but the kernel starts at $(KERNEL_START_SECTOR)."; \
+	@if [ $$(( 1 + $(STAGE2_SECTORS) )) -gt $(GROUND_START_SECTOR) ]; then \
+	    echo "ERROR: stage2 occupies sectors 1..$$(( $(STAGE2_SECTORS) )) and the volume's"; \
+	    echo "       ground begins at $(GROUND_START_SECTOR) — the loader would be inside the volume,"; \
+	    echo "       and the volume's Deed would be written over it."; \
 	    exit 1; \
 	fi
 
@@ -602,11 +614,16 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 	@dd if=/dev/zero of=$@ bs=512 count=$(BOXOS_SECTORS) status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
 	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
-	@echo "  Writing Stage2 (sectors 1-9, $(STAGE2_SECTORS) sectors)..."
+	@echo "  Writing Stage2 (sectors 1-$(STAGE2_SECTORS), $(STAGE2_SECTORS) sectors)..."
 	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none
-	@echo "  Writing Kernel (sector $(KERNEL_START_SECTOR)+, dynamic size via TagFS)..."
-	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
-	@echo "  Creating TagFS v1..."
+	@echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."
+	@dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none
+	@echo "  Writing the partition table (the volume's ground, then the ESP)..."
+	@ESP_SECTORS=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
+	python3 tools/make_mbr.py $@ \
+	    $(GROUND_START_SECTOR),$$(( $(BOXOS_SECTORS) - $(GROUND_START_SECTOR) )),7f,boot \
+	    $(ESP_START_SECTOR),$$ESP_SECTORS,ef
+	@echo "  Making the volume on it..."
 	@$(TAGFS_TOOL) $@ \
 		$(KERNEL_BIN)   "system" \
 		$(DISPLAY_BIN)  "display,system,utility,autostart" \
@@ -664,13 +681,6 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(UTILS_DIR)/ipc_test.elf "utility" \
 		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 		$(UTILS_DIR)/hw.elf      "utility,system,hardware"
-	@echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."
-	@dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none
-	@echo "  Writing MBR partition table..."
-	@ESP_SECTORS=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
-	python3 tools/make_mbr.py $@ \
-	    1,$$(( $(BOXOS_SECTORS) - 1 )),7f,boot \
-	    $(ESP_START_SECTOR),$$ESP_SECTORS,ef
 	@echo "Disk image created: $(IMAGE)"
 
 $(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
@@ -1033,14 +1043,18 @@ run-bg: $(IMAGE)
 #   • Sector 0        = MBR: stage1's boot code and the partition table.
 #     A stick WITHOUT that table is one the firmware has to guess about, and
 #     the guess is commonly USB-FDD — a 1.44 MB floppy emulation, 2880
-#     sectors, while the kernel lives at 2088..3272 and runs off the end of
-#     it partway through loading.
+#     sectors, while the volume begins at 2048 and the kernel inside it lives
+#     past that, so the read runs off the end of the emulation partway
+#     through loading.
 #   • Sectors 1..16   = stage2 (BIOS legacy path)
-#   • Partition 1     = the BoxOS region, marked bootable: kernel + TagFS
+#   • Partition 1     = the volume, marked bootable, starting one mebibyte in.
+#                       Its Deed is the first block of it, and every number
+#                       inside the volume is counted from there.
 #   • Partition 2     = an EFI System Partition (FAT32) holding
 #                       EFI/BOOT/BOOTX64.EFI, which UEFI firmware finds by
-#                       itself. TagBoot then locates TagFS by its magic on
-#                       the whole disk, so both paths reach the same volume.
+#                       itself. TagBoot then reads this same table for the
+#                       BoxOS partition, so both paths reach the same volume
+#                       by asking the same question.
 #
 # SAFETY: refuses to write to /dev/disk0 / /dev/sda (likely host system),
 # requires explicit DEV=, asks for confirmation before destroying data.

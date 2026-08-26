@@ -43,14 +43,14 @@ static void CowWriteManifest(void) {
     if (!fs || !fs->initialized)
         return;
 
-    uint32_t primary_block = TAGFS_SB_COW_SNAPSHOT(&fs->superblock);
+    uint32_t primary_block = fs->ledger.cow_manifest_block;
 
     // Lazy allocation: on first snapshot, allocate a dedicated block for the manifest.
     if (primary_block == 0) {
         if (tagfs_alloc_blocks(1, &primary_block) != 0)
             return;  // No free blocks — manifest cannot be persisted
-        TAGFS_SB_COW_SNAPSHOT(&fs->superblock) = primary_block;
-        tagfs_write_superblock(&fs->superblock);
+        fs->ledger.cow_manifest_block = primary_block;
+        tagfs_write_ledger();
     }
 
     CowManifest *manifest = kmalloc(sizeof(CowManifest));
@@ -81,7 +81,7 @@ static void CowWriteManifest(void) {
 
     tagfs_write_block(primary_block, manifest);
 
-    uint32_t backup_block = TAGFS_SB_COW_SNAPSHOT_BACKUP(&fs->superblock);
+    uint32_t backup_block = fs->ledger.cow_manifest_backup_block;
     if (backup_block != 0)
         tagfs_write_block(backup_block, manifest);
 
@@ -216,7 +216,7 @@ error_t TagFS_SnapshotCreate(const char *name, uint32_t file_id, uint32_t *snaps
     if (file_id == 0) {
         TagFSState *fs = tagfs_get_state();
         if (fs)
-            snap->file_count = fs->superblock.total_files;
+            snap->file_count = fs->ledger.total_files;
     } else {
         if (tagfs_get_metadata(file_id, &file_meta) == OK) {
             snap->file_count = 1;

@@ -9,13 +9,12 @@
 #define TAGFS_VERSION               1
 #define TAGFS_BLOCK_SIZE            4096
 #define TAGFS_SECTOR_SIZE           512
+#define TAGFS_BLOCK_SECTORS         (TAGFS_BLOCK_SIZE / TAGFS_SECTOR_SIZE)
 
-// Disk Layout (sectors)
-#define TAGFS_SUPERBLOCK_SECTOR     1034
-#define TAGFS_BACKUP_SB_SECTOR      1035
-#define TAGFS_DISK_BOOK_SB_SECTOR   1036
-#define TAGFS_DISK_BOOK_START       1038
-#define TAGFS_BITMAP_SECTOR_START   (TAGFS_DISK_BOOK_START + DISK_BOOK_JOURNAL_SECTORS)
+/* No disk layout here any more. Where each part of a volume sits is stated by
+ * that volume's own Deed, in blocks counted from its own start, and read at
+ * mount — see tagfs.h. These were absolute sectors of the whole medium, which
+ * is why a volume could only ever exist in one place. */
 
 // DiskBook journal size on disk (must match disk_book.h CAPACITY × SECTORS_PER_ENTRY)
 #define DISK_BOOK_JOURNAL_SECTORS   1024    /* 512 entries × 2 sectors each */
@@ -63,14 +62,5 @@
 
 // Read-ahead cache
 #define TAGFS_READ_AHEAD_BLOCKS         4
-
-// CRC configuration
-// Byte offsets into TagFSSuperblock.reserved[] where the sentinel and CRC32
-// are stored. reserved[] starts at struct byte 108 (after backup_superblock_sector).
-// Absolute byte 507 = reserved[399] = sentinel.
-// Absolute bytes 508-511 = reserved[400..403] = CRC32.
-#define TAGFS_SB_CRC_OFFSET         400
-#define TAGFS_SB_CRC_SENTINEL_OFFSET 399
-#define TAGFS_SB_CRC_SENTINEL       0xCC
 
 #endif // TAGFS_CONSTANTS_H

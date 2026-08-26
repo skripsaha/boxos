@@ -1370,7 +1370,7 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     TagFSState *fs = tagfs_get_state();
     if (fs && fs->initialized) {
-        uint32_t max_id = fs->superblock.next_file_id;
+        uint32_t max_id = fs->ledger.next_file_id;
         for (uint32_t i = 1; i < max_id; i++) {
             TagFSMetadata meta;
             if (tagfs_get_metadata(i, &meta) == 0) {

@@ -12,7 +12,7 @@
 #define IDT_ENTRIES        256
 #define ATA_SECTOR_SIZE    512
 
-#define TAGFS_MAX_FILES    1024  // Default for formatting; runtime reads from superblock
+#define TAGFS_MAX_FILES    1024  // Ceiling for callers with no volume; a mounted one says how many it holds (its Ledger)
 #define TAGFS_MAX_TAG_INDEX 1024
 #define TAGFS_INODE_SIZE   512
 #define JOURNAL_ENTRY_COUNT 512

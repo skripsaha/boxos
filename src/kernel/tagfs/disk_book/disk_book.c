@@ -7,16 +7,17 @@
 #include "../../../kernel/drivers/disk/ahci.h"
 #include "boardroom.h"
 
-// Direct sector I/O — bypasses the tagfs block abstraction (the journal lives
-// in a fixed disk region addressed by absolute LBA, not by TagFS block number).
-// Same seat as the volume: the journal describes that volume and belongs on
-// the medium carrying it.
-static int disk_book_read_sectors(uint64_t lba, uint16_t count, void *buf) {
-    return BoardroomRead(tagfs_get_seat(), lba, count, buf);
+// Sector I/O through the volume's own door (tagfs_volume_read/write), not the
+// Boardroom directly: the DiskBook lives in a run of the volume named by its
+// Deed, so every sector it names is counted from the volume's start. Going to
+// the medium itself would mean knowing where the volume begins, which is
+// exactly the knowledge that stopped a volume from being able to move.
+static int disk_book_read_sectors(uint64_t vlba, uint16_t count, void *buf) {
+    return tagfs_volume_read(vlba, count, buf);
 }
 
-static int disk_book_write_sectors(uint64_t lba, uint16_t count, const void *buf) {
-    return BoardroomWrite(tagfs_get_seat(), lba, count, buf);
+static int disk_book_write_sectors(uint64_t vlba, uint16_t count, const void *buf) {
+    return tagfs_volume_write(vlba, count, buf);
 }
 
 // ----------------------------------------------------------------------------
@@ -25,8 +26,8 @@ static int disk_book_write_sectors(uint64_t lba, uint16_t count, const void *buf
 static DiskBookSuperblock g_sb;
 static bool      g_initialized       = false;
 static spinlock_t g_lock;
-static uint32_t  g_sb_sector         = 0;
-static uint32_t  g_sb_backup_sector  = 0;
+static uint64_t  g_sb_sector         = 0;   /* all three counted from the */
+static uint64_t  g_sb_backup_sector  = 0;   /* start of the volume         */
 static uint32_t  g_redirects_logged  = 0;
 static uint32_t  g_replay_count      = 0;
 static uint32_t  g_crc_errors        = 0;
@@ -108,11 +109,11 @@ static int write_entry(uint32_t idx, const DiskBookEntry *e) {
     return OK;
 }
 
-static void format_fresh_locked(uint32_t sector) {
+static void format_fresh_locked(uint64_t records_sector) {
     memset(&g_sb, 0, sizeof(g_sb));
     g_sb.magic        = DISK_BOOK_SB_MAGIC;
     g_sb.version      = DISK_BOOK_VERSION;
-    g_sb.start_sector = (uint64_t)sector + 2;   /* superblock + backup, then records */
+    g_sb.start_sector = records_sector;
     g_sb.capacity     = DISK_BOOK_CAPACITY;
     g_sb.count        = 0;
     g_sb.generation   = 0;
@@ -122,13 +123,14 @@ static void format_fresh_locked(uint32_t sector) {
 // ----------------------------------------------------------------------------
 // Init
 // ----------------------------------------------------------------------------
-error_t DiskBookInit(uint32_t sector) {
+error_t DiskBookInit(uint64_t head_sector, uint64_t backup_sector,
+                    uint64_t records_sector) {
     if (g_initialized)
         return ERR_DISKBOOK_NOT_INITIALIZED;
 
     spinlock_init(&g_lock);
-    g_sb_sector        = sector;
-    g_sb_backup_sector = sector + 1;
+    g_sb_sector        = head_sector;
+    g_sb_backup_sector = backup_sector;
 
     DiskBookSuperblock disk;
     /* read_superblock_into() needs g_sb_sector set (done above); it fills `disk`. */
@@ -136,12 +138,12 @@ error_t DiskBookInit(uint32_t sector) {
     if (rc == OK && disk.version == DISK_BOOK_VERSION &&
         disk.capacity == DISK_BOOK_CAPACITY &&
         disk.count <= DISK_BOOK_CAPACITY &&
-        disk.start_sector == (uint64_t)sector + 2) {
+        disk.start_sector == records_sector) {
         g_sb = disk;
         debug_printf("[DiskBook] Existing redirect log: %u redirects, gen=%u\n",
                      g_sb.count, g_sb.generation);
     } else {
-        format_fresh_locked(sector);
+        format_fresh_locked(records_sector);
         if (write_superblock_locked() != OK) {
             debug_printf("[DiskBook] Init failed: superblock write error\n");
             return ERR_DISKBOOK_WRITE_FAILED;

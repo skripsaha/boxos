@@ -149,8 +149,8 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
     TagFSState *fs = tagfs_get_state();
     if (!fs || !fs->registry) return 0;
 
-    uint32_t max_files = (fs->superblock.total_files > 0)
-                         ? fs->superblock.total_files : TAGFS_MAX_FILES;
+    uint32_t max_files = (fs->ledger.total_files > 0)
+                         ? fs->ledger.total_files : TAGFS_MAX_FILES;
     uint32_t *file_ids = kmalloc(sizeof(uint32_t) * max_files);
     if (!file_ids) {
         kprintf("[AUTOSTART] no memory to list the volume's files\n");
