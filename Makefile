@@ -1,7 +1,7 @@
 # ===================================================================
 # BoxOS Makefile - Cross-platform OS build system
 # ===================================================================
-# Builds: disk image, floppy image, ISO, VDI, ELF with debug symbols
+# Builds: disk image, VDI, ELF with debug symbols
 # Supports: Linux, macOS, Windows (Cygwin/MSYS2)
 # ===================================================================
 # IMPORTANT: Uses x86_64-elf-gcc cross-compiler on ALL platforms for
@@ -71,7 +71,6 @@ BOOT_INFO_ADDR      = 0xA000
 # than repeat it.
 BOARDING_PASS_ADDR  = 0xA600
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
-KERNEL_START_SECTOR = 17
 
 # Where the volume's ground begins. One mebibyte in: the step every
 # partitioning tool has used for fifteen years, and the one every flash
@@ -308,9 +307,6 @@ IMAGE        = $(BUILDDIR)/boxos.img
 # quietly disappears. That is exactly what happened when the ESP first became
 # part of the image — the build got as far as `dd if=` an empty filename.
 UEFI_ESP_IMG = $(BUILDDIR)/esp.img
-FLOPPY_IMG   = $(BUILDDIR)/boxos_floppy.img
-ISO          = $(BUILDDIR)/boxos.iso
-ISO_DIR      = $(BUILDDIR)/isofiles
 VBOX_VDI     = $(BUILDDIR)/boxos.vdi
 
 # ==== UEFI BOOTLOADER ====
@@ -352,7 +348,7 @@ CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 .PHONY: all clean run run-bg run-stop bochs-bg bochs-stop debug info check-deps install-deps uefi usb check-endbr64
 
 # ==== MAIN TARGET ====
-all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(FLOPPY_IMG) $(ISO) $(VBOX_VDI) uefi check-endbr64
+all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(VBOX_VDI) uefi check-endbr64
 
 # ==== CET / IBT POST-LINK AUDIT ====
 # Verifies every globally-visible function in the kernel ELF begins with
@@ -401,7 +397,6 @@ check-deps:
 	@command -v $(OBJCOPY) >/dev/null || (echo "ERROR: x86_64-elf-objcopy not found" && exit 1)
 	@command -v $(QEMU) >/dev/null || echo "WARNING: qemu-system-x86_64 not found (needed for 'make run')"
 	@command -v bochs   >/dev/null || echo "WARNING: bochs not found (needed for 'make bochs')"
-	@command -v xorriso >/dev/null || echo "WARNING: xorriso not found (needed for ISO)"
 	@command -v VBoxManage >/dev/null || (echo "WARNING: VBoxManage not found" && sleep 2)
 	@echo "All dependencies OK."
 
@@ -683,19 +678,13 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(UTILS_DIR)/hw.elf      "utility,system,hardware"
 	@echo "Disk image created: $(IMAGE)"
 
-$(FLOPPY_IMG): $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN)
-	@echo "Creating floppy image (1.44MB)..."
-	@dd if=/dev/zero of=$@ bs=512 count=2880 status=none
-	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
-	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none
-	@dd if=$(KERNEL_BIN) of=$@ bs=512 seek=$(KERNEL_START_SECTOR) conv=notrunc status=none
-	@echo "Floppy image created: $(FLOPPY_IMG)"
-
-$(ISO): $(FLOPPY_IMG)
-	@echo "Creating ISO image..."
-	@mkdir -p $(ISO_DIR)
-	@cp $< $(ISO_DIR)/boot.img
-	@xorriso -as mkisofs -b boot.img -no-emul-boot -boot-load-size 2880 -boot-info-table -o $@ $(ISO_DIR)
+# There is no floppy image and no ISO here any more.
+#
+# Both were stage1 + stage2 + a raw copy of the kernel, and NO VOLUME — so
+# stage2 reached them, looked for a partition table, and had nowhere to go.
+# They could not boot before this layout either: they carried no superblock at
+# 1034 the loader could read. They were two build targets that produced two
+# files nobody could start a machine from, and `all` waited on both.
 
 $(VBOX_VDI): $(IMAGE)
 	@echo "Creating VirtualBox VDI..."
@@ -1198,7 +1187,7 @@ install-deps:
 	@if [ "$(UNAME_S)" = "Linux" ]; then \
 		echo "Linux detected (Debian/Ubuntu)..."; \
 		sudo apt update; \
-		sudo apt install -y nasm qemu-system-x86 xorriso virtualbox bochs make \
+		sudo apt install -y nasm qemu-system-x86 virtualbox bochs make \
 			binutils-x86-64-linux-gnu gcc-x86-64-linux-gnu; \
 		echo "Creating symlinks for x86_64-elf-gcc toolchain..."; \
 		sudo mkdir -p /usr/local/bin; \
@@ -1212,10 +1201,10 @@ install-deps:
 	elif [ "$(UNAME_S)" = "Darwin" ]; then \
 		echo "macOS detected..."; \
 		echo "Install dependencies using Homebrew:"; \
-		echo "  brew install nasm qemu xorriso x86_64-elf-gcc bochs"; \
+		echo "  brew install nasm qemu x86_64-elf-gcc bochs"; \
 		echo ""; \
 		echo "Or using MacPorts:"; \
-		echo "  sudo port install nasm qemu xorriso crossgcc-x86_64-elf bochs"; \
+		echo "  sudo port install nasm qemu crossgcc-x86_64-elf bochs"; \
 	else \
 		echo "Unsupported OS: $(UNAME_S)"; \
 		echo "Please install dependencies manually:"; \
