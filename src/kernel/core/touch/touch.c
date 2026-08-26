@@ -225,7 +225,11 @@ void TouchPolicySetLevelState(TouchTag tag_id, uint8_t state)
 bool TouchHasAnyListenersForTag(TouchTag tag_id)
 {
     TouchBucket *b = touch_bucket_lookup(tag_id);
-    return b && __atomic_load_n(&b->sub_count, __ATOMIC_ACQUIRE) > 0;
+    if (!b) return false;
+    /* A kernel ear counts. Answering "nobody" while a watch is open is how a
+     * caller talks itself out of a publish someone is waiting on. */
+    return __atomic_load_n(&b->sub_count,   __ATOMIC_ACQUIRE) > 0 ||
+           __atomic_load_n(&b->watch_count, __ATOMIC_ACQUIRE) > 0;
 }
 
 bool TouchHasAnyListeners(void)
@@ -398,21 +402,21 @@ static void touch_interrupt_deliver(process_t *proc, TouchSub *sub,
     touch_wake_remote(proc);
 }
 
-static void touch_react_deliver(process_t *proc, TouchSub *sub,
-                                TouchTag tag_id, const void *kpayload,
-                                uint32_t plen, uint32_t source_pid,
-                                uint16_t flags)
+/* Bound synchronous re-entry on THIS core — a delivery that publishes, whose
+ * delivery publishes again. Measured against ACTUAL kernel-stack headroom
+ * rather than a nesting count: frame-size AND stack-size proof. floor/top
+ * describe the stack currently in use (set together on every dispatch); rsp in
+ * (floor, top] confirms we are on that stack, and if the geometry is unknown
+ * (stale, or the pre-userspace boot stack) we fall back to counting.
+ *
+ * Returns false when there is no room to descend — the caller must not.
+ * Every true must be paired with touch_depth_leave. Shared by REACT delivery
+ * into a process and by TouchWatch delivery into the kernel, because both run
+ * on the publisher's stack and both can loop back into publish. */
+static bool touch_depth_enter(uint8_t core)
 {
-    if (sub->u.manifest == MANIFEST_HANDLE_INVALID) return;
-
-    uint8_t  core  = amp_get_core_index();
     uint32_t depth = __atomic_add_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
 
-    /* Bound synchronous REACT recursion by ACTUAL kernel-stack headroom on
-     * THIS core — frame-size AND stack-size proof. floor/top describe the
-     * stack currently in use (set together on every dispatch). rsp in
-     * (floor, top] confirms we're on that stack; otherwise (stale/unknown
-     * geometry, e.g. pre-userspace boot stack) fall back to the depth count. */
     uint64_t rsp;
     __asm__ volatile("mov %%rsp, %0" : "=r"(rsp));
     uint64_t top   = per_core_current_kstack_top();
@@ -427,10 +431,27 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
         __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
         uint64_t n = __atomic_add_fetch(&g_react_depth_drops, 1, __ATOMIC_RELAXED);
         if ((n & (n - 1)) == 0)   /* power-of-2 throttle */
-            debug_printf("[TOUCH] REACT guard drop on core %u (drops=%lu)\n",
+            debug_printf("[TOUCH] re-entry guard drop on core %u (drops=%lu)\n",
                          (unsigned)core, (unsigned long)n);
-        return;
+        return false;
     }
+    return true;
+}
+
+static inline void touch_depth_leave(uint8_t core)
+{
+    __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
+}
+
+static void touch_react_deliver(process_t *proc, TouchSub *sub,
+                                TouchTag tag_id, const void *kpayload,
+                                uint32_t plen, uint32_t source_pid,
+                                uint16_t flags)
+{
+    if (sub->u.manifest == MANIFEST_HANDLE_INVALID) return;
+
+    uint8_t core = amp_get_core_index();
+    if (!touch_depth_enter(core)) return;
 
     uint64_t vaddr = touch_emit_payload(proc, tag_id, flags, source_pid,
                                         kpayload, plen);
@@ -488,7 +509,88 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
     /* else: handler kfrees via crate_stage_commit_and_release at I/O completion. */
 
 out_dec:
-    __atomic_sub_fetch(&g_react_depth[core], 1, __ATOMIC_RELAXED);
+    touch_depth_leave(core);
+}
+
+/* ────────────────────────────────────────────────────────────────────────
+ * TouchWatch — kernel-side listeners.
+ *
+ * Same shape as TouchSub and for the same reason: the publisher snapshots
+ * under the bucket lock and calls outside it, so a watch cleared mid-publish
+ * must stay alive until the call it is already inside of returns. Base ref = 1
+ * held by bucket membership; +1 per in-flight publisher.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+struct TouchWatch {
+    struct TouchWatch *next;
+    struct TouchWatch *prev;
+    TouchBucket       *bucket;
+    TouchWatchFn       fn;
+    void              *ctx;
+    atomic_u32_t       ref;
+    TouchTag           tag_id;
+};
+
+static void touch_watch_release(TouchWatch *w)
+{
+    if (__atomic_sub_fetch(&w->ref, 1, __ATOMIC_ACQ_REL) != 0) return;
+    kfree(w);
+}
+
+TouchWatch *TouchWatchSet(TouchTag tag_id, TouchWatchFn fn, void *ctx)
+{
+    if (!fn || tag_id == TOUCH_TAG_INVALID) return NULL;
+
+    TouchBucket *b = touch_bucket_get_or_create(tag_id);
+    if (!b) return NULL;
+
+    TouchWatch *w = (TouchWatch *)kmalloc(sizeof(TouchWatch));
+    if (!w) return NULL;
+
+    w->fn     = fn;
+    w->ctx    = ctx;
+    w->bucket = b;
+    w->tag_id = tag_id;
+    w->ref    = 1;
+    w->prev   = NULL;
+
+    spin_lock(&b->lock);
+    w->next = b->watch_head;
+    if (b->watch_head) b->watch_head->prev = w;
+    b->watch_head = w;
+    __atomic_add_fetch(&b->watch_count, 1, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
+
+    /* The coarse "does anybody listen at all?" gate that storage_ops and
+     * write_job consult before serializing tag snapshots has to see kernel
+     * ears too, or a publish meant for one of them is skipped wholesale. */
+    __atomic_add_fetch(&g_total_subs, 1, __ATOMIC_RELAXED);
+    return w;
+}
+
+void TouchWatchClear(TouchWatch *w)
+{
+    if (!w) return;
+    TouchBucket *b = w->bucket;
+
+    spin_lock(&b->lock);
+    if (w->prev) w->prev->next = w->next;
+    else if (b->watch_head == w) b->watch_head = w->next;
+    if (w->next) w->next->prev = w->prev;
+    w->next = NULL;
+    w->prev = NULL;
+    __atomic_sub_fetch(&b->watch_count, 1, __ATOMIC_RELEASE);
+    spin_unlock(&b->lock);
+
+    __atomic_sub_fetch(&g_total_subs, 1, __ATOMIC_RELAXED);
+    touch_watch_release(w);
+}
+
+uint32_t TouchWatchCount(TouchTag tag_id)
+{
+    TouchBucket *b = touch_bucket_lookup(tag_id);
+    if (!b) return 0;
+    return __atomic_load_n(&b->watch_count, __ATOMIC_ACQUIRE);
 }
 
 /* Drop one reference on a TouchSub and free it on the last drop. The base ref
@@ -599,6 +701,46 @@ static void deliver_one(TouchSnap *e, TouchTag tag_id,
     }
 }
 
+/* Snapshot-then-call, exactly as the process side does it. The bucket lock is
+ * released before any callback runs, so a watch may publish, and a watch on
+ * another tag may be set or cleared from inside one. */
+static void touch_watch_deliver(TouchBucket *b, TouchTag tag_id,
+                                const void *kpayload, uint32_t plen,
+                                uint32_t source_pid)
+{
+    enum { WATCH_SNAP_STACK = 8 };
+    TouchWatch *stack[WATCH_SNAP_STACK];
+    TouchWatch **snap = stack;
+    uint32_t snap_cap = WATCH_SNAP_STACK;
+    uint32_t snap_n   = 0;
+
+    spin_lock(&b->lock);
+    for (TouchWatch *w = b->watch_head; w; w = w->next) {
+        if (snap_n >= snap_cap) {
+            uint32_t new_cap = snap_cap * 4;
+            TouchWatch **heap_buf = (TouchWatch **)kmalloc(sizeof(TouchWatch *) * new_cap);
+            if (!heap_buf) break;
+            memcpy(heap_buf, snap, sizeof(TouchWatch *) * snap_n);
+            if (snap != stack) kfree(snap);
+            snap = heap_buf;
+            snap_cap = new_cap;
+        }
+        __atomic_add_fetch(&w->ref, 1, __ATOMIC_RELAXED);
+        snap[snap_n++] = w;
+    }
+    spin_unlock(&b->lock);
+
+    uint8_t core = amp_get_core_index();
+    if (touch_depth_enter(core)) {
+        for (uint32_t i = 0; i < snap_n; i++)
+            snap[i]->fn(tag_id, kpayload, plen, source_pid, snap[i]->ctx);
+        touch_depth_leave(core);
+    }
+
+    for (uint32_t i = 0; i < snap_n; i++) touch_watch_release(snap[i]);
+    if (snap != stack) kfree(snap);
+}
+
 void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
                     uint32_t source_pid, uint16_t flags)
 {
@@ -620,9 +762,14 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
         if (new_state == 0) return;
     }
 
-    if (__atomic_load_n(&b->sub_count, __ATOMIC_ACQUIRE) == 0) return;
+    uint32_t n_subs   = __atomic_load_n(&b->sub_count,   __ATOMIC_ACQUIRE);
+    uint32_t n_watches = __atomic_load_n(&b->watch_count, __ATOMIC_ACQUIRE);
+    if (n_subs == 0 && n_watches == 0) return;
 
     __atomic_add_fetch(&g_touch_publish_calls, 1, __ATOMIC_RELAXED);
+
+    if (n_watches != 0) touch_watch_deliver(b, tag_id, kpayload, plen, source_pid);
+    if (n_subs == 0) return;
 
     TouchSnap stack[TOUCH_SNAP_STACK];
     TouchSnap *snap = stack;

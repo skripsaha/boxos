@@ -486,6 +486,11 @@ void kernel_main(void)
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
 
+    /* The kernel's own ear, exercised here rather than later on purpose: no
+     * process exists yet, and listening before there is any userspace to
+     * listen for you is the entire reason TouchWatch exists. */
+    { extern void TouchWatchSelfTest(void); TouchWatchSelfTest(); }
+
     /* Touch is up after guide_init — let the Canvas surface broadcast
      * its readiness so log collectors / power daemons can subscribe. */
     VideoNotifyReady();
