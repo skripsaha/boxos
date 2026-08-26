@@ -45,8 +45,24 @@ boot() {
         sleep 2; i=$((i+1))
     done
     sleep 3
+
+
+    # Type into it. A machine you can look at and not talk to is not a machine
+    # that booted — and "can it be typed on" is the only question the board
+    # failure was ever really about.
+    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+# Did the machine answer a keystroke? The shell prints its command list in
+# response to "help", so one line out of that list is the proof.
+typed_ok() {
+    grep -q "Show available commands" "$1"
 }
 
 # The probe reports every resolve and which book answered. It is installed
@@ -139,6 +155,7 @@ run_stranger() {
     # The whole point of declining: the machine must still be usable, because
     # the person who has to re-seat the medium types on it.
     grep -q "BoxOS Shell" "$L"; chk $? "the machine still reaches a shell"
+    typed_ok "$L"; chk $? "and answers a keystroke"
 
     # And it must be LISTENING, not polling on a clock.
     ! grep -q "falling back to the rule" "$L"; chk $? "the guess-rule never ran"
@@ -155,6 +172,7 @@ run_healthy() {
     L="$SCRATCH/serial.healthy.log"
 
     grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell"
+    typed_ok "$L"; chk $? "and answers a keystroke"
 
     # (1) every occurrence lands in the kernel half — id has bit 15 set
     local bad_ids
@@ -197,6 +215,7 @@ run_novolume() {
 
     grep -q "no volume\|No autostart" "$L"; chk $? "boot proceeds with no volume"
     grep -q "BoxOS Shell" "$L"; chk $? "a machine with no medium still reaches a shell"
+    typed_ok "$L"; chk $? "and answers a keystroke"
 
     # THE point of the whole change: the console tag survives having no medium
     grep -q "logbook 'keyboard'.*bare=0x8" "$L"; chk $? "'keyboard' resolves with NO volume"

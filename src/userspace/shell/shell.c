@@ -78,18 +78,45 @@ void ShellInit(void)
      *      then we wait for *that* spawn's reply, never assuming the
      *      original tag is silent forever. */
     Result entry;
-    bool   discovered = false;
+    bool   discovered   = false;
+    bool   nobody_at_all = false;
 
     for (int round = 0; !discovered && round < 2; round++) {
         uint8_t ping = DISP_CMD_PING;
-        broadcast("display", &ping, 1);
+        int rc = broadcast("display", &ping, 1);
+
+        /*
+         * The kernel already answered the question, on the spot and exactly.
+         *
+         * A broadcast is routed to the processes carrying the tag, so
+         * ERR_ROUTE_NO_SUBSCRIBERS does not mean "nobody has replied yet" —
+         * it means there is no process wearing the display tag for a reply to
+         * come from. Waiting 2500 ms twice for one is waiting on a clock for
+         * an event that cannot happen, and it is exactly the machine that has
+         * no display daemon — one that failed to mount a volume — where those
+         * five seconds are spent, and where somebody is standing in front of
+         * a blank screen wanting to type.
+         *
+         * The wait that remains is the one worth having: the daemon EXISTS
+         * (the broadcast reached it, because the tag is on the process from
+         * the moment it is created) and simply has not reached its receive
+         * loop yet. That is a watchdog on something that is really coming,
+         * which is what the 2500 ms was written for — the 2026-05-14
+         * regression where a 16-core boot had display alive but not yet
+         * listening, and a too-short window made the shell spawn a second one.
+         */
+        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) {
+            nobody_at_all = true;
+            break;
+        }
+
         if (receive_wait(&entry, 2500) && entry.sender_pid != 0) {
             io_set_display_pid(entry.sender_pid);
             discovered = true;
         }
     }
 
-    if (!discovered && ci->spawner_pid == 0) {
+    if (!discovered && (nobody_at_all || ci->spawner_pid == 0)) {
         /* Historical: spawned a "last-resort" display via proc_exec here.
          * That was the root cause of the post-2026-05-15 "first-command-
          * no-op" race: the autostart display was actually alive but its
