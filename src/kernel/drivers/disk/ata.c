@@ -342,8 +342,8 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
         if (words >= 256) logical = words * 2u;
     }
     if (logical != 512) {
-        debug_printf("[ATA] drv%u: unsupported logical sector size %u (need 512); skipping\n",
-                     drive_idx, logical);
+        kprintf("[ATA] drive %u: %u-byte logical sectors, and this stack is "
+                "built on 512 — not using it\n", drive_idx, logical);
         return ATA_ERR_NO_DEVICE;
     }
     device->logical_sector_size = logical;
@@ -439,6 +439,29 @@ static inline bool ata_legacy_path_active(void) {
     return !ahci_is_initialized();
 }
 
+/*
+ * A drive that fell back from DMA to PIO, said once per drive.
+ *
+ * Every transfer is not worth a line — a drive whose DMA is broken would
+ * bury the log — and no line at all is how a machine ends up running its
+ * whole disk in programmed I/O with nobody aware of it, which on real
+ * hardware is the difference between a disk and a bottleneck. So: the
+ * first time it happens on a drive, and not again.
+ */
+static uint8_t g_ata_dma_fallback_said = 0;
+
+static void ata_note_dma_fallback(uint8_t drive_idx, int rc, uint64_t lba,
+                                  bool write)
+{
+    if (drive_idx >= 8) return;
+    if (g_ata_dma_fallback_said & (uint8_t)(1u << drive_idx)) return;
+    g_ata_dma_fallback_said |= (uint8_t)(1u << drive_idx);
+
+    kprintf("[ATA] drive %u: DMA %s failed (rc=%d) at LBA %lu — this drive "
+            "runs in PIO from here\n",
+            drive_idx, write ? "write" : "read", rc, (unsigned long)lba);
+}
+
 int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* buffer) {
     if (!buffer || count == 0) return ATA_ERR_INVALID_ARGS;
     if (!ata_legacy_path_active()) return ATA_ERR_NOT_SUPPORTED;
@@ -458,8 +481,7 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, false, buffer);
         if (rc == 0) return 0;
-        debug_printf("[ATA] drv%u: DMA read failed (rc=%d) @LBA %lu; PIO fallback\n",
-                     drive_idx, rc, (unsigned long)lba);
+        ata_note_dma_fallback(drive_idx, rc, lba, false);
     }
 
     spin_lock(&g_ata_lock);
@@ -512,8 +534,7 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     if (ata_async_usable(drive_idx) && count <= ATA_ASYNC_MAX_SECTORS) {
         int rc = ata_dma_sync(drive_idx, lba, count, true, (void*)buffer);
         if (rc == 0) return 0;
-        debug_printf("[ATA] drv%u: DMA write failed (rc=%d) @LBA %lu; PIO fallback\n",
-                     drive_idx, rc, (unsigned long)lba);
+        ata_note_dma_fallback(drive_idx, rc, lba, true);
     }
 
     spin_lock(&g_ata_lock);
@@ -700,8 +721,8 @@ static void ata_discover_channels(void) {
 
     uint32_t extra = ata_count_extra_ide_controllers(&ide);
     if (extra) {
-        debug_printf("[ATA] %u additional IDE controller(s) ignored — "
-                     "single-chip driver scope\n", extra);
+        kprintf("[ATA] %u further IDE controller(s) on this machine are not "
+                "used — any disk on them will not appear\n", extra);
     }
 
     /* Primary channel */
