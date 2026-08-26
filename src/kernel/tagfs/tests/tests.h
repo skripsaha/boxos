@@ -19,6 +19,24 @@ typedef enum {
     TEST_CRASH = 3
 } TestResult;
 
+/*
+ * Does this test WRITE to the mounted volume?
+ *
+ * It matters because the volume a running machine has mounted belongs to
+ * whoever is using the machine. A test that creates files, allocates blocks or
+ * checkpoints the journal is doing that to their data, on their medium, every
+ * time they switch the computer on.
+ *
+ * Found on the owner's flash drive after two boots: test_file, test_rw,
+ * stress_file_0..2 sitting among his own files, next_file_id grown from 57 to
+ * 135, nineteen blocks gone, and the metadata pool chained into the data run.
+ * None of it visible in QEMU, where the image is rebuilt by every build.
+ */
+typedef enum {
+    TEST_READS_ONLY = 0,
+    TEST_WRITES_TO_VOLUME = 1
+} TestReach;
+
 // Test case structure
 typedef struct {
     const char* name;
@@ -26,6 +44,7 @@ typedef struct {
     TestResult result;
     uint64_t duration_ms;
     char error_message[256];
+    TestReach reach;
 } TestCase;
 
 // Test suite structure

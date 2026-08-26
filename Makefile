@@ -188,6 +188,30 @@ endif
 # running system the normal behaviour is right; on the first boot of a new
 # machine it scrolls the only dump that mattered off a screen with no
 # scrollback. `make BRINGUP=on` — never in a shipped build.
+# Let the startup tests write to the mounted volume.
+#
+# Off by default, because the volume a running machine has mounted is the one
+# somebody keeps their files on — and these tests create files, allocate blocks
+# and checkpoint the journal on it, at every boot. That was invisible until a
+# flash drive was read back after two boots on a real machine and had
+# test_file, test_rw and stress_file_0..2 sitting among its owner's files.
+#
+# `make VOLUME_TESTS=on` — for a throwaway image, never on a medium that
+# carries anything.
+ifeq ($(VOLUME_TESTS),on)
+CFLAGS += -DCONFIG_VOLUME_TESTS=1
+endif
+
+# A switch that changes CFLAGS has to change what gets rebuilt, or it does
+# nothing on a tree that is already built — `make VOLUME_TESTS=on` would print
+# nothing, link the objects it already had, and boot a kernel with the tests
+# still skipped. Measured, first try.
+#
+# Same trick this file already uses for the host OS signature: the marker's
+# NAME carries the setting, so switching it names a file that does not exist,
+# whose recipe touches it, and every object depending on it recompiles.
+VOLUME_TESTS_MARK = $(BUILDDIR)/.volume_tests.$(if $(filter on,$(VOLUME_TESTS)),on,off)
+
 ifeq ($(BRINGUP),on)
 CFLAGS += -DCONFIG_BRINGUP_HOLD_ON_FIRST_FAULT=1
 endif
@@ -432,12 +456,16 @@ $(TAGFS_OS_SIGNATURE): | $(BUILDDIR)
 # of the same struct linked cleanly and hung on the first schedule() — measured
 # in Ф41-e-2, three matrix runs spent bisecting it. `make clean` was the only
 # remedy and it is not one anybody remembers every time.
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c | $(BUILDDIR)
+$(VOLUME_TESTS_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.volume_tests.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
