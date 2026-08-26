@@ -732,6 +732,9 @@ void kernel_main(void)
      * the answer is still cheap to act on. */
     BoardroomAsyncSelfTest(tagfs_get_seat());
 
+    /* And what every medium's own ground says it carries. Reads only. */
+    { extern void DeedSurveyAll(void); DeedSurveyAll(); }
+
     debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
     error_t storage_reg_err = StorageDeckRegister();
     if (storage_reg_err != OK)
