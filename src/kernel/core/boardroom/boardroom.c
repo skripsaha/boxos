@@ -1,4 +1,5 @@
 #include "boardroom.h"
+#include "ground.h"
 #include "touch.h"
 #include "boarding.h"
 #include "klib.h"
@@ -209,6 +210,35 @@ void BoardroomInit(void)
     for (BoardSeat* s = g_seats; s; s = s->next) {
         kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
                 s->removable ? " (removable)" : "");
+
+        /* And how the medium is divided, which nothing in this kernel used to
+         * read. A volume was assumed to begin at one absolute sector of the
+         * whole device, so BoxOS could exist in exactly one place on any
+         * medium — and a disk belonging to somebody else could not be shared
+         * with it at all.
+         *
+         * Only for the seats that are new. The room is called to order again
+         * every time something arrives, and re-reading the table of every
+         * medium already in it would say the same thing again on every
+         * hot-plug — which is how a log stops being read. */
+        if (s->number < seated_before) {
+            continue;
+        }
+
+        MediumGround ground[GROUND_MAX_PER_MEDIUM];
+        uint8_t claimed = GroundSurvey(s->number, ground, GROUND_MAX_PER_MEDIUM);
+        for (uint8_t g = 0; g < claimed; g++) {
+            kprintf("[Boardroom]     ground %u: sectors %llu..%llu "
+                    "(%llu MiB), from %s entry %u\n",
+                    g,
+                    (unsigned long long)ground[g].start_sector,
+                    (unsigned long long)(ground[g].start_sector +
+                                         ground[g].sectors - 1),
+                    (unsigned long long)((ground[g].sectors *
+                                          BOARDROOM_SECTOR_BYTES) /
+                                         (1024u * 1024u)),
+                    GroundOriginName(ground[g].origin), ground[g].entry);
+        }
     }
 
     /* Said here, at the end, and not from seat_add: a listener that mounts on
