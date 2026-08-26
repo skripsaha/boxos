@@ -353,8 +353,10 @@ void ahci_watchdog_scan(void) {
 
         if (won) {
             __atomic_store_n(&state->stats.last_error_tsc, now, __ATOMIC_RELAXED);
-            debug_printf("[AHCI] watchdog: port %u %s — failing slots 0x%08x + COMRESET\n",
-                         i, port_error ? "fatal-error (lost MSI)" : "wedged past timeout", won);
+            kprintf("[AHCI] port %u %s — failing slots 0x%08x and resetting "
+                    "the link\n", i,
+                    port_error ? "reported a fatal error (lost MSI)"
+                               : "went past its deadline", won);
             ahci_retire_slots(state, i, won, ERR_IO);
             if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
                 StorageCompletionPush(&state->recover_node);   /* never-drop */
@@ -655,7 +657,8 @@ static int ahci_port_init(uint8_t port_num) {
     volatile ahci_port_regs_t* regs = port->regs;
 
     if (ahci_port_stop(port) != 0) {
-        debug_printf("[AHCI] Port %u: Failed to stop\n", port_num);
+        kprintf("[AHCI] port %u: would not stop, so it cannot be set up — "
+                "no disk on it\n", port_num);
         return -1;
     }
 
@@ -663,7 +666,8 @@ static int ahci_port_init(uint8_t port_num) {
     // targets that must sit below 4GB (PHYS_TAG_DMA32 == [0,1GB)).
     void* clb_page = pmm_alloc(1, PHYS_TAG_DMA32);
     if (!clb_page) {
-        debug_printf("[AHCI] Port %u: Failed to allocate CLB page\n", port_num);
+        kprintf("[AHCI] port %u: no DMA32 page for its command list — "
+                "no disk on it\n", port_num);
         return -1;
     }
 
@@ -810,8 +814,14 @@ static int ahci_port_init(uint8_t port_num) {
      * port loudly instead. 512e drives (512 logical / 4096 physical) report
      * logical 512 and work unchanged. */
     if (port->logical_sector_size != 512) {
-        debug_printf("[AHCI] Port %u: unsupported logical sector size %u (need 512); refusing\n",
-                     port_num, port->logical_sector_size);
+        /* Said with kprintf, not debug_printf. This removes a disk from the
+         * machine, and debug_printf compiles to nothing in a shipped build —
+         * so the comment above promised "loudly" while the operator saw a
+         * board that simply had no disk on it and no reason given. Every
+         * refusal below is on the same rule. */
+        kprintf("[AHCI] port %u: %u-byte logical sectors, and this stack is "
+                "built on 512 — not using it\n",
+                port_num, port->logical_sector_size);
         ahci_port_stop(port);
         goto fail_free;
     }

@@ -115,6 +115,27 @@ typedef struct XhciMsdUnit {
     uint64_t sectors;
     uint32_t block_bytes;
     uint32_t per_sector;
+
+    /*
+     * And what the medium is really made of, which is not the same question.
+     *
+     * Almost every flash device today is "512e": it is ADDRESSED in 512-byte
+     * logical blocks and BUILT from 4096-byte (or larger) physical ones. Reads
+     * do not care. A write that does not cover a whole physical block makes
+     * the device read it, patch it and write it back — twice the work and
+     * twice the wear, invisibly, forever.
+     *
+     * SBC-4 READ CAPACITY(16) states both: byte 13 bits 3:0 give the exponent
+     * N where one physical block holds 2^N logical ones, and byte 14 bits 5:0
+     * with byte 15 give the lowest logical block that starts a physical one.
+     * READ CAPACITY(10) has neither field, which is why asking it alone
+     * leaves a kernel guessing at the geometry it is writing to.
+     *
+     * phys_block_bytes == 0 means the device would not say.
+     */
+    uint32_t phys_block_bytes;
+    uint32_t lowest_aligned_lba;
+
     uint32_t tag;
 
     void*    cmd_virt;   uint64_t cmd_phys;      /* wrappers, one page */
@@ -813,14 +834,22 @@ static int msd_read_capacity(XhciMsdUnit* u)
         return -1;
     }
 
-    if (last_lba != 0xFFFFFFFFu) {
+    bool ten_sufficed = (last_lba != 0xFFFFFFFFu);
+    if (ten_sufficed) {
         u->block_bytes = block;
         u->blocks      = (uint64_t)last_lba + 1;
-        return 0;
     }
 
-    /* Sixteen bytes: opcode, service action, an eight-byte LBA that is zero
-     * here, a four-byte allocation length, control. */
+    /*
+     * Sixteen bytes: opcode, service action, an eight-byte LBA that is zero
+     * here, a four-byte allocation length, control.
+     *
+     * Asked of EVERY device, not only of one too large for the ten-byte form.
+     * The capacity is the smaller half of what it answers; the other half is
+     * the physical geometry, and there is nowhere else to get it. A device
+     * that does not implement it says so and keeps the numbers it already
+     * gave — that is a device without an answer, not a device that failed.
+     */
     uint8_t cdb16[16] = {0};
     cdb16[0]  = SCSI_SERVICE_ACTION_IN_16;
     cdb16[1]  = SCSI_SAI_READ_CAPACITY_16;
@@ -829,21 +858,50 @@ static int msd_read_capacity(XhciMsdUnit* u)
     memset(u->bounce_virt, 0, 32);
     got = 0;
     rc = msd_command(u, cdb16, sizeof(cdb16), u->bounce_phys, 32, true, &got);
+
     if (rc != 0 || got < 12) {
-        kprintf("[USB disk %u] says it is larger than a ten-byte capacity can "
-                "state and then would not answer the sixteen-byte one\n",
-                u->number);
-        return -1;
+        if (!ten_sufficed) {
+            kprintf("[USB disk %u] says it is larger than a ten-byte capacity "
+                    "can state and then would not answer the sixteen-byte "
+                    "one\n", u->number);
+            return -1;
+        }
+        return 0;                       /* geometry unknown; capacity stands */
     }
 
     uint64_t last64 = be64_get(c);
     uint32_t blk64  = be32_get(c + 8);
     if (blk64 == 0) {
-        return -1;
+        return ten_sufficed ? 0 : -1;
     }
 
-    u->block_bytes = blk64;
-    u->blocks      = last64 + 1;
+    if (!ten_sufficed) {
+        u->block_bytes = blk64;
+        u->blocks      = last64 + 1;
+    } else if (blk64 != u->block_bytes) {
+        /* The two commands describe one medium and must agree about it. When
+         * they do not, the ten-byte answer stands — every device implements
+         * it — and the disagreement is said rather than averaged. */
+        kprintf("[USB disk %u] answers %u-byte blocks to one capacity command "
+                "and %u to the other; using %u\n",
+                u->number, u->block_bytes, blk64, u->block_bytes);
+    }
+
+    /* SBC-4 READ CAPACITY(16): byte 13 bits 3:0 = LOGICAL BLOCKS PER PHYSICAL
+     * BLOCK EXPONENT, byte 14 bits 5:0 (MSB) with byte 15 = LOWEST ALIGNED
+     * LOGICAL BLOCK ADDRESS. Both need sixteen bytes back, not twelve. */
+    if (got >= 16) {
+        /* The exponent field is four bits, so it cannot exceed 15 — but the
+         * block size it multiplies came off the wire too, and a device that
+         * states an absurd one must not be able to overflow the shift into a
+         * small number that looks reasonable. Checked against the room left,
+         * not against the exponent. */
+        uint32_t exponent = c[13] & 0x0Fu;
+        if (u->block_bytes <= (0xFFFFFFFFu >> exponent)) {
+            u->phys_block_bytes = u->block_bytes << exponent;
+        }
+        u->lowest_aligned_lba = ((uint32_t)(c[14] & 0x3Fu) << 8) | c[15];
+    }
     return 0;
 }
 
@@ -1006,6 +1064,25 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     if (u->per_sector != 1) {
         kprintf("[USB disk %u] addressed in %u-byte blocks (%llu of them)\n",
                 u->number, u->block_bytes, (unsigned long long)u->blocks);
+    }
+
+    /* What it is made of, when it was willing to say. Printed even when it
+     * matches the logical block, because "512 logical over 4096 physical" and
+     * "512 over 512" are different media and only one of them punishes a
+     * misaligned write — and which one this is decides where a volume ought
+     * to start on it. */
+    if (u->phys_block_bytes != 0) {
+        kprintf("[USB disk %u] built from %u-byte physical blocks%s\n",
+                u->number, u->phys_block_bytes,
+                u->lowest_aligned_lba ? ", offset from sector zero" : "");
+        if (u->lowest_aligned_lba != 0) {
+            kprintf("[USB disk %u] its first aligned block is logical %u — "
+                    "anything laid out from zero is skewed on it\n",
+                    u->number, u->lowest_aligned_lba);
+        }
+    } else {
+        kprintf("[USB disk %u] would not say what it is built from; assuming "
+                "nothing about alignment\n", u->number);
     }
     return 0;
 }
