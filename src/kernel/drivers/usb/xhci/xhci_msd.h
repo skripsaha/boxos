@@ -40,6 +40,7 @@ void xhci_msd_release(xhci_device_slot_t* slot);
 uint8_t     xhci_msd_unit_count(void);
 bool        xhci_msd_unit_present(uint8_t unit);
 uint64_t    xhci_msd_unit_sectors(uint8_t unit);
+uint32_t    xhci_msd_unit_physical_bytes(uint8_t unit);
 const char* xhci_msd_unit_name(uint8_t unit);
 
 /* Sector I/O. Counts are in 512-byte sectors; a request larger than the

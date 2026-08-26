@@ -1211,6 +1211,19 @@ uint64_t xhci_msd_unit_sectors(uint8_t unit)
     return sectors;
 }
 
+/* What this unit is built from, in bytes — the answer READ CAPACITY(16) gives
+ * and almost every flash device gives differently from what it is addressed
+ * in. Zero when the device would not say, which is a fact and not a failure. */
+uint32_t xhci_msd_unit_physical_bytes(uint8_t unit)
+{
+    if (!g_units_lock_ready) return 0;
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    uint32_t bytes = (u && u->ready) ? u->phys_block_bytes : 0;
+    spin_unlock(&g_units_lock);
+    return bytes;
+}
+
 /* The name belongs to the unit, so it is only worth anything while the unit is
  * seated. Every caller copies it straight away, which is the only safe way to
  * use it and the only way it is used. */

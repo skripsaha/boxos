@@ -348,6 +348,19 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     }
     device->logical_sector_size = logical;
 
+    /* Word 106 again: bit 13 marks a drive with more than one logical sector
+     * per physical, and bits 3:0 are the exponent. A 512e drive says 512 and
+     * 4096 here, and a volume that was laid out for the smaller of the two
+     * wears it twice as fast for every metadata write. */
+    device->physical_sector_size = logical;
+    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
+        (id[106] & (1u << 13))) {
+        uint32_t exponent = id[106] & 0x0Fu;
+        if (exponent < 16 && logical <= (0xFFFFFFFFu >> exponent)) {
+            device->physical_sector_size = logical << exponent;
+        }
+    }
+
     device->lba48_supported = (id[83] & (1u << 10)) ? 1 : 0;
     if (device->lba48_supported) {
         uint64_t lba48 = 0;
