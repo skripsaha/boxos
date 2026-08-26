@@ -6,6 +6,7 @@
 #include "irqchip.h"
 #include "ioapic.h"
 #include "touch.h"
+#include "logbook.h"
 #include "system_halt.h"
 #include "ioapic.h"
 #include "irq_defer.h"
@@ -348,7 +349,7 @@ static void acpi_pm1_arm_power_button(void)
 static void acpi_power_button_answer(void)
 {
     TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
-    TouchTagResolve("acpi:power-button", &full, &bare);
+    TouchLogbookResolve("acpi:power-button", &full, &bare);
 
     bool claimed = (full != TOUCH_TAG_INVALID && TouchHasAnyListenersForTag(full)) ||
                    (bare != TOUCH_TAG_INVALID && TouchHasAnyListenersForTag(bare));

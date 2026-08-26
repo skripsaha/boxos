@@ -10,6 +10,7 @@
 #include "xhci_enumeration.h"
 #include "klib.h"
 #include "touch.h"
+#include "logbook.h"
 #include "amp.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -63,19 +64,19 @@ void xhci_interrupt_touch_init(void)
 {
     TouchTag full, bare;
 
-    TouchTagResolve("usb:connect", &full, &bare);
+    TouchLogbookResolve("usb:connect", &full, &bare);
     __atomic_store_n(&g_xhci_touch_connect_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xhci_touch_connect_bare, bare, __ATOMIC_RELEASE);
 
-    TouchTagResolve("usb:disconnect", &full, &bare);
+    TouchLogbookResolve("usb:disconnect", &full, &bare);
     __atomic_store_n(&g_xhci_touch_disconnect_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xhci_touch_disconnect_bare, bare, __ATOMIC_RELEASE);
 
-    TouchTagResolve("usb:arrived", &full, &bare);
+    TouchLogbookResolve("usb:arrived", &full, &bare);
     __atomic_store_n(&g_xhci_touch_arrived_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xhci_touch_arrived_bare, bare, __ATOMIC_RELEASE);
 
-    TouchTagResolve("usb:left", &full, &bare);
+    TouchLogbookResolve("usb:left", &full, &bare);
     __atomic_store_n(&g_xhci_touch_left_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_xhci_touch_left_bare, bare, __ATOMIC_RELEASE);
 

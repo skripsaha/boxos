@@ -13,7 +13,8 @@
 #include "amp.h"
 #include "video.h"
 #include "e820.h"
-#include "touch.h"   /* TouchPublish for pku:fault:denied (Phase 2H) */
+#include "touch.h"
+#include "logbook.h"   /* TouchPublish for pku:fault:denied (Phase 2H) */
 #include "fpu.h"     /* fpu_xsave_register_extension — XCR0 RMW + xsave area resize */
 #include "cabin_layout.h"
 #include "acpi.h"
@@ -478,7 +479,7 @@ void vmm_pku_init(void) {
     vmm_pku_program_cr4();
     vmm_pku_program_xcr0();
     /* Cache Touch handle for IRQ-safe publish from PF.PK path. */
-    g_vmm_tag_pku_fault = TouchTagIntern("pku:fault:denied");
+    g_vmm_tag_pku_fault = TouchLogbookIntern("pku:fault:denied");
     debug_printf("[VMM] PKU/PKS BSP init: PKU=%d PKS=%d XCR0.PKRU=%d "
                  "fault_tag=0x%x (default PKRU=0 → all keys allowed; "
                  "per-process PKRU lifecycle = XSAVE/XRSTOR via "
@@ -592,7 +593,7 @@ void vmm_tme_ap_probe(void) { vmm_tme_probe_inner("AP"); }
 
 /* Pre-resolved Touch tag for #CP (vector 21) handler. Resolved in
  * vmm_cet_probe (BSP, outside IRQ context) so idt.c's #CP handler
- * does NOT have to call TouchTagIntern lazily (which takes registry
+ * does NOT have to call TouchLogbookIntern lazily (which takes registry
  * locks — touch.h:230 forbids from IRQ context). Exposed via getter
  * so idt.c stays IRQ-safe. */
 static TouchTag g_vmm_tag_cet_cp_fault = TOUCH_TAG_INVALID;
@@ -636,8 +637,8 @@ void vmm_cet_probe(void) {
     /* Pre-resolve #CP Touch tag for IRQ-safe publish from idt.c
      * vector-21 handler. Done here (BSP, after MemTagInit so the
      * cet:* reserved tags are interned) rather than at lazy first
-     * #CP fire — registry locks make TouchTagIntern non-IRQ-safe. */
-    g_vmm_tag_cet_cp_fault = TouchTagIntern("cet:fault:cp");
+     * #CP fire — registry locks make TouchLogbookIntern non-IRQ-safe. */
+    g_vmm_tag_cet_cp_fault = TouchLogbookIntern("cet:fault:cp");
     debug_printf("[VMM] CET Touch handle cached: cet:fault:cp=0x%x\n",
                  (unsigned)g_vmm_tag_cet_cp_fault);
 }

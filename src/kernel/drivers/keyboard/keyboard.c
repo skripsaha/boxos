@@ -7,6 +7,7 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, g_timer_frequency */
 #include "touch.h"
+#include "logbook.h"
 #include "kb_event.h"    /* kb_event_t + KB_MOD_* — shared keyboard ABI */
 
 /* Runtime repeat timing (calculated from ms based on timer frequency) */
@@ -40,7 +41,7 @@ static char readline_result[KEYBOARD_LINE_BUFFER_SIZE];
 /* ─── Touch tag handle cache (resolved once at keyboard_init) ──────────────
  *
  * keyboard_handle_scancode and keyboard_timer_tick both run in IRQ context
- * (PS/2 IRQ1 dispatch + PIT IRQ0 tick). TouchTagResolve is NOT IRQ-safe —
+ * (PS/2 IRQ1 dispatch + PIT IRQ0 tick). TouchLogbookResolve is NOT IRQ-safe —
  * it takes the TagFS registry lock and may intern a fresh tag, which can
  * kmalloc. We therefore resolve the "keyboard" tag once during driver
  * initialization (non-IRQ context, TagFS registry already up) and cache
@@ -285,12 +286,12 @@ void keyboard_init(void)
      * boot sequence; the TagFS registry is fully online by the time
      * keyboard_init is called.
      *
-     * The "keyboard" tag is a bare key (no value), so TouchTagResolve
+     * The "keyboard" tag is a bare key (no value), so TouchLogbookResolve
      * fills only `bare`; `full` stays TOUCH_TAG_INVALID. That is still
      * correct for TouchPublishIrqPair which publishes to whichever id
      * is non-invalid. */
     TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
-    TouchTagResolve("keyboard", &full, &bare);
+    TouchLogbookResolve("keyboard", &full, &bare);
     __atomic_store_n(&g_kbd_touch_full, full, __ATOMIC_RELEASE);
     __atomic_store_n(&g_kbd_touch_bare, bare, __ATOMIC_RELEASE);
     debug_printf("[KEYBOARD] Touch tag handles: full=%u bare=%u\n",

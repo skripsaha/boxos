@@ -14,6 +14,7 @@
 #include "memtag.h"
 #include "klib.h"
 #include "touch.h"
+#include "logbook.h"
 #include "debug.h"
 #include "cpuid.h"
 
@@ -296,10 +297,10 @@ error_t tme_init_bsp(void) {
     }
 
     /* Pre-resolve Touch tag IDs for fast publish. Use the reserved
-     * tme:* namespace seeded in memtag.c (Phase 2J). TouchTagIntern
+     * tme:* namespace seeded in memtag.c (Phase 2J). TouchLogbookIntern
      * resolves through the unified tag registry. */
-    g_tme_tag_pool_ready   = TouchTagIntern("tme:pool:ready");
-    g_tme_tag_rekey_failed = TouchTagIntern("tme:keyid:rekey:failed");
+    g_tme_tag_pool_ready   = TouchLogbookIntern("tme:pool:ready");
+    g_tme_tag_rekey_failed = TouchLogbookIntern("tme:keyid:rekey:failed");
 
     /* Publish pool-ready Touch event with the programmed count in the
      * payload so subscribers can see capacity. */

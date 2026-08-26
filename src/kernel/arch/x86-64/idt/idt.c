@@ -470,7 +470,7 @@ void exception_handler(interrupt_frame_t *frame)
         if ((frame->cs & 3) == 0)
             panic_name_addr("[CET]   in ", frame->rip, false);
         /* Touch publish via pre-resolved tag (resolved in vmm_cet_probe
-         * at BSP boot, outside IRQ context). TouchTagIntern in this
+         * at BSP boot, outside IRQ context). TouchLogbookIntern in this
          * handler would take registry locks → deadlock against any
          * thread holding the Touch lock at the moment #CP fired. */
         TouchTag cp_tag = vmm_get_cet_cp_tag();

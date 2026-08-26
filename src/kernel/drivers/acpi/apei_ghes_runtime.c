@@ -20,6 +20,7 @@
 #include "pmm.h"
 #include "memtag.h"
 #include "touch.h"
+#include "logbook.h"
 #include "mce_migrate.h"
 #include "mce.h"
 #include "irq_defer.h"
@@ -190,11 +191,11 @@ bool apei_ghes_runtime_is_initialized(void) { return g_initialized; }
 
 void apei_ghes_runtime_init(void) {
     if (g_initialized) return;
-    g_tag_mem_error   = TouchTagIntern("apei:memory:error");
-    g_tag_proc_error  = TouchTagIntern("apei:processor:error");
-    g_tag_pcie_error  = TouchTagIntern("apei:pcie:error");
-    g_tag_generic_err = TouchTagIntern("apei:generic:error");
-    g_tag_ready       = TouchTagIntern("apei:ghes:ready");
+    g_tag_mem_error   = TouchLogbookIntern("apei:memory:error");
+    g_tag_proc_error  = TouchLogbookIntern("apei:processor:error");
+    g_tag_pcie_error  = TouchLogbookIntern("apei:pcie:error");
+    g_tag_generic_err = TouchLogbookIntern("apei:generic:error");
+    g_tag_ready       = TouchLogbookIntern("apei:ghes:ready");
     g_initialized = true;
     debug_printf("[APEI] runtime init: %u source(s) tracked, tags resolved\n",
                  (unsigned)g_source_count);

@@ -50,7 +50,7 @@
 
 /* Initialise — registers Touch tag handles, zeroes counters. Safe to
  * call when no GHES source was seen. Must run AFTER:
- *   - touch_init  (TouchTagIntern available)
+ *   - touch_init  (TouchLogbookIntern available)
  *   - mce_migrate_init (we hand phys addresses to it)
  *   - acpi_parse_apei  (sources registered via decode_ghes hook) */
 void apei_ghes_runtime_init(void);
