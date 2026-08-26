@@ -22,6 +22,7 @@
 #include "e820.h"
 #include "fpu.h"
 #include "process.h"
+#include "autostart.h"
 #include "guide.h"
 #include "scheduler.h"
 #include "keyboard.h"
@@ -811,158 +812,12 @@ void kernel_main(void)
     // AUTOSTART: Query TagFS for files tagged "autostart" and
     // spawn them automatically, as specified in the BoxOS tag spec.
     // ============================================================
-    debug_printf("[AUTOSTART] Scanning TagFS for autostart files...\n");
-
-    TagFSState *tfs_state = tagfs_get_state();
-    uint32_t autostart_max = (tfs_state && tfs_state->superblock.total_files > 0)
-                                 ? tfs_state->superblock.total_files
-                                 : TAGFS_MAX_FILES;
-    uint32_t *file_ids = kmalloc(sizeof(uint32_t) * autostart_max);
-    if (!file_ids)
-    {
-        debug_printf("[AUTOSTART] Failed to allocate file_ids buffer\n");
-        autostart_max = 0;
-    }
-    int file_count = file_ids ? tagfs_list_all_files(file_ids, autostart_max) : 0;
+    /* The volume's own programs. Extracted from here into autostart.c, because
+     * it was a hundred and ninety lines executed once at whatever moment this
+     * line happened to be reached — and a machine whose medium finished
+     * enumerating a second later came up empty and stayed that way. */
     process_t *initial_proc = NULL;
-    int autostart_count = 0;
-
-    for (int i = 0; i < file_count; i++)
-    {
-        TagFSMetadata meta;
-        if (tagfs_get_metadata(file_ids[i], &meta) != 0)
-            continue;
-        if (!(meta.flags & TAGFS_FILE_ACTIVE))
-        {
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        bool has_autostart = false;
-        bool has_exec_tag = false;
-
-        for (uint16_t t = 0; t < meta.tag_count; t++)
-        {
-            const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
-            if (!key)
-                continue;
-            if (strcmp(key, "autostart") == 0)
-                has_autostart = true;
-            if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
-                has_exec_tag = true;
-        }
-
-        if (!has_autostart || !has_exec_tag)
-        {
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        debug_printf("[AUTOSTART] Found: '%s' (file_id=%u)\n",
-                     meta.filename, file_ids[i]);
-
-        // Collect all tags for the new process
-        char found_tags[PROCESS_TAG_SIZE];
-        size_t pos = 0;
-        for (uint16_t t = 0; t < meta.tag_count; t++)
-        {
-            const char *key = tag_registry_key(tfs_state->registry, meta.tag_ids[t]);
-            if (!key)
-                continue;
-            size_t klen = strlen(key);
-            if (pos + klen + 2 > PROCESS_TAG_SIZE)
-                break;
-            if (pos > 0)
-                found_tags[pos++] = ',';
-            memcpy(found_tags + pos, key, klen);
-            pos += klen;
-        }
-        found_tags[pos] = '\0';
-
-        // Load binary from TagFS
-        uint64_t file_size = meta.size;
-        if (file_size == 0 || file_size > CONFIG_PROC_MAX_BINARY_SIZE)
-        {
-            kprintf("[AUTOSTART] Skip '%s': invalid size %lu\n",
-                         meta.filename, file_size);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        size_t pages_needed = (file_size + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-        void *phys_buf = pmm_alloc_zero(pages_needed);
-        if (!phys_buf)
-        {
-            kprintf("[AUTOSTART] Skip '%s': memory allocation failed\n",
-                         meta.filename);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        void *virt_buf = vmm_phys_to_virt((uintptr_t)phys_buf);
-
-        TagFSFileHandle *fh = tagfs_open(file_ids[i], TAGFS_HANDLE_READ);
-        if (!fh)
-        {
-            pmm_free(phys_buf, pages_needed);
-            kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n",
-                         meta.filename);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        int read_result = tagfs_read(fh, virt_buf, file_size);
-        tagfs_close(fh);
-
-        if (read_result < 0)
-        {
-            pmm_free(phys_buf, pages_needed);
-            kprintf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
-                         meta.filename, read_result);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        // Create process with all file tags
-        process_t *proc = process_create(found_tags);
-        if (!proc)
-        {
-            pmm_free(phys_buf, pages_needed);
-            kprintf("[AUTOSTART] Skip '%s': process_create failed\n",
-                         meta.filename);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        int load_result = process_load_binary(proc, virt_buf, (size_t)file_size);
-        pmm_free(phys_buf, pages_needed);
-
-        if (load_result != 0)
-        {
-            process_destroy(proc);
-            kprintf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
-                         meta.filename, load_result);
-            tagfs_metadata_free(&meta);
-            continue;
-        }
-
-        proc->state = PROC_WORKING;
-        autostart_count++;
-
-        kprintf("[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
-                meta.filename, proc->pid, found_tags);
-
-        tagfs_metadata_free(&meta);
-
-        // First autostart process becomes the initial process
-        if (!initial_proc)
-            initial_proc = proc;
-    }
-
-    if (file_ids)
-    {
-        kfree(file_ids);
-    }
+    int autostart_count = AutostartLaunchFromVolume(&initial_proc, false);
 
     // Fallback: if no autostart files found, use embedded shell binary
     if (!initial_proc)
@@ -995,7 +850,21 @@ void kernel_main(void)
         shell_proc->state = PROC_WORKING;
         initial_proc = shell_proc;
         kprintf("[AUTOSTART] Fallback shell ready (PID %u)\n", shell_proc->pid);
+
+        /* It is standing in, not filling the post. If this machine's own
+         * volume turns up later carrying a display daemon and a shell of its
+         * own, this one hands over rather than sharing a keyboard with it. */
+        AutostartNoteStandIn(shell_proc->pid);
     }
+    else
+    {
+        AutostartNoteVolumeLaunched();
+    }
+
+    /* Listen from here on. Set AFTER the boot has had its go, so it can only
+     * ever catch a volume that arrived too late for it — the boot mount's own
+     * announcement has already been made and gone unheard, deliberately. */
+    AutostartWatchVolume();
 
     kprintf("[AUTOSTART] %d process(es) launched\n", autostart_count);
 

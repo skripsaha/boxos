@@ -140,6 +140,78 @@ stranger_off() {
     sleep 1; touch src/kernel/core/boarding/boarding.c
 }
 
+# The volume turns up AFTER the boot gave up on it — a stick pushed in while
+# the machine is running. Mutation: the internal disk is declared not to be
+# this machine's, so the boot finds nothing; then a USB stick carrying the real
+# image is hot-plugged through the QEMU monitor and the whole chain has to run
+# by itself — enumerate, seat, recognise by boarding pass, mount, start the
+# volume's programs, and relieve the stand-in shell.
+#
+# Four cores, because that chain is driven from the K-Core guide loop. On a
+# single core it does not run at all — see the note at the end of this file.
+latearrival_on() {
+    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.late.bak"
+    python3 - <<'EOF'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "static bool tagfs_recognise(void *ctx, uint8_t seat, uint8_t out_uuid[16])\n{\n"
+assert anchor in s, "late-arrival anchor missing"
+s = s.replace(anchor, anchor + "    if (BoardroomSeatKind(seat) == BOARD_ATA) return false;   /* logcheck mutation: the internal disk is not this machine's */\n", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "late-arrival install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+latearrival_off() {
+    cp "$SCRATCH/tagfs.late.bak" src/kernel/tagfs/tagfs.c
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+run_latearrival() {
+    echo "== latearrival: the volume arrives after the boot gave up =="
+    # The mutation stays installed until the run is over: `make run-bg` has the
+    # image as a prerequisite and will rebuild it, so restoring the source
+    # first quietly boots an unmutated kernel. Cost an entire run to learn.
+    latearrival_on; build
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 30 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+
+    i=0
+    while [ $i -lt 30 ]; do
+        grep -q "AUTOSTART. Started" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.latearrival.log"
+    latearrival_off
+    L="$SCRATCH/serial.latearrival.log"
+
+    grep -q "no volume yet" "$L";      chk $? "the boot found no volume of its own"
+    grep -q "Fallback shell ready" "$L"; chk $? "and stood a shell in for one"
+    grep -q "mass storage" "$L";       chk $? "the stick enumerated after the boot"
+    grep -q "arrived after the room was called to order\|seat 1:" "$L"
+    chk $? "the room seated it"
+    grep -q "seat 1 carries the volume this kernel was read out of" "$L"
+    chk $? "and recognised it by the boarding pass, not by a rule"
+    grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
+    chk $? "TagFS mounted it"
+    grep -q "AUTOSTART. Started .display.elf" "$L"; chk $? "the volume's display daemon started"
+    grep -q "AUTOSTART. Started .shell.bin" "$L";   chk $? "the volume's shell started"
+    grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+}
+
 run_stranger() {
     echo "== stranger: the pass names a volume that is not here =="
     stranger_on; build; boot stranger; stranger_off
@@ -269,9 +341,10 @@ case "${1:-both}" in
     novolume) run_novolume ;;
     uefi)     run_uefi ;;
     stranger) run_stranger ;;
+    latearrival) run_latearrival ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_uefi ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_uefi ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|both|all]"; exit 2 ;;
 esac
 
 echo
