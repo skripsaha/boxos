@@ -80,7 +80,16 @@
  * today and reads into ground that is not there.
  */
 
-#include <stdint.h>
+/*
+ * Integer types come from the includer, as everywhere in src/include:
+ *   Kernel:    #include "ktypes.h"
+ *   Host tool: #include <stdint.h>
+ *
+ * This header pulls in neither. The kernel defines its own fixed-width types
+ * and a <stdint.h> underneath them collides with every one; the host tool has
+ * no ktypes.h to find. A shared format header that chooses for its includer
+ * can only be right in one of the two places it is shared between.
+ */
 
 /* 'B','O','X','D','E','E','D', and a NUL so a hex dump reads as words. */
 #define VOLUME_DEED_MAGIC_0  'B'
@@ -140,6 +149,7 @@ typedef struct __attribute__((packed)) {
 #define VOLUME_STAMP_GEOMETRY  1    /* VolumeGeometry */
 #define VOLUME_STAMP_LAYOUT    2    /* VolumeLayout   */
 #define VOLUME_STAMP_BORN      3    /* VolumeBorn     */
+#define VOLUME_STAMP_BOOT      4    /* VolumeBoot     */
 
 /*
  * What the volume was laid out for — as opposed to what it is sitting on.
@@ -191,6 +201,27 @@ typedef struct __attribute__((packed)) {
     uint32_t disk_book_blocks;
     uint32_t data_block;        /* first block that holds file contents */
 } VolumeLayout;
+
+/*
+ * Where the kernel is, for the loader that has to find it before there is
+ * anything to find it with.
+ *
+ * The kernel is a file inside the volume, so a loader in sixteen-bit real mode
+ * would otherwise have to understand the metadata pool to reach it. This says
+ * it outright, in the volume's own blocks: read from here, this many, this
+ * many bytes.
+ *
+ * It belongs in the Deed rather than in the bookkeeping block because it
+ * changes only when the kernel is replaced, which is an act of installation
+ * and not a write — and because the loader has the Deed in front of it already
+ * and nothing else yet.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t kernel_block;
+    uint32_t kernel_blocks;
+    uint32_t kernel_bytes;
+    uint32_t reserved;          /* padding to eight; growth is a new stamp */
+} VolumeBoot;
 
 /* When it was made, and by what. Not needed to mount; needed to answer "which
  * of these two sticks is the one I wrote on Tuesday". */
