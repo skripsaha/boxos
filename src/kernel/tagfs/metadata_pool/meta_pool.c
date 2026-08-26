@@ -51,26 +51,38 @@ int meta_pool_init(uint32_t first_block, uint32_t block_count) {
 
     // spinlock_init removed
 
+    /*
+     * ‼ NEITHER OF THESE IS AN EMPTY POOL, AND THIS NO LONGER PRETENDS THEY ARE
+     *
+     * Both used to "start fresh" and return success. This is the record that
+     * holds every file's name, size and extents; a mount that begins it afresh
+     * is a mount that has decided the volume is empty, and the first write
+     * after that allocates over what is still there.
+     *
+     * On the board it looked like this: one boot worked, the next came up with
+     * no files on it, and neither said anything — because it was said with
+     * debug_printf, which compiles to nothing in a shipped build.
+     *
+     * A pool that is unreadable, or that holds something which is not a pool,
+     * means the volume does not mount. Nothing is written to it; whatever is
+     * still on the medium stays there and can be looked at.
+     *
+     * There is no case where an ordinary volume gets here with an empty pool:
+     * the tool that makes a volume writes one, and the kernel does not create
+     * volumes.
+     */
     int read_result = tagfs_read_block(first_block, &g_current_block);
     if (read_result < 0) {
-        debug_printf("[MetaPool] init: failed to read first block %u, starting fresh\n", first_block);
-        memset(&g_current_block, 0, sizeof(MetaPoolBlock));
-        g_current_block.magic = TAGFS_MPOOL_MAGIC;
-        g_current_dirty = true;
-        debug_printf("[MetaPool] initialized (fresh): first_block=%u block_count=%u\n",
-                     first_block, block_count);
-        return 0;
+        kprintf("[MetaPool] block %u would not read — this volume's metadata "
+                "cannot be reached, so it is not mounted\n", first_block);
+        return -1;
     }
 
     if (g_current_block.magic != TAGFS_MPOOL_MAGIC) {
-        debug_printf("[MetaPool] init: bad magic 0x%x on block %u, starting fresh\n",
-                     g_current_block.magic, first_block);
-        memset(&g_current_block, 0, sizeof(MetaPoolBlock));
-        g_current_block.magic = TAGFS_MPOOL_MAGIC;
-        g_current_dirty = true;
-        debug_printf("[MetaPool] initialized (fresh): first_block=%u block_count=%u\n",
-                     first_block, block_count);
-        return 0;
+        kprintf("[MetaPool] block %u holds 0x%08x where a metadata pool should "
+                "be — this volume is not mounted, and nothing is written to "
+                "it\n", first_block, g_current_block.magic);
+        return -1;
     }
 
     uint32_t chain_steps = 0;

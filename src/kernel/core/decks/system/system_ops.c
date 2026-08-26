@@ -868,9 +868,15 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
     }
+    /* The whole image or none of it — see the same check in autostart.c. A
+     * short read leaves the rest of the buffer as the zeros it was allocated
+     * with, and a process started on those runs `add [rax], al` off the first
+     * page and dies writing to address zero. */
     int rd = tagfs_read(fh, virt, file_size);
     tagfs_close(fh);
-    if (rd < 0) {
+    if (rd < 0 || (uint64_t)rd != file_size) {
+        kprintf("[Spawn] not starting file %u: %d of %llu bytes came back\n",
+                found_id, rd, (unsigned long long)file_size);
         pmm_free(phys, pages);
         return ERR_SPAWN_FAILED;
     }

@@ -33,16 +33,28 @@ int file_table_init(uint32_t first_block, uint32_t block_count) {
 
     while (block != 0) {
         FileTableBlock fb;
+        /* Same rule as the metadata pool: a table that will not read, or a
+         * block holding something that is not a table, means this volume does
+         * not mount. Breaking out of the loop left the entries zeroed, which
+         * reads as "this volume has no files" — and the writes that follow
+         * take the blocks those files are still using. */
         int ret = tagfs_read_block(block, &fb);
         if (ret < 0) {
-            debug_printf("[FileTable] init: read failed at block=%u\n", block);
-            break;
+            kprintf("[FileTable] block %u would not read — this volume's file "
+                    "table cannot be reached, so it is not mounted\n", block);
+            kfree(g_entries);
+            g_entries  = NULL;
+            g_capacity = 0;
+            return -1;
         }
 
         if (fb.magic != TAGFS_FILETBL_MAGIC) {
-            debug_printf("[FileTable] init: bad magic at block=%u (got 0x%x)\n",
-                         block, fb.magic);
-            break;
+            kprintf("[FileTable] block %u holds 0x%08x where a file table "
+                    "should be — this volume is not mounted\n", block, fb.magic);
+            kfree(g_entries);
+            g_entries  = NULL;
+            g_capacity = 0;
+            return -1;
         }
 
         uint32_t entry_offset = block_idx * TAGFS_FTABLE_PER_BLOCK;

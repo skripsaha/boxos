@@ -114,12 +114,27 @@ static process_t *autostart_launch_one(uint32_t file_id, TagFSMetadata *meta,
         kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n", meta->filename);
         return NULL;
     }
+    /*
+     * ‼ THE WHOLE IMAGE, OR NONE OF IT
+     *
+     * tagfs_read returns the number of bytes it managed. This tested it for
+     * being negative, which catches a read that failed outright and misses the
+     * one that stopped early — and the buffer underneath was allocated zeroed,
+     * so a short read hands over an image that is partly, or entirely, zeros.
+     *
+     * A page of zeros is not an empty program. 0x00 0x00 decodes as
+     * `add [rax], al`, so the process starts, writes to address zero with
+     * every register still clear, and dies with a page fault at 0x0 — which is
+     * exactly what a machine whose flash drive stopped answering showed on the
+     * screen, having first announced that it had started the program.
+     */
     int read_result = tagfs_read(fh, virt_buf, file_size);
     tagfs_close(fh);
-    if (read_result < 0) {
+    if (read_result < 0 || (uint64_t)read_result != file_size) {
         pmm_free(phys_buf, pages_needed);
-        kprintf("[AUTOSTART] Skip '%s': tagfs_read failed (%d)\n",
-                meta->filename, read_result);
+        kprintf("[AUTOSTART] not starting '%s': %d of %llu bytes came back — "
+                "an image that is not all here is not started\n",
+                meta->filename, read_result, (unsigned long long)file_size);
         return NULL;
     }
 

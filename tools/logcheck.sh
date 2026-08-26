@@ -280,6 +280,77 @@ run_healthy() {
     grep -q "TOUCH WATCH TEST. PASSED: all 20 checks OK" "$L"; chk $? "TouchWatch self-test 20/20"
 }
 
+# ── a volume whose metadata will not read ────────────────────────────────
+#
+# The board failure this reproduces: a flash drive came up once with every
+# file on it, and the boot after that had none. The metadata pool had been
+# overwritten, and the mount met a block that was not a pool — which it
+# answered by "starting fresh" and returning success, silently, because the
+# line saying so was a debug_printf and those compile to nothing.
+#
+# A volume that reads as empty is a volume the next write finishes off. So the
+# rule is: metadata that cannot be read means the volume does NOT mount, the
+# machine says why, and nothing is written to the medium.
+#
+# The damage is done to the IMAGE, not to the code — the same way the deed
+# checks are proven. Nothing here depends on a mutation being installed.
+badpool_on() {
+    cp build/boxos.img "$SCRATCH/boxos.img.bak"
+    python3 - <<'EOF'
+import struct
+# ground at 2048, data run begins at volume block 134, the pool is data block 2
+off = (2048 + 136 * 8) * 512
+f = open("build/boxos.img", "r+b")
+f.seek(off)
+was = f.read(4)
+f.seek(off)
+f.write(b"\xAA\xBB\xCC\xDD")
+f.close()
+print("logcheck: metadata pool magic %s -> aabbccdd" % was.hex())
+EOF
+}
+badpool_off() {
+    cp "$SCRATCH/boxos.img.bak" build/boxos.img
+}
+
+run_badpool() {
+    echo "== badpool: the metadata pool holds something that is not a pool =="
+    build
+    badpool_on
+    # boot() rebuilds nothing — it runs what is on disk now.
+    make run-stop >/dev/null 2>&1
+    make run-bg   >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.badpool.log"
+    badpool_off
+    L="$SCRATCH/serial.badpool.log"
+
+    grep -q "where a metadata pool should be" "$L"
+    chk $? "the mount says what it found instead of a pool"
+
+    ! grep -q "starting fresh" "$L"
+    chk $? "and does not decide the volume is empty"
+
+    ! grep -qE "AUTOSTART. Started" "$L"
+    chk $? "nothing from the volume was started off it"
+
+    grep -q "BoxOS Shell" "$L"
+    chk $? "the machine still reaches a shell"
+
+    typed_ok "$L"
+    chk $? "and answers a keystroke"
+}
+
 run_novolume() {
     echo "== novolume: tagfs_recognise() forced false =="
     probe_on; mutate_on; build; boot novolume; mutate_off; probe_off
@@ -339,11 +410,12 @@ run_uefi() {
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
+    badpool)  run_badpool ;;
     uefi)     run_uefi ;;
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_uefi ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_uefi; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|both|all]"; exit 2 ;;
 esac
 
