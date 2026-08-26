@@ -22,6 +22,15 @@ static inline uint32_t ctx_hash(uint32_t pid)
 
 void tagfs_context_init(void)
 {
+    /* Idempotent, because a mount is no longer something that happens once at
+     * a known moment. A volume that arrives after the boot has given up gets
+     * here too, and a volume that leaves and comes back gets here a third
+     * time — and the per-process contexts must survive that, since the
+     * processes holding them did. Zeroing on a later call would take the
+     * filesystem out from under every one of them. */
+    if (g_initialized) {
+        return;
+    }
     memset(g_buckets, 0, sizeof(g_buckets));
     spinlock_init(&g_lock);
     g_initialized = true;

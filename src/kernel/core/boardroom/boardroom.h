@@ -65,6 +65,35 @@ void BoardroomNoteDeparture(void);
  * which is almost always. */
 void BoardroomAttendIfPending(void);
 
+/*
+ * The room says what changed in it, and does not decide what that means.
+ *
+ * It used to call the filesystem directly — the comment at the call site
+ * apologised for it, which is usually a sign that the arrangement is wrong
+ * rather than that the apology was needed. A room full of media has no
+ * business knowing that anybody keeps a filesystem on one; it announces, and
+ * whoever cares is listening.
+ *
+ *   seat:taken     one or more media are in the room that were not before
+ *   seat:emptied   a medium left
+ *
+ * Announced AFTER the room has settled, never part-way through seating: a
+ * listener that mounts on this event would otherwise be looking at a room
+ * that is still filling up, and would choose from the seats that happened to
+ * be added first.
+ *
+ * A departure does not name a seat. The medium is already gone by the time
+ * anyone is told, and seat indices are handed out again as soon as they are
+ * free — so a number here would name a socket that may already hold something
+ * else. A listener re-checks the seat it cares about instead.
+ */
+typedef struct __attribute__((packed)) {
+    uint8_t seated;      /* media in the room now */
+    uint8_t arrived;     /* how many of them are new (0 for a departure) */
+    uint8_t first_new;   /* lowest new seat number, or BOARDROOM_NO_SEAT */
+    uint8_t reserved;
+} BoardroomSeatEvent;
+
 /* How many media answered, and what each of them is. */
 uint8_t     BoardroomSeatCount(void);
 BoardKind   BoardroomSeatKind(uint8_t seat);
