@@ -29,13 +29,19 @@ build() {
     fi
 }
 
+# Waits for the SHELL BANNER, not for "userspace is starting".
+#
+# Those are not the same moment and the gap is not small: a machine with no
+# display daemon spends five seconds asking for one before it gives up and
+# writes the screen itself, so sampling at "Starting userspace" reports a
+# machine that never reached a shell when it reaches one shortly after.
+# Measured — it cost a wrong FAIL here first.
 boot() {
     make run-stop >/dev/null 2>&1
     make run-bg   >/dev/null 2>&1
     local i=0
     while [ $i -lt 40 ]; do
         grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
-        grep -q "Starting userspace" build/serial.log 2>/dev/null && break
         sleep 2; i=$((i+1))
     done
     sleep 3
@@ -86,6 +92,56 @@ EOF
 mutate_off() {
     cp "$SCRATCH/tagfs.c.bak" src/kernel/tagfs/tagfs.c
     sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+# The boarding pass names a volume that is not in the room, while another
+# perfectly good TagFS volume is. This is the case that used to mount the
+# stranger in silence and then ignore the real medium for the rest of the boot.
+stranger_on() {
+    cp src/kernel/core/boarding/boarding.c "$SCRATCH/boarding.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/boarding/boarding.c"
+s = open(p).read()
+anchor = """    if (out_uuid) {
+        memcpy(out_uuid, v->uuid, 16);
+    }
+    return true;
+}"""
+mutated = """    if (out_uuid) {
+        memcpy(out_uuid, v->uuid, 16);
+        out_uuid[0] ^= 0xFF;   /* logcheck mutation: a pass naming an absent volume */
+    }
+    return true;
+}"""
+assert anchor in s, "stranger anchor missing"
+open(p, "w").write(s.replace(anchor, mutated, 1))
+EOF
+    grep -q "logcheck mutation" src/kernel/core/boarding/boarding.c || { echo "stranger install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/boarding/boarding.c
+}
+stranger_off() {
+    cp "$SCRATCH/boarding.c.bak" src/kernel/core/boarding/boarding.c
+    sleep 1; touch src/kernel/core/boarding/boarding.c
+}
+
+run_stranger() {
+    echo "== stranger: the pass names a volume that is not here =="
+    stranger_on; build; boot stranger; stranger_off
+    L="$SCRATCH/serial.stranger.log"
+
+    grep -q "no seat is carrying it" "$L"; chk $? "the room says the volume it wants is absent"
+    grep -q "none of them is this machine.s . mounting nothing" "$L"
+    chk $? "and declines the volume that IS here"
+
+    ! grep -q "TagFS. volume on seat" "$L"; chk $? "no stranger was mounted"
+    grep -q "Storage Deck. no volume yet" "$L"; chk $? "the deck says it has no volume"
+
+    # The whole point of declining: the machine must still be usable, because
+    # the person who has to re-seat the medium types on it.
+    grep -q "BoxOS Shell" "$L"; chk $? "the machine still reaches a shell"
+
+    # And it must be LISTENING, not polling on a clock.
+    ! grep -q "falling back to the rule" "$L"; chk $? "the guess-rule never ran"
 }
 
 # Occurrence names that measurement showed were resolving to INVALID before
@@ -139,7 +195,8 @@ run_novolume() {
     probe_on; mutate_on; build; boot novolume; mutate_off; probe_off
     L="$SCRATCH/serial.novolume.log"
 
-    grep -q "no volume\|No autostart\|Starting userspace" "$L"; chk $? "boot proceeds with no volume"
+    grep -q "no volume\|No autostart" "$L"; chk $? "boot proceeds with no volume"
+    grep -q "BoxOS Shell" "$L"; chk $? "a machine with no medium still reaches a shell"
 
     # THE point of the whole change: the console tag survives having no medium
     grep -q "logbook 'keyboard'.*bare=0x8" "$L"; chk $? "'keyboard' resolves with NO volume"
@@ -192,9 +249,10 @@ case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
     uefi)     run_uefi ;;
+    stranger) run_stranger ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_uefi ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_uefi ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|both|all]"; exit 2 ;;
 esac
 
 echo

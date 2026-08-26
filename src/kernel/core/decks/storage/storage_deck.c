@@ -11,10 +11,16 @@
 #include "tagfs.h"
 #include "tagfs_context.h"
 #include "klib.h"
+#include "touch.h"
 
 void storage_deck_init(void)
 {
     kprintf("[Storage Deck] Initializing...\n");
+
+    /* Listening BEFORE looking. A medium that turns up while the boot mount is
+     * running is announced to whoever is subscribed at that moment, so
+     * subscribing afterwards is subscribing too late. */
+    TagFSWatchSeats();
 
     error_t result = tagfs_init();
 
@@ -25,13 +31,23 @@ void storage_deck_init(void)
     TagFSBootMountSettled();
 
     if (result != 0) {
-        kprintf("[Storage Deck] ERROR: Failed to initialize TagFS (error=%d)\n", result);
-        TagFSState *fs = tagfs_get_state();
-        kprintf("[Storage Deck] TagFS state: %s\n",
-                fs ? (fs->initialized ? "initialized" : "NOT initialized") : "NULL");
+        kprintf("[Storage Deck] no volume yet (error=%d) — the machine will "
+                "mount when its own medium arrives, and runs without one "
+                "until then\n", result);
+
+        /* One catch-up look. An arrival announced while the boot mount was
+         * still running reached a listener that was gated shut by the line
+         * above, and nothing would have said it a second time. */
+        TagFSAttendArrival();
         return;
     }
 
     tagfs_context_init();
     kprintf("[Storage Deck] Initialization complete\n");
+
+    /* Said on both roads to a mounted volume, this one and the late one, so
+     * anything waiting for a filesystem waits for one thing rather than
+     * knowing which way it might arrive. */
+    uint8_t seat = tagfs_get_seat();
+    TouchPublish("volume:mounted", &seat, sizeof(seat));
 }

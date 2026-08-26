@@ -21,6 +21,7 @@
 #include "integrity/integrity.h"
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
+#include "logbook.h"
 
 static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
     if (file_id == 0)
@@ -418,6 +419,59 @@ void TagFSNoteMediumGone(void)
     (void)volume_medium_gone();
 }
 
+/*
+ * Listening for the medium, instead of being told about it.
+ *
+ * The Boardroom used to call in here by name, which meant a room full of disks
+ * had to know that somebody keeps a filesystem on one of them. Now it says
+ * seat:taken and seat:emptied and this listens — so the dependency points the
+ * way round it should, and anything else that cares about media arriving can
+ * care without either side being changed.
+ *
+ * These callbacks do real disk I/O, which the TouchWatch contract asks you not
+ * to do lightly. It is safe here because of where the publisher stands: the
+ * room is called to order from the guide loop and the idle loop, ordinary
+ * kernel context with interrupts on, holding nothing but its own one-at-a-time
+ * flag. That is exactly where mounting a volume is allowed to happen, and is
+ * where this work was already being done before it was a callback.
+ */
+static TouchWatch *g_seat_taken_watch   = NULL;
+static TouchWatch *g_seat_emptied_watch = NULL;
+
+static void tagfs_on_seat_taken(TouchTag tag, const void *payload,
+                                uint32_t plen, uint32_t source_pid, void *ctx)
+{
+    (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
+    TagFSAttendArrival();
+}
+
+static void tagfs_on_seat_emptied(TouchTag tag, const void *payload,
+                                  uint32_t plen, uint32_t source_pid, void *ctx)
+{
+    (void)tag; (void)payload; (void)plen; (void)source_pid; (void)ctx;
+    TagFSNoteMediumGone();
+}
+
+void TagFSWatchSeats(void)
+{
+    if (g_seat_taken_watch) {
+        return;
+    }
+
+    TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+
+    TouchLogbookResolve("seat:taken", &full, &bare);
+    g_seat_taken_watch = TouchWatchSet(full, tagfs_on_seat_taken, NULL);
+
+    TouchLogbookResolve("seat:emptied", &full, &bare);
+    g_seat_emptied_watch = TouchWatchSet(full, tagfs_on_seat_emptied, NULL);
+
+    if (!g_seat_taken_watch || !g_seat_emptied_watch) {
+        kprintf("[TagFS] could not listen for media arriving — a volume that "
+                "turns up later will not be noticed\n");
+    }
+}
+
 void TagFSAttendArrival(void)
 {
     if (__atomic_load_n(&g_boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
@@ -432,8 +486,13 @@ void TagFSAttendArrival(void)
     /* Never mounted. tagfs_init only marks itself done at the very end, so a
      * first attempt that found nothing left everything exactly as it was. */
     if (tagfs_init() == OK) {
+        /* The boot path did this after its own mount and this path did not,
+         * so a volume that arrived late came up without the per-process
+         * contexts every storage op looks for. */
+        tagfs_context_init();
         kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
                 "had none — mounted from seat %u\n", g_tagfs_seat);
+        TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
     }
 }
 

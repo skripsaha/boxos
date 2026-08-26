@@ -436,6 +436,14 @@ uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
  * could carry a volume. Called from a context that is allowed to wait,
  * because deciding takes reads.
  */
+/*
+ * Listen for media arriving and leaving, instead of being called about them.
+ * Set up once, before the boot mount is attempted — a medium that turns up
+ * while that mount is running is announced to whoever is subscribed at that
+ * moment. Idempotent.
+ */
+void     TagFSWatchSeats(void);
+
 void     TagFSAttendArrival(void);
 
 /* The medium under the volume may have left; ask now rather than at the next

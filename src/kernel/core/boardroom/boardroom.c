@@ -1,5 +1,5 @@
 #include "boardroom.h"
-#include "tagfs.h"
+#include "touch.h"
 #include "boarding.h"
 #include "klib.h"
 #include "ahci.h"
@@ -158,6 +158,8 @@ static void seat_usb_take_attendance(void)
 
 void BoardroomInit(void)
 {
+    uint8_t seated_before = g_seat_count;
+
     if (!g_initialised) {
         g_seats = NULL;
         g_seat_count = 0;
@@ -208,6 +210,19 @@ void BoardroomInit(void)
         kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
                 s->removable ? " (removable)" : "");
     }
+
+    /* Said here, at the end, and not from seat_add: a listener that mounts on
+     * this would otherwise be choosing among the seats that happened to be
+     * filled first, while the rest of the room was still arriving. */
+    if (g_seat_count > seated_before) {
+        BoardroomSeatEvent ev = {
+            g_seat_count,
+            (uint8_t)(g_seat_count - seated_before),
+            seated_before,
+            0
+        };
+        TouchPublish("seat:taken", &ev, sizeof(ev));
+    }
 }
 
 /*
@@ -228,8 +243,9 @@ void BoardroomNoteArrival(void)
 void BoardroomNoteDeparture(void)
 {
     /* The Boardroom knows about media and not about what anybody keeps on
-     * them, so it passes the fact on rather than acting on it. */
-    TagFSNoteMediumGone();
+     * them, so it says what happened and lets whoever cares decide. */
+    BoardroomSeatEvent ev = { g_seat_count, 0, BOARDROOM_NO_SEAT, 0 };
+    TouchPublish("seat:emptied", &ev, sizeof(ev));
 }
 
 void BoardroomAttendIfPending(void)
@@ -258,11 +274,9 @@ void BoardroomAttendIfPending(void)
                 "to order\n", (unsigned)(g_seat_count - before));
     }
 
-    /* And whether any of it carries the filesystem this machine lives on. The
-     * Boardroom knows about media; what is kept on them is not its business,
-     * so it asks rather than decides. */
-    TagFSAttendArrival();
-
+    /* Whether any of it carries the filesystem this machine lives on is not
+     * asked here at all any more. BoardroomInit said seat:taken on its way
+     * out, and whoever that concerns was listening. */
     __atomic_store_n(&busy, 0u, __ATOMIC_RELEASE);
 }
 
@@ -618,19 +632,38 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     }
 
     /*
-     * Down to a rule, and which rule it is depends on why.
+     * The pass names a volume and the room is not carrying it. Nothing is
+     * handed over.
      *
-     * A pass that named a volume nothing on this machine is carrying is worth
-     * more words than one that was never written: it means the medium the
-     * kernel came from is not in the room — unplugged between the loader
-     * finishing and the drivers coming up, or on a controller that has not
-     * answered — and the volume about to be mounted is somebody else's.
+     * This used to fall through to the rule below and give back somebody
+     * else's volume — and it did so having just printed, in as many words,
+     * that the volume it was looking for was not there. It had the exact
+     * sixteen bytes it wanted, knew they were absent, and guessed anyway.
+     *
+     * What made that expensive is what happens next: the mount succeeds, so
+     * nothing is ever wrong enough to retry, and when the real medium finishes
+     * enumerating half a second later it is ignored for the rest of the boot.
+     * Measured — a machine booted from a stick mounted its own old internal
+     * disk instead, silently, and went on to run programs out of it.
+     *
+     * So the question stops being "has the bus finished?", which nothing can
+     * answer except a clock, and becomes "has THAT volume arrived?", which the
+     * volume itself answers exactly. Until it does, this machine has no
+     * filesystem, which is the truth. Re-seating the medium is what a person
+     * does about it, and re-seating produces the arrival that ends the wait.
      */
     if (have_pass) {
         char text[33];
         uuid_text(want, text);
         kprintf("[Boardroom] the loader came from the volume %s, and no seat "
                 "is carrying it\n", text);
+        /* found is at least one here — found == 0 returned above — so there is
+         * always somebody else's volume being declined. */
+        kprintf("[Boardroom] %u volume(s) are here and none of them is this "
+                "machine's — mounting nothing, and waiting for the medium to "
+                "arrive\n", found);
+        kscreen_hold(1000);
+        return BOARDROOM_NO_SEAT;
     }
     if (found > 1) {
         kprintf("[Boardroom] falling back to the rule: the removable medium "
