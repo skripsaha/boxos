@@ -989,7 +989,36 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     u->bounce_phys = (uint64_t)bounce;
     u->bounce_virt = vmm_phys_to_virt((uintptr_t)bounce);
 
+    /*
+     * ‼ IS THERE ALREADY ONE OF THESE? ASKED WHERE THE ANSWER CANNOT CHANGE.
+     *
+     * The caller asks xhci_msd_slot_attached() first, and that walk is not
+     * under this lock — so two cores can both be told "no" for the same slot
+     * and both arrive here. That is not a theoretical arrangement: the room is
+     * called to order from the boot on the BSP and from the attendance pass on
+     * any idle core, and both of those attach whatever storage they find.
+     *
+     * The second unit is the damage. Only one of them is ever unlinked when
+     * the device leaves — xhci_msd_release takes the FIRST match — so the
+     * other keeps its unit number for the rest of the boot. The number is
+     * never free again, the next stick gets a higher one, and a higher number
+     * is a chair nobody was sitting in. Measured on a live board: one flash
+     * drive, seats usb0, usb1 and usb2, two of which could not be read.
+     *
+     * So the question is asked again HERE, holding the lock that the answer
+     * depends on. A second attach for a slot that already has a unit is not an
+     * error — the device IS attached — it is simply nothing to do.
+     */
     spin_lock(&g_units_lock);
+    for (XhciMsdUnit* other = g_units; other; other = other->next) {
+        if (other->slot == slot) {
+            spin_unlock(&g_units_lock);
+            pmm_free(cmd, 1);
+            pmm_free(bounce, vmm_size_to_pages(MSD_BOUNCE_BYTES));
+            kfree(u);
+            return 0;               /* somebody else got here first */
+        }
+    }
     u->number = msd_next_number();
     u->next   = g_units;
     g_units   = u;

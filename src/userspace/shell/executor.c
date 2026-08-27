@@ -14,6 +14,7 @@
 #include "box/ipc.h"
 #include "box/touch.h"
 #include "box/debug.h"
+#include "box/error.h"
 #include "box/core/result.h"
 #include "box/print.h"
 
@@ -65,7 +66,12 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
 
     uint32_t gen = 0;
     int pid = proc_exec_gen(name, NULL, &gen);
-    if (pid <= 0) return -1;
+    if (pid <= 0) {
+        /* Carried up, not flattened. "There is no such program" and "the
+         * program is there and would not start" are different facts, and the
+         * caller printed the same sentence for both. */
+        return (pid == 0) ? -ERR_SPAWN_FAILED : pid;
+    }
 
     /* Build args + context tags into IPC buffer. SHELL_ARGS_BUF_MAX
      * (240 B) bounds the legacy send() payload; if the user's command
@@ -167,15 +173,44 @@ int ExecutorRun(ParsedCommand *cmd)
     }
 
     /* Try external utility */
-    if (RunExternal(name, cmd) == 0)
+    int rc = RunExternal(name, cmd);
+    if (rc == 0)
         return 0;
 
-    /* Not found */
+    /*
+     * ‼ SAY WHICH OF THE TWO THINGS HAPPENED.
+     *
+     * "Unknown command" used to be printed for every failure to start a
+     * program, including the one that matters most on a machine you can pull
+     * the disk out of: the program IS on the volume, and the volume is not
+     * there any more. Measured on a live board — the stick was out, the user
+     * typed a command that exists, and the machine told them the command does
+     * not exist. The kernel had just printed the truth two lines above.
+     */
+    error_t why = box_errno_of(rc);
+
+    /* ASCII only, and measured rather than counted by hand: the sentence that
+     * used to sit here carried an em dash, three bytes for one character, and
+     * the length beside it was the count of characters. It copied one byte
+     * short and printed half a word. On a machine read off a photograph, half
+     * a sentence is worse than none. */
+    static const char kTail[] = ": is there and would not start";
+    const size_t tail_len = sizeof(kTail) - 1;
+
     size_t name_len = strlen(name);
-    if (name_len > SHELL_ERROR_MAX - 20) name_len = SHELL_ERROR_MAX - 20;
-    memcpy(g_error, "Unknown command: ", 17);
-    memcpy(g_error + 17, name, name_len);
-    g_error[17 + name_len] = '\0';
+    if (why == ERR_FILE_NOT_FOUND) {
+        if (name_len > SHELL_ERROR_MAX - 19) name_len = SHELL_ERROR_MAX - 19;
+        memcpy(g_error, "Unknown command: ", 17);
+        memcpy(g_error + 17, name, name_len);
+        g_error[17 + name_len] = '\0';
+    } else {
+        /* The name is real; starting it is what failed. */
+        if (name_len > SHELL_ERROR_MAX - tail_len - 2)
+            name_len = SHELL_ERROR_MAX - tail_len - 2;
+        memcpy(g_error, name, name_len);
+        memcpy(g_error + name_len, kTail, tail_len);
+        g_error[name_len + tail_len] = '\0';
+    }
     return -1;
 }
 
