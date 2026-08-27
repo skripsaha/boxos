@@ -628,6 +628,18 @@ run_uefi() {
     [ "$pci_low" = 0 ]; chk $? "no pci:* name took a volume id"
 
     grep -q "AUTOSTART.*display.elf.*tags: display," "$L"; chk $? "uefi: volume tags unshifted"
+
+    # A family the muster DECLARED must not be reported as a stranger. It was:
+    # the warning judged the full name, which is new for every device that has
+    # ever existed, so "pci" being in the muster bought nothing and eight lines
+    # were printed on every boot of a machine with MCFG. Measured here, on this
+    # scenario, before and after: 8 lines -> 0. Removing X("pci") from the
+    # muster prints exactly one line naming the family, which is the whole
+    # point of the warning and is what must survive.
+    local strangers
+    strangers=$(grep -c "not in its muster" "$L")
+    [ "$strangers" = 0 ]
+    chk $? "no name the muster declared was called a stranger ($strangers)"
 }
 
 case "${1:-both}" in

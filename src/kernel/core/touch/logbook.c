@@ -15,6 +15,7 @@ typedef struct LogbookEntry {
     char                *value;   /* NULL = bare */
     TouchTag             tag_id;
     bool                 mustered; /* named before the voyage, not on first use */
+    bool                 warned;   /* its absence from the muster has been said */
 } LogbookEntry;
 
 /*
@@ -188,6 +189,7 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value,
 
     entry->tag_id   = (TouchTag)(TOUCH_TAG_KERNEL_BIT | index);
     entry->mustered = false;
+    entry->warned   = false;
 
     uint32_t slot = logbook_hash(key, value) % g_logbook.bucket_count;
     entry->chain = g_logbook.buckets[slot];
@@ -282,9 +284,8 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
     }
 
     if (create) {
-        bool made_bare = false, made_full = false;
-        *out_bare = logbook_intern_unlocked(key, NULL, &made_bare);
-        if (has_value) *out_full = logbook_intern_unlocked(key, value, &made_full);
+        *out_bare = logbook_intern_unlocked(key, NULL, NULL);
+        if (has_value) *out_full = logbook_intern_unlocked(key, value, NULL);
 
         /*
          * A name entered here and not at the muster is a name this kernel can
@@ -293,10 +294,23 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
          * have: anybody who asked for it EARLIER got an id out of the volume
          * instead, and is waiting on it.
          *
-         * So it is said, by name, and capped: a family built from data
-         * ("pci:vendor:8086") would otherwise print one line per device.
+         * What counts as a miss is the BARE KEY, not the full name. A family
+         * whose members are built from data — "pci:vendor:8086:1901", one per
+         * device — is declared at the muster by its key alone, and every
+         * member of it is then a name the muster covers. Judging the full name
+         * instead made the muster's own entry worthless: the full name is new
+         * for every device that has ever existed, so a correctly declared
+         * family printed eight lines on every single boot, capped only because
+         * the cap was there. It worked as written and was written wrong.
+         *
+         * So: said once, per key, and only for a key nobody declared. A family
+         * missing from the muster is one line naming the family; a family in
+         * it is silent, which is what having declared it is supposed to buy.
          */
-        if ((made_bare || made_full) && g_muster_misses < LOGBOOK_MISS_LINES) {
+        LogbookEntry *bare = logbook_find_unlocked(key, NULL);
+        if (bare && !bare->mustered && !bare->warned &&
+            g_muster_misses < LOGBOOK_MISS_LINES) {
+            bare->warned = true;
             g_muster_misses++;
             kprintf("[Logbook] the kernel named '%s', which is not in its "
                     "muster — anybody who asked for it earlier is listening "
