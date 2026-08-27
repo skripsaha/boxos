@@ -1108,7 +1108,23 @@ run-bg: $(IMAGE)
 # requires explicit DEV=, asks for confirmation before destroying data.
 # ===================================================================
 
-usb: $(IMAGE)
+# Writes the image; does NOT build it. `make` builds, `make usb` flashes, and
+# the two stay separate on purpose.
+#
+# It used to depend on $(IMAGE), which was harmless while nothing else could
+# change what a build produces. PRINTTOFILE changed that: the switch's value is
+# carried in the NAME of a marker every object depends on, so `make usb` with
+# the switch left off renamed the marker, invalidated every object, recompiled
+# the whole tree — and quietly produced an image WITHOUT the log ring, which is
+# the one thing the person flashing it had built it for. A flash command that
+# rebuilds is a flash command that can hand you something other than what you
+# built.
+usb:
+	@if [ ! -f "$(IMAGE)" ]; then \
+		echo "ERROR: $(IMAGE) does not exist — run 'make' first"; \
+		echo "  (and 'make PRINTTOFILE=on' if you want the machine to keep its log)"; \
+		exit 1; \
+	fi
 	@if [ -z "$(DEV)" ]; then \
 		echo "ERROR: specify target device, e.g. make usb DEV=/dev/disk4"; \
 		echo "  macOS: diskutil list  (look for the USB stick — never disk0!)"; \
