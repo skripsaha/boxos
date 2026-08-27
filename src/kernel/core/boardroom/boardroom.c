@@ -70,6 +70,23 @@ static bool       g_initialised = false;
 static spinlock_t g_seats_lock;
 static bool       g_seats_lock_ready = false;
 
+/*
+ * The room is called to order by ONE core at a time, and the second WAITS.
+ *
+ * There are two doors into it. The boot walks in on the BSP; the attendance
+ * pass walks in from whichever core went idle, every time something arrives on
+ * a bus. Only the second door had a lock on it, so on a machine whose USB
+ * settles slowly — a controller that reset itself, a port that takes ten
+ * seconds to answer — the boot was still seating media when a hot-plug sent
+ * another core in through the other door. Both then attached the same disk.
+ *
+ * Waiting rather than going away, because both callers need the room to be IN
+ * ORDER when they return: a boot that skipped it has no volume, and going away
+ * would trade a duplicate for a machine with no filesystem. The wait is
+ * bounded by exactly the work the waiter would otherwise have done itself.
+ */
+static volatile uint32_t g_in_session = 0;
+
 static void seats_lock_init(void)
 {
     if (!g_seats_lock_ready) {
@@ -278,9 +295,15 @@ void BoardroomInit(void)
      * returning stick lands in seat 3 that has been there since boot, and the
      * seat number says nothing at all about whether anything happened.
      */
-    uint32_t seatings_before = g_seatings;
-
     seats_lock_init();
+
+    while (__atomic_exchange_n(&g_in_session, 1u, __ATOMIC_ACQUIRE) != 0) {
+        cpu_pause();
+    }
+
+    /* Read AFTER the gate: whoever went first may have seated something, and
+     * counting from before their pass would report their work as ours. */
+    uint32_t seatings_before = g_seatings;
 
     if (!g_initialised) {
         g_seats = NULL;
@@ -331,6 +354,7 @@ void BoardroomInit(void)
      * bus notices, and most of those are a device this room already has — so
      * saying the same thing again is how a log stops being read. */
     if (g_seatings == seatings_before) {
+        __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
         return;
     }
 
@@ -394,6 +418,12 @@ void BoardroomInit(void)
      * The room went on holding a volume nobody had mounted.
      */
     BoardroomSeatEvent ev = { seat_occupied_count(), changed, first, 0 };
+
+    /* Given back BEFORE the announcement: a listener that mounts a volume on
+     * this event reads sectors, and a reader must never be holding the door
+     * the medium's own arrival has to come through. */
+    __atomic_store_n(&g_in_session, 0u, __ATOMIC_RELEASE);
+
     TouchPublish("seat:taken", &ev, sizeof(ev));
 }
 

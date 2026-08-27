@@ -303,6 +303,15 @@ run_replug() {
     done
     sleep 2
 
+    # And now, with the medium out, ask for a program that IS on it and one
+    # that is not. Those are different facts and used to print the same
+    # sentence — on a live board the machine told the user that a command
+    # which exists does not exist, two lines under the kernel saying why.
+    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+    ./tools/qemu-input.sh type "nosuchthing" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+
     # And pushed back in — the same medium, into the machine it left.
     #
     # The drive is added again first. A drive created through the HMP
@@ -355,6 +364,25 @@ run_replug() {
     else bad "no new chair was added for the returning stick"; fi
     grep -qE "the volume is back, in seat 1" "$S"
     chk $? "and it is the same seat number it had before"
+
+    # A program that is on the absent volume, and one that is on no volume at
+    # all, must not get the same sentence.
+    grep -q "files: is there and would not start" "$S"
+    chk $? "a real command on an absent medium says so"
+    grep -q "Unknown command: nosuchthing" "$S"
+    chk $? "and a command that does not exist is still unknown"
+
+    # ONE stick, ONE unit number, for the whole run.
+    #
+    # Two cores could both attach the same disk — the "is it already attached"
+    # walk was outside the lock that the answer depends on — and only one of
+    # the two units is ever unlinked when the device leaves. The other keeps
+    # its number for the rest of the boot, so the next stick gets a higher one,
+    # and a higher number is a chair nobody is sitting in. Measured on a live
+    # board: one flash drive, seats usb0, usb1 and usb2.
+    local units
+    units=$(grep -oE "USB disk [0-9]+\] usb[0-9]+ " "$L" | sort -u | wc -l | tr -d ' ')
+    [ "$units" = 1 ]; chk $? "one stick was one disk throughout ($units named)"
 
     # And the machine is still usable afterwards, which is the point.
     grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
