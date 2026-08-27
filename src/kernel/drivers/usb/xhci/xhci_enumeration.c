@@ -574,6 +574,29 @@ int xhci_slot_service(xhci_controller_t* ctrl)
          * Slot to silicon that never enabled it, and frees an input context
          * sized by the wrong controller's context size. */
         if (slot->ctrl != ctrl) {
+            /*
+             * Somebody else's device, and this pass is not allowed to touch
+             * it — but it is not allowed to FORGET it either.
+             *
+             * The flag this pass consumed is one flag for the whole machine,
+             * and it was raised by a departure that may well have been on the
+             * other controller. Skipping quietly left it lowered with work
+             * still to do, so on a machine with two controllers every pass by
+             * the first one ate the flag and the second one's devices were
+             * never taken down at all: the unit was never released, its number
+             * never came back, the next arrival got a higher one — and a
+             * higher number is a chair nobody was sitting in.
+             *
+             * Measured on a live board with an Intel and an NVIDIA
+             * controller: fifteen chairs from ONE flash drive, slot ids
+             * climbing to 34, and not a single "is gone" in the whole log. In
+             * QEMU, which has one controller, the same ten replugs reuse usb0
+             * ten times over. Saying "there is more" is what keeps the pass
+             * for the OTHER controller reachable.
+             */
+            if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == ENUM_STATE_RETIRING) {
+                more = true;
+            }
             continue;
         }
         if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != ENUM_STATE_RETIRING) {
