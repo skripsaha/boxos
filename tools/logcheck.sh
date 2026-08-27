@@ -55,6 +55,20 @@ boot() {
     ./tools/qemu-input.sh key ret >/dev/null 2>&1
     sleep 3
 
+    # And then an EXTERNAL utility, which is a different question entirely.
+    #
+    # Every scenario in this file typed "help" and nothing else, and "help" is
+    # a builtin — it never leaves the shell. So none of them could reach the
+    # path where the shell spawns a program and waits for it to die, and that
+    # path was broken for as long as the Logbook split has existed: the shell
+    # parked on a tag nothing published to, and the prompt never came back.
+    # Five green scenarios, and the machine was unusable from its second
+    # command onward.
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 4
+
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.log"
 }
@@ -63,6 +77,16 @@ boot() {
 # response to "help", so one line out of that list is the proof.
 typed_ok() {
     grep -q "Show available commands" "$1"
+}
+
+# Did the shell come BACK after running a program?
+#
+# The prompt is printed by every pass of the main loop, so a prompt appearing
+# after the utility's own output is the proof that the loop went round. A
+# machine that runs one command and then ignores the keyboard for ever looks,
+# from a photograph, exactly like a machine that is working.
+external_ok() {
+    sed -n '/CPU features/,$p' "$1" | grep -qE '^~ ?$|^~ '
 }
 
 # The probe reports every resolve and which book answered. It is installed
@@ -369,6 +393,11 @@ run_healthy() {
 
     grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
+
+    # Running a PROGRAM, and coming back. A builtin never leaves the shell;
+    # this is the only check in the file that exercises spawn-and-wait.
+    grep -q "CPU features" "$L"; chk $? "an external utility ran"
+    external_ok "$L"; chk $? "and the prompt came back after it"
 
     # (1) every occurrence lands in the kernel half — id has bit 15 set
     local bad_ids
