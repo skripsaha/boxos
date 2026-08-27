@@ -388,6 +388,48 @@ run_replug() {
     grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
 }
 
+# ── nofsgsbase: a processor that cannot write its own TLS base ─────────────
+#
+# Every configuration in this file runs with +fsgsbase, so ring 3 installs its
+# own FS base with WRFSBASE and the kernel's fallback is never exercised. That
+# fallback was broken for as long as it has existed, and it takes out EVERY
+# C++ binary on such a machine — measured on a Braswell laptop, reproduced here
+# byte for byte. Broadwell brought FSGSBASE to the Core line and Goldmont to
+# Atom; everything older is this configuration, and BoxOS is meant to run on
+# machines people already own.
+run_nofsgsbase() {
+    echo "== nofsgsbase: the CPU cannot write its own TLS base =="
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg FSGSBASE=off CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+    for c in timezone me; do
+        ./tools/qemu-input.sh type "$c" >/dev/null 2>&1
+        sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.nofsgsbase.log"
+    L="$SCRATCH/serial.nofsgsbase.log"
+
+    grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell without fsgsbase"
+
+    # The C++ runtime installs its TLS through the kernel here, and the first
+    # fs-relative instruction is two after the request. Nothing may fault.
+    ! grep -q "__boxcxx_tls_bootstrap" "$L"
+    chk $? "no C++ program died in its TLS bootstrap"
+    ! grep -q "EXCEPTION" "$L"; chk $? "no user-mode exception at all"
+
+    grep -q "timezone: not set\|now:" "$L"
+    chk $? "a C++ utility ran and printed its answer"
+    grep -q "AMP active\|Uptime:" "$L"
+    chk $? "and so did the one after it"
+}
+
 run_stranger() {
     echo "== stranger: the pass names a volume that is not here =="
     stranger_on; build; boot stranger; stranger_off
@@ -596,9 +638,10 @@ case "${1:-both}" in
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
+    nofsgsbase) run_nofsgsbase ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|badpool|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|both|all]"; exit 2 ;;
 esac
 
 echo

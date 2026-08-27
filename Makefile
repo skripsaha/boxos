@@ -982,7 +982,9 @@ else
 		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
 		    -overcommit cpu-pm=on \
 		    -d guest_errors$(comma)unimp$(comma)cpu_reset, \
-		    -cpu qemu64$(comma)+fsgsbase) \
+		    $(if $(filter off,$(FSGSBASE)), \
+		        -cpu qemu64, \
+		        -cpu qemu64$(comma)+fsgsbase)) \
 		-m $(MEM) \
 		-serial stdio \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
@@ -1028,7 +1030,9 @@ run-bg: $(IMAGE)
 		    -cpu max$(comma)+invtsc$(comma)+rdrand$(comma)+rdseed \
 		    -overcommit cpu-pm=on \
 		    -d guest_errors$(comma)unimp$(comma)cpu_reset, \
-		    -cpu qemu64$(comma)+fsgsbase) \
+		    $(if $(filter off,$(FSGSBASE)), \
+		        -cpu qemu64, \
+		        -cpu qemu64$(comma)+fsgsbase)) \
 		-m $(MEM) \
 		-monitor unix:$(BUILDDIR)/qemu.mon$(comma)server$(comma)nowait \
 		-serial file:$(BUILDDIR)/serial.log \

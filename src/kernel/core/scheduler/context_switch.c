@@ -35,7 +35,13 @@
  * the save always belongs to the strand being switched out. */
 #define CTX_IA32_FS_BASE_MSR 0xC0000100u
 
-static inline void ctx_save_user_fsbase(ProcessContext* ctx) {
+static inline void ctx_save_user_fsbase(process_t* proc, ProcessContext* ctx) {
+    /* A base that has been asked for and not yet installed makes the register
+     * stale: reading it here would overwrite the request with whatever the CPU
+     * still holds, which on a fresh strand is zero. See process.h. */
+    if (__atomic_load_n(&proc->fsbase_owed, __ATOMIC_ACQUIRE)) {
+        return;
+    }
     if (g_fsgsbase_active) {
         uint64_t base;
         __asm__ volatile("rdfsbase %0" : "=r"(base));
@@ -47,7 +53,14 @@ static inline void ctx_save_user_fsbase(ProcessContext* ctx) {
     }
 }
 
-static inline void ctx_restore_user_fsbase(const ProcessContext* ctx) {
+static inline void ctx_restore_user_fsbase(process_t* proc, ProcessContext* ctx) {
+    /* Paying the debt is what installs it, and this is the only place that
+     * runs on the CPU the strand is about to use. */
+    if (__atomic_load_n(&proc->fsbase_owed, __ATOMIC_ACQUIRE)) {
+        ctx->user_fsbase = proc->fsbase_wanted;
+        __atomic_store_n(&proc->fsbase_owed, 0, __ATOMIC_RELEASE);
+    }
+
     if (g_fsgsbase_active) {
         __asm__ volatile("wrfsbase %0" : : "r"(ctx->user_fsbase));
     } else if (g_user_fsbase_used) {
@@ -71,7 +84,7 @@ void context_save_from_frame(process_t* proc, interrupt_frame_t* frame) {
     }
 
     // Capture this strand's user FS base (TLS) before it is switched out.
-    ctx_save_user_fsbase(ctx);
+    ctx_save_user_fsbase(proc, ctx);
 
     ctx->rax = frame->rax;
     ctx->rbx = frame->rbx;
@@ -165,5 +178,5 @@ void context_restore_to_frame(process_t* proc, interrupt_frame_t* frame) {
     // Install the incoming strand's user FS base (TLS). The frame path does
     // not reload the FS selector, so this is the only place per-strand TLS is
     // switched on the live scheduler dispatch.
-    ctx_restore_user_fsbase(ctx);
+    ctx_restore_user_fsbase(proc, ctx);
 }

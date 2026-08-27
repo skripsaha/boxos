@@ -284,6 +284,36 @@ typedef struct process_t
     struct process_t *cleanup_next; // intrusive link for process cleanup queue
     atomic_u32_t      cleanup_enqueued; // one-shot 0->1 CAS guard: gates cleanup-queue enqueue (double-free defense). Zeroed by process_create's memset.
     volatile uint8_t  in_ready;     // CAS guard: 1 = currently enqueued in ReadyQueue
+
+    /*
+     * ‼ A TLS BASE THAT HAS BEEN ASKED FOR AND NOT YET INSTALLED.
+     *
+     * ProcessContext.user_fsbase means "what the hardware had when this
+     * strand was switched out" — it is written by the SAVE, from the live
+     * MSR. That is right for a strand that installed its own base with
+     * WRFSBASE, and it is the only writer on a CPU that has FSGSBASE.
+     *
+     * A CPU without FSGSBASE cannot write the base from ring 3 at all, so the
+     * base arrives through SYSTEM_OP_TLS_FSBASE — and that op runs on a K-Core
+     * in the guide loop, which is not the caller's CPU and cannot program its
+     * MSR. Writing the value into user_fsbase from there put a SECOND writer
+     * on the field, and the two disagreed: the very next save read the
+     * hardware (which had never been told) and overwrote the request with the
+     * zero that was still in the register. The restore then put that zero
+     * back, and the first fs-relative instruction in the program faulted at
+     * address 0.
+     *
+     * Measured: every C++ binary on a Braswell laptop, and reproduced exactly
+     * under QEMU with -cpu qemu64 (no fsgsbase). Intermittent on the board
+     * only because a timer tick landing in the two-instruction window installs
+     * the base first, after which the save reads the right value.
+     *
+     * So the request lives here, where nothing reads the hardware. The save
+     * declines to run while one is owed — the register is stale by definition
+     * — and the restore installs it and clears the debt.
+     */
+    volatile uint8_t  fsbase_owed;  // 1 = fsbase_wanted has not reached the CPU yet
+    uint64_t          fsbase_wanted;
 } process_t;
 
 _Static_assert(sizeof(process_t) < 4096, "Process structure must fit in one page");
