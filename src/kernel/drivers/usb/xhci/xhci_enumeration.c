@@ -54,6 +54,11 @@ uint32_t xhci_slot_epoch(const xhci_device_slot_t* slot)
     return __atomic_load_n(&slot->epoch, __ATOMIC_ACQUIRE);
 }
 
+bool xhci_slot_is_live(const xhci_device_slot_t* slot)
+{
+    return slot ? slot_is_live(slot) : false;
+}
+
 bool xhci_slot_still_is(const xhci_device_slot_t* slot, uint32_t epoch)
 {
     if (!slot) {

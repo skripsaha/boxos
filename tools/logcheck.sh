@@ -7,6 +7,8 @@
 #   logcheck.sh novolume  boot with tagfs_recognise() forced false — the board
 #                         failure reproduced on the desk. The kernel's
 #                         vocabulary must survive having no medium at all.
+#   logcheck.sh yank      the stick is pulled WHILE the volume is being read.
+#                         The medium is throttled so the window exists at all
 #   logcheck.sh logsave   the machine writes down what it said. Two kernels:
 #                         one built PRINTTOFILE=on, which must produce a
 #                         readable account of its own boot on the volume, and
@@ -745,6 +747,96 @@ run_logsave() {
     chk $? "and claims nothing it did not do"
 }
 
+run_yank() {
+    echo "== yank: the stick is pulled while the volume is being read =="
+
+    # replug pulls the stick when the machine is idle, so nothing is in flight
+    # and the recovery path is never entered. The window this driver used to
+    # spend tens of seconds in is the other one: a transfer outstanding at the
+    # moment the device leaves. Two things are needed to reach it.
+    #
+    # The stick must BE the volume, or nothing reads from it — the boot image
+    # is on ATA. Same mutation late-arrival uses, and it stays installed for
+    # the whole run, for the reason written there.
+    latearrival_on; build
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+
+    # And the MEDIUM must be slow. QEMU answers a read the instant it is asked,
+    # so the whole mount burst is over before a poll of the log can see it
+    # begin — there is no window to aim at, and a fixed delay lands either side
+    # of it. Held to 64 KiB/s the same burst takes seconds, which is also what
+    # a flash drive on a real bus looks like. Nothing in the guest is touched:
+    # this is the emulator being told to behave less like a RAM disk.
+    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 65536 0 0 0 0" >/dev/null 2>&1
+
+    # Fired off the first sign of the volume being read, not off a clock.
+    i=0
+    while [ $i -lt 400 ]; do
+        tail -n +$((MARK+1)) build/serial.log 2>/dev/null | grep -q "Deed] seat" && break
+        python3 -c "import time; time.sleep(0.02)"
+        i=$((i+1))
+    done
+    sleep 1
+    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
+
+    # Waited out past XHCI_RETIRE_PATIENCE_MS (15 s), not merely past the
+    # departure. The last check below is on the slot service saying it has been
+    # trying to take a slot down and cannot — and a window shorter than the
+    # patience makes that check green on a machine where it is false, which is
+    # decoration rather than a guard. Measured: at fourteen seconds it passed
+    # against the very code it exists to catch.
+    sleep 20
+    make run-stop >/dev/null 2>&1
+    tail -n +$((MARK+1)) build/serial.log > "$SCRATCH/serial.yank.log"
+    latearrival_off
+    L="$SCRATCH/serial.yank.log"
+
+    grep -q "mounted from seat" "$L"
+    chk $? "the stick became this machine's volume"
+
+    # The point of the whole scenario. Measured against the code before this
+    # change, same script, same throttle: 4 transport resets, 2 endpoint
+    # clears, no departure and NO EMPTY SEAT within fourteen seconds.
+    grep -q "the device has left, so it is not being asked for anything more" "$L"
+    chk $? "the driver stopped because the device left, not because a clock ran out"
+
+    ! grep -q "resetting the transport" "$L"
+    chk $? "nothing was spent resetting a transport that is not there"
+
+    ! grep -q "halted — clearing it" "$L"
+    chk $? "no endpoint of a departed device was reset"
+
+    ! grep -q "no answer in .* ms at stage" "$L"
+    chk $? "no budget was waited out for an answer nobody could give"
+
+    grep -q "is gone" "$L"
+    chk $? "the unit was released"
+
+    grep -q "seat .* is empty" "$L"
+    chk $? "and its chair was emptied"
+
+    # The slot service says this when a slot has been leaving for longer than
+    # its patience because somebody is still inside it. That somebody was the
+    # recovery grind.
+    ! grep -q "has been leaving for" "$L"
+    chk $? "no caller was still inside the slot when it wanted to leave"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -755,8 +847,9 @@ case "${1:-both}" in
     replug)   run_replug ;;
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
+    yank)     run_yank ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_uefi; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_uefi; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|both|all]"; exit 2 ;;
 esac
 

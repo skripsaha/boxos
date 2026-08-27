@@ -512,6 +512,24 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
         return;
     }
 
+    /*
+     * Two commands are about to be posted, and a command for a device that has
+     * gone is not free: the controller holds it, the ring is executed in
+     * order, and the slot cannot be taken down while anything is outstanding
+     * for it. Measured on a live board, where a departed device does not go
+     * quiet but answers `Endpoint Not Enabled`: `Reset Endpoint on slot 16
+     * took 3552 ms`, `Set TR Dequeue Pointer on slot 11 took 3567 ms`, over
+     * and over.
+     *
+     * A halted endpoint on a place nobody is in has nothing to be cleared FOR:
+     * the whole context is about to be handed back. Every enumeration state
+     * still passes this — the question is only whether the place is occupied,
+     * not whether the device has finished arriving.
+     */
+    if (!xhci_slot_is_live(slot)) {
+        return;
+    }
+
     kprintf("[xHCI] slot %u endpoint %u halted — clearing it\n",
             slot->slot_id, dci);
 

@@ -308,6 +308,13 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
 uint32_t xhci_slot_epoch(const xhci_device_slot_t* slot);
 bool     xhci_slot_still_is(const xhci_device_slot_t* slot, uint32_t epoch);
 
+/* Is there anybody in this place at all — as opposed to the stronger question
+ * xhci_slot_still_is asks, which is whether it is the SAME anybody. Idle means
+ * nothing is there; retiring means something was and is being taken down, and
+ * speaking to either is speaking to a device context that is about to stop
+ * existing. */
+bool     xhci_slot_is_live(const xhci_device_slot_t* slot);
+
 /* The port finished the reset enumeration asked for. Called from the
  * port-status change path, which is the only thing that knows when. */
 void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port);
