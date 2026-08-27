@@ -2,6 +2,7 @@
 #include "boardroom.h"
 #include "xhci_endpoint.h"
 #include "xhci_enumeration.h"
+#include "xhci_port.h"
 #include "xhci_transfer.h"
 #include "xhci_command.h"
 #include "xhci_interrupt.h"
@@ -97,6 +98,14 @@ typedef struct XhciMsdUnit {
 
     xhci_controller_t*  ctrl;
     xhci_device_slot_t* slot;
+
+    /* Which TENANCY of that slot. A slot is a numbered place the controller
+     * hands out and takes back, and the next device to arrive may be given the
+     * same number — so "my slot" is not by itself an identity. The epoch is:
+     * it changes when the place changes hands, and comparing it is how this
+     * unit can tell its own device from its successor. */
+    uint32_t epoch;
+
     uint8_t  number;
     uint8_t  lun;
     bool     ready;
@@ -137,6 +146,9 @@ typedef struct XhciMsdUnit {
     uint32_t lowest_aligned_lba;
 
     uint32_t tag;
+
+    /* Whether this unit has already said its device left. */
+    bool     said_gone;
 
     void*    cmd_virt;   uint64_t cmd_phys;      /* wrappers, one page */
     void*    bounce_virt;uint64_t bounce_phys;   /* data */
@@ -385,6 +397,61 @@ static uint8_t msd_next_number(void)
     return 255;
 }
 
+/* ── is the device still there ──────────────────────────────────────────── */
+
+/*
+ * The one question this driver asks before it spends anything on a device.
+ *
+ * Everything below — clearing a halted pipe, resetting the transport, waiting
+ * for an answer — costs a budget per step, and on a live board a device that
+ * has been pulled does not go quiet: it answers `Endpoint Not Enabled`, and
+ * the controller holds commands for a slot that is not there any more. So the
+ * recovery kept going, seconds at a time, against something that had left.
+ *
+ * What that cost was not obvious. A caller inside the slot holds `visitors`
+ * above zero and keeps commands outstanding, and `xhci_slot_service` waits for
+ * BOTH to clear before it takes the slot down — so `xhci_msd_release` never
+ * ran, the unit number was never given back, the next stick got a higher one,
+ * and a higher number is a chair nobody was sitting in. That is the whole of
+ * "usb0..usb4 from one flash drive".
+ *
+ * Two facts, and neither of them is a clock:
+ *   - the slot is still live AND still the tenancy this unit belongs to. A
+ *     retired slot fails this, and so does one already handed to the next
+ *     device to arrive;
+ *   - the root port does not say the socket is empty. Only the NEGATIVE answer
+ *     is worth anything here: a device behind a hub carries the ROOT port, so
+ *     a healthy reading there describes the branch and says nothing about the
+ *     device. `xhci_slot_retire` clears port_num, so this covers exactly the
+ *     window before the port event has been drained.
+ */
+static bool msd_device_is_there(const XhciMsdUnit* u)
+{
+    if (!u || !u->slot) {
+        return false;
+    }
+    if (!xhci_slot_still_is(u->slot, u->epoch)) {
+        return false;
+    }
+    uint8_t port = u->slot->port_num;
+    if (port != 0 && xhci_port_says_gone(u->ctrl, port)) {
+        return false;
+    }
+    return true;
+}
+
+/* Said once per unit, because the recovery has several steps and each of them
+ * asks: eight identical lines describe one departure no better than one. */
+static void msd_note_gone(XhciMsdUnit* u, const char* what)
+{
+    if (u->said_gone) {
+        return;
+    }
+    u->said_gone = true;
+    kprintf("[USB disk %u] %s — the device has left, so it is not being "
+            "asked for anything more\n", u->number, what);
+}
+
 /* ── endpoint recovery ──────────────────────────────────────────────────── */
 
 /*
@@ -396,6 +463,11 @@ static uint8_t msd_next_number(void)
  */
 static void msd_clear_halt(XhciMsdUnit* u, uint8_t dci)
 {
+    if (!msd_device_is_there(u)) {
+        msd_note_gone(u, "a halted pipe was to be cleared");
+        return;
+    }
+
     xhci_endpoint_t* ep = &u->slot->endpoints[dci];
 
     usb_setup_packet_t setup = {
@@ -408,6 +480,13 @@ static void msd_clear_halt(XhciMsdUnit* u, uint8_t dci)
     xhci_control_transfer_sync(u->ctrl, u->slot, &setup, 0, 0, false,
                                MSD_CTRL_TIMEOUT_MS);
 
+    /* Asked again: the transfer above is where a departure is most likely to
+     * be discovered, and the two commands below are the expensive half. */
+    if (!msd_device_is_there(u)) {
+        msd_note_gone(u, "the pipe would not clear");
+        return;
+    }
+
     xhci_ep_recover(u->ctrl, u->slot, dci);
     xhci_command_wait_idle(u->ctrl, MSD_CTRL_TIMEOUT_MS);
 }
@@ -419,6 +498,14 @@ static void msd_clear_halt(XhciMsdUnit* u, uint8_t dci)
  */
 static void msd_bot_reset(XhciMsdUnit* u)
 {
+    /* The class reset is three control transfers and four commands. Spending
+     * that on a device that has left is what kept a slot occupied for tens of
+     * seconds while the room waited to seat the next one. */
+    if (!msd_device_is_there(u)) {
+        msd_note_gone(u, "the transport was to be reset");
+        return;
+    }
+
     kprintf("[USB disk %u] resetting the transport\n", u->number);
 
     usb_setup_packet_t setup = {
@@ -722,10 +809,30 @@ static void msd_job_run(MsdJob* j)
             deadline   = rdtsc() + cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS);
         }
         /*
+         * The fact first, the clock only after it.
+         *
+         * A device that has been pulled is not a device that is answering
+         * slowly, and there is a precise answer to which of the two this is —
+         * so it is asked every pass rather than waited out. Without it a stick
+         * pulled mid-read cost the full budget here and then the transport
+         * reset after it, and the whole of that time the slot could not be
+         * taken down and the unit number could not be given back.
+         */
+        if (!msd_device_is_there(j->u)) {
+            msd_note_gone(j->u, "an answer was owed at this stage");
+            msd_job_finish(j, -1);
+            break;
+        }
+
+        /*
          * The one deadline in the exchange, and it is on the exchange rather
          * than on each of its three transfers: what a caller needs to know is
          * whether the device answered, and the device stops being answerable
          * as a whole, not a stage at a time.
+         *
+         * It is a watchman of SILENCE and nothing else: it is reached only
+         * when the device is still there by both facts above and simply has
+         * not spoken, which no register distinguishes from slow.
          */
         if ((int64_t)(rdtsc() - deadline) >= 0) {
             kprintf("[USB disk %u] no answer in %u ms at stage %u — resetting "
@@ -972,8 +1079,9 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     }
     memset(u, 0, sizeof(*u));
     spinlock_init(&u->q_lock);
-    u->ctrl = ctrl;
-    u->slot = slot;
+    u->ctrl  = ctrl;
+    u->slot  = slot;
+    u->epoch = xhci_slot_epoch(slot);
 
     void* cmd = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     void* bounce = pmm_alloc_zero(vmm_size_to_pages(MSD_BOUNCE_BYTES),
