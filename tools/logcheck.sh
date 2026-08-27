@@ -9,6 +9,8 @@
 #                         vocabulary must survive having no medium at all.
 #   logcheck.sh yank      the stick is pulled WHILE the volume is being read.
 #                         The medium is throttled so the window exists at all
+#   logcheck.sh twoctrl   two host controllers, stick on the SECOND — the shape
+#                         the board has and no scenario could be until now
 #   logcheck.sh logsave   the machine writes down what it said. Two kernels:
 #                         one built PRINTTOFILE=on, which must produce a
 #                         readable account of its own boot on the volume, and
@@ -837,6 +839,80 @@ run_yank() {
     chk $? "no caller was still inside the slot when it wanted to leave"
 }
 
+run_twoctrl() {
+    echo "== twoctrl: two host controllers, and the stick on the SECOND one =="
+
+    # The board has two: an Intel 00:14.0 and an NVIDIA 01:00.2, and the driver
+    # registers the NVIDIA one FIRST — so the flash drive lives on controller
+    # INDEX 1. Every scenario before this one ran on a machine with exactly one
+    # controller, where index 1 does not exist, so nothing here could ever be
+    # seen: the retire flag is ONE flag for the whole machine, and the pass for
+    # controller 0 used to consume it and walk away, leaving controller 1's
+    # departed devices standing for ever.
+    #
+    # Measured on the board: fifteen chairs from one flash drive, slot ids to
+    # 34, and not one "is gone" in a 977-line log. Measured here, same script,
+    # with and without the fix: five replugs give usb0 five times, or usb0
+    # through usb4 and zero releases.
+    latearrival_on; build
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on XHCI2=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+
+    # Five arrivals and five departures on the second controller. A fresh
+    # drive_add each time: HMP marks the drive auto-del, so device_del takes it
+    # with it and the next device_add silently does nothing — one cycle
+    # pretending to be ten.
+    for n in 1 2 3 4 5; do
+        ./tools/qemu-input.sh raw "drive_add 0 if=none,id=st$n,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+        sleep 1
+        ./tools/qemu-input.sh raw "device_add usb-storage,bus=xhci2.0,drive=st$n,id=us" >/dev/null 2>&1
+        sleep 4
+        ./tools/qemu-input.sh raw "device_del us" >/dev/null 2>&1
+        sleep 4
+    done
+    sleep 4
+    make run-stop >/dev/null 2>&1
+    tail -n +$((MARK+1)) build/serial.log > "$SCRATCH/serial.twoctrl.log"
+    latearrival_off
+    L="$SCRATCH/serial.twoctrl.log"
+
+    grep -q "2 controller(s) in service" build/serial.log
+    chk $? "the machine really has two host controllers"
+
+    local arrivals
+    arrivals=$(grep -c "usb0 QEMU" "$L")
+    [ "$arrivals" -ge 2 ]
+    chk $? "the stick arrived on the second controller more than once ($arrivals)"
+
+    # THE check. A unit number is handed back when its device leaves, so the
+    # same stick coming home takes the same number. A second number means the
+    # first was never given back.
+    local numbers count
+    numbers=$(grep -oE "\[USB disk [0-9]+\] usb[0-9]+ " "$L" | grep -oE "usb[0-9]+" | sort -u | tr '\n' ' ')
+    count=$(printf '%s' "$numbers" | wc -w | tr -d ' ')
+    [ "$count" = "1" ]
+    chk $? "one stick kept one unit number across every replug ($numbers)"
+
+    grep -q "is gone" "$L"
+    chk $? "the unit on controller 1 was released at all"
+
+    grep -q "is empty" "$L"
+    chk $? "and its chair was emptied"
+
+    ! grep -q "has been leaving for" "$L"
+    chk $? "no slot was left standing because nobody came to take it down"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -848,8 +924,9 @@ case "${1:-both}" in
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     yank)     run_yank ;;
+    twoctrl)  run_twoctrl ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_uefi; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_uefi; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|both|all]"; exit 2 ;;
 esac
 

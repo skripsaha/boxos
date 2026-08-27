@@ -202,6 +202,17 @@ ifeq ($(VOLUME_TESTS),on)
 CFLAGS += -DCONFIG_VOLUME_TESTS=1
 endif
 
+# A SECOND xHCI controller, because a machine with two of them is a different
+# machine and we had no way to be one.
+#
+# The board has an Intel 00:14.0 and an NVIDIA 01:00.2, and the driver
+# registers the NVIDIA one FIRST — so the stick lives on controller INDEX 1.
+# Every defect that turns on "which controller is this" was invisible here
+# until now: QEMU's default has exactly one, and one controller is always
+# index 0. `make run-bg USB=on XHCI2=on` adds a second, and a device can be
+# hot-plugged onto it with bus=xhci2.0.
+XHCI2 ?= off
+
 # A switch that changes CFLAGS has to change what gets rebuilt, or it does
 # nothing on a tree that is already built — `make VOLUME_TESTS=on` would print
 # nothing, link the objects it already had, and boot a kernel with the tests
@@ -1065,7 +1076,8 @@ run-bg: $(IMAGE)
 		-serial file:$(BUILDDIR)/serial.log \
 		-display none \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
-		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
+		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1 -device usb-kbd$(comma)bus=xhci1.0) \
+		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2) \
 		-pidfile $(BUILDDIR)/qemu.pid \
 		-daemonize
 	@i=0; while [ ! -S $(BUILDDIR)/qemu.mon ] && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done
