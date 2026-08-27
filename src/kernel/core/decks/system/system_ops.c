@@ -584,20 +584,28 @@ static int SysTlsFsbase(const ManifestOp *op, Crate *crates,
      * read kernel memory through fs: overrides on the next switch-in. */
     if (base >= 0x0000800000000000ULL) return ERR_INVALID_ADDRESS;
 
-    ctx->proc->context.user_fsbase = base;
+    /*
+     * ‼ RECORDED AS A DEBT, NOT WRITTEN INTO THE SAVED CONTEXT.
+     *
+     * This op runs in the guide loop on a K-Core — not the caller's CPU — so
+     * it cannot program IA32_FS_BASE, and the branch that used to try was
+     * guarded by process_get_current() == ctx->proc, which is never true here
+     * (that reads the K-Core's own current process, and a K-Core is running
+     * the guide loop, not a process). Dead code guarding a hazard.
+     *
+     * Nor may it write ProcessContext.user_fsbase: that field belongs to the
+     * SAVE, which fills it from the live register. Writing it here made two
+     * writers of one field, and the loser was this one — see the note in
+     * process.h. The request goes somewhere the save never reads, and the
+     * caller's next dispatch installs it.
+     */
+    /* The gate first, then the debt: the restore checks the gate before it
+     * writes the MSR, and a core that saw the debt without the gate would
+     * clear it having installed nothing. */
     g_user_fsbase_used = 1;
+    ctx->proc->fsbase_wanted = base;
+    __atomic_store_n(&ctx->proc->fsbase_owed, 1, __ATOMIC_RELEASE);
 
-    /* Synchronous dispatch (the op runs on the caller's own core inside
-     * its syscall window — the iretq back skips task_restore_context):
-     * program the MSR right here so TLS is live on return. On the async
-     * K-Core path proc != current and the value lands at the caller's
-     * next context restore — guaranteed, because its pocket is only
-     * processed after the context was saved into the ready queue. */
-    if (process_get_current() == ctx->proc) {
-        uint32_t lo = (uint32_t)base;
-        uint32_t hi = (uint32_t)(base >> 32);
-        __asm__ volatile("wrmsr" :: "c"(0xC0000100u), "a"(lo), "d"(hi));
-    }
     return OK;
 }
 
