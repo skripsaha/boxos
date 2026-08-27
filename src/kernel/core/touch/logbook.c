@@ -1,5 +1,6 @@
 #include "logbook.h"
 #include "tagfs.h"      /* tagfs_parse_tag — pure string split, no volume */
+#include "muster.h"
 
 /*
  * One name the kernel has used for an occurrence. `value` is NULL for a bare
@@ -13,6 +14,7 @@ typedef struct LogbookEntry {
     char                *key;
     char                *value;   /* NULL = bare */
     TouchTag             tag_id;
+    bool                 mustered; /* named before the voyage, not on first use */
 } LogbookEntry;
 
 /*
@@ -21,6 +23,10 @@ typedef struct LogbookEntry {
  * it fills. The only hard limit is the id space itself
  * (TOUCH_LOGBOOK_MAX_INDEX), and hitting it is a refusal, not a wrap.
  */
+/* How many un-mustered names are worth a line before the point is made. */
+#define LOGBOOK_MISS_LINES 8u
+static uint32_t g_muster_misses = 0;
+
 static struct {
     LogbookEntry **buckets;
     uint32_t       bucket_count;
@@ -30,6 +36,10 @@ static struct {
     spinlock_t     lock;          /* statically zeroed == unlocked */
     bool           ready;
 } g_logbook;
+
+static void logbook_muster_unlocked(void);
+static void logbook_split(const char *tag, char *key, size_t key_size,
+                          char *value, size_t value_size, bool *out_has_value);
 
 #define LOGBOOK_INITIAL_BUCKETS  64u
 #define LOGBOOK_INITIAL_INDEX    64u
@@ -86,6 +96,8 @@ static bool logbook_ready_unlocked(void)
     g_logbook.index_capacity = LOGBOOK_INITIAL_INDEX;
     g_logbook.count          = 0;
     g_logbook.ready          = true;
+
+    logbook_muster_unlocked();
     return true;
 }
 
@@ -145,8 +157,10 @@ static bool logbook_reserve_index_unlocked(uint32_t index)
 
 /* Caller holds the lock. Returns the id of an existing or freshly created
  * entry, TOUCH_TAG_INVALID if it could not be made. */
-static TouchTag logbook_intern_unlocked(const char *key, const char *value)
+static TouchTag logbook_intern_unlocked(const char *key, const char *value,
+                                        bool *out_created)
 {
+    if (out_created) *out_created = false;
     LogbookEntry *found = logbook_find_unlocked(key, value);
     if (found) return found->tag_id;
 
@@ -172,7 +186,8 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value)
         return TOUCH_TAG_INVALID;
     }
 
-    entry->tag_id = (TouchTag)(TOUCH_TAG_KERNEL_BIT | index);
+    entry->tag_id   = (TouchTag)(TOUCH_TAG_KERNEL_BIT | index);
+    entry->mustered = false;
 
     uint32_t slot = logbook_hash(key, value) % g_logbook.bucket_count;
     entry->chain = g_logbook.buckets[slot];
@@ -184,7 +199,51 @@ static TouchTag logbook_intern_unlocked(const char *key, const char *value)
     if (g_logbook.count >= g_logbook.bucket_count)
         logbook_grow_buckets_unlocked();
 
+    if (out_created) *out_created = true;
     return entry->tag_id;
+}
+
+/*
+ * Call the muster — every name this kernel can speak, entered before anybody
+ * asks for one. Caller holds the lock, and this runs exactly once, from the
+ * same place the tables are built: there is no init call to forget and no boot
+ * phase to get wrong, which is the property the rest of this file was written
+ * for.
+ *
+ * A failure to seat a name is not fatal. It costs that ONE name the guarantee
+ * the muster exists to give, and the line below says which.
+ */
+static void logbook_muster_unlocked(void)
+{
+    unsigned seated = 0, refused = 0;
+
+    #define MUSTER_SEAT(NAME)                                                  \
+        do {                                                                   \
+            char k[256], v[256];                                               \
+            bool has_value;                                                    \
+            logbook_split((NAME), k, sizeof(k), v, sizeof(v), &has_value);     \
+            if (k[0] != '\0') {                                               \
+                LogbookEntry *e;                                               \
+                if (logbook_intern_unlocked(k, NULL, NULL) == TOUCH_TAG_INVALID)\
+                    refused++;                                                 \
+                else { seated++;                                               \
+                       e = logbook_find_unlocked(k, NULL);                     \
+                       if (e) e->mustered = true; }                            \
+                if (has_value) {                                               \
+                    if (logbook_intern_unlocked(k, v, NULL) == TOUCH_TAG_INVALID)\
+                        refused++;                                             \
+                    else { seated++;                                           \
+                           e = logbook_find_unlocked(k, v);                    \
+                           if (e) e->mustered = true; }                        \
+                }                                                              \
+            }                                                                  \
+        } while (0);
+
+    TOUCH_KERNEL_MUSTER(MUSTER_SEAT)
+    #undef MUSTER_SEAT
+
+    kprintf("[Logbook] muster: %u name(s) seated%s\n", seated,
+            refused ? ", SOME REFUSED — see above" : "");
 }
 
 /*
@@ -223,8 +282,26 @@ static void logbook_resolve(const char *tag, TouchTag *out_full,
     }
 
     if (create) {
-        *out_bare = logbook_intern_unlocked(key, NULL);
-        if (has_value) *out_full = logbook_intern_unlocked(key, value);
+        bool made_bare = false, made_full = false;
+        *out_bare = logbook_intern_unlocked(key, NULL, &made_bare);
+        if (has_value) *out_full = logbook_intern_unlocked(key, value, &made_full);
+
+        /*
+         * A name entered here and not at the muster is a name this kernel can
+         * speak and never declared. It works — the entry exists from now on —
+         * but the guarantee the muster gives is exactly the one it does not
+         * have: anybody who asked for it EARLIER got an id out of the volume
+         * instead, and is waiting on it.
+         *
+         * So it is said, by name, and capped: a family built from data
+         * ("pci:vendor:8086") would otherwise print one line per device.
+         */
+        if ((made_bare || made_full) && g_muster_misses < LOGBOOK_MISS_LINES) {
+            g_muster_misses++;
+            kprintf("[Logbook] the kernel named '%s', which is not in its "
+                    "muster — anybody who asked for it earlier is listening "
+                    "elsewhere\n", tag);
+        }
     } else {
         LogbookEntry *bare = logbook_find_unlocked(key, NULL);
         if (bare) *out_bare = bare->tag_id;
