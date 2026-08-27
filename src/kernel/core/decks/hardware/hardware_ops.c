@@ -10,6 +10,7 @@
  */
 
 #include "klib.h"
+#include "klib_logring.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
 #include "boxos_manifest.h"
@@ -42,9 +43,17 @@
  * reach serial via kputchar; this fills the gap for user Manifest VGA
  * ops. Gated behind CONFIG_VIDEO_SERIAL_MIRROR — keep OFF on real HW
  * where serial is not wired or where 115200 baud (~87us/char) would
- * dominate latency on long output. */
+ * dominate latency on long output.
+ *
+ * The log ring is NOT behind that gate, and must not be. The reason the
+ * serial mirror is off on a board is that a UART costs ~87us a character;
+ * the ring costs a store. And a saved log that has the kernel's answers but
+ * not the command that caused them is a log somebody has to guess at — the
+ * board is exactly where nobody can afford to. What the machine put on its
+ * screen belongs in the account of what the machine said. */
 static inline void HwVgaMirrorChar(char ch)
 {
+    LogRingPut(ch);
 #if CONFIG_VIDEO_SERIAL_MIRROR
     if (ch == '\n') serial_putchar('\r');
     serial_putchar(ch);
@@ -142,6 +151,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         char c = str[i];
         if (c == '\0') break;
         VideoPrintChar(c, color);
+        LogRingPut(c);           /* see HwVgaMirrorChar: not behind the gate */
         chars_written++;
     }
     VideoBatchEnd();
@@ -989,6 +999,62 @@ static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 }
 
 /* =========================================================================
+ *  Log ring — what this kernel has said, asked for from userspace
+ *
+ *  HW_LOG_READ  params:    [u64 from]  — ring position to read from
+ *               out_crate: [u64 oldest][u64 written][u64 copied][bytes...]
+ *
+ *  Self-describing on purpose: `oldest` says where the ring actually begins
+ *  now, so a reader the writers overtook learns the size of its gap instead
+ *  of splicing two ends of the log together and believing the seam.
+ *
+ *  Bounded to a page per call. LogRingRead copies with interrupts off, and
+ *  the length of that window is the only price the rest of the machine pays
+ *  for being asked what it said; a reader that wants more asks again.
+ * ========================================================================= */
+
+#define HW_LOG_READ_HEADER  24u
+#define HW_LOG_READ_CHUNK   4096u
+
+static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                     const OpContext *ctx)
+{
+    (void)crate_count;
+
+    /* A kernel built without the ring says so, rather than answering with an
+     * empty log that reads exactly like a machine that never spoke. */
+    if (!LogRingIsKept())                  return ERR_UNSUPPORTED;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8)                return ERR_INVALID_ARGUMENT;
+
+    uint64_t from = 0;
+    for (unsigned i = 0; i < 8; i++) {
+        from |= (uint64_t)op->params[i] << (i * 8);
+    }
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < HW_LOG_READ_HEADER) return ERR_BUFFER_TOO_SMALL;
+
+    uint64_t room = out->capacity - HW_LOG_READ_HEADER;
+    if (room > HW_LOG_READ_CHUNK) room = HW_LOG_READ_CHUNK;
+
+    uint8_t *kp = crate_out_alloc(out, HW_LOG_READ_HEADER + room);
+    if (!kp) return ERR_INVALID_ADDRESS;
+
+    uint64_t oldest = 0, written = 0;
+    uint64_t copied = LogRingRead(from, kp + HW_LOG_READ_HEADER, room,
+                                  &oldest, &written);
+
+    memcpy(kp,      &oldest,  sizeof(uint64_t));
+    memcpy(kp + 8,  &written, sizeof(uint64_t));
+    memcpy(kp + 16, &copied,  sizeof(uint64_t));
+
+    int crc = crate_out_commit(out, ctx, kp, HW_LOG_READ_HEADER + copied);
+    crate_buf_free(kp);
+    return (crc == OK) ? OK : ERR_INVALID_ADDRESS;
+}
+
+/* =========================================================================
  *  Registration
  * ========================================================================= */
 
@@ -1046,6 +1112,7 @@ error_t HardwareDeckRegister(void)
         { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot"  },
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
         { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
+        { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
         /* USB: hardware control, system+. */
         { HW_USB_INIT,           HwUsbInit,          OP_AUTH_SYSTEM, "hw.usb.init"      },
         { HW_USB_RESET,          HwUsbReset,         OP_AUTH_SYSTEM, "hw.usb.reset"     },

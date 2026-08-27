@@ -14,6 +14,14 @@
 #include "box/brook.h"    /* brook_open/push/pop/release/...      */
 #include "box/memory.h"   /* malloc, free                         */
 #include "box/string.h"   /* strcmp, strncmp, memcpy, memset      */
+#include "box/core/manifest.h" /* MfCall1                          */
+#include "boxos_decks.h"  /* DECK_HARDWARE                        */
+#include "box/timeouts.h" /* BOX_TIMEOUT_FAST_MS                  */
+
+/* The hardware deck's log-ring door. Named here the way debug.c names
+ * HW_DEBUG_PRINT next to it: userspace does not include kernel headers, and
+ * the opcode's home is src/kernel/core/decks/hardware/hardware_deck.h. */
+#define HW_LOG_READ  0x83
 
 /* --------------------------------------------------------------------------
  * Backend selection + handle layout
@@ -22,7 +30,8 @@
 typedef enum {
     CurScreen = 0,
     CurKeyboard,
-    CurLog,
+    CurLogSerial,
+    CurLogFile,
     CurFile,
     CurStream,
 } CurrentBackend;
@@ -43,18 +52,75 @@ struct Current {
     /* file (TagFS) backing */
     uint32_t       file_id;
     uint64_t       file_pos;
+
+    /* log (kernel ring) backing, reader end */
+    uint8_t       *log_buf;     /* staging frame: header + one chunk        */
+    uint64_t       log_pos;     /* ring position this reader is at next     */
+    uint64_t       log_end;     /* what the kernel had said when we opened  */
+    uint64_t       log_lost;    /* bytes the ring dropped under this reader */
 };
 
 #define STREAM_FRAMES_DEFAULT  256u
 #define BROOK_FRAME_MIN        8u
 #define BROOK_FRAME_MAX        65536u
 
+/* --------------------------------------------------------------------------
+ * log backing, reader end
+ *
+ * The kernel's log is one thing kept in two places, and the family says which:
+ * `log:serial` is the line it goes out on, `log:file` is the ring it is held
+ * in so it can become a file (klib_logring.h). One name each, one honest role
+ * each — a wire cannot be read back, and a ring is not somewhere you speak.
+ *
+ * Wire: [u64 oldest][u64 written][u64 copied][bytes...]
+ * ------------------------------------------------------------------------ */
+
+#define CUR_LOG_HEADER  24u
+#define CUR_LOG_CHUNK   4096u    /* the kernel copies a page per call at most */
+
+/* One HW_LOG_READ into the handle's staging frame. Returns bytes staged (0 is
+ * a legitimate answer — the pure "what have you got" question), or -ERR_*. */
+static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
+                        uint64_t *out_oldest, uint64_t *out_written)
+{
+    uint8_t params[8];
+    for (unsigned i = 0; i < 8; i++) params[i] = (uint8_t)(from >> (i * 8));
+
+    if (want > CUR_LOG_CHUNK) want = CUR_LOG_CHUNK;
+
+    int rc = MfCall1(DECK_HARDWARE, HW_LOG_READ,
+                     params, sizeof(params),
+                     NULL, 0,
+                     c->log_buf, CUR_LOG_HEADER + want,
+                     /* Sub-microsecond in-kernel work — a memcpy of at most a
+                      * page — so TIMEOUT_FAST is the constant box/timeouts.h
+                      * prescribes, and a named one rather than the default is
+                      * what that file asks every MfCall1 to pass. It matters
+                      * more here than most: logsave issues hundreds of these
+                      * back to back, and a reply orphaned by a timeout is
+                      * popped by the NEXT call as if it were its own. */
+                     NULL, BOX_TIMEOUT_FAST_MS, NULL);
+    if (rc != OK) return rc > 0 ? -rc : rc;
+
+    uint64_t oldest, written, copied;
+    memcpy(&oldest,  c->log_buf,      sizeof(uint64_t));
+    memcpy(&written, c->log_buf + 8,  sizeof(uint64_t));
+    memcpy(&copied,  c->log_buf + 16, sizeof(uint64_t));
+
+    if (copied > want) return -ERR_CORRUPTED;   /* the door overran its own crate */
+
+    if (out_oldest)  *out_oldest  = oldest;
+    if (out_written) *out_written = written;
+    return (int)copied;
+}
+
 static CurrentBackend ResolveBackend(const char *tag, const char **name_out)
 {
     *name_out = NULL;
     if (strcmp(tag, "screen") == 0)    return CurScreen;
     if (strcmp(tag, "keyboard") == 0)  return CurKeyboard;
-    if (strcmp(tag, "log") == 0)       return CurLog;
+    if (strcmp(tag, "log:serial") == 0) return CurLogSerial;
+    if (strcmp(tag, "log:file") == 0)   return CurLogFile;
     if (strncmp(tag, "file:", 5) == 0) { *name_out = tag + 5; return CurFile; }
     return CurStream;
 }
@@ -101,11 +167,50 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
         if (out_err) *out_err = OK;
         return c;
 
-    case CurLog:
+    case CurLogSerial:
+        /* The line, and a line has no memory: you can say something on it and
+         * you cannot ask it what was said. WRITE only, and that is not a
+         * limitation to be worked around — it is what a wire is. */
         if (role != CURRENT_WRITE) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
         c->caps = CURRENT_CAP_WRITE;
         if (out_err) *out_err = OK;
         return c;
+
+    case CurLogFile: {
+        /* What was said, kept by the kernel so it can become a file. READ
+         * only: writing here would mean adding to the account of what the
+         * kernel said, and that is what saying it does — through log:serial,
+         * which lands in the same ring on its way out.
+         *
+         * Whether the kernel keeps it at all is a QUESTION put to the kernel,
+         * not a guess from a build flag on this side of the wall: a kernel
+         * built without the ring answers ERR_UNSUPPORTED and the open fails
+         * with that reason, instead of succeeding onto an empty channel that
+         * reads exactly like a machine which never said anything. */
+        if (role != CURRENT_READ) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
+
+        c->log_buf = (uint8_t *)malloc(CUR_LOG_HEADER + CUR_LOG_CHUNK);
+        if (!c->log_buf) { free(c); CUR_FAIL(ERR_NO_MEMORY); }
+
+        uint64_t oldest = 0, written = 0;
+        int rc = cur_log_pull(c, 0, 0, &oldest, &written);
+        if (rc < 0) {
+            error_t why = (error_t)(-rc);
+            free(c->log_buf); free(c);
+            CUR_FAIL(why);
+        }
+        /* Positions count from the first byte this kernel ever said, so
+         * `oldest` is itself the number of bytes the ring has already
+         * dropped — the gap this reader was born with, and the one it will
+         * be able to name instead of splicing over. */
+        c->log_pos  = oldest;
+        c->log_end  = written;
+        c->log_lost = oldest;
+
+        c->caps = CURRENT_CAP_READ;
+        if (out_err) *out_err = OK;
+        return c;
+    }
 
     case CurKeyboard:
         if (role != CURRENT_READ) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
@@ -223,6 +328,9 @@ int current_release(Current *c)
         if (c->brook)     brook_release(c->brook);
         if (c->frame_buf) free(c->frame_buf);
         break;
+    case CurLogFile:
+        if (c->log_buf) free(c->log_buf);
+        break;
     case CurScreen:
         io_flush();
         break;
@@ -269,7 +377,7 @@ int current_write(Current *c, const void *data, size_t len)
         print_bytes((const char *)data, len);
         return (int)len;
 
-    case CurLog: {
+    case CurLogSerial: {
         /* Serial diagnostic log is a TEXT channel: kdbg takes NUL-terminated
          * strings, so bytes are emitted in NUL-bounded chunks. Embedded NULs
          * truncate a chunk (documented: log carries text). */
@@ -340,6 +448,34 @@ int current_read(Current *c, void *buf, size_t len)
         if (n == 0) return CURRENT_CLOSED;     /* content exhausted */
         c->file_pos += (uint64_t)n;
         return (int)n;
+    }
+
+    case CurLogFile: {
+        /* Bounded at the position the kernel had reached when this handle was
+         * opened. Without that bound a reader could never finish: printing
+         * what it has read is itself something the kernel says, so the tail
+         * would grow exactly as fast as it was chased. */
+        if (c->log_pos >= c->log_end) return CURRENT_CLOSED;
+
+        uint64_t remain = c->log_end - c->log_pos;
+        uint32_t want   = (len < remain) ? (uint32_t)len : (uint32_t)remain;
+
+        uint64_t oldest = 0, written = 0;
+        int n = cur_log_pull(c, c->log_pos, want, &oldest, &written);
+        if (n < 0)  return n;
+
+        /* Overtaken while we were away: the kernel restarted us at the oldest
+         * byte it still holds and said where that was. Count the gap rather
+         * than joining the two ends as if nothing were missing. */
+        if (oldest > c->log_pos) {
+            c->log_lost += oldest - c->log_pos;
+            c->log_pos   = oldest;
+        }
+        if (n == 0) return CURRENT_CLOSED;   /* nothing left within our bound */
+
+        memcpy(buf, c->log_buf + CUR_LOG_HEADER, (size_t)n);
+        c->log_pos += (uint64_t)n;
+        return n;
     }
 
     case CurStream: {
@@ -433,3 +569,8 @@ int current_resize(Current *c, uint64_t new_size)
 
 uint32_t current_caps(const Current *c)      { return c ? c->caps : 0; }
 uint32_t current_item_size(const Current *c) { return c ? c->item_size : 0; }
+
+uint64_t current_lost(const Current *c)
+{
+    return (c && c->backend == CurLogFile) ? c->log_lost : 0;
+}

@@ -19,6 +19,7 @@
  * The lock is BSS-zero before mem_init() runs spinlock_init(); BSS-zero
  * happens to mean unlocked for the current spinlock_t layout. */
 #include "klib.h"
+#include "klib_logring.h"
 #include "video.h"
 #include "canvas.h"
 #include "serial.h"
@@ -37,6 +38,7 @@ void console_lock_release(void) { spin_unlock(&g_kprintf_lock); }
 void klib_print_lock_init(void)
 {
     spinlock_init(&g_kprintf_lock);
+    LogRingLockInit();
 }
 
 int kputnl(void)
@@ -49,6 +51,14 @@ int kputnl(void)
 
 void kputchar(char c)
 {
+    /* Every byte the kernel says passes here — kprintf's characters under the
+     * console lock, the keyboard's echo without it — so this is where the log
+     * ring is fed and there is nowhere else to look. The character kept is the
+     * one the caller wrote: the '\r' below belongs to a serial line, not to
+     * what the kernel said. Nothing at all when the build was not asked for
+     * the ring (see klib_logring.h). */
+    LogRingPut(c);
+
     if (c == '\n')
     {
         serial_putchar('\r');

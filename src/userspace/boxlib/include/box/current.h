@@ -21,13 +21,19 @@
  *
  *   "screen"      -> console output  (display daemon / VGA; byte sink)
  *   "keyboard"    -> console input   (line-oriented blocking source)
- *   "log"         -> serial log      (kdbg diagnostic byte sink)
+ *   "log:serial"  -> the kernel log on the wire  (write only — a line has no
+ *                                                  memory to be asked)
+ *   "log:file"    -> the kernel log kept in memory (read only — what has been
+ *                                                  said, on a kernel that
+ *                                                  keeps it: PRINTTOFILE=on)
  *   "file:NAME"   -> a TagFS file    (seekable byte storage)
  *   <other tag>   -> a Brook stream  (framed, cross-cabin, with honest close)
  *
- * screen / keyboard / log are the three CONVENTIONAL Currents — the named
+ * screen / keyboard / log: are the CONVENTIONAL Currents — the named
  * counterpart of stdout / stdin / stderr — but they are not special, magic,
- * or limited to three: any other tag opens a Brook stream between cabins.
+ * or limited in number: any other tag opens a Brook stream between cabins.
+ * The kernel's log is one thing in two places and the family says which, so
+ * neither name has to carry a role it does not have.
  *
  * Deliberately NOT Currents: Bay (random-access shared memory) and Touch
  * (multicast events). Those are different shapes and keep their own APIs;
@@ -88,11 +94,15 @@ typedef struct Current Current;
  *               file backing, which also accepts CURRENT_READ|CURRENT_WRITE.
  *               A Brook end is a producer or a consumer and the two open
  *               different objects; a file is one object with one cursor that
- *               can be read and written. Screen/log take WRITE only, keyboard
- *               READ only, a stream exactly one.
+ *               can be read and written. Screen and log:serial take WRITE
+ *               only, keyboard and log:file READ only, a stream exactly one.
+ *               log:file additionally refuses the open on a kernel that keeps
+ *               no log — ERR_UNSUPPORTED through current_open_ex, which is the
+ *               honest answer rather than an empty channel.
  *   item_size : framed backings (stream) — bytes per item (>= 1; values < 8
  *               are padded to the Brook minimum transparently, <= 65536).
- *               byte backings (screen/keyboard/log/file) — pass 0.
+ *               byte backings (screen, keyboard, log:serial, log:file,
+ *               file:NAME) — pass 0.
  *   flags     : CURRENT_CREATE | CURRENT_NONBLOCK.
  *
  * Returns a handle, or NULL on failure (bad args, role unsupported by the
@@ -187,6 +197,13 @@ int current_resize(Current *c, uint64_t new_size);
  * ------------------------------------------------------------------------ */
 uint32_t current_caps(const Current *c);       /* CURRENT_CAP_* bitset */
 uint32_t current_item_size(const Current *c);  /* framed: bytes/item; byte: 0 */
+
+/* Bytes this channel could NOT deliver because its backing overwrote them
+ * before the reader got there — the kernel log ring being the one backing that
+ * can. Zero everywhere else, and zero on a log that never overflowed. A reader
+ * that would otherwise splice two ends of a log together can say how wide the
+ * seam is instead. */
+uint64_t current_lost(const Current *c);
 
 /* Framed sugar definitions (need current_item_size). */
 static inline int current_put(Current *c, const void *item)
