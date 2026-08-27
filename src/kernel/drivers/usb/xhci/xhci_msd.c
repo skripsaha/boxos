@@ -1139,6 +1139,10 @@ void xhci_msd_release(xhci_device_slot_t* slot)
         kprintf("[USB disk %u] %s is gone\n", u->number, u->name);
     }
 
+    /* Which unit it was. Read before the unit is freed, because it is the
+     * whole of what the room is being told. */
+    uint8_t number = u->number;
+
     if (u->cmd_phys)    pmm_free((void*)u->cmd_phys, 1);
     if (u->bounce_phys) pmm_free((void*)u->bounce_phys,
                                  vmm_size_to_pages(MSD_BOUNCE_BYTES));
@@ -1146,7 +1150,7 @@ void xhci_msd_release(xhci_device_slot_t* slot)
 
     /*
      * And whoever is keeping a filesystem on it is told NOW, not at its next
-     * read.
+     * read — and told WHICH unit left.
      *
      * A unit number is handed out again as soon as it is free, and a seat
      * holds a unit number — so a medium that leaves and another that arrives
@@ -1155,11 +1159,16 @@ void xhci_msd_release(xhci_device_slot_t* slot)
      * back was never noticed to have gone at all, because nothing read from it
      * in between, and the seat went on pointing at whatever took the number.
      *
+     * Naming the unit is what lets the room empty the right chair. Saying only
+     * "something left" meant the room could not, so the chair stayed occupied
+     * for ever — and the stick coming home found its own seat already taken by
+     * its own ghost, which is silence exactly where an arrival should be.
+     *
      * This runs from the service pass, which is ordinary kernel context, so
      * saying it here is allowed and is the last moment at which it is still
      * true that the number belongs to nobody.
      */
-    BoardroomNoteDeparture();
+    BoardroomNoteDeparture(BOARD_USB, number);
 }
 
 /* ── sector I/O ─────────────────────────────────────────────────────────── */
