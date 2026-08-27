@@ -78,6 +78,17 @@ int      xhci_port_warm_reset(xhci_controller_t* ctrl, uint8_t port);
 /* True when the port that just reported a reset came out of it usable. */
 bool     xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port);
 
+/*
+ * Has the device on this port gone, as the port itself reports it?
+ *
+ * The one question that replaces a deadline with a fact. Whoever is waiting
+ * for an answer that has not come can ask this instead of counting: a port
+ * with nothing on it is not a slow device, and the silence is not the
+ * controller's fault. True in one direction only — see the comment on the
+ * definition, and never read a false as "the device is fine".
+ */
+bool     xhci_port_says_gone(xhci_controller_t* ctrl, uint8_t port);
+
 int      xhci_disable_port(xhci_controller_t* ctrl, uint8_t port);
 
 #endif

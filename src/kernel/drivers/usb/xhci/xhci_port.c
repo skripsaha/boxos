@@ -314,6 +314,31 @@ bool xhci_port_reset_finished(xhci_controller_t* ctrl, uint8_t port)
     return (portsc & XHCI_PORTSC_CCS) && (portsc & XHCI_PORTSC_PED);
 }
 
+/*
+ * The port's own answer to "is there any point waiting for this device?"
+ *
+ * Asked instead of a clock, and trusted in ONE direction only. CCS clear is
+ * the controller saying nothing is attached — a device that is not there will
+ * not answer an Address Device this year or next, and that is a fact rather
+ * than an expired budget. The other direction is deliberately not offered:
+ * a device reached through a hub carries the ROOT port in slot->port_num
+ * (xhci_enumeration.c, xhci_enumerate_behind_hub), so a healthy answer here
+ * says the branch is alive and says NOTHING about the device on the end of it.
+ *
+ * PED is left out on purpose. It is zero for the whole of a port reset, which
+ * is a device coming up rather than a device gone, and a predicate that cannot
+ * tell those apart is one that retires devices for being born.
+ *
+ * A port this controller does not have is not an answer, so it is not "gone".
+ */
+bool xhci_port_says_gone(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!port_valid(ctrl, port)) {
+        return false;
+    }
+    return (portsc_read(ctrl, port) & XHCI_PORTSC_CCS) == 0;
+}
+
 int xhci_disable_port(xhci_controller_t* ctrl, uint8_t port) {
     if (!port_valid(ctrl, port)) {
         return -1;

@@ -676,6 +676,13 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
     uint8_t  oldest_type = 0;
     uint8_t  oldest_slot = 0;
 
+    /* Who is owed an answer, so the ports they are on can be asked about it
+     * once the lock is let go. Collected here because this is the only walk
+     * that sees the pending table, and read outside because asking a port is
+     * an MMIO read and this lock is taken from the drain. */
+    xhci_device_slot_t* waiting[XHCI_CMD_RING_TRBS];
+    unsigned waiting_count = 0;
+
     for (uint32_t i = 0; i < XHCI_CMD_RING_TRBS; i++) {
         if (ctrl->pending_cmds[i].state != XHCI_CMD_POSTED) {
             continue;
@@ -685,6 +692,17 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
             oldest_at   = ctrl->pending_cmds[i].posted_at;
             oldest_type = ctrl->pending_cmds[i].trb_type;
             oldest_slot = ctrl->pending_cmds[i].slot_id;
+        }
+
+        xhci_device_slot_t* owner = ctrl->pending_cmds[i].owner;
+        if (owner && waiting_count < XHCI_CMD_RING_TRBS) {
+            bool already = false;
+            for (unsigned k = 0; k < waiting_count; k++) {
+                if (waiting[k] == owner) { already = true; break; }
+            }
+            if (!already) {
+                waiting[waiting_count++] = owner;
+            }
         }
     }
 
@@ -703,6 +721,64 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
 
     if (!stuck) {
         return;
+    }
+
+    /*
+     * ‼ ASK WHO IS OWED, BEFORE RINGING A BELL NOBODY IS BEHIND.
+     *
+     * "Nothing answered for five seconds" is a question about the RING, and
+     * the ladder below answers it in two steps: ring the doorbell, and if that
+     * changes nothing, take the ring away. The doorbell is there because a
+     * controller that did not act on one is indistinguishable, from outside,
+     * from a controller that has hung — and that is true, but only while there
+     * is somebody to hear it.
+     *
+     * There is a case where there is not, and it is the ordinary one on a
+     * machine with a socket in it: the command is owed by a device that has
+     * LEFT. The controller is not ignoring anything; it is holding a command
+     * for a device that stopped existing, and the Disable Slot that would
+     * clear it is queued BEHIND that command on a ring executed in order. No
+     * bell will move it. Ringing one costs a second full budget — five
+     * thousand milliseconds of a boot, twice over on a live board, and the
+     * measured "Address Device took 10005 ms" is exactly those two budgets
+     * end to end.
+     *
+     * So: when everything outstanding is owed by devices that have gone, the
+     * bell is skipped and the ring is taken back at once, and the log says
+     * WHY rather than reporting a controller that never misbehaved.
+     *
+     * Two ways to know a device has gone, and both are facts rather than
+     * deadlines. Its slot is no longer live — the port-status change retired
+     * it, which also clears the port number, so this is the answer most of the
+     * time. Or its port says so directly, which covers the window before that
+     * event has been drained. Neither is a clock.
+     */
+    unsigned gone = 0;
+    for (unsigned k = 0; k < waiting_count; k++) {
+        xhci_device_slot_t* s = waiting[k];
+        uint8_t port = s->port_num;
+
+        if (!xhci_slot_still_is(s, xhci_slot_epoch(s))) {
+            gone++;                     /* retired: the device left */
+            continue;
+        }
+        if (port != 0 && xhci_port_says_gone(ctrl, port)) {
+            kprintf("[xHCI %s] port %u (slot %u): the port reports nothing "
+                    "attached — the command it owes an answer for is owed by "
+                    "a device that has left\n", ctrl->name, port, s->slot_id);
+            xhci_slot_retire(ctrl, s);
+            gone++;
+        }
+    }
+
+    bool nobody_left_to_answer = (waiting_count > 0 && gone == waiting_count);
+
+    if (nobody_left_to_answer && ctrl->cmd_nudges < XHCI_CMD_NUDGES) {
+        kprintf("[xHCI %s] %u command(s) outstanding after %u ms, and every "
+                "one of them is owed by a device that has left — not ringing "
+                "the doorbell, there is nobody behind it\n",
+                ctrl->name, outstanding, silent);
+        ctrl->cmd_nudges = XHCI_CMD_NUDGES;      /* straight to the remedy */
     }
 
     /*
@@ -771,9 +847,15 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
      * It has been told three times and answered nothing. That is a stopped
      * controller, and the ring has to be taken away from it.
      */
-    kprintf("[xHCI %s] still nothing after %u doorbell(s) — the command ring "
-            "has stopped and is being taken back\n",
-            ctrl->name, XHCI_CMD_NUDGES);
+    if (nobody_left_to_answer) {
+        kprintf("[xHCI %s] the command ring is being taken back — it is "
+                "holding commands for devices that are not there any more\n",
+                ctrl->name);
+    } else {
+        kprintf("[xHCI %s] still nothing after %u doorbell(s) — the command "
+                "ring has stopped and is being taken back\n",
+                ctrl->name, XHCI_CMD_NUDGES);
+    }
 
     ctrl->cmd_nudges = 0;
     xhci_command_ring_abort(ctrl);

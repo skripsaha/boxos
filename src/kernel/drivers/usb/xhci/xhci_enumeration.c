@@ -267,21 +267,39 @@ static int enum_start(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
  */
 static int enum_admit(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
 {
-    bool mine;
-
-    spin_lock(&device_slots_lock);
-    mine = (ctrl->enum_active == NULL);
-    if (mine) {
-        ctrl->enum_active = slot;
-    }
-    spin_unlock(&device_slots_lock);
-
-    if (!mine) {
-        __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_QUEUED,
-                         __ATOMIC_RELEASE);
-        return 0;
-    }
-    return enum_start(ctrl, slot);
+    /*
+     * Everybody joins the queue, and ONE place decides who goes next.
+     *
+     * This used to take the bus for itself whenever it happened to be free,
+     * which made two places that hand out the same turn. The one that reaches
+     * here that way is slot_take_down, retrying a port that has just failed —
+     * and it runs at the very moment that failure released the bus, so it
+     * could go round again ahead of a device that has never had a first
+     * attempt at all.
+     *
+     * ‼ AND THE WINDOW IS IN THIS FUNCTION, not in the caller. The old shape
+     * released the lock and only THEN marked the slot as queued:
+     *
+     *     spin_unlock(&device_slots_lock);
+     *     if (!mine) { ...store QUEUED... }
+     *
+     * Between those two lines the slot is waiting for the bus and is INVISIBLE
+     * to anybody looking for somebody waiting for the bus. A pump that runs in
+     * that gap finds an empty queue, drops enum_active to NULL, and the next
+     * caller — the retry of the port that has just failed — takes the turn
+     * that belonged to the device standing right there. Microseconds wide, and
+     * on a board with six cores the pump runs on a different one.
+     *
+     * Setting the state FIRST and then asking closes it by construction: there
+     * is no moment at which this slot wants the bus and cannot be seen to.
+     *
+     * The second half is the rule underneath. There wasn't one: the queue was
+     * walked in slot-table order and the first QUEUED entry won, which is
+     * wherever find_free_slot happened to put it.
+     */
+    __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_QUEUED, __ATOMIC_RELEASE);
+    xhci_enum_pump(ctrl);
+    return 0;
 }
 
 /*
@@ -337,14 +355,42 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
         ctrl->enum_active = NULL;
     }
 
+    /*
+     * A first attempt outranks a retry.
+     *
+     * Enumeration is one at a time on a controller, so the order of this queue
+     * is the order devices come up in, and a port that has already failed once
+     * is the least likely of them to succeed. Letting it go first means every
+     * device behind it waits out its whole budget again, three more times.
+     * What this replaces is not a worse rule but no rule: the queue was walked
+     * in slot-table order and the first QUEUED entry won, which is wherever
+     * find_free_slot happened to put it.
+     *
+     * born_port is zero for a device found on a hub, and enum_attempts[0] is
+     * never incremented, so those count as first attempts. That is right: the
+     * retry counter is about root ports, and a hub rescans its own.
+     */
+    bool next_is_retry = true;
     for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl == ctrl &&
-            __atomic_load_n(&device_slots[i].state, __ATOMIC_ACQUIRE) ==
+        if (device_slots[i].ctrl != ctrl ||
+            __atomic_load_n(&device_slots[i].state, __ATOMIC_ACQUIRE) !=
                 ENUM_STATE_QUEUED) {
-            next = &device_slots[i];
-            ctrl->enum_active = next;
-            break;
+            continue;
         }
+        uint8_t born = device_slots[i].born_port;
+        bool retry = (born != 0 && born <= ctrl->max_ports &&
+                      ctrl->enum_attempts[born] > 0);
+
+        if (!next || (next_is_retry && !retry)) {
+            next          = &device_slots[i];
+            next_is_retry = retry;
+            if (!retry) {
+                break;      /* nothing outranks a first attempt */
+            }
+        }
+    }
+    if (next) {
+        ctrl->enum_active = next;
     }
 
     spin_unlock(&device_slots_lock);
