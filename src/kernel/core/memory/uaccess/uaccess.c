@@ -40,6 +40,24 @@
 #include "uaccess.h"
 #include "klib.h"   /* debug_printf for boot-time fixup table report */
 
+/*
+ * Whether this processor has the instructions at all — see the note in
+ * uaccess.h. False until boot says otherwise, which is the safe direction:
+ * a kernel that has not yet asked issues no STAC, and the worst that costs is
+ * that SMAP is not enforced during early boot, where there is no user space
+ * to be protected from yet.
+ */
+bool g_uaccess_smap = false;
+
+void uaccess_set_smap(bool present)
+{
+    g_uaccess_smap = present;
+
+    kprintf("[uaccess] SMAP %s — user access is bracketed with STAC/CLAC%s\n",
+            present ? "present" : "absent",
+            present ? "" : " nowhere, because this CPU would fault on them");
+}
+
 extern uintptr_t __uaccess_fixup_start[];
 extern uintptr_t __uaccess_fixup_end[];
 
@@ -147,10 +165,9 @@ size_t copy_to_user(void *dst, const void *src, size_t n) {
      * with CR4.SMAP=1 + AC=0 it faults on user-mapped target. We wrap
      * it in STAC/CLAC so the access succeeds; the fixup catches PF on
      * a genuinely unmapped page (unmap-while-syscall race). */
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: rep movsb\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -159,6 +176,7 @@ size_t copy_to_user(void *dst, const void *src, size_t n) {
         : "memory"
         : fault
     );
+    clac();
     return 0;
 
 fault:
@@ -175,10 +193,9 @@ fault:
 
 size_t copy_from_user(void *dst, const void *src, size_t n) {
     if (!access_ok(src, n)) return n;
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: rep movsb\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -187,6 +204,7 @@ size_t copy_from_user(void *dst, const void *src, size_t n) {
         : "memory"
         : fault
     );
+    clac();
     return 0;
 
 fault:
@@ -202,10 +220,9 @@ fault:
 
 int put_user_u32(uint32_t val, uint32_t *ptr) {
     if (!access_ok(ptr, sizeof(uint32_t))) return -1;
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: movl %[val], (%[ptr])\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -214,6 +231,7 @@ int put_user_u32(uint32_t val, uint32_t *ptr) {
         : "memory"
         : fault
     );
+    clac();
     return 0;
 
 fault:
@@ -223,10 +241,9 @@ fault:
 
 int put_user_u64(uint64_t val, uint64_t *ptr) {
     if (!access_ok(ptr, sizeof(uint64_t))) return -1;
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: movq %[val], (%[ptr])\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -235,6 +252,7 @@ int put_user_u64(uint64_t val, uint64_t *ptr) {
         : "memory"
         : fault
     );
+    clac();
     return 0;
 
 fault:
@@ -245,10 +263,9 @@ fault:
 int get_user_u32(uint32_t *out, const uint32_t *ptr) {
     if (!access_ok(ptr, sizeof(uint32_t))) return -1;
     uint32_t v;
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: movl (%[ptr]), %[v]\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -257,6 +274,7 @@ int get_user_u32(uint32_t *out, const uint32_t *ptr) {
         : "memory"
         : fault
     );
+    clac();
     *out = v;
     return 0;
 
@@ -268,10 +286,9 @@ fault:
 int get_user_u64(uint64_t *out, const uint64_t *ptr) {
     if (!access_ok(ptr, sizeof(uint64_t))) return -1;
     uint64_t v;
+    stac();
     __asm__ volatile goto (
-        "stac\n\t"
         "1: movq (%[ptr]), %[v]\n\t"
-        "clac\n\t"
         ".pushsection .uaccess_fixup, \"a\", @progbits\n\t"
         ".quad 1b, %l[fault]\n\t"
         ".popsection\n\t"
@@ -280,6 +297,7 @@ int get_user_u64(uint64_t *out, const uint64_t *ptr) {
         : "memory"
         : fault
     );
+    clac();
     *out = v;
     return 0;
 

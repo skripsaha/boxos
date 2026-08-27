@@ -2,6 +2,7 @@
 #include "fpu.h"
 #include "klib.h"
 #include "cpuid.h"
+#include "uaccess.h"
 
 bool g_use_xsave = false;
 uint32_t g_xsave_area_size = 0;
@@ -127,6 +128,10 @@ void enable_fpu(void) {
 
     if (g_cpu_caps.has_smep) cr4 |= (1ULL << 20);
     if (g_cpu_caps.has_smap) cr4 |= (1ULL << 21);
+    /* And the other half of the same fact: whether STAC/CLAC may be issued at
+     * all. Without SMAP those instructions are #UD, not no-ops — see the note
+     * at the top of uaccess.h and the Braswell panic it came from. */
+    uaccess_set_smap(g_cpu_caps.has_smap);
 
     /* UMIP (bit 11) — Intel SDM Vol 3A §2.5. */
     if (g_cpu_caps.has_umip) cr4 |= (1ULL << 11);

@@ -77,15 +77,53 @@
  * uaccess as a leaf header. */
 #define UACCESS_USER_VA_MAX     0x0000800000000000ULL
 
-/* Bare STAC / CLAC primitives. Both are CPL=0-only — calling from
- * userspace would #UD. Both are NOPs when CR4.SMAP=0 (architectural,
- * per Intel SDM Vol 2A). The "cc" clobber on STAC/CLAC is required
- * because they modify RFLAGS.AC. */
+/*
+ * ‼ STAC AND CLAC DO NOT EXIST ON EVERY PROCESSOR
+ *
+ * The comment that used to stand here said both were "NOPs when CR4.SMAP=0".
+ * That confuses two different things, and the difference is a dead machine:
+ *
+ *   SMAP present, CR4.SMAP=0  — the instruction executes, sets RFLAGS.AC,
+ *                               and the bit has no effect. Harmless.
+ *   SMAP absent from the CPU  — #UD. Intel SDM Vol 2A, CLAC/STAC:
+ *                               "#UD ... If CPUID.(EAX=07H, ECX=0H):EBX.SMAP
+ *                               [bit 20] = 0."
+ *
+ * Intel added SMAP in Broadwell for the Core line and in Goldmont for the
+ * Atom line. Anything older does not have it: Haswell, Ivy Bridge, and every
+ * Bay Trail / Braswell part — which is what is inside a great many cheap
+ * laptops still in daily use.
+ *
+ * Measured, on an Acer Aspire R3 with a Pentium N3700 (Braswell):
+ *
+ *     KERNEL PANIC: #UD (vector 6)
+ *     fault at ffffffff8012cca9   get_user_u32+0x1f
+ *     Stack: ReadWordUser <- NameAt <- exception_handler <- isr_common
+ *
+ * and ffffffff8012cca9 disassembles to exactly `0f 01 cb  stac`. Note WHERE
+ * it died: inside the exception handler, which had called NameAt to put a
+ * function name in the fault dump. On a machine without SMAP, ANY user-space
+ * fault therefore became a kernel panic — the handler could not survive
+ * reporting one.
+ *
+ * QEMU does not raise #UD for these, which is why this survived every run in
+ * the matrix. Bochs models it correctly, and so does real silicon. The same
+ * trap caught `umwait` on this project once already.
+ *
+ * So the instruction is issued only where it exists. One predictable branch,
+ * on a path that runs when a fault is being reported — not a hot path.
+ */
+extern bool g_uaccess_smap;
+
+/* Told once, at boot, by whoever sets CR4.SMAP — the same code that already
+ * had to ask CPUID whether the bit could be set at all. */
+void uaccess_set_smap(bool present);
+
 static inline void stac(void) {
-    __asm__ volatile("stac" ::: "cc", "memory");
+    if (g_uaccess_smap) __asm__ volatile("stac" ::: "cc", "memory");
 }
 static inline void clac(void) {
-    __asm__ volatile("clac" ::: "cc", "memory");
+    if (g_uaccess_smap) __asm__ volatile("clac" ::: "cc", "memory");
 }
 
 /* Manual bracket. Use ONLY when copy_to/from_user / put_user / get_user
