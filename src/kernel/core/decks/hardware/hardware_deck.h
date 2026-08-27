@@ -63,6 +63,7 @@
 #define HW_SYSTEM_REBOOT        0x80
 #define HW_SYSTEM_SHUTDOWN      0x81
 #define HW_DEBUG_PRINT          0x82
+#define HW_LOG_READ             0x83
 
 #define HW_USB_INIT             0x90
 #define HW_USB_RESET            0x91

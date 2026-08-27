@@ -55,7 +55,7 @@ int main(void)
 
     /* T3 — log: the serial diagnostic channel. */
     {
-        Current *lg = current_open("log", CURRENT_WRITE, 0, 0);
+        Current *lg = current_open("log:serial", CURRENT_WRITE, 0, 0);
         int ok = lg != NULL
               && (current_caps(lg) & CURRENT_CAP_WRITE)
               && current_write(lg, "Current: log backend reached serial\n", 36) == 36;

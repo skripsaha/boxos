@@ -7,6 +7,10 @@
 #   logcheck.sh novolume  boot with tagfs_recognise() forced false — the board
 #                         failure reproduced on the desk. The kernel's
 #                         vocabulary must survive having no medium at all.
+#   logcheck.sh logsave   the machine writes down what it said. Two kernels:
+#                         one built PRINTTOFILE=on, which must produce a
+#                         readable account of its own boot on the volume, and
+#                         one without, which must SAY it keeps none
 #   logcheck.sh both
 #
 # Every check is a grep against build/serial.log. No timing assertions.
@@ -642,6 +646,105 @@ run_uefi() {
     chk $? "no name the muster declared was called a stranger ($strangers)"
 }
 
+# Does the medium actually carry this text? Read off the image rather than
+# believed from what the command printed. Every needle carries a
+# runtime-formatted digit or a typed prompt, so none of them can match a format
+# string sitting in some binary's rodata — the trap a plain grep walks into.
+img_carries() {
+    python3 - "$1" "$2" <<'PY'
+import sys, re
+img = open(sys.argv[1], 'rb').read()
+sys.exit(0 if re.search(sys.argv[2].encode(), img) else 1)
+PY
+}
+
+run_logsave() {
+    echo "== logsave: what the kernel said, written down where it can be read =="
+
+    # Two kernels, because the switch is a BUILD switch. The machine that keeps
+    # its log and the machine that does not are different kernels, and both
+    # halves of the promise have to hold: the one that keeps it must produce a
+    # readable account, and the one that does not must SAY so rather than hand
+    # back an empty file that reads like a machine which never spoke.
+    make PRINTTOFILE=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (PRINTTOFILE=on) — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
+    fi
+
+    make run-stop >/dev/null 2>&1
+    make run-bg PRINTTOFILE=on >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+
+    # A command FIRST, so the file is asked to carry both what a photograph of
+    # the screen would have shown and what it would not: the command that was
+    # typed. Userspace output reaches the ring through the Manifest VGA ops,
+    # deliberately not through the serial mirror a board build turns off.
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
+    ./tools/qemu-input.sh type "logsave" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 8
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.logsave.log"
+    cp build/boxos.img  "$SCRATCH/logsave.img"
+    L="$SCRATCH/serial.logsave.log"
+    I="$SCRATCH/logsave.img"
+
+    grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell with the log kept"
+
+    grep -qE "[0-9]+ byte\(s\) written to watch.log" "$L"
+    chk $? "logsave says how much it wrote, and where"
+
+    ! grep -qE "^0 byte\(s\) written" "$L"
+    chk $? "and it is not nothing"
+
+    ! grep -q "byte(s) were said before this" "$L"
+    chk $? "one boot does not overflow the ring"
+
+    sed -n '/~ logsave/,$p' "$L" | grep -qE '^~ ?$|^~ '
+    chk $? "the shell came back after it"
+
+    img_carries "$I" '\[Logbook\] muster: \d+ name\(s\) seated'
+    chk $? "the file carries a line from before the screen could scroll"
+
+    img_carries "$I" '~ hw\n'
+    chk $? "the file carries the command that was typed"
+
+    # A RUNTIME value, not a label. The first form of this check looked for
+    # "invariant TSC : " and passed with the ring deliberately broken — that
+    # string is the format literal in hw.elf's rodata, sitting in the same
+    # image, and the check was reading the binary rather than the log. The
+    # number here is printed through %u and exists nowhere but in the account.
+    img_carries "$I" 'TSC freq      : \d+ kHz'
+    chk $? "and the answer that command produced"
+
+    # Now the same command on a kernel that keeps nothing.
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg >/dev/null 2>&1
+    i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+    ./tools/qemu-input.sh type "logsave" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 6
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.logsave-off.log"
+    O="$SCRATCH/serial.logsave-off.log"
+
+    grep -q "does not keep what it says" "$O"
+    chk $? "a kernel without the ring refuses by name"
+
+    ! grep -qE "byte\(s\) written to" "$O"
+    chk $? "and claims nothing it did not do"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -651,8 +754,9 @@ case "${1:-both}" in
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
     nofsgsbase) run_nofsgsbase ;;
+    logsave)  run_logsave ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_uefi; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_uefi; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|both|all]"; exit 2 ;;
 esac
 

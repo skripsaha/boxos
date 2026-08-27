@@ -216,6 +216,28 @@ ifeq ($(BRINGUP),on)
 CFLAGS += -DCONFIG_BRINGUP_HOLD_ON_FIRST_FAULT=1
 endif
 
+# Keep what the kernel says, so a machine with no serial cable can be asked
+# afterwards. Every byte kputchar() emits also lands in a ring in kernel
+# memory, and the `logsave` command writes that ring to a file on the volume
+# through Current. See src/lib/kernel/klib_logring.h for why a ring in memory
+# and not a file written as it goes.
+#
+# Off by default and deliberately not "always on": a board run where this is
+# wanted is not a constant activity, and a build that carries a megabyte of
+# buffer for a boot nobody is going to read is a cost with no reader. Built
+# once with it, every run of that image keeps its log — first, second, third —
+# until the tree is rebuilt without it.
+#
+# `make PRINTTOFILE=on`
+ifeq ($(PRINTTOFILE),on)
+CFLAGS += -DCONFIG_PRINTTOFILE=1
+endif
+
+# Same marker trick as VOLUME_TESTS below: a switch that changes CFLAGS has to
+# change what gets rebuilt, or `make PRINTTOFILE=on` on a built tree links the
+# objects it already had and boots a kernel with no ring in it.
+PRINTTOFILE_MARK = $(BUILDDIR)/.printtofile.$(if $(filter on,$(PRINTTOFILE)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -316,7 +338,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
              me info say reboot bye defrag fsck ipc_test memtag hw \
-             timezone
+             timezone logsave
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -460,12 +482,16 @@ $(VOLUME_TESTS_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.volume_tests.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) | $(BUILDDIR)
+$(PRINTTOFILE_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.printtofile.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
@@ -703,7 +729,8 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(USERSPACE_DIR)/testbin.bin "binary, test:forerror, emptyfile" \
 		$(UTILS_DIR)/ipc_test.elf "utility" \
 		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
-		$(UTILS_DIR)/hw.elf      "utility,system,hardware"
+		$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
+		$(UTILS_DIR)/logsave.elf "utility,system,log"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

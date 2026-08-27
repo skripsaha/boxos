@@ -311,7 +311,7 @@ using byte_current = current<std::byte>;
 // Conventional channels — the named counterpart of stdout/stdin/stderr.
 // ---------------------------------------------------------------------------
 inline byte_current screen()   { return byte_current("screen",   role::write); }
-inline byte_current log()      { return byte_current("log",      role::write); }
+inline byte_current log()      { return byte_current("log:serial", role::write); }
 inline byte_current keyboard(opening o = opening::none) { return byte_current("keyboard", role::read, o); }
 inline byte_current file(const char *path, role r, opening o = opening::create)
 {
