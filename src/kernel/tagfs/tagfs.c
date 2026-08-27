@@ -177,6 +177,23 @@ static inline bool bitmap_test_bit(const uint8_t *bitmap, uint32_t bit)
  */
 static uint8_t g_tagfs_seat = BOARDROOM_NO_SEAT;
 
+/*
+ * WHICH occupant of that seat this volume is.
+ *
+ * A seat can be taken again, which is what lets a stick that was pulled out
+ * come home to the chair it left. The cost of that is exactly this: "there is
+ * a medium in seat 3" stopped being enough to know it is the SAME medium, so
+ * the taking is stamped here at the moment the volume is mounted and compared
+ * afterwards. A chair that changed hands while nobody was reading from it is a
+ * medium that left, whatever is sitting in it now.
+ *
+ * Before seats could be reused this was covered by accident — a returning
+ * medium always got a NEW seat number, so the number itself carried the
+ * answer. It also meant the room grew by one chair per unplug for ever, and a
+ * medium that got its old unit number back was never announced at all.
+ */
+static uint32_t g_tagfs_seating = 0;
+
 uint8_t tagfs_get_seat(void) { return g_tagfs_seat; }
 
 /*
@@ -275,6 +292,7 @@ static void TagFSProbeDrive(void)
     }
 
     g_volume_uuid_known = tagfs_recognise(NULL, g_tagfs_seat, g_volume_uuid);
+    g_tagfs_seating     = BoardroomSeatSeating(g_tagfs_seat);
 
     kprintf("[TagFS] volume on seat %u: %s\n", g_tagfs_seat,
             BoardroomSeatName(g_tagfs_seat));
@@ -515,14 +533,33 @@ static bool volume_medium_gone(void)
     if (g_medium_left) {
         return true;
     }
-    if (g_tagfs_seat == BOARDROOM_NO_SEAT || BoardroomSeatOccupied(g_tagfs_seat)) {
+    if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
         return false;
     }
 
+    /*
+     * Two ways for the medium to be gone, and only one of them looks like it.
+     *
+     * The chair is empty — the obvious one. Or the chair has somebody in it
+     * who is not the medium this volume was mounted from: a stick pulled out
+     * and a different one pushed in before anything read a byte. Nothing about
+     * the seat number changes across that, and without the taking stamp the
+     * two are indistinguishable from here — which would mean serving this
+     * volume's blocks out of somebody else's medium.
+     */
+    if (BoardroomSeatOccupied(g_tagfs_seat) &&
+        BoardroomSeatSeating(g_tagfs_seat) == g_tagfs_seating) {
+        return false;
+    }
+
+    bool swapped = BoardroomSeatOccupied(g_tagfs_seat);
+
     g_medium_left = true;
     ReadAheadForget();
-    kprintf("[TagFS] the medium the volume lives on has left — every read and "
-            "write from here on will say so\n");
+    kprintf("[TagFS] the medium the volume lives on has %s — every read and "
+            "write from here on will say so\n",
+            swapped ? "been replaced by another one in the same seat"
+                    : "left");
     return true;
 }
 
@@ -1856,8 +1893,9 @@ void tagfs_shutdown(void)
 static void tagfs_abandon(void)
 {
     tagfs_teardown(false);
-    g_medium_left = false;
-    g_tagfs_seat  = BOARDROOM_NO_SEAT;
+    g_medium_left   = false;
+    g_tagfs_seat    = BOARDROOM_NO_SEAT;
+    g_tagfs_seating = 0;
 }
 
 

@@ -19,21 +19,64 @@
 #include "cpu_calibrate.h"
 #include "atomics.h"
 
-/* A seat is one medium. The list is built at init and grows when media arrive;
- * nothing here is sized in advance, because the number of disks a machine has
- * is the machine's business. */
+/*
+ * A seat is a PLACE, and a medium is who is sitting in it.
+ *
+ * That used to be one thing: a seat was a medium, appended to the list when it
+ * was found, and there was no way to say it had gone. Two faults came out of
+ * the same missing idea. A stick pulled out left its chair behind for ever, so
+ * sixteen plug cycles on a live board made sixteen chairs with nobody in
+ * fifteen of them. And — far worse — a stick pushed back in got its unit
+ * number handed straight back to it, landed in the chair the room already had,
+ * and the room announced nothing, because the only thing it could announce was
+ * that it had grown. The volume was never mounted again.
+ *
+ * So a chair can now be empty, and can be sat in again. The list still only
+ * grows, and seat numbers still never move under anybody holding one — an
+ * empty chair is not deleted, it is unoccupied, which is why a number handed
+ * out once stays meaningful for as long as the machine runs.
+ */
 typedef struct BoardSeat {
     struct BoardSeat* next;
     uint8_t   number;
     BoardKind kind;
     uint8_t   index;            /* AHCI port, ATA drive, or USB unit */
     bool      removable;
+    bool      occupied;         /* is there a medium in it at this moment */
+    uint32_t  seating;          /* which taking of the room this occupant is */
     char      name[48];
 } BoardSeat;
 
 static BoardSeat* g_seats = NULL;
-static uint8_t    g_seat_count = 0;
+static uint8_t    g_seat_count = 0;     /* chairs, whether or not anybody is in them */
+static uint32_t   g_seatings = 0;       /* takings anywhere in the room, ever */
 static bool       g_initialised = false;
+
+/*
+ * The list, and the fields in it.
+ *
+ * Seats are never freed, so walking one is safe without holding anything —
+ * a pointer into the room stays a pointer into the room. What needs the lock
+ * is deciding to take a chair, because two cores that both find the same empty
+ * one would both sit in it: departures come from the USB service pass and
+ * arrivals from the attendance pass, and on a machine with six cores those are
+ * routinely different cores at the same moment.
+ *
+ * ‼ Never held across disk I/O or an allocation. Every path below reads what
+ * it needs, lets go, and only then talks to a medium — the alternative is the
+ * one this kernel already has a debt for, and it is not going to be paid by
+ * adding another.
+ */
+static spinlock_t g_seats_lock;
+static bool       g_seats_lock_ready = false;
+
+static void seats_lock_init(void)
+{
+    if (!g_seats_lock_ready) {
+        spinlock_init(&g_seats_lock);
+        g_seats_lock_ready = true;
+    }
+}
 
 /* The largest run of sectors handed to a controller at once. Both disk paths
  * take a 16-bit count, and the USB path splits internally anyway; keeping the
@@ -54,40 +97,108 @@ static BoardSeat* seat_find(uint8_t number)
     return NULL;
 }
 
-static bool seat_exists(BoardKind kind, uint8_t index)
+/*
+ * The chair, and only while somebody is in it.
+ *
+ * Every path that goes on to touch a medium comes through here rather than
+ * through seat_find. The index in an empty chair is the number the controller
+ * used to give the medium that left, and controllers hand those out again
+ * immediately — so a caller holding a stale seat number would be sent to
+ * whatever is in that unit now, and would be told nothing about it.
+ */
+static BoardSeat* seat_taken(uint8_t number)
 {
-    for (BoardSeat* s = g_seats; s; s = s->next) {
-        if (s->kind == kind && s->index == index) {
-            return true;
-        }
-    }
-    return false;
+    BoardSeat* s = seat_find(number);
+    return (s && s->occupied) ? s : NULL;
 }
 
-static BoardSeat* seat_add(BoardKind kind, uint8_t index, bool removable,
-                           const char* name)
+/* The chair this medium is sitting in, or none. An empty chair that used to
+ * hold it is not it: the whole point of emptying one is that the number in it
+ * stops meaning anything. Caller holds the lock. */
+static BoardSeat* seat_holding_locked(BoardKind kind, uint8_t index)
 {
-    if (seat_exists(kind, index)) {
+    for (BoardSeat* s = g_seats; s; s = s->next) {
+        if (s->occupied && s->kind == kind && s->index == index) {
+            return s;
+        }
+    }
+    return NULL;
+}
+
+static uint8_t seat_occupied_count(void)
+{
+    uint8_t n = 0;
+    for (BoardSeat* s = g_seats; s; s = s->next) {
+        if (s->occupied) n++;
+    }
+    return n;
+}
+
+/*
+ * Sit a medium down, and say which chair it got.
+ *
+ * An empty chair of the same kind is taken before a new one is added, lowest
+ * first — a room that adds a chair per arrival is a room that fills up with
+ * furniture on a machine somebody keeps swapping sticks on. Returns NULL when
+ * this medium is already sitting somewhere, which is the ordinary answer on
+ * every attendance pass after the first.
+ *
+ * The chair itself is allocated before the lock is taken and given back if it
+ * turns out not to be needed: kmalloc under a spinlock is a wait of unbounded
+ * length inside one of bounded length, and this room is walked from the USB
+ * service pass.
+ */
+static BoardSeat* seat_take(BoardKind kind, uint8_t index, bool removable,
+                            const char* name)
+{
+    seats_lock_init();
+
+    BoardSeat* spare = (BoardSeat*)kmalloc(sizeof(BoardSeat));
+
+    spin_lock(&g_seats_lock);
+
+    if (seat_holding_locked(kind, index)) {
+        spin_unlock(&g_seats_lock);
+        if (spare) kfree(spare);
         return NULL;
     }
 
-    BoardSeat* s = (BoardSeat*)kmalloc(sizeof(BoardSeat));
-    if (!s) {
-        return NULL;
+    BoardSeat* s = NULL;
+    for (BoardSeat* c = g_seats; c; c = c->next) {
+        if (!c->occupied && c->kind == kind) {
+            s = c;                      /* the list is in number order */
+            break;
+        }
     }
-    memset(s, 0, sizeof(*s));
-    s->number    = g_seat_count++;
-    s->kind      = kind;
+
+    if (!s) {
+        if (!spare) {
+            spin_unlock(&g_seats_lock);
+            return NULL;
+        }
+        s = spare;
+        spare = NULL;
+        memset(s, 0, sizeof(*s));
+        s->number = g_seat_count++;
+        s->kind   = kind;
+
+        /* Appended, so seat numbers never move under anybody. */
+        BoardSeat** link = &g_seats;
+        while (*link) {
+            link = &(*link)->next;
+        }
+        *link = s;
+    }
+
     s->index     = index;
     s->removable = removable;
+    s->occupied  = true;
+    s->seating   = ++g_seatings;
     ksnprintf(s->name, sizeof(s->name), "%s", name);
 
-    /* Appended, so seat numbers never move under anybody. */
-    BoardSeat** link = &g_seats;
-    while (*link) {
-        link = &(*link)->next;
-    }
-    *link = s;
+    spin_unlock(&g_seats_lock);
+
+    if (spare) kfree(spare);
     return s;
 }
 
@@ -159,7 +270,17 @@ static void seat_usb_take_attendance(void)
 
 void BoardroomInit(void)
 {
-    uint8_t seated_before = g_seat_count;
+    /*
+     * What counts as "new in this pass" is a TAKING, not a seat number.
+     *
+     * It used to be "seat number below the count we started with", which was
+     * the same thing only while chairs could never be sat in twice. Now a
+     * returning stick lands in seat 3 that has been there since boot, and the
+     * seat number says nothing at all about whether anything happened.
+     */
+    uint32_t seatings_before = g_seatings;
+
+    seats_lock_init();
 
     if (!g_initialised) {
         g_seats = NULL;
@@ -179,7 +300,7 @@ void BoardroomInit(void)
         usb_units--;
         char name[48];
         ksnprintf(name, sizeof(name), "%s", xhci_msd_unit_name(n));
-        seat_add(BOARD_USB, n, true, name);
+        seat_take(BOARD_USB, n, true, name);
     }
 
     if (ahci_is_initialized()) {
@@ -190,7 +311,7 @@ void BoardroomInit(void)
             }
             char name[48];
             ksnprintf(name, sizeof(name), "AHCI port %u", p);
-            seat_add(BOARD_AHCI, p, false, name);
+            seat_take(BOARD_AHCI, p, false, name);
         }
     } else {
         /* The legacy channels, which only matter when AHCI is absent — a
@@ -202,12 +323,27 @@ void BoardroomInit(void)
             if (ata_read_sectors_retry(d, 0, 1, probe) != 0) {
                 continue;
             }
-            seat_add(BOARD_ATA, d, false, ata_slot_name(d));
+            seat_take(BOARD_ATA, d, false, ata_slot_name(d));
         }
     }
 
-    kprintf("[Boardroom] %u medium/media seated\n", g_seat_count);
+    /* Nothing changed hands. The room is called to order on every arrival the
+     * bus notices, and most of those are a device this room already has — so
+     * saying the same thing again is how a log stops being read. */
+    if (g_seatings == seatings_before) {
+        return;
+    }
+
+    uint8_t changed = 0;
+    uint8_t first   = BOARDROOM_NO_SEAT;
+
+    kprintf("[Boardroom] %u medium/media seated\n", seat_occupied_count());
     for (BoardSeat* s = g_seats; s; s = s->next) {
+        if (!s->occupied) {
+            kprintf("[Boardroom]   seat %u: empty\n", s->number);
+            continue;
+        }
+
         kprintf("[Boardroom]   seat %u: %s%s\n", s->number, s->name,
                 s->removable ? " (removable)" : "");
 
@@ -217,12 +353,17 @@ void BoardroomInit(void)
          * medium — and a disk belonging to somebody else could not be shared
          * with it at all.
          *
-         * Only for the seats that are new. The room is called to order again
-         * every time something arrives, and re-reading the table of every
-         * medium already in it would say the same thing again on every
-         * hot-plug — which is how a log stops being read. */
-        if (s->number < seated_before) {
+         * Only for the seats that changed hands in this pass. The room is
+         * called to order again every time something arrives, and re-reading
+         * the table of every medium already in it would say the same thing
+         * again on every hot-plug. */
+        if (s->seating <= seatings_before) {
             continue;
+        }
+
+        changed++;
+        if (first == BOARDROOM_NO_SEAT) {
+            first = s->number;
         }
 
         MediumGround ground[GROUND_MAX_PER_MEDIUM];
@@ -241,18 +382,19 @@ void BoardroomInit(void)
         }
     }
 
-    /* Said here, at the end, and not from seat_add: a listener that mounts on
+    /*
+     * Said here, at the end, and not from seat_take: a listener that mounts on
      * this would otherwise be choosing among the seats that happened to be
-     * filled first, while the rest of the room was still arriving. */
-    if (g_seat_count > seated_before) {
-        BoardroomSeatEvent ev = {
-            g_seat_count,
-            (uint8_t)(g_seat_count - seated_before),
-            seated_before,
-            0
-        };
-        TouchPublish("seat:taken", &ev, sizeof(ev));
-    }
+     * filled first, while the rest of the room was still arriving.
+     *
+     * And said whenever a chair CHANGED HANDS, which is the whole repair. It
+     * used to be said only when the room GREW, and a stick pushed back into
+     * the machine it was pulled out of does not make the room grow: its unit
+     * number is free, it gets it back, and it sits down in the chair it left.
+     * The room went on holding a volume nobody had mounted.
+     */
+    BoardroomSeatEvent ev = { seat_occupied_count(), changed, first, 0 };
+    TouchPublish("seat:taken", &ev, sizeof(ev));
 }
 
 /*
@@ -270,11 +412,32 @@ void BoardroomNoteArrival(void)
     __atomic_store_n(&g_arrival_pending, 1u, __ATOMIC_RELEASE);
 }
 
-void BoardroomNoteDeparture(void)
+void BoardroomNoteDeparture(BoardKind kind, uint8_t index)
 {
+    seats_lock_init();
+
+    spin_lock(&g_seats_lock);
+    BoardSeat* s = seat_holding_locked(kind, index);
+    if (s) {
+        /* The chair stays. Only the person in it goes — which is what makes a
+         * seat number something anybody can hold on to across an unplug. */
+        s->occupied = false;
+    }
+    uint8_t seated = seat_occupied_count();
+    spin_unlock(&g_seats_lock);
+
+    if (!s) {
+        /* A medium that was never seated. Ordinary: an enumeration that failed
+         * before the room was told about it still comes through here. */
+        return;
+    }
+
+    kprintf("[Boardroom] seat %u is empty — %s has left\n", s->number, s->name);
+
     /* The Boardroom knows about media and not about what anybody keeps on
-     * them, so it says what happened and lets whoever cares decide. */
-    BoardroomSeatEvent ev = { g_seat_count, 0, BOARDROOM_NO_SEAT, 0 };
+     * them, so it says what happened, names the chair it happened to, and lets
+     * whoever cares decide what that means. */
+    BoardroomSeatEvent ev = { seated, 1, s->number, 0 };
     TouchPublish("seat:emptied", &ev, sizeof(ev));
 }
 
@@ -293,15 +456,15 @@ void BoardroomAttendIfPending(void)
     }
     __atomic_store_n(&g_arrival_pending, 0u, __ATOMIC_RELEASE);
 
-    uint8_t before = g_seat_count;
+    uint32_t before = g_seatings;
 
-    /* Idempotent per medium: a seat that already exists is not seated twice,
-     * and seat numbers never move, so anything holding one keeps it. */
+    /* Idempotent per medium: a medium already sitting somewhere is not seated
+     * twice, and seat numbers never move, so anything holding one keeps it. */
     BoardroomInit();
 
-    if (g_seat_count != before) {
+    if (g_seatings != before) {
         kprintf("[Boardroom] %u medium/media arrived after the room was called "
-                "to order\n", (unsigned)(g_seat_count - before));
+                "to order\n", (unsigned)(g_seatings - before));
     }
 
     /* Whether any of it carries the filesystem this machine lives on is not
@@ -314,19 +477,22 @@ uint8_t BoardroomSeatCount(void) { return g_seat_count; }
 
 BoardKind BoardroomSeatKind(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     return s ? s->kind : BOARD_NONE;
 }
 
 const char* BoardroomSeatName(uint8_t seat)
 {
+    /* An empty chair has no name. It keeps the last occupant's in the struct
+     * so the departure line can say who left, but handing that out afterwards
+     * would name a medium that is in somebody's pocket. */
     BoardSeat* s = seat_find(seat);
-    return s ? s->name : "";
+    return (s && s->occupied) ? s->name : "";
 }
 
 uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s) return 0;
 
     switch (s->kind) {
@@ -348,20 +514,26 @@ uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
 
 uint8_t BoardroomSeatIndex(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     return s ? s->index : 0;
 }
 
 bool BoardroomSeatIsRemovable(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     return s ? s->removable : false;
+}
+
+uint32_t BoardroomSeatSeating(uint8_t seat)
+{
+    BoardSeat* s = seat_find(seat);
+    return s ? s->seating : 0;
 }
 
 bool BoardroomSeatOccupied(uint8_t seat)
 {
     BoardSeat* s = seat_find(seat);
-    if (!s) {
+    if (!s || !s->occupied) {
         return false;
     }
 
@@ -378,7 +550,7 @@ bool BoardroomSeatOccupied(uint8_t seat)
 
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
     }
@@ -409,7 +581,7 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 
 int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffer)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
     }
@@ -440,7 +612,7 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
 
 bool BoardroomSeatCanReadAsync(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s) {
         return false;
     }
@@ -460,7 +632,7 @@ bool BoardroomSeatCanReadAsync(uint8_t seat)
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
                            void* dma_phys, BoardroomAsyncCb cb, void* ctx)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s || !dma_phys || count == 0) {
         return ERR_INVALID_ARGUMENT;
     }
@@ -577,7 +749,7 @@ void BoardroomAsyncSelfTest(uint8_t seat)
 
 int BoardroomFlush(uint8_t seat)
 {
-    BoardSeat* s = seat_find(seat);
+    BoardSeat* s = seat_taken(seat);
     if (!s) {
         return -1;
     }
@@ -621,6 +793,11 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
         uint8_t uuid[16];
         memset(uuid, 0, sizeof(uuid));
 
+        /* An empty chair carries nothing, and probing one reads through a unit
+         * number that now belongs to somebody else. */
+        if (!s->occupied) {
+            continue;
+        }
         if (!probe(ctx, s->number, uuid)) {
             continue;
         }
@@ -638,7 +815,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
 
         /* The fallback, for when nothing on the bus is the volume named on the
          * pass — or there is no pass. */
-        BoardSeat* c = seat_find(chosen);
+        BoardSeat* c = seat_taken(chosen);
         if (c && !c->removable && s->removable) {
             chosen = s->number;
         }
@@ -662,7 +839,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
         for (BoardSeat* s = g_seats; s; s = s->next) {
             uint8_t uuid[16];
             memset(uuid, 0, sizeof(uuid));
-            if (!probe(ctx, s->number, uuid)) {
+            if (!s->occupied || !probe(ctx, s->number, uuid)) {
                 continue;
             }
             char text[33];

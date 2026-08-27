@@ -51,15 +51,19 @@ void BoardroomInit(void);
 void BoardroomNoteArrival(void);
 
 /*
- * A medium left, and this is said at the moment it does.
+ * A medium left, and this is said at the moment it does — naming which one.
  *
  * Not deferred, because a seat holds a controller-specific index and those are
  * handed out again as soon as they are free: by the time a deferred pass ran,
  * the seat could be pointing at a different medium with the same number, and
  * nothing would ever have noticed the first one leaving. Called from the
  * service pass that takes the device down, which is ordinary kernel context.
+ *
+ * The medium is named by the controller and the index it had, not by a seat
+ * number, because the caller is a driver and a driver does not hold seats. The
+ * room works out which chair that was and empties it.
  */
-void BoardroomNoteDeparture(void);
+void BoardroomNoteDeparture(BoardKind kind, uint8_t index);
 
 /* Cheap enough for the idle loop: one atomic load when nothing has arrived,
  * which is almost always. */
@@ -74,23 +78,27 @@ void BoardroomAttendIfPending(void);
  * business knowing that anybody keeps a filesystem on one; it announces, and
  * whoever cares is listening.
  *
- *   seat:taken     one or more media are in the room that were not before
- *   seat:emptied   a medium left
+ *   seat:taken     one or more seats have somebody in them who was not there
+ *   seat:emptied   a seat has nobody in it any more, and it is named
  *
  * Announced AFTER the room has settled, never part-way through seating: a
  * listener that mounts on this event would otherwise be looking at a room
  * that is still filling up, and would choose from the seats that happened to
  * be added first.
  *
- * A departure does not name a seat. The medium is already gone by the time
- * anyone is told, and seat indices are handed out again as soon as they are
- * free — so a number here would name a socket that may already hold something
- * else. A listener re-checks the seat it cares about instead.
+ * ‼ seat:taken fires whenever a seat CHANGES HANDS, not only when the room
+ * grows. That distinction is the whole of a bug that survived every test in
+ * QEMU: a stick pulled out and pushed back in gets its unit number handed
+ * straight back to it, so the chair it lands in is one the room already had.
+ * The room grew by nothing, said nothing, and the volume on that stick was
+ * never mounted again — on a machine that boots from a stick, that is the
+ * machine gone until it is switched off and on. Every oracle passed, because
+ * every oracle plugged the stick in exactly once.
  */
 typedef struct __attribute__((packed)) {
-    uint8_t seated;      /* media in the room now */
-    uint8_t arrived;     /* how many of them are new (0 for a departure) */
-    uint8_t first_new;   /* lowest new seat number, or BOARDROOM_NO_SEAT */
+    uint8_t seated;      /* seats with a medium in them now */
+    uint8_t changed;     /* how many seats changed hands just now */
+    uint8_t first;       /* lowest seat that changed, or BOARDROOM_NO_SEAT */
     uint8_t reserved;
 } BoardroomSeatEvent;
 
@@ -114,6 +122,24 @@ bool        BoardroomSeatIsRemovable(uint8_t seat);
  * that is what removable means.
  */
 bool        BoardroomSeatOccupied(uint8_t seat);
+
+/*
+ * WHICH seating of the room this chair's current occupant is.
+ *
+ * A chair is a place, not a medium, and it can be taken again. That is what
+ * makes the room a room rather than a list that only ever grows — but it costs
+ * something, and this is what pays for it: "there is a medium in seat 3" stops
+ * being enough to know it is the SAME medium that was there a moment ago.
+ *
+ * Every taking anywhere in the room gets the next number, so a chair whose
+ * seating has not changed has not changed hands, and one whose seating has
+ * changed is carrying somebody else — even if it happened between two reads
+ * and nothing else could tell. Anything that holds a seat across time stamps
+ * this when it takes hold and compares it afterwards.
+ *
+ * Zero for a chair nobody has ever sat in, and for a seat that does not exist.
+ */
+uint32_t    BoardroomSeatSeating(uint8_t seat);
 
 /*
  * What the medium in this seat is BUILT from, in bytes, as opposed to what it

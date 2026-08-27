@@ -187,9 +187,19 @@ run_latearrival() {
     sleep 1
     ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
 
+    #
+    # Waited out to the END of the chain.
+    #
+    # This used to break on the FIRST "AUTOSTART Started" — which is
+    # display.elf — and then stop the machine two seconds later. Reading the
+    # rest of the volume's programs off a USB stick takes longer than that
+    # often enough that the two checks below were passing on luck: the machine
+    # was killed mid-launch and the log was then searched for a line it had
+    # not had time to print. Measured — it went red on a tree whose kernel had
+    # nothing wrong with it.
     i=0
-    while [ $i -lt 30 ]; do
-        grep -q "AUTOSTART. Started" build/serial.log 2>/dev/null && break
+    while [ $i -lt 60 ]; do
+        grep -q "hands over" build/serial.log 2>/dev/null && break
         sleep 1; i=$((i+1))
     done
     sleep 2
@@ -210,6 +220,120 @@ run_latearrival() {
     grep -q "AUTOSTART. Started .display.elf" "$L"; chk $? "the volume's display daemon started"
     grep -q "AUTOSTART. Started .shell.bin" "$L";   chk $? "the volume's shell started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+}
+
+# ── replug: the stick is pulled out and pushed back in ─────────────────────
+#
+# The scenario every other one here missed, and the one the board actually
+# failed on. Each of the five existing scenarios plugs the stick in exactly
+# ONCE, so none of them could ever reach the code that decides what to do with
+# a medium arriving in a room that has already seen it.
+#
+# What went wrong: a seat could never be emptied, so the departing stick left
+# its chair behind occupied. It got its unit number straight back on return,
+# the room found the chair already holding that number, added nothing, and
+# therefore announced nothing — and the volume was never mounted again. On a
+# machine that boots from a stick, that is the machine gone until it is
+# switched off and on.
+#
+# Four cores, same as latearrival: the departure is taken down from the idle
+# and guide loops, and on one core neither of them runs.
+run_replug() {
+    echo "== replug: the volume leaves and comes home to the same chair =="
+    latearrival_on; build
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 30 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    # First arrival — the same one latearrival proves.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    # Waited out to the END of the chain, not to its first sign. The stand-in
+    # handing over is the last thing the first arrival does; pulling the stick
+    # before then tests something else entirely — a medium yanked out from
+    # under a program being loaded — and reports it as this.
+    i=0
+    while [ $i -lt 60 ]; do
+        grep -q "hands over" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    # A mark in the log, so the second half is read apart from the first: every
+    # line the checks below care about has a twin above it.
+    local FIRST_LINES
+    FIRST_LINES=$(wc -l < build/serial.log)
+
+    # Pulled out.
+    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 20 ]; do
+        grep -q "is empty" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    # And pushed back in — the same medium, into the machine it left.
+    #
+    # The drive is added again first. A drive created through the HMP
+    # `drive_add` is auto-delete: QEMU takes it away with the device that was
+    # using it, so the second `device_add` referred to a drive that no longer
+    # existed and did nothing at all. It cost a run to find, because a monitor
+    # command that fails is silent on the guest's serial line.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        grep -q "the volume is back" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.replug.log"
+    latearrival_off
+    L="$SCRATCH/serial.replug.log"
+    # Everything after the first arrival. The checks are about the SECOND one.
+    tail -n +$((FIRST_LINES + 1)) "$L" > "$SCRATCH/serial.replug.second.log"
+    local S="$SCRATCH/serial.replug.second.log"
+
+    # The first arrival happened at all — otherwise the rest is vacuous.
+    grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
+    chk $? "the stick was mounted on its first arrival"
+    grep -q "AUTOSTART. Started .shell.bin" "$L"; chk $? "and its shell started"
+    grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+
+    # The departure NAMES the chair. Saying only "something left" is what made
+    # the room unable to empty the right one.
+    grep -qE "seat [0-9]+ is empty . usb[0-9]+" "$S"
+    chk $? "the room emptied the chair and named it"
+    grep -q "the medium the volume lives on has left" "$S"
+    chk $? "TagFS noticed the medium go"
+
+    # The second arrival is announced. This is the whole repair: it used not to
+    # be, because the room only ever spoke when it GREW.
+    grep -q "arrived after the room was called to order" "$S"
+    chk $? "the return was announced, not swallowed"
+    grep -q "the volume is back, in seat" "$S"
+    chk $? "TagFS took the volume back up"
+
+    # Into the chair it left, not a new one. The room must not grow a chair
+    # per plug cycle — sixteen of them is what a live board showed.
+    grep -q "seat 2:" "$S"
+    if [ $? -ne 0 ]; then ok "no new chair was added for the returning stick"
+    else bad "no new chair was added for the returning stick"; fi
+    grep -qE "the volume is back, in seat 1" "$S"
+    chk $? "and it is the same seat number it had before"
+
+    # And the machine is still usable afterwards, which is the point.
+    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
 }
 
 run_stranger() {
@@ -414,9 +538,10 @@ case "${1:-both}" in
     uefi)     run_uefi ;;
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
+    replug)   run_replug ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|badpool|both|all]"; exit 2 ;;
 esac
 
 echo
