@@ -804,8 +804,21 @@ static void uuid_text(const uint8_t uuid[16], char out[33])
     out[32] = '\0';
 }
 
-uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
+/* One line of the list that is printed when more than one volume is here. */
+static void board_say_volume(uint8_t seat, const uint8_t uuid[16])
 {
+    char text[33];
+    uuid_text(uuid, text);
+    kprintf("[Boardroom]   seat %u: %s  %s\n", seat, BoardroomSeatName(seat),
+            text);
+}
+
+uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
+                            uint8_t out_uuid[16])
+{
+    if (out_uuid) {
+        memset(out_uuid, 0, 16);
+    }
     if (!probe) {
         return BOARDROOM_NO_SEAT;
     }
@@ -816,8 +829,26 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     bool     have_pass = BoardingPassVolume(want);
 
     uint8_t  chosen      = BOARDROOM_NO_SEAT;
+    uint8_t  chosen_uuid[16];
     uint8_t  by_identity = BOARDROOM_NO_SEAT;
     unsigned found       = 0;
+
+    /*
+     * The first volume met, held back by one line.
+     *
+     * The list below is only worth printing when there is more than one, and
+     * that is not known until the second turns up — by which time the first has
+     * been and gone. Two locals close that, and what they replace was a SECOND
+     * WALK of the room afterwards calling probe() again on every chair. probe()
+     * is the filesystem: it reads a partition table and a deed off each medium.
+     * Sixteen bytes were being paid for with a re-read of every disk in the
+     * machine.
+     */
+    uint8_t first_seat = BOARDROOM_NO_SEAT;
+    uint8_t first_uuid[16];
+
+    memset(chosen_uuid, 0, sizeof(chosen_uuid));
+    memset(first_uuid, 0, sizeof(first_uuid));
 
     for (BoardSeat* s = g_seats; s; s = s->next) {
         uint8_t uuid[16];
@@ -833,6 +864,17 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
         }
         found++;
 
+        if (found == 1) {
+            first_seat = s->number;
+            memcpy(first_uuid, uuid, 16);
+        } else {
+            if (found == 2) {
+                kprintf("[Boardroom] a volume is here on more than one seat:\n");
+                board_say_volume(first_seat, first_uuid);
+            }
+            board_say_volume(s->number, uuid);
+        }
+
         if (have_pass && memcmp(uuid, want, 16) == 0 &&
             by_identity == BOARDROOM_NO_SEAT) {
             by_identity = s->number;
@@ -840,6 +882,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
 
         if (chosen == BOARDROOM_NO_SEAT) {
             chosen = s->number;
+            memcpy(chosen_uuid, uuid, 16);
             continue;
         }
 
@@ -848,6 +891,7 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
         BoardSeat* c = seat_taken(chosen);
         if (c && !c->removable && s->removable) {
             chosen = s->number;
+            memcpy(chosen_uuid, uuid, 16);
         }
     }
 
@@ -861,22 +905,10 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     bool by_rule = true;
     if (by_identity != BOARDROOM_NO_SEAT) {
         chosen  = by_identity;
+        /* It was chosen BECAUSE it matched, so the pass's sixteen bytes are
+         * that seat's identity — there is nothing else it could be. */
+        memcpy(chosen_uuid, want, 16);
         by_rule = false;
-    }
-
-    if (found > 1) {
-        kprintf("[Boardroom] a volume was found on %u seats:\n", found);
-        for (BoardSeat* s = g_seats; s; s = s->next) {
-            uint8_t uuid[16];
-            memset(uuid, 0, sizeof(uuid));
-            if (!s->occupied || !probe(ctx, s->number, uuid)) {
-                continue;
-            }
-            char text[33];
-            uuid_text(uuid, text);
-            kprintf("[Boardroom]   seat %u: %s  %s%s\n", s->number, s->name,
-                    text, s->number == chosen ? "  <- using this one" : "");
-        }
     }
 
     if (found == 0) {
@@ -886,6 +918,9 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     if (!by_rule) {
         kprintf("[Boardroom] seat %u carries the volume this kernel was read "
                 "out of — the loader said so on its boarding pass\n", chosen);
+        if (out_uuid) {
+            memcpy(out_uuid, chosen_uuid, 16);
+        }
         return chosen;
     }
 
@@ -924,12 +959,15 @@ uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx)
     }
     if (found > 1) {
         kprintf("[Boardroom] falling back to the rule: the removable medium "
-                "wins\n");
+                "wins — seat %u\n", chosen);
     }
 
     /* Which volume is about to be mounted, and on what grounds — the line that
      * explains every file the machine goes on to read. It scrolls past like
      * everything else and is recoverable like everything else, from the ring
      * the kernel keeps of its own boot. */
+    if (out_uuid) {
+        memcpy(out_uuid, chosen_uuid, 16);
+    }
     return chosen;
 }

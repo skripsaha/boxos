@@ -104,6 +104,128 @@ static bool ground_room(uint8_t found, uint8_t max, uint8_t seat)
 }
 
 /*
+ * ── What this seat's table said, so it is read once and not five times ──────
+ *
+ * The same medium's table is surveyed several times in one boot by parties
+ * that have no business knowing about each other: the room describing what it
+ * has just seated, a filesystem asking every chair whether its volume is
+ * there, the mount standing on the ground it chose, and the boot survey
+ * walking all of them. Measured on this machine — five reads of sector 0 for
+ * one seat, in one boot. On a flash drive each of those is a transfer over the
+ * bus, and on a GPT disk it is three.
+ *
+ * The answer is small, is owned by nobody — MediumGround is four plain numbers
+ * — and cannot go stale while the medium stays put. So it is remembered per
+ * chair, keyed by WHICH OCCUPANT of that chair it describes. The Boardroom
+ * already has that fact and already keeps it for exactly this kind of
+ * question: a chair whose seating has not changed has not changed hands. A
+ * stick pulled out and pushed back gets a new seating and is read again, which
+ * is right — it may not be the same stick and it may not have the same table.
+ *
+ * ‼ NOTHING IN THIS KERNEL WRITES A PARTITION TABLE, and this depends on that.
+ * Every write to a medium goes through BoardroomWrite, and the only callers
+ * are the volume — which addresses sectors from its own ground and therefore
+ * cannot reach sector 0 of the medium — and Braid, which no running
+ * configuration builds in. A writer of partition tables that ever appears MUST
+ * drop the memo for the seat it wrote to, or the next survey will answer from
+ * before the write.
+ *
+ * Two cores surveying the same chair cannot produce a wrong answer, only a
+ * wasted read: an entry is only ever handed back when its key matches
+ * EXACTLY, so an entry written under a seating that has since changed is never
+ * matched again by anybody.
+ *
+ * One entry per chair, made when that chair is first surveyed and never given
+ * back — the room's own list of chairs is kept the same way and for the same
+ * reason. A fixed array would be a limit invented here rather than one the
+ * hardware states, and freeing an entry would be freeing what the next survey
+ * immediately asks for again.
+ */
+typedef struct GroundMemo {
+    struct GroundMemo *next;
+    uint8_t      seat;
+    uint32_t     seating;       /* which occupant of that chair this describes */
+    uint8_t      claimed;
+    MediumGround ground[GROUND_MAX_PER_MEDIUM];
+} GroundMemo;
+
+static GroundMemo *g_memos = NULL;
+static spinlock_t  g_memo_lock;
+static bool        g_memo_lock_ready = false;
+
+static void memo_lock_init(void)
+{
+    if (!g_memo_lock_ready) {
+        spinlock_init(&g_memo_lock);
+        g_memo_lock_ready = true;
+    }
+}
+
+static bool memo_recall(uint8_t seat, uint32_t seating, MediumGround *out,
+                        uint8_t *out_claimed)
+{
+    memo_lock_init();
+
+    spin_lock(&g_memo_lock);
+    for (GroundMemo *m = g_memos; m; m = m->next) {
+        if (m->seat == seat && m->seating == seating) {
+            *out_claimed = m->claimed;
+            memcpy(out, m->ground, (size_t)m->claimed * sizeof(MediumGround));
+            spin_unlock(&g_memo_lock);
+            return true;
+        }
+    }
+    spin_unlock(&g_memo_lock);
+    return false;
+}
+
+static void memo_keep(uint8_t seat, uint32_t seating,
+                      const MediumGround *ground, uint8_t claimed)
+{
+    memo_lock_init();
+
+    /* Allocated before the lock is taken and given back if it turns out not to
+     * be needed. kmalloc under a spinlock is a wait of unbounded length inside
+     * one of bounded length, and this is reached from the pass that seats media
+     * arriving on the USB bus; the Boardroom's own seat_take is built the same
+     * way for the same reason. */
+    GroundMemo *spare = (GroundMemo *)kmalloc(sizeof(GroundMemo));
+
+    spin_lock(&g_memo_lock);
+
+    GroundMemo *m = NULL;
+    for (GroundMemo *c = g_memos; c; c = c->next) {
+        if (c->seat == seat) {
+            m = c;
+            break;
+        }
+    }
+
+    if (!m) {
+        if (!spare) {
+            /* No memory for a memo is not a failure. It is a survey that will
+             * be read off the medium again next time, which is what every
+             * survey did before there were any. */
+            spin_unlock(&g_memo_lock);
+            return;
+        }
+        m       = spare;
+        spare   = NULL;
+        m->seat = seat;
+        m->next = g_memos;
+        g_memos = m;
+    }
+
+    m->seating = seating;
+    m->claimed = claimed;
+    memcpy(m->ground, ground, (size_t)claimed * sizeof(MediumGround));
+
+    spin_unlock(&g_memo_lock);
+
+    if (spare) kfree(spare);
+}
+
+/*
  * GPT, if the disk has one.
  *
  * Both checksums are verified because both exist for a reason: a header that
@@ -219,9 +341,18 @@ done:
     return found;
 }
 
-uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max)
+/*
+ * The survey itself, with nothing remembered in it.
+ *
+ * Fills up to GROUND_MAX_PER_MEDIUM, which is this file's own ceiling and not
+ * the caller's buffer: what is read off the medium is the whole of what the
+ * medium says, so that the memo above holds a complete answer whoever asked
+ * first. Trimming to what a particular caller can hold happens in one place,
+ * in GroundSurvey.
+ */
+static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
 {
-    if (!out || max == 0) return 0;
+    const uint8_t max = GROUND_MAX_PER_MEDIUM;
 
     uint8_t sector0[BOARDROOM_SECTOR_BYTES];
     if (BoardroomRead(seat, 0, 1, sector0) != 0) {
@@ -271,4 +402,36 @@ uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max)
     }
 
     return found;
+}
+
+uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max)
+{
+    if (!out || max == 0) return 0;
+
+    MediumGround all[GROUND_MAX_PER_MEDIUM];
+    uint8_t      claimed;
+
+    /*
+     * Zero means nobody has ever sat in that chair, or there is no such chair.
+     * There is nothing to remember about an empty one, and a memo keyed on
+     * zero could never be told apart from the next occupant's.
+     */
+    uint32_t seating = BoardroomSeatSeating(seat);
+
+    if (seating == 0 || !memo_recall(seat, seating, all, &claimed)) {
+        claimed = ground_survey_medium(seat, all);
+        if (seating != 0) {
+            memo_keep(seat, seating, all, claimed);
+        }
+    }
+
+    if (claimed > max) {
+        kprintf("[Ground] seat %u carries %u runs of BoxOS ground and the "
+                "survey it was asked for holds %u; the rest was not handed "
+                "over\n", seat, claimed, max);
+        claimed = max;
+    }
+
+    memcpy(out, all, (size_t)claimed * sizeof(MediumGround));
+    return claimed;
 }

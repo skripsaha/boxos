@@ -40,6 +40,7 @@
 #include "ahci.h"
 #include "cabin_layout.h"
 #include "tagfs.h"
+#include "deed.h"
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 #include "boarding.h"
@@ -732,8 +733,10 @@ void kernel_main(void)
      * the answer is still cheap to act on. */
     BoardroomAsyncSelfTest(tagfs_get_seat());
 
-    /* And what every medium's own ground says it carries. Reads only. */
-    { extern void DeedSurveyAll(void); DeedSurveyAll(); }
+    /* And what every medium's own ground says it carries. Reads only — and not
+     * the ground the volume above is standing on, which has just been read,
+     * checked and described by the mount that took it up. */
+    DeedSurveyAll(tagfs_get_seat(), tagfs_get_volume_base());
 
     debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
     error_t storage_reg_err = StorageDeckRegister();

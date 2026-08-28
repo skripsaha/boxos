@@ -295,7 +295,7 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
     }
 }
 
-void DeedSurveyAll(void)
+void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start)
 {
     uint8_t seats = BoardroomSeatCount();
 
@@ -306,6 +306,26 @@ void DeedSurveyAll(void)
         uint8_t claimed = GroundSurvey(seat, ground, GROUND_MAX_PER_MEDIUM);
 
         for (uint8_t g = 0; g < claimed; g++) {
+            /*
+             * The ground this machine is already standing on.
+             *
+             * Its deed was read, checked against the copy at the far end and
+             * described by whoever mounted it, seconds before this ran. Reading
+             * it again establishes nothing and costs two more reads of the
+             * medium — on a flash drive, two more transfers over the bus — and
+             * it printed the same three lines a second time, which is how a log
+             * teaches the person reading it to stop looking.
+             *
+             * Named rather than skipped in silence: a survey that leaves a
+             * ground out without saying so is a survey nobody can count.
+             */
+            if (seat == standing_seat &&
+                ground[g].start_sector == standing_start) {
+                kprintf("[Deed] seat %u ground %u carries the volume this "
+                        "machine is standing on, described above\n", seat, g);
+                continue;
+            }
+
             DeedCopy head;
             bool from_tail = false;
             if (DeedReadHead(seat, &ground[g], &head) != OK) {

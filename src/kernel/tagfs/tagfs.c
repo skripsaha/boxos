@@ -281,9 +281,27 @@ static bool    g_volume_uuid_known = false;
  */
 static uint64_t g_volume_base;
 
+uint64_t tagfs_get_volume_base(void) { return g_volume_base; }
+
 static void TagFSProbeDrive(void)
 {
-    g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, NULL);
+    /*
+     * The identity comes back with the seat, because the room had it.
+     *
+     * tagfs_recognise is what told the room which volume that seat carries, and
+     * this used to call it a SECOND time on the chosen seat purely to be told
+     * again — a full survey of that medium's partition table and another read
+     * of its deed, for sixteen bytes the room was already holding.
+     *
+     * Into a local, and copied over only once a seat has been found: what this
+     * volume calls itself is what lets it be recognised when its medium is
+     * pushed back in, so it has to survive a mount that FAILS. A re-mount
+     * attempted in the instant the stick left again would otherwise overwrite
+     * the identity with nothing, and the volume could never be matched on its
+     * return for the rest of the boot.
+     */
+    uint8_t uuid[16];
+    g_tagfs_seat = BoardroomFindVolume(tagfs_recognise, NULL, uuid);
 
     if (g_tagfs_seat == BOARDROOM_NO_SEAT) {
         kprintf("[TagFS] no volume found on any of the %u seated medium(s)\n",
@@ -291,7 +309,8 @@ static void TagFSProbeDrive(void)
         return;
     }
 
-    g_volume_uuid_known = tagfs_recognise(NULL, g_tagfs_seat, g_volume_uuid);
+    memcpy(g_volume_uuid, uuid, 16);
+    g_volume_uuid_known = true;
     g_tagfs_seating     = BoardroomSeatSeating(g_tagfs_seat);
 
     kprintf("[TagFS] volume on seat %u: %s\n", g_tagfs_seat,
@@ -474,9 +493,19 @@ static error_t volume_take_ground(uint8_t seat)
         return ERR_TAGFS_CORRUPTED;
     }
 
-    /* And whether the whole of it is present. A volume with only a head still
+    /*
+     * And whether the whole of it is present. A volume with only a head still
      * mounts — this is not the reason to refuse one — but it is a volume whose
-     * far end no longer agrees, and nobody finds that out later by accident. */
+     * far end no longer agrees, and nobody finds that out later by accident.
+     *
+     * ‼ Said when it AGREES, and not only when it does not.
+     *
+     * This check has always been here and only ever spoke on failure, so a
+     * volume whose whole extent is present was indistinguishable, from the
+     * screen, from a volume nobody had checked — and on a machine read by
+     * photographing that screen there was no way to tell which. It also meant
+     * the check could be lost entirely without anything going quiet.
+     */
     DeedCopy tail;
     MediumGround stood = { .start_sector = g_volume_base,
                            .sectors      = head.head.sectors,
@@ -485,7 +514,11 @@ static error_t volume_take_ground(uint8_t seat)
     if (head.head.role == VOLUME_DEED_ROLE_TAIL) {
         /* Already standing on the far copy — there is nothing further out to
          * ask, and asking would only re-read what is already in hand. */
+        kprintf("[TagFS] seat %u: its far copy agrees — it IS the far copy, and "
+                "the head this volume began with is gone\n", seat);
     } else if (DeedReadTail(seat, &stood, &head, &tail) == OK) {
+        kprintf("[TagFS] seat %u: its far copy agrees — the whole volume is "
+                "present\n", seat);
         DeedRelease(&tail);
     } else {
         kprintf("[TagFS] seat %u: the far end of this volume does not answer; "

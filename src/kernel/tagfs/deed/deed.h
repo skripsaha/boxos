@@ -111,7 +111,19 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy);
  * in front of it. Whether a partition table parses, whether a Deed checksums,
  * and whether the copy at the far end agrees with the one at the near end are
  * all facts about THIS machine and cannot be established anywhere else.
+ *
+ * ‼ EXCEPT THE ONE GROUND THIS MACHINE IS ALREADY STANDING ON, which is named
+ * by (`standing_seat`, `standing_start`) — the seat and the medium sector its
+ * volume begins at. Whoever mounted that volume read its deed, checked it
+ * against the copy at the far end and described it, out loud, seconds earlier.
+ * Reading it again establishes nothing and prints the same three lines a
+ * second time; it is named here instead, so the survey still accounts for every
+ * ground it met. Every OTHER ground on the same medium is surveyed normally —
+ * a disk may carry a second BoxOS partition nobody has mounted, and that one
+ * has never been looked at.
+ *
+ * BOARDROOM_NO_SEAT for a machine that mounted nothing.
  */
-void DeedSurveyAll(void);
+void DeedSurveyAll(uint8_t standing_seat, uint64_t standing_start);
 
 #endif /* DEED_READER_H */
