@@ -1673,9 +1673,10 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
                 "arrived and moved nothing\n", ctrl->name);
     }
 
-    /* These three lines are the report. Held so they can be read off a screen
-     * rather than inferred from a blur. */
-    xhci_hold_screen();
+    /* Those three lines ARE the report, and they are written to stand on their
+     * own: everything they name is read at the moment of the failure, so
+     * nothing has to be pieced together from lines that scrolled past earlier.
+     * That is what replaced holding the screen for them. */
 }
 
 /*
@@ -1757,7 +1758,6 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
                     ctrl->command_ring.enqueue_idx,
                     ctrl->command_ring.cycle_state,
                     xhci_command_outstanding(ctrl));
-            xhci_hold_screen();
         }
         xhci_slot_retire(ctrl, slot);
     }
