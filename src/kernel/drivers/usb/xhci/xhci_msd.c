@@ -820,6 +820,7 @@ static void msd_job_run(MsdJob* j)
          */
         if (!msd_device_is_there(j->u)) {
             msd_note_gone(j->u, "an answer was owed at this stage");
+            xhci_ep_abandon(j->u->ctrl, j->u->slot, j->dci);
             msd_job_finish(j, -1);
             break;
         }
@@ -838,6 +839,17 @@ static void msd_job_run(MsdJob* j)
             kprintf("[USB disk %u] no answer in %u ms at stage %u — resetting "
                     "the transport\n", j->u->number, MSD_XFER_TIMEOUT_MS,
                     j->phase);
+            /*
+             * The host side first, and the order is not a preference.
+             *
+             * The transfer this gave up on is still on the endpoint's ring and
+             * the controller still owns it. Resetting the transport before
+             * taking it back tells the device to start a new command over a
+             * pipe the controller is still walking — and leaves the endpoint
+             * marked as busy for the rest of the boot, so every later read on
+             * this disk is refused before it is even sent.
+             */
+            xhci_ep_abandon(j->u->ctrl, j->u->slot, j->dci);
             msd_bot_reset(j->u);
             msd_job_finish(j, -1);
             break;
@@ -1666,6 +1678,11 @@ void xhci_msd_watchdog(void)
     kprintf("[USB disk %u] a read nobody was waiting on went unanswered for "
             "%u ms at stage %u — resetting the transport\n",
             late_unit->number, MSD_XFER_TIMEOUT_MS, late_job->phase);
+    /* The transfer comes off the endpoint before anything else happens — see
+     * the note on the same call in msd_job_run. It matters more here: this job
+     * carries a completion node, and the node lives inside memory that
+     * msd_job_finish is about to hand back. */
+    xhci_ep_abandon(late_unit->ctrl, late_unit->slot, late_job->dci);
     msd_bot_reset(late_unit);
     msd_job_finish(late_job, -1);
 }

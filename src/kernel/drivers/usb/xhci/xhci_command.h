@@ -101,6 +101,29 @@ int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t
  * and their completions must not be mistaken for one of its steps. */
 int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                                  uint8_t slot_id, uint8_t dci);
+
+/*
+ * Stop an endpoint that is RUNNING, because the transfer on it is not wanted
+ * any more.
+ *
+ * xHCI 1.2 Section 4.6.9. The controller stops the endpoint and posts a
+ * Transfer Event saying where it had got to, so the transfer leaves the ring
+ * instead of being forgotten while the controller still owns it.
+ *
+ * ‼ THIS IS NOT Reset Endpoint, AND THE DIFFERENCE IS A MACHINE.
+ *
+ * Reset Endpoint (Section 4.6.8) is defined for a HALTED endpoint and for
+ * nothing else. An endpoint whose device is merely SLOW is Running, so the
+ * controller refuses the reset — and says so: `Reset Endpoint on slot 2 was
+ * refused: Context State Error`, once per attempt, measured. A refused command
+ * is a repair that did not happen, and the driver went on as though it had.
+ *
+ * Declared with the others and, until now, never posted by anything: the TRB
+ * type has been defined in xhci_trb.h and named in the command table since the
+ * driver was written.
+ */
+int xhci_post_stop_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                uint8_t slot_id, uint8_t dci);
 int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                                  uint8_t slot_id, uint8_t dci,
                                  uint64_t dequeue_ptr_with_dcs);
