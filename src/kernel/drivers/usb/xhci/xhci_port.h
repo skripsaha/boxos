@@ -37,6 +37,24 @@ void     xhci_port_clear_change_bits(xhci_controller_t* ctrl, uint8_t port, uint
  * Zero when the controller never described the port. */
 uint8_t  xhci_port_protocol(xhci_controller_t* ctrl, uint8_t port);
 
+/* The other root port of the same physical socket, or zero when this port has
+ * no other half. See ctrl->port_pair for what that answer is made of. */
+uint8_t  xhci_port_other_half(xhci_controller_t* ctrl, uint8_t port);
+
+/*
+ * Is the SOCKET this port belongs to empty — as opposed to this port being.
+ *
+ * The one question a single port cannot answer. A USB 3 socket is two root
+ * ports, and a device whose SuperSpeed link does not train vanishes from one
+ * of them and appears on the other; on the port it left, that is bit-for-bit
+ * what a hand pulling it out looks like. Asking both halves separates them,
+ * and separates them with two register reads rather than a clock.
+ *
+ * A port with no other half answers for itself alone, which is correct: a
+ * socket with one port IS that port.
+ */
+bool     xhci_port_socket_is_empty(xhci_controller_t* ctrl, uint8_t port);
+
 /* Switch on every root port that is not powered, then wait out the debounce.
  * Called once, after the controller is running. */
 void     xhci_power_ports(xhci_controller_t* ctrl);

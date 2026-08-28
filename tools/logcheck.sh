@@ -497,6 +497,23 @@ run_healthy() {
     # (4) nothing collided in the on-disk registry
     ! grep -q "slot .* already used" "$L"; chk $? "no registry slot collision"
 
+    # Which root ports are one hole in the case. The controller does not say,
+    # so this driver pairs them by position and PRINTS that it is doing so —
+    # a board wired differently has to be catchable by reading the boot, since
+    # nothing else can catch it.
+    grep -q "socket(s) have both halves" "$L"
+    chk $? "the boot says which of its root ports share a socket"
+
+    # And each port names its own other half, both ways round. A pairing that
+    # only holds in one direction is one that will be asked the wrong way.
+    local pair_line pair_a pair_b
+    pair_line=$(grep -m1 -oE "port [0-9]+: .*same socket as port [0-9]+" "$L")
+    pair_a=$(printf '%s' "$pair_line" | sed -nE 's/^port ([0-9]+):.*/\1/p')
+    pair_b=$(printf '%s' "$pair_line" | sed -nE 's/.*same socket as port ([0-9]+)$/\1/p')
+    [ -n "$pair_a" ] && [ -n "$pair_b" ] &&
+        grep -q "port $pair_b: .*same socket as port $pair_a\b" "$L"
+    chk $? "the pairing holds both ways (port $pair_a <-> port $pair_b)"
+
     # (5) the kernel's vocabulary is complete, not a handful of survivors
     local names
     names=$(grep -c '^\[PROBE\] logbook' "$L")
@@ -825,6 +842,20 @@ run_yank() {
 
     ! grep -q "no answer in .* ms at stage" "$L"
     chk $? "no budget was waited out for an answer nobody could give"
+
+    # ‼ THE SOCKET, NOT THE PORT.
+    #
+    # A USB 3 socket is two root ports, and a device whose SuperSpeed link does
+    # not train leaves one of them and appears on the other — which on the port
+    # it left is bit-for-bit what a hand pulling it out looks like. Here the
+    # emulator really does take the device away, so BOTH halves are empty, and
+    # the driver has to say so rather than say something that would be equally
+    # true of a link falling back.
+    grep -q "unplugged — the socket is empty" "$L"
+    chk $? "the departure says the SOCKET is empty, not just the port"
+
+    ! grep -q "the other half of the same socket — has something in it" "$L"
+    chk $? "and does not claim the device moved to the socket's other half"
 
     grep -q "is gone" "$L"
     chk $? "the unit was released"
