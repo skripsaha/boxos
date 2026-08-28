@@ -52,9 +52,28 @@ typedef enum {
     ENUM_STATE_WAIT_RESET_RECOVERY,
 
     ENUM_STATE_WAIT_ENABLE_SLOT,
-    ENUM_STATE_WAIT_ADDRESS_DEVICE,
+
+    /*
+     * The first of the two Address Device commands — the one that says
+     * nothing on the bus.
+     *
+     * xHCI 1.2 Section 4.3.4 describes addressing as two steps with a
+     * descriptor read between them, and this driver used to do only the
+     * second. That made SET_ADDRESS the very first thing ever said to a
+     * device, and a device not ready to hear it failed a COMMAND — which the
+     * Command Ring cannot skip past, so every device queued behind it stopped
+     * too and the only way out was to take the ring away from the controller.
+     * Measured on a live board as `Address Device on slot 3 took 10005 ms`
+     * followed by a reset of a controller with twenty-four ports on it.
+     */
+    ENUM_STATE_WAIT_ADDRESS_DEVICE_BSR,
+
     ENUM_STATE_WAIT_GET_DESC_HEADER,
-    ENUM_STATE_WAIT_EVALUATE_CONTEXT,
+
+    /* The second: the controller sends the device its address, using the
+     * packet size the device named in the eight bytes above. */
+    ENUM_STATE_WAIT_ADDRESS_DEVICE,
+
     ENUM_STATE_WAIT_GET_DESCRIPTOR,
     ENUM_STATE_WAIT_GET_CONFIG_HEADER,
     ENUM_STATE_WAIT_GET_CONFIG_DESC,

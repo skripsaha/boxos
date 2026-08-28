@@ -78,12 +78,23 @@ int xhci_post_enable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner
                               uint8_t slot_type);
 int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                                uint8_t slot_id);
+/*
+ * Address Device, in whichever of its two halves is being asked for.
+ *
+ * xHCI 1.2 Section 4.3.4 describes addressing as TWO commands, not one, and
+ * `block_set_address` is which of them this is. With it set the controller
+ * assigns the slot its resources and moves it to the Default state, and puts
+ * NOTHING on the bus — the device goes on answering the default address, which
+ * is where it can be asked how large its control packets are. With it clear
+ * the controller also sends the device a USB SET_ADDRESS.
+ *
+ * Section 6.4.3.4 puts the bit at 9 of the control dword.
+ */
 int xhci_post_address_device_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
-                                 uint8_t slot_id, uint64_t input_ctx_phys);
+                                 uint8_t slot_id, uint64_t input_ctx_phys,
+                                 bool block_set_address);
 int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                                      uint8_t slot_id, uint64_t input_ctx_phys);
-int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
-                                   uint8_t slot_id, uint64_t input_ctx_phys);
 
 /* Endpoint recovery. Reset Endpoint clears a halt; Set TR Dequeue tells the
  * controller where to pick the ring up again. Neither belongs to enumeration,

@@ -194,7 +194,8 @@ int xhci_post_disable_slot_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owne
 }
 
 int xhci_post_address_device_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
-                                 uint8_t slot_id, uint64_t input_ctx_phys)
+                                 uint8_t slot_id, uint64_t input_ctx_phys,
+                                 bool block_set_address)
 {
     if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
         return -1;
@@ -203,6 +204,9 @@ int xhci_post_address_device_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* ow
     xhci_trb_t trb = {0};
     trb.parameter = input_ctx_phys;
     trb.control = TRB_SET_TYPE(TRB_TYPE_ADDRESS_DEVICE) | ((uint32_t)slot_id << 24);
+    if (block_set_address) {
+        trb.control |= TRB_BSR;
+    }
 
     return post_command(ctrl, &trb, slot_id, owner);
 }
@@ -217,20 +221,6 @@ int xhci_post_configure_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t
     xhci_trb_t trb = {0};
     trb.parameter = input_ctx_phys;
     trb.control = TRB_SET_TYPE(TRB_TYPE_CONFIGURE_ENDPOINT) | ((uint32_t)slot_id << 24);
-
-    return post_command(ctrl, &trb, slot_id, owner);
-}
-
-int xhci_post_evaluate_context_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
-                                   uint8_t slot_id, uint64_t input_ctx_phys)
-{
-    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots) {
-        return -1;
-    }
-
-    xhci_trb_t trb = {0};
-    trb.parameter = input_ctx_phys;
-    trb.control = TRB_SET_TYPE(TRB_TYPE_EVALUATE_CONTEXT) | ((uint32_t)slot_id << 24);
 
     return post_command(ctrl, &trb, slot_id, owner);
 }
@@ -299,7 +289,6 @@ static bool cmd_is_enumeration_step(uint8_t trb_type,
         case TRB_TYPE_ENABLE_SLOT:
         case TRB_TYPE_ADDRESS_DEVICE:
         case TRB_TYPE_CONFIGURE_ENDPOINT:
-        case TRB_TYPE_EVALUATE_CONTEXT:
         case TRB_TYPE_RESET_ENDPOINT:
         case TRB_TYPE_SET_TR_DEQUEUE:
             return true;
