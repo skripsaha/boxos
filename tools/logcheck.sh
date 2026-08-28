@@ -766,6 +766,69 @@ run_logsave() {
     chk $? "and claims nothing it did not do"
 }
 
+# ---------------------------------------------------------------------------
+# manyports — every port the controller says it has is a port this driver uses
+#
+# MaxPorts is an eight-bit field. This driver surveyed the first thirty-one
+# root ports and kept a thirty-two-bit note of which it had done, so a device
+# in any socket above that was invisible to the boot: not reported, not
+# enumerated, not mentioned. A machine booting off a stick in one of them
+# would not have booted, and nothing anywhere would have said why.
+#
+# ‼ WHAT THIS CANNOT DO. QEMU's xHCI allows fifteen ports per protocol and no
+# more, so thirty is the widest controller that can stand on this desk and the
+# cliff at thirty-one cannot be reached. What is checked instead is the
+# INVARIANT the cliff broke — every port the controller reports is looked at
+# and described — which is worth something at any width and which goes red the
+# moment a bound of any size comes back. The bound is what the mutation below
+# puts back, at fifteen instead of thirty-one, and the keyboard sitting on
+# port 16 is what notices.
+# ---------------------------------------------------------------------------
+run_manyports() {
+    echo "== manyports: thirty root ports, and none of them ignored =="
+    build
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on XHCIPORTS=15 >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.manyports.log"
+    L="$SCRATCH/serial.manyports.log"
+
+    grep -q "BoxOS Shell" "$L"
+    chk $? "boot reaches the shell with thirty root ports"
+
+    # What the controller says it has, taken from its own summary line rather
+    # than from the number this scenario asked for — the emulator is entitled
+    # to give fewer than requested and a check against our own wish would then
+    # be a check against nothing.
+    local claimed described
+    claimed=$(grep -oE "controller ready: [0-9]+ port" "$L" | head -1 |
+              sed -nE 's/.*: ([0-9]+) port/\1/p')
+    described=$(grep -cE "^\[xHCI [0-9a-f:.]+\] port [0-9]+: (powered|NOT powered)" "$L")
+
+    [ -n "$claimed" ] && [ "$claimed" -gt 16 ]
+    chk $? "the controller really has more than sixteen ports ($claimed)"
+
+    [ "$claimed" = "$described" ]
+    chk $? "every port it says it has is described ($described of $claimed)"
+
+    # The survey, as opposed to the description: the keyboard sits on the first
+    # USB 2 port, which with fifteen SuperSpeed ports in front of it is port 16.
+    # A survey that stops short never finds it, and the machine boots without a
+    # keyboard rather than saying anything.
+    grep -qE "port ([2-9][0-9]|1[6-9]): device attached at boot" "$L"
+    chk $? "the boot survey reached a port above the sixteenth"
+
+    grep -qE "port ([2-9][0-9]|1[6-9]): .*keyboard .* is live" "$L"
+    chk $? "and the device there came up"
+}
+
 run_yank() {
     echo "== yank: the stick is pulled while the volume is being read =="
 
@@ -956,9 +1019,10 @@ case "${1:-both}" in
     logsave)  run_logsave ;;
     yank)     run_yank ;;
     twoctrl)  run_twoctrl ;;
+    manyports) run_manyports ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_manyports; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|both|all]"; exit 2 ;;
 esac
 
 echo

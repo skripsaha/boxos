@@ -140,7 +140,16 @@ void xhci_power_ports(xhci_controller_t* ctrl)
     }
 
     unsigned switched = 0;
-    for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
+    /*
+     * ‼ `port` is wider than the eight-bit field it is counting over, and has to
+     * be. MaxPorts and MaxSlots are both eight bits, so both may legitimately
+     * be 255 — and `for (uint8_t i = 1; i <= 255; i++)` never ends: the
+     * counter wraps to zero before the test can fail. Every board this has run
+     * on reports twenty-four ports and sixty-four slots, which is exactly the
+     * kind of number that makes a loop look correct for years.
+     */
+    for (unsigned pn = 1; pn <= ctrl->max_ports; pn++) {
+        uint8_t port = (uint8_t)pn;
         if (portsc_read(ctrl, port) & XHCI_PORTSC_PP) {
             continue;                   /* already powered */
         }
