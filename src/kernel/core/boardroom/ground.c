@@ -49,6 +49,12 @@ static const uint8_t g_boxos_type_guid[16] = {
 #define GPT_SIG_OFFSET          0u
 #define GPT_HEADER_SIZE_OFFSET  0x0Cu
 #define GPT_HEADER_CRC_OFFSET   0x10u
+/* Where this header says it lives, and where it says the other one does. The
+ * first is how a header copied to the wrong sector gives itself away; the
+ * second is the specification's own way of finding the far copy, and it is
+ * only worth anything when the header stating it has checked out. */
+#define GPT_MY_LBA_OFFSET       0x18u
+#define GPT_ALT_LBA_OFFSET      0x20u
 #define GPT_ENTRY_LBA_OFFSET    0x48u
 #define GPT_ENTRY_COUNT_OFFSET  0x50u
 #define GPT_ENTRY_BYTES_OFFSET  0x54u
@@ -226,36 +232,58 @@ static void memo_keep(uint8_t seat, uint32_t seating,
 }
 
 /*
- * GPT, if the disk has one.
+ * What reading ONE GPT told us.
+ *
+ * "There is nothing of ours on this disk" and "this table is not to be
+ * believed" are opposite answers, and only the second is worth crossing the
+ * whole medium for. They used to be the same answer — zero — so a disk with a
+ * damaged primary table and a perfectly good copy at the far end was a disk
+ * this kernel said had no BoxOS ground on it, which on a machine that boots
+ * from a stick is the machine gone.
+ */
+typedef enum {
+    GPT_TABLE_READ,      /* believed, and `found` is what it holds */
+    GPT_TABLE_ABSENT,    /* no signature there: this is not a GPT header */
+    GPT_TABLE_DAMAGED    /* there IS one, and it does not check out */
+} GptVerdict;
+
+/*
+ * Read the GPT whose header sits at `header_lba`, and say what came of it.
  *
  * Both checksums are verified because both exist for a reason: a header that
  * passes its own CRC can still point at an entry array that was interrupted
  * mid-write, and mounting out of that array is mounting out of whatever was
- * there before. A table that does not check out yields nothing and says which
- * check failed — the alternative is a machine that mounts something it cannot
- * justify.
+ * there before.
+ *
+ * `medium_sectors` is how far the disk runs, or zero when it would not say.
+ * Every bound below is skipped when it is zero rather than guessed at — but
+ * when it is known, a table that names sectors past the end of the medium is
+ * refused, because following it is this kernel reading where there is nothing.
  */
-static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
+static GptVerdict gpt_read_one(uint8_t seat, uint64_t header_lba,
+                               uint64_t medium_sectors,
+                               MediumGround *out, uint8_t max, uint8_t *found)
 {
+    *found = 0;
+
     uint8_t header[BOARDROOM_SECTOR_BYTES];
-    if (BoardroomRead(seat, GPT_HEADER_LBA, 1, header) != 0) {
-        kprintf("[Ground] seat %u: the disk says it is a GPT and then would "
-                "not give up its header\n", seat);
-        return 0;
+    if (BoardroomRead(seat, header_lba, 1, header) != 0) {
+        kprintf("[Ground] seat %u: sector %llu would not be read\n",
+                seat, (unsigned long long)header_lba);
+        return GPT_TABLE_DAMAGED;
     }
 
     if (memcmp(header + GPT_SIG_OFFSET, g_gpt_signature, 8) != 0) {
-        kprintf("[Ground] seat %u: a protective MBR with no GPT behind it\n",
-                seat);
-        return 0;
+        return GPT_TABLE_ABSENT;
     }
 
     uint32_t header_bytes = le32(header + GPT_HEADER_SIZE_OFFSET);
     if (header_bytes < GPT_HEADER_MIN_BYTES ||
         header_bytes > BOARDROOM_SECTOR_BYTES) {
-        kprintf("[Ground] seat %u: its GPT header states a length of %u, "
-                "which cannot be one\n", seat, header_bytes);
-        return 0;
+        kprintf("[Ground] seat %u: the GPT header at sector %llu states a "
+                "length of %u, which cannot be one\n",
+                seat, (unsigned long long)header_lba, header_bytes);
+        return GPT_TABLE_DAMAGED;
     }
 
     /* The header's own checksum is taken over `header_bytes` with the checksum
@@ -267,10 +295,50 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
     uint32_t want_header_crc = le32(header + GPT_HEADER_CRC_OFFSET);
     uint32_t have_header_crc = KCrc32(probe, header_bytes);
     if (have_header_crc != want_header_crc) {
-        kprintf("[Ground] seat %u: its GPT header does not match its own "
-                "checksum (0x%08x against 0x%08x) — not reading it\n",
-                seat, have_header_crc, want_header_crc);
-        return 0;
+        kprintf("[Ground] seat %u: the GPT header at sector %llu does not "
+                "match its own checksum (0x%08x against 0x%08x)\n",
+                seat, (unsigned long long)header_lba,
+                have_header_crc, want_header_crc);
+        return GPT_TABLE_DAMAGED;
+    }
+
+    /* ‼ A header states where it lives, and a copy of one that has been put
+     * somewhere else says so in that field. Without this a primary header
+     * duplicated into the last sector — which is what a naive imaging tool
+     * produces — reads as a valid backup and hands out the wrong array. */
+    uint64_t my_lba = le64(header + GPT_MY_LBA_OFFSET);
+    if (my_lba != header_lba) {
+        kprintf("[Ground] seat %u: the GPT header at sector %llu says it "
+                "lives at %llu — it is a copy of one from somewhere else\n",
+                seat, (unsigned long long)header_lba,
+                (unsigned long long)my_lba);
+        return GPT_TABLE_DAMAGED;
+    }
+
+    /*
+     * ‼ AND WHERE IT THINKS THE OTHER COPY IS.
+     *
+     * A GPT written for one medium and copied onto a larger one is the
+     * ordinary case, not an exotic one: an image is made the size it needs and
+     * then written to whatever stick is to hand. Its backup header then sits
+     * at the end of the IMAGE and not at the end of the MEDIUM, so a reader
+     * that later has to fall back on the far copy will look in the wrong place
+     * — and every partitioning tool calls such a disk damaged and offers to
+     * move it.
+     *
+     * Nothing can be done about it from here, and nothing should be: this
+     * kernel does not write partition tables. What it can do is SAY it, once,
+     * while the primary is still readable — which is the only moment the fact
+     * is knowable at all.
+     */
+    uint64_t alt_lba = le64(header + GPT_ALT_LBA_OFFSET);
+    if (medium_sectors != 0 && header_lba == GPT_HEADER_LBA &&
+        alt_lba != medium_sectors - 1) {
+        kprintf("[Ground] seat %u: its GPT keeps the far copy at sector %llu "
+                "and the medium runs to %llu — this table was made for a "
+                "smaller disk and copied onto this one\n",
+                seat, (unsigned long long)alt_lba,
+                (unsigned long long)(medium_sectors - 1));
     }
 
     uint64_t entry_lba   = le64(header + GPT_ENTRY_LBA_OFFSET);
@@ -284,22 +352,35 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
         kprintf("[Ground] seat %u: its GPT states %u entries of %u bytes, "
                 "which is not a table this reads\n",
                 seat, entry_count, entry_bytes);
-        return 0;
+        return GPT_TABLE_DAMAGED;
     }
 
     uint32_t array_bytes = entry_count * entry_bytes;
     uint32_t array_secs  = (array_bytes + BOARDROOM_SECTOR_BYTES - 1) /
                            BOARDROOM_SECTOR_BYTES;
 
+    if (medium_sectors != 0 &&
+        (entry_lba >= medium_sectors ||
+         entry_lba + array_secs > medium_sectors)) {
+        kprintf("[Ground] seat %u: its GPT puts the entry array at sectors "
+                "%llu..%llu and the medium has %llu — not reading it\n",
+                seat, (unsigned long long)entry_lba,
+                (unsigned long long)(entry_lba + array_secs - 1),
+                (unsigned long long)medium_sectors);
+        return GPT_TABLE_DAMAGED;
+    }
+
     uint8_t *array = (uint8_t *)kmalloc(array_secs * BOARDROOM_SECTOR_BYTES);
     if (!array) {
         kprintf("[Ground] seat %u: no memory to read its GPT entries\n", seat);
-        return 0;
+        return GPT_TABLE_DAMAGED;
     }
 
-    uint8_t found = 0;
+    GptVerdict verdict = GPT_TABLE_READ;
+
     if (BoardroomRead(seat, entry_lba, array_secs, array) != 0) {
         kprintf("[Ground] seat %u: would not give up its GPT entries\n", seat);
+        verdict = GPT_TABLE_DAMAGED;
         goto done;
     }
 
@@ -307,9 +388,11 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
      * they were read in. */
     uint32_t have_array_crc = KCrc32(array, array_bytes);
     if (have_array_crc != want_array_crc) {
-        kprintf("[Ground] seat %u: its GPT entries do not match their own "
-                "checksum (0x%08x against 0x%08x) — not reading them\n",
-                seat, have_array_crc, want_array_crc);
+        kprintf("[Ground] seat %u: the GPT entries at sector %llu do not match "
+                "their own checksum (0x%08x against 0x%08x)\n",
+                seat, (unsigned long long)entry_lba,
+                have_array_crc, want_array_crc);
+        verdict = GPT_TABLE_DAMAGED;
         goto done;
     }
 
@@ -327,18 +410,102 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
             continue;
         }
 
-        if (!ground_room(found, max, seat)) break;
+        /* ‼ AND IT HAS TO FIT ON THE DISK. A table is bytes off a medium, and
+         * one that claims a run reaching past the end of it would have this
+         * kernel reading where there is nothing. Nothing checked before,
+         * because there was nobody to ask how far the medium ran. */
+        if (medium_sectors != 0 && last >= medium_sectors) {
+            kprintf("[Ground] seat %u: GPT entry %u claims sectors %llu..%llu "
+                    "and the medium has %llu — not using it\n",
+                    seat, i, (unsigned long long)first,
+                    (unsigned long long)last,
+                    (unsigned long long)medium_sectors);
+            continue;
+        }
 
-        out[found].start_sector = first;
-        out[found].sectors      = last - first + 1;   /* GPT's last is inclusive */
-        out[found].origin       = GROUND_FROM_GPT;
-        out[found].entry        = (uint8_t)i;
-        found++;
+        if (!ground_room(*found, max, seat)) break;
+
+        out[*found].start_sector = first;
+        out[*found].sectors      = last - first + 1;   /* GPT's last is inclusive */
+        out[*found].origin       = GROUND_FROM_GPT;
+        out[*found].entry        = (uint8_t)i;
+        (*found)++;
     }
 
 done:
     kfree(array);
-    return found;
+    if (verdict != GPT_TABLE_READ) {
+        *found = 0;
+    }
+    return verdict;
+}
+
+/*
+ * GPT, if the disk has one — and BOTH of its copies, because it keeps two.
+ *
+ * UEFI 2.10 §5.3.2: the table is written twice, the primary at LBA 1 and the
+ * backup in the LAST sector of the medium, and a reader whose primary does not
+ * check out is required to use the other. This did not: it returned nothing,
+ * which every caller read as "there is no BoxOS ground here". A disk with one
+ * bad erase block under its first sector and a perfectly good copy at the far
+ * end was a disk this kernel would not mount, and it never said why.
+ *
+ * Finding the far copy needs one fact the room could not give until now — how
+ * far the medium runs. When it still cannot, that is SAID: a disk whose table
+ * is damaged and whose size is unknown is one where nothing more can be tried,
+ * and a person reading the screen should be told which of the two it was.
+ */
+static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max)
+{
+    uint64_t medium = BoardroomSeatSectors(seat);
+    uint8_t  found  = 0;
+
+    GptVerdict v = gpt_read_one(seat, GPT_HEADER_LBA, medium, out, max, &found);
+    if (v == GPT_TABLE_READ) {
+        return found;
+    }
+
+    /*
+     * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
+     *
+     * This is only reached because sector 0 carries a protective entry, which
+     * is the disk saying "my real table is a GPT". If the header is then
+     * missing, the disk is contradicting itself — and that is exactly what one
+     * dead erase block under sector 1 looks like, which is the commonest way a
+     * GPT is lost. Treating it as "no GPT here" and stopping would leave the
+     * good copy at the other end unread, which is the whole fault this was
+     * written to close.
+     */
+    if (medium == 0) {
+        kprintf("[Ground] seat %u: its GPT is damaged, and the medium will not "
+                "say how far it runs — so the copy at the far end cannot be "
+                "found\n", seat);
+        return 0;
+    }
+
+
+    /* The specification puts the far copy in the last sector of the medium,
+     * and that is where this looks. A disk whose table was made for a smaller
+     * medium keeps it somewhere else — said above while the primary could
+     * still be read, and unknowable once it cannot. */
+    kprintf("[Ground] seat %u: its GPT %s — reading the copy at the far end, "
+            "sector %llu (UEFI 2.10 5.3.2)\n", seat,
+            (v == GPT_TABLE_ABSENT) ? "is not where the disk says it is"
+                                    : "is damaged",
+            (unsigned long long)(medium - 1));
+
+    found = 0;
+    v = gpt_read_one(seat, medium - 1, medium, out, max, &found);
+    if (v == GPT_TABLE_READ) {
+        kprintf("[Ground] seat %u: the copy at the far end is good — this disk "
+                "is readable after all\n", seat);
+        return found;
+    }
+
+    kprintf("[Ground] seat %u: the copy at the far end is %s — this disk has "
+            "no table left to read\n", seat,
+            (v == GPT_TABLE_ABSENT) ? "not there either" : "damaged too");
+    return 0;
 }
 
 /*
@@ -353,6 +520,7 @@ done:
 static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
 {
     const uint8_t max = GROUND_MAX_PER_MEDIUM;
+    const uint64_t medium = BoardroomSeatSectors(seat);
 
     uint8_t sector0[BOARDROOM_SECTOR_BYTES];
     if (BoardroomRead(seat, 0, 1, sector0) != 0) {
@@ -389,6 +557,20 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out)
         if (count == 0) {
             kprintf("[Ground] seat %u: MBR entry %u claims no sectors\n",
                     seat, i);
+            continue;
+        }
+
+        /* And it has to be ON the disk. An MBR is four sixteen-byte records
+         * with nothing to check them against, so a table that names a run
+         * reaching past the end of the medium is one this kernel would have
+         * read straight off it. There was nobody to ask how far the medium ran
+         * until BoardroomSeatSectors; there is now. */
+        if (medium != 0 && (start >= medium || start + count > medium)) {
+            kprintf("[Ground] seat %u: MBR entry %u claims sectors %llu..%llu "
+                    "and the medium has %llu — not using it\n",
+                    seat, i, (unsigned long long)start,
+                    (unsigned long long)(start + count - 1),
+                    (unsigned long long)medium);
             continue;
         }
 

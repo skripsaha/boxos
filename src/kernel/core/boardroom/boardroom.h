@@ -156,6 +156,35 @@ uint32_t    BoardroomSeatSeating(uint8_t seat);
  */
 uint32_t BoardroomSeatPhysicalBytes(uint8_t seat);
 
+/*
+ * How far the medium in this seat runs, in the 512-byte sectors this room is
+ * addressed in.
+ *
+ * Zero means the medium would not say, which is an answer and not a failure —
+ * the same shape as BoardroomSeatPhysicalBytes, and for the same reason: a
+ * caller that cannot be told has to be able to see that it was not, rather
+ * than being handed a number somebody invented.
+ *
+ * ‼ NOTHING COULD ASK THIS UNTIL NOW, AND TWO THINGS NEEDED IT.
+ *
+ * A GPT keeps a second copy of its table in the LAST sector of the medium, and
+ * UEFI 2.10 §5.3.2 requires a reader whose primary copy does not check out to
+ * go and read it. Where the last sector IS was a fact each driver held and the
+ * room did not hand out — so a disk with a damaged primary GPT and a perfectly
+ * good backup simply did not mount, and on a machine that boots from a stick
+ * that is the machine gone.
+ *
+ * And the plainer one: a partition table is bytes off a medium, and a table
+ * that claims a run reaching past the end of it is a table that would have
+ * this kernel reading where there is nothing. Until this door there was
+ * nobody to ask, so nothing checked.
+ *
+ * Every driver already knew — xhci_msd_unit_sectors, ahci_port_t.total_sectors,
+ * g_ata_devices[].total_sectors — and each answers in ITS OWN logical sectors,
+ * which is what this converts.
+ */
+uint64_t BoardroomSeatSectors(uint8_t seat);
+
 /* The controller-specific index behind a seat — an AHCI port, an ATA drive, a
  * USB unit. This is a deliberate way out of the abstraction, for the one thing
  * the abstraction cannot express: a fast path that exists on one kind of
