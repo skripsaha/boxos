@@ -669,7 +669,6 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
     /* And every port described, one line each — the block that says whether a
      * socket is powered, whether anything is in it, and what link state it is
      * stuck in. On a board with twenty-four of them that is most of a screen. */
-    xhci_hold_screen();
 }
 
 static int xhci_bring_up(xhci_controller_t* ctrl) {
@@ -986,7 +985,6 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
     /* Everything this controller said about itself is now on the screen —
      * capabilities, handoff, scratchpad, port power, protocols — and it is
      * about to be pushed off the top by the enumeration. */
-    xhci_hold_screen();
 
     return 0;
 

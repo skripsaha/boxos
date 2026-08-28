@@ -177,21 +177,13 @@ size_t strspn(const char* s, const char* accept);
 size_t strcspn(const char* s, const char* reject);
 char* strpbrk(const char* s, const char* accept);
 
-/*
- * Hold the screen after something worth reading has been printed.
- *
- * On the machine this exists for there is no scrollback, no log file and no
- * serial cable — there is a screen and somebody photographing it, and a line
- * that scrolls past in a hundredth of a second is a line that was never
- * printed. This is for the handful of places where the next few lines decide
- * what happens next.
- *
- * It spins on the TSC, so it is never for a hot path and never for a caller
- * that cannot afford to wait — and never, ever from an interrupt handler,
- * where a second of not returning is a second of the machine's timekeeping
- * gone.
- */
-void kscreen_hold(uint32_t ms);
+/* kscreen_hold is gone. It held the screen for a second so a line could be
+ * photographed, which was the only way to read this machine while it was being
+ * brought up — and it stopped being the only way when the kernel learned to
+ * keep its own boot in a ring and write it to the volume (`make
+ * PRINTTOFILE=on`, then `logsave`). What it left behind was six seconds of a
+ * boot spent deliberately doing nothing. Anything that needs to be stared at
+ * again belongs behind a build key, not in the path every boot takes. */
 
 // Tag wildcard matching: "key:..." matches any "key:<value>"
 bool tag_is_wildcard(const char* tag);

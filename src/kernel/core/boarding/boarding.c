@@ -201,10 +201,10 @@ static void boarding_describe(unsigned stamps)
                 "will have to choose by rule\n");
     }
 
-    /* Four lines that answer "which loader, off what, from where", and the
-     * whole of the boot scrolls over them within the second. Reached once,
-     * from ordinary context, long before any interrupt handler exists. */
-    kscreen_hold(1000);
+    /* Four lines that answer "which loader, off what, from where". Said once,
+     * early, and the whole of the boot scrolls over them — which is why the
+     * kernel keeps its own account of what it said (`make PRINTTOFILE=on`,
+     * then `logsave`) instead of standing still to be photographed. */
 }
 
 void BoardingPassInit(void)

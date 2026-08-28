@@ -294,7 +294,6 @@ static bool xhci_controller_stopped(xhci_controller_t* ctrl)
                     "registers — it is gone from the bus\n", ctrl->name);
             ctrl->error_state = true;
             ctrl->running     = false;
-            xhci_hold_screen();
         }
         return true;
     }
@@ -315,7 +314,6 @@ static bool xhci_controller_stopped(xhci_controller_t* ctrl)
                 (uint32_t)ctrl->op_regs->crcr,
                 (uint32_t)ctrl->op_regs->dcbaap,
                 ctrl->op_regs->config);
-        xhci_hold_screen();
     }
 
     /* HSE is write-one-to-clear and HCE is not: a controller in HCE stays in
@@ -418,7 +416,6 @@ drain_again:
                     "something to say and nowhere to write it, and that "
                     "answer is lost (ring of %u, dequeue at %u)\n",
                     ctrl->name, event_ring->num_trbs, event_ring->dequeue_idx);
-            xhci_hold_screen();
         }
 
         /*
@@ -510,7 +507,6 @@ drain_again:
             kprintf("[xHCI %s] one drain handled %u events of a %u-entry ring "
                     "— the ring is closer to full than it should ever be\n",
                     ctrl->name, drained, event_ring->num_trbs);
-            xhci_hold_screen();
         }
     }
 
@@ -561,26 +557,7 @@ void xhci_process_events(void) {
     }
 }
 
-/*
- * True while this core is inside the interrupt handler or the timer tick.
- *
- * Both of those reach the same watchdogs as ordinary boot-time code does, and
- * only one of the two callers can afford to stop for a second. A plain flag is
- * enough: the tick is the timer interrupt and runs on one core, and the handler
- * cannot preempt itself.
- */
-static volatile uint32_t g_no_waiting = 0;
-
-void xhci_hold_screen(void)
-{
-    if (__atomic_load_n(&g_no_waiting, __ATOMIC_ACQUIRE) != 0) {
-        return;
-    }
-    kscreen_hold(XHCI_SCREEN_HOLD_MS);
-}
-
 void xhci_tick(void) {
-    __atomic_store_n(&g_no_waiting, 1, __ATOMIC_RELEASE);
     for (uint8_t i = 0; i < xhci_controller_count(); i++) {
         xhci_controller_t* ctrl = xhci_controller_at(i);
         if (!ctrl || !ctrl->running) {
@@ -619,7 +596,6 @@ void xhci_tick(void) {
      * loop and the idle loop instead, where waiting is allowed; it compares a
      * TSC deadline, so the cadence it runs at is nobody's business but its own.
      */
-    __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 
 /*
@@ -635,7 +611,6 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
         return;
     }
     __atomic_fetch_add(&ctrl->irq_count, 1, __ATOMIC_RELAXED);
-    __atomic_store_n(&g_no_waiting, 1, __ATOMIC_RELEASE);
 
     uint32_t usbsts = ctrl->op_regs->usbsts;
 
@@ -664,8 +639,6 @@ static void xhci_irq_handler_on(xhci_controller_t* ctrl) {
      * write-one-to-clear bits, with whichever ran first deciding what the
      * other one got to see. */
     xhci_process_events_on(ctrl);
-
-    __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 
 /*

@@ -642,7 +642,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
                 xhci_get_port_status(ctrl, s->port_num),
                 xhci_port_reset_kind_name(s->reset_kind));
     }
-    xhci_hold_screen();
 
     for (unsigned k = 0; k < orphan_count; k++) {
         xhci_slot_retire(ctrl, orphans[k]);
@@ -650,7 +649,6 @@ void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
 
     kprintf("[xHCI %s] command ring restarted; %u device(s) released\n",
             ctrl->name, orphan_count);
-    xhci_hold_screen();
 }
 
 /*
@@ -840,7 +838,6 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
                 ctrl->command_ring.enqueue_idx,
                 er->dequeue_idx, er->cycle_state, at_dequeue,
                 __atomic_load_n(&ctrl->drain_skips, __ATOMIC_RELAXED));
-        xhci_hold_screen();
 
         __sync_synchronize();
         ctrl->doorbells->doorbells[0].doorbell = 0;

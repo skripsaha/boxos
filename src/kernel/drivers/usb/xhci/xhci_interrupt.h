@@ -37,20 +37,24 @@ void xhci_touch_device_left(const xhci_device_slot_t* slot);
 void xhci_interrupt_touch_init(void);
 
 /*
- * Hold the screen so the lines just printed can be read — or photographed.
+ * ‼ THERE IS NO LONGER ANYTHING HERE THAT STOPS THE MACHINE TO BE READ.
  *
- * This driver is brought up on a machine whose only diagnostic is a monitor
- * and a phone camera, and the lines that decide what to do next go past faster
- * than a shutter. So the few places where the next line changes what happens
- * next stop for a moment afterwards.
+ * This driver was brought up against a screen and a phone camera, and the
+ * lines that decided what to do next went past faster than a shutter — so the
+ * places where the next line mattered used to stand still for a second
+ * afterwards. Thirteen of them, one second each, and a boot on the owner's
+ * board reached six of those before it had mounted anything: six seconds of a
+ * forty-eight second boot spent deliberately doing nothing, with three more
+ * whenever a controller misbehaved.
  *
- * It does nothing when the caller is an interrupt handler or the timer tick.
- * That is the whole reason this exists rather than a bare kscreen_hold at each
- * site: a second spent not returning from IRQ0 is a second of the machine's
- * timekeeping thrown away, and the enumeration watchdog is reached from both
- * there and from ordinary context.
+ * It was worth it while a photograph was the only way to read this machine.
+ * It is not any more: `make PRINTTOFILE=on` keeps the whole boot in a ring and
+ * `logsave` writes it to the volume, so every line is readable afterwards, in
+ * order, without the machine waiting for anybody.
+ *
+ * If a line ever needs to be stared at again, it belongs behind a build key
+ * like that one — not in the path every boot takes.
  */
-#define XHCI_SCREEN_HOLD_MS 1000
 
 /*
  * How many events are handled between publications of the dequeue pointer.
@@ -74,6 +78,5 @@ void xhci_interrupt_touch_init(void);
  * turns that into a line naming the caller.
  */
 bool xhci_drain_is_mine(const xhci_controller_t* ctrl);
-void xhci_hold_screen(void);
 
 #endif
