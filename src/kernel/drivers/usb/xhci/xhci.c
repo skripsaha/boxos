@@ -425,8 +425,16 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
             "reported\n", ctrl->name);
 
     /* Nothing may believe a device is still there. */
-    for (uint8_t slot_id = 1; slot_id <= ctrl->max_slots; slot_id++) {
-        xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, slot_id);
+    /*
+     * ‼ `slot_id` is wider than the eight-bit field it is counting over, and has to
+     * be. MaxPorts and MaxSlots are both eight bits, so both may legitimately
+     * be 255 — and `for (uint8_t i = 1; i <= 255; i++)` never ends: the
+     * counter wraps to zero before the test can fail. Every board this has run
+     * on reports twenty-four ports and sixty-four slots, which is exactly the
+     * kind of number that makes a loop look correct for years.
+     */
+    for (unsigned slot_id = 1; slot_id <= ctrl->max_slots; slot_id++) {
+        xhci_device_slot_t* slot = xhci_get_device_slot(ctrl, (uint8_t)slot_id);
         if (slot) {
             xhci_slot_retire(ctrl, slot);
         }
@@ -595,7 +603,21 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
         cpu_pause();
     }
 
-    uint32_t seen = 0;                  /* ports already enumerated */
+    /*
+     * Which ports have already been enumerated in this survey.
+     *
+     * ‼ This was one uint32_t, and the loop below stopped at port 31 to match
+     * it. MaxPorts is an eight-bit field: a controller may have up to 255 root
+     * ports, and on one that does, every device plugged into a port above the
+     * thirty-first was invisible to the boot — not reported, not enumerated,
+     * not mentioned. Hot-plug would have found them afterwards; a machine
+     * booting from a stick in one of those sockets would not have booted.
+     *
+     * One bit per port the register can name, which is thirty-two bytes of
+     * stack and the end of the question.
+     */
+    uint8_t  seen[(XHCI_PORT_MAP_ENTRIES + 7) / 8];
+    memset(seen, 0, sizeof(seen));
     unsigned found = 0;
     unsigned quiet_passes = 0;
 
@@ -603,19 +625,21 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
     while (quiet_passes < 2 && (int64_t)(rdtsc() - ceiling) < 0) {
         bool anything_new = false;
 
-        for (uint8_t port = 1; port <= ctrl->max_ports && port < 32; port++) {
-            if (seen & (1u << port)) {
+        /* `port` is wider than the field it is counting over on purpose —
+         * see the note above xhci_survey_root_ports. */
+        for (unsigned port = 1; port <= ctrl->max_ports; port++) {
+            if (seen[port >> 3] & (1u << (port & 7))) {
                 continue;
             }
-            if (!xhci_port_has_device(ctrl, port)) {
+            if (!xhci_port_has_device(ctrl, (uint8_t)port)) {
                 continue;
             }
-            seen |= (1u << port);
+            seen[port >> 3] |= (uint8_t)(1u << (port & 7));
             found++;
             anything_new = true;
             kprintf("[xHCI %s] port %u: device attached at boot (USB %u)\n",
                     ctrl->name, port, ctrl->port_major[port]);
-            xhci_enumerate_device(ctrl, port);
+            xhci_enumerate_device(ctrl, (uint8_t)port);
         }
 
         /* Enumeration is answered by events, and nothing else is draining them
@@ -650,8 +674,8 @@ void xhci_survey_root_ports(xhci_controller_t* ctrl)
     int unfinished = xhci_enum_settle(ctrl, XHCI_ENUM_TIMEOUT_MS +
                                             XHCI_CMD_TIMEOUT_MS);
 
-    for (uint8_t port = 1; port <= ctrl->max_ports; port++) {
-        xhci_port_describe(ctrl, port);
+    for (unsigned port = 1; port <= ctrl->max_ports; port++) {
+        xhci_port_describe(ctrl, (uint8_t)port);
     }
 
     kprintf("[xHCI %s] %u of %u root port(s) had something on them; the "

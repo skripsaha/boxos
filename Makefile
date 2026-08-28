@@ -213,6 +213,24 @@ endif
 # hot-plugged onto it with bus=xhci2.0.
 XHCI2 ?= off
 
+# HOW MANY ROOT PORTS the emulated controller has.
+#
+# MaxPorts in HCSPARAMS1 is an eight-bit field, so a controller may report up
+# to 255 root ports — and this driver had a survey that stopped at the
+# thirty-first and a bookkeeping word thirty-two bits wide to match. Every
+# device in a socket above that was invisible to the boot.
+#
+# QEMU's xHCI allows fifteen ports per protocol and no more, so the cliff
+# itself cannot be reached here. What CAN be reached is the invariant that
+# broke on it: every port the controller says it has must be looked at and
+# described. `make run-bg USB=on XHCIPORTS=15` gives thirty of them, which is
+# enough for that check to be worth something and enough to catch the cliff
+# coming back at any bound this machine can express.
+#
+# Empty means "whatever QEMU defaults to", which is four of each.
+XHCIPORTS ?=
+XHCI_PORT_ARGS = $(if $(XHCIPORTS),$(comma)p2=$(XHCIPORTS)$(comma)p3=$(XHCIPORTS))
+
 # A switch that changes CFLAGS has to change what gets rebuilt, or it does
 # nothing on a tree that is already built — `make VOLUME_TESTS=on` would print
 # nothing, link the objects it already had, and boot a kernel with the tests
@@ -1076,7 +1094,7 @@ run-bg: $(IMAGE)
 		-serial file:$(BUILDDIR)/serial.log \
 		-display none \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
-		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1 -device usb-kbd$(comma)bus=xhci1.0) \
+		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1$(XHCI_PORT_ARGS) -device usb-kbd$(comma)bus=xhci1.0) \
 		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2) \
 		-pidfile $(BUILDDIR)/qemu.pid \
 		-daemonize
