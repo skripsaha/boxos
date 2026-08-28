@@ -80,17 +80,21 @@ error_t xhci_msd_read_async(uint8_t unit, uint64_t lba, uint32_t count,
 bool xhci_msd_unit_can_read_async(uint8_t unit);
 
 /*
- * Look over the asynchronous reads in flight, and give up on one that has
- * stopped being answered.
+ * Look over the asynchronous reads in flight, and end one that is not going to
+ * be answered.
  *
- * A read somebody is standing over carries its own deadline, in the loop that
- * is standing there. One nobody is standing over has nobody to carry it — and
- * a device that goes quiet mid-command would otherwise hold its turn for ever,
- * which is not one lost read but every read after it on that device. Measured
- * by mutation: with the completion suppressed, the machine did not reach the
+ * A read somebody is standing over asks the facts itself, in the loop that is
+ * standing there: is the device still in the socket, is its pipe well, is the
+ * controller running. One nobody is standing over has nobody to ask them — so
+ * this asks on its behalf, and the FIRST of those facts is what ends nearly
+ * every such read: a device that has been pulled is finished with here and
+ * now, not after a budget. Only a device that is present, well and silent
+ * reaches the clock, and on bulk that means it has been saying "not yet".
+ *
+ * Called from the guide loop and the idle loop, where the reset that follows a
+ * give-up — three control transfers — is allowed to happen. Measured by
+ * mutation: with the completion suppressed, the machine did not reach the
  * shell at all.
- *
- * Called from the tick, beside this driver's other watchdogs.
  */
 void xhci_msd_watchdog(void);
 

@@ -100,8 +100,10 @@
 #define HUB_CTRL_TIMEOUT_MS      1000
 
 /* USB 2.0 §7.1.7.5: a port reset is driven for at least 10 ms and the device
- * is allowed 10 ms more to recover. The hub reports when it is done, and this
- * is only the outside edge of waiting for that. */
+ * is allowed 10 ms more to recover. The hub REPORTS when it is done — that is
+ * the fact this waits on, in C_PORT_RESET — and a device taken out of the
+ * socket mid-reset is a second fact, in wPortStatus. This number is only the
+ * outside edge behind both of them, for a hub that answers neither. */
 #define HUB_RESET_TIMEOUT_MS     800
 #define HUB_RESET_POLL_MS        10
 #define HUB_RESET_RECOVERY_MS    20
@@ -488,6 +490,24 @@ static int hub_reset_port(XhciHub* h, uint8_t port, bool warm,
         if (change & finished) {
             break;
         }
+
+        /*
+         * ‼ THE HAND THAT TOOK IT OUT, ASKED BEFORE THE CLOCK.
+         *
+         * A reset is being driven at something that may not be there any more,
+         * and the hub says so in the same word it says everything else in:
+         * wPortStatus bit 0 is whether anything is connected. Waiting out the
+         * rest of the budget for a socket that is empty is time the machine
+         * spends on a device that has left, and it is time the port cannot be
+         * given to whatever is plugged in next.
+         */
+        if (!(status & PORT_STAT_CONNECTION)) {
+            kprintf("[USB hub slot %u] port %u has nothing attached to reset "
+                    "any more\n", h->slot->slot_id, port);
+            hub_clear_changes(h, port, change);
+            return -1;
+        }
+
         if ((int64_t)(rdtsc() - deadline) >= 0) {
             kprintf("[USB hub slot %u] port %u did not finish %s resetting\n",
                     h->slot->slot_id, port, warm ? "warm" : "");

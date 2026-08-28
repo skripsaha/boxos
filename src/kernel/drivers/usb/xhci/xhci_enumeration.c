@@ -1743,11 +1743,58 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
         if (slot->timestamp_started == 0) {
             continue;
         }
-        if ((int64_t)(now - slot->timestamp_started) < (int64_t)budget) {
+
+        /*
+         * ── the fact first ────────────────────────────────────────────────
+         *
+         * A device that has been taken out of the socket is not a device that
+         * is answering slowly, and the port says which. Only the NEGATIVE
+         * answer means anything: a device behind a hub carries the ROOT port,
+         * so a healthy reading there describes the branch and says nothing
+         * about the device — the same rule the disk driver already lives by.
+         *
+         * Without this, an unplug during enumeration cost the whole budget
+         * before anybody looked, and the socket could not be given to whatever
+         * was plugged in next until it had.
+         */
+        if (slot->port_num != 0 &&
+            xhci_port_says_gone(ctrl, slot->port_num)) {
+            kprintf("[xHCI %s] port %u: nothing is attached there any more — "
+                    "%s was for a device that has gone\n",
+                    ctrl->name, slot->port_num, xhci_enum_state_name(state));
+            xhci_slot_retire(ctrl, slot);
             continue;
         }
+
         if (xhci_command_pending_for(ctrl, slot)) {
-            continue;   /* the command watchdog has this one */
+            /* The command watchdog has this one, and it asks a better question
+             * than this loop can: whether the CONTROLLER has answered anything
+             * at all, rather than how long this one request has lived. The
+             * step clock is restarted so that a device which spent seconds
+             * inside a command arrives at its NEXT step with a full budget
+             * instead of none — which is what threw devices away on a board
+             * where an Address Device took ten seconds. */
+            slot->watch_state = state;
+            slot->watch_since = now;
+            continue;
+        }
+
+        /*
+         * ── and only then the clock, on the STEP ──────────────────────────
+         *
+         * The state this slot is in IS the thing it is waiting for, so a state
+         * that has not changed is a step that has not been answered. Anything
+         * that happens to the device moves it, and moving it starts the clock
+         * again — which is what the budget's own words have always claimed and
+         * what measuring from `timestamp_started` never did.
+         */
+        if (slot->watch_state != state || slot->watch_since == 0) {
+            slot->watch_state = state;
+            slot->watch_since = now;
+            continue;
+        }
+        if ((int64_t)(now - slot->watch_since) < (int64_t)budget) {
+            continue;
         }
 
         xhci_report_stuck(ctrl, slot, state);

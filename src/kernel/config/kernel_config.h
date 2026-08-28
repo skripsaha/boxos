@@ -70,6 +70,23 @@
 #define CONFIG_WATCHDOG_CHECK_INTERVAL 100 // 1 second at 100Hz
 
 #define CONFIG_ATA_TIMEOUT_MS 5000
+
+/*
+ * And how long the DRIVE is given to carry a command out, which is a different
+ * question from how long a register handshake may take.
+ *
+ * A drive that meets a marginal sector retries the head internally before it
+ * answers, and how long it may spend doing that belongs to the drive: seven
+ * seconds is ordinary on a desktop disk without configurable error recovery,
+ * and the standard sets no ceiling at all. Under the handshake's five seconds
+ * every one of those reads was a timeout on a disk that would have answered.
+ *
+ * Thirty seconds is what every host stack gives a disk command — Linux's SCSI
+ * layer uses exactly this number (drivers/scsi/sd.h, SD_TIMEOUT) — and it is
+ * the LAST RESORT: the status register's own bits end the wait first, and a
+ * bus with nothing on it reads 0xFF and ends it immediately.
+ */
+#define CONFIG_ATA_IO_TIMEOUT_MS 30000
 #define CONFIG_ATA_SECTOR_SIZE 512 // Hardware constant
 #define CONFIG_ATA_MAX_RETRIES 3
 
