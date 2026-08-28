@@ -267,6 +267,25 @@ endif
 # objects it already had and boots a kernel with no ring in it.
 PRINTTOFILE_MARK = $(BUILDDIR)/.printtofile.$(if $(filter on,$(PRINTTOFILE)),on,off)
 
+# Prove, on the machine, that the hardware deck can put a USB controller back in
+# service — the whole eleven-step repair the driver keeps for a controller that
+# has stopped itself, asked for by name through hw.usb.reset.
+#
+# That repair is production code that had never once run in any test: nothing in
+# an emulator makes a controller halt itself, so error_state was never set and
+# xhci_recover_if_needed never had anything to do. This is the switch that makes
+# a boot go through it deliberately, once, with a keyboard and a volume on the
+# bus — which is also the only way to find out whether the machine survives it.
+#
+# Off in every ordinary build: it costs the machine every USB device it has.
+#
+# `make USBRECOVER=on`
+ifeq ($(USBRECOVER),on)
+CFLAGS += -DCONFIG_USB_RECOVER_PROOF=1
+endif
+
+USBRECOVER_MARK = $(BUILDDIR)/.usbrecover.$(if $(filter on,$(USBRECOVER)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -515,12 +534,16 @@ $(PRINTTOFILE_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.printtofile.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) | $(BUILDDIR)
+$(USBRECOVER_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.usbrecover.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

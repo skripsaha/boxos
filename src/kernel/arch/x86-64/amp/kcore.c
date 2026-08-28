@@ -1,6 +1,7 @@
 #include "kcore.h"
 #include "boardroom.h"
 #include "xhci_hub.h"
+#include "hardware_deck.h"
 #include "xhci_msd.h"
 #include "xhci_enumeration.h"
 #include "process.h"
@@ -285,6 +286,13 @@ void kcore_run_loop(void)
          * rest go away. One load of a flag per controller when nothing has
          * failed. */
         xhci_recover_if_needed();
+
+        /* And, in a build made with USBRECOVER=on and in no other, the one
+         * proof that the repair above actually works: the hardware deck is
+         * asked, by name, to put a controller back in service, once, on a
+         * machine that has one and a volume to lose. Not a call at all when
+         * the switch is off. */
+        HardwareDeckUsbRecoverProof();
 
         /* And a read on a USB disk that nobody is standing over and that was
          * never answered: giving up on one means resetting the transport, and

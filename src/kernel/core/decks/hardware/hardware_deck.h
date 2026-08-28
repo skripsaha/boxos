@@ -65,10 +65,19 @@
 #define HW_DEBUG_PRINT          0x82
 #define HW_LOG_READ             0x83
 
-#define HW_USB_INIT             0x90
+/*
+ * ‼ A RETIRED OPCODE IS NEVER REISSUED.
+ *
+ * 0x90 was hw.usb.init and 0x93 was hw.usb.stop. Both are withdrawn: the first
+ * re-ran the driver's boot and took the machine's USB down with it, the second
+ * returned success for doing nothing (hardware_ops.c says what each of them
+ * actually did). Their numbers stay spent, so an old caller that still knows
+ * them can only ever be told there is no such op — never handed a different
+ * one. The Boarding Pass keeps its stamp kinds the same way and for the same
+ * reason: a number that meant one thing must not come back meaning another.
+ */
 #define HW_USB_RESET            0x91
 #define HW_USB_START            0x92
-#define HW_USB_STOP             0x93
 #define HW_USB_PORT_STATUS      0x94
 #define HW_USB_PORT_RESET       0x95
 #define HW_USB_ENUM_DEVICE      0x96
@@ -76,5 +85,21 @@
 #define HW_USB_PORT_QUERY       0x98
 
 error_t HardwareDeckRegister(void);
+
+/*
+ * Prove, on this machine, that asking the hardware deck to put a USB controller
+ * back in service does it — and that the two withdrawn opcodes answer to
+ * nothing. Runs once, on the first pass through the idle or guide loop with a
+ * controller in service and a volume mounted; that is a fact about the machine
+ * and not a moment waited for.
+ *
+ * It costs the machine every USB device it has, once, so it exists only in a
+ * build made with USBRECOVER=on. Off, it is not a call at all.
+ */
+#if CONFIG_USB_RECOVER_PROOF
+void HardwareDeckUsbRecoverProof(void);
+#else
+static inline void HardwareDeckUsbRecoverProof(void) { }
+#endif
 
 #endif /* HARDWARE_DECK_H */
