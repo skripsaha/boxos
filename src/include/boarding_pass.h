@@ -28,13 +28,30 @@
  * is followed by the next. A reader that meets a stamp it does not recognise
  * steps over it by that length and carries on.
  *
- * That is the whole of the forward compatibility, and it is why there are no
- * reserved fields here and no version ladder to climb. A loader that learns
- * something new adds a stamp; a kernel that has not been taught about it is
- * unaffected. A kernel that wants something the loader is too old to say finds
- * the stamp missing and says so, which is a fact rather than a crash. Neither
- * side has to be upgraded with the other, and neither has to guess what a
- * block of padding was supposed to mean.
+ * That is the whole of the forward compatibility, and it is why there is no
+ * version ladder to climb. A loader that learns something new adds a stamp; a
+ * kernel that has not been taught about it is unaffected. A kernel that wants
+ * something the loader is too old to say finds the stamp missing and says so,
+ * which is a fact rather than a crash. Neither side has to be upgraded with
+ * the other, and neither has to guess what a block of padding was supposed to
+ * mean.
+ *
+ *
+ * ‼ WHAT THE VERSION IS FOR, AND WHAT IT IS NOT FOR
+ *
+ * The sixteen bytes below are frozen. Every field keeps its offset, its width
+ * and its meaning for as long as there is a boarding pass, and a loader that
+ * needs to say something new says it in a stamp. `header_bytes` is what a
+ * reader uses to find the first stamp, so a later version may make the header
+ * LONGER without any reader having to be taught how.
+ *
+ * So the version guards the HEADER and nothing else. It used to throw the
+ * whole pass away on any number this kernel had not been compiled against,
+ * which is the version ladder the paragraph above promises not to build: it
+ * turns every stamp on the block — including the volume the kernel was read
+ * out of — into something an older reader must discard wholesale because one
+ * number at offset four went up. A reader that can find the stamps can read
+ * the stamps it knows.
  */
 
 /*
@@ -67,7 +84,10 @@ typedef struct __attribute__((packed)) {
     uint16_t used_bytes;        /* +8  header + every stamp */
     uint16_t capacity;          /* +10 how much room the block has */
     uint16_t count;             /* +12 how many stamps */
-    uint16_t reserved;          /* +14 zero */
+    uint16_t reserved;          /* +14 zero — padding to a four-byte boundary,
+                                 * so the first stamp starts aligned. Not a
+                                 * field waiting to be given a meaning: a new
+                                 * fact goes in a stamp, never here. */
 } BoardingPassHeader;
 
 _Static_assert(sizeof(BoardingPassHeader) == 16, "a boarding pass header is 16 bytes");
@@ -89,6 +109,7 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes");
 #define BOARDING_STAMP_VOLUME  1    /* BoardingVolume */
 #define BOARDING_STAMP_MEDIUM  2    /* BoardingMedium */
 #define BOARDING_STAMP_LOADER  3    /* BoardingLoader */
+#define BOARDING_STAMP_SEAL    4    /* BoardingSeal — always the last one */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -126,5 +147,39 @@ typedef struct __attribute__((packed)) {
 } BoardingLoader;
 
 _Static_assert(sizeof(BoardingLoader) == 16, "a loader stamp is 16 bytes");
+
+/*
+ * The seal — what says the pass arrived the way the loader wrote it.
+ *
+ * Everything else on the block is a fact the loader states. This is the one
+ * that says the block is still the block: a CRC-32 (ISO 3309, the sum GPT and
+ * the Deed are already specified in) over every byte AHEAD of this stamp's
+ * payload — the header, every stamp before it, and this stamp's own four-byte
+ * kind/length pair. Nothing sums itself, so there is no hole to arrange.
+ *
+ * Which makes the seal the LAST stamp, always, and the rule is worth stating
+ * rather than inferring: the loader has to know the final header before it can
+ * sum it, so `used_bytes` and `count` are written to include the seal and then
+ * the sum is taken. A reader finds the seal by walking, and what it walked is
+ * exactly what the sum covers.
+ *
+ * ‼ IT IS NOT A SIGNATURE. It catches a block that rotted, was half-written
+ * by a loader that died, or was walked over by firmware between the write and
+ * ExitBootServices — which is the case it was added for, and which is real:
+ * the loader writes this block into low memory it must ask the firmware to set
+ * aside, and a firmware that hands those pages to something else instead
+ * leaves a pass that still carries a valid magic. It stops nobody who means
+ * harm, and a kernel that says otherwise would be lying.
+ *
+ * A pass with no seal is not a broken pass. Loaders older than this stamp
+ * wrote none, and a kernel that meets one believes it and SAYS it could not
+ * check — which is a fact, and the alternative is refusing to boot a machine
+ * whose loader is simply older than its kernel.
+ */
+typedef struct __attribute__((packed)) {
+    uint32_t crc32;
+} BoardingSeal;
+
+_Static_assert(sizeof(BoardingSeal) == 4, "a seal stamp is 4 bytes");
 
 #endif /* BOARDING_PASS_H */

@@ -1416,6 +1416,74 @@ static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
     return (uint64_t)buf;
 }
 
+/*
+ * ── the pages the kernel will be told to read, asked for before they are written
+ *
+ * Three fixed addresses below 64 KB carry everything this loader tells the
+ * kernel: the E820 map at 0x500, boot_info at 0xA000, the boarding pass at
+ * 0xA600. All three were written into memory this loader had never asked the
+ * firmware for.
+ *
+ * ‼ AND THE WINDOW IS NOT THEORETICAL. Between BuildMemoryMap writing E820 at
+ * 0x504 and ExitBootServices, this loader itself calls the firmware's
+ * allocator at least three more times — page tables, the ESRT copy, the memory
+ * map buffer — and two of those are AllocateAnyPages, which lets the firmware
+ * choose. A firmware that satisfies them from low conventional memory hands
+ * out the very pages the E820 map is sitting in, and the kernel then reads a
+ * memory map with somebody else's data in it. Nothing anywhere would say so:
+ * the count at 0x500 would still look like a count.
+ *
+ * So they are asked for, once, before anything is written into them — which is
+ * what AllocateAddress is for (UEFI 2.10 §7.2). Page granularity means three
+ * pages cover all three structures:
+ *
+ *   0x0000  E820 count (0x500), entry size (0x502), start of the map (0x504)
+ *   0x1000  the tail of that map — 128 entries of 24 bytes end at 0x1104
+ *   0xA000  boot_info v4 (140 bytes) and the boarding pass (512 at 0xA600)
+ *
+ * ‼ WHAT THIS DOES NOT DO IS free_pages FIRST. The two AllocateAddress sites
+ * further down do, because they may be re-claiming a range this loader already
+ * owns. These pages it has never owned: a refusal here means the FIRMWARE has
+ * them, and handing firmware memory back is not a retry, it is a corruption
+ * with a spec section against it.
+ *
+ * A refusal is not fatal either. The addresses are a contract with the kernel
+ * and with stage2 — they cannot move — so the loader writes there regardless
+ * and the machine goes on booting exactly as well as it did before this
+ * function existed. What changes is that it SAYS which page it could not get,
+ * on a board where that is the difference between a mystery and a sentence.
+ */
+static void ClaimHandoffPages(void)
+{
+    static const struct { uint64_t at; const char *what; } wanted[] = {
+        { 0x0000ULL, "the E820 map"          },
+        { 0x1000ULL, "the rest of the E820 map" },
+        { 0xA000ULL, "boot_info and the boarding pass" },
+    };
+
+    unsigned held = 0;
+    for (unsigned i = 0; i < sizeof(wanted) / sizeof(wanted[0]); i++) {
+        EFI_PHYSICAL_ADDRESS pa = (EFI_PHYSICAL_ADDRESS)wanted[i].at;
+        EFI_STATUS s = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
+                                            1, &pa);
+        if (EFI_ERROR(s)) {
+            Print("TagBoot: firmware would not set aside ");
+            PrintHex64(wanted[i].at);
+            Print(" for ");
+            Print(wanted[i].what);
+            Print(" — writing there anyway (status=");
+            PrintHex64((uint64_t)s);
+            Print(")\r\n");
+            continue;
+        }
+        held++;
+    }
+
+    Print("TagBoot: set aside ");
+    PrintDec(held);
+    Print(" of 3 handoff page(s)\r\n");
+}
+
 /* Allocate and retrieve UEFI memory map, convert to E820 at 0x500.
  * The map_key is needed for ExitBootServices. */
 static EFI_STATUS BuildMemoryMap(MemMapResult *out)
@@ -1768,6 +1836,7 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 #define BOARDING_STAMP_VOLUME   1U
 #define BOARDING_STAMP_MEDIUM   2U
 #define BOARDING_STAMP_LOADER   3U
+#define BOARDING_STAMP_SEAL     4U
 #define BOARDING_FIRMWARE_UEFI  1U
 
 #ifdef BOARDING_PASS_ADDR_FROM_BUILD
@@ -1836,6 +1905,19 @@ static void WriteBoardingPass(void)
     at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
     count++;
 
+    /*
+     * The seal, and it goes on last because it covers everything ahead of it.
+     *
+     * Its four-byte kind/length pair is written here; the sum that fills its
+     * payload cannot be taken until the HEADER is final, because the header is
+     * part of what it covers. So: reserve the stamp, finish the header with
+     * the seal counted in, then sum.
+     */
+    uint32_t sum = 0;
+    uint16_t seal_at = at;
+    at = BoardingStamp(base, at, BOARDING_STAMP_SEAL, &sum, sizeof(sum));
+    count++;
+
     BoardingPassHeaderV1 hdr;
     hdr.magic        = BOARDING_PASS_MAGIC;
     hdr.version      = BOARDING_PASS_VERSION;
@@ -1845,6 +1927,12 @@ static void WriteBoardingPass(void)
     hdr.count        = count;
     hdr.reserved     = 0;
     MemCopy(base, &hdr, sizeof(hdr));
+
+    /* Every byte ahead of the seal's payload: the header, the stamps, and the
+     * seal's own kind/length pair. Nothing sums itself. */
+    uint32_t covered = (uint32_t)seal_at + 4U;   /* past its kind/length */
+    sum = Crc32(base, covered);
+    MemCopy(base + covered, &sum, sizeof(sum));
 }
 
 /* =========================================================================
@@ -2064,6 +2152,12 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print(" entries=");
     PrintDec(g_efi_cfg_table_count);
     Print("\r\n");
+
+    /* ----- 0. Ask for the pages this loader hands the kernel -----
+     *
+     * Before anything is written into them, and so before the firmware can be
+     * asked for memory by any of the steps below and answer with these. */
+    ClaimHandoffPages();
 
     /* ----- 1. Find Block IO ----- */
     Print("TagBoot: locating disk...\r\n");
