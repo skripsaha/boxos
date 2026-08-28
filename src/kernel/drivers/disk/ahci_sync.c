@@ -28,6 +28,16 @@
  */
 #define AHCI_CMD_PATIENCE_MS  CONFIG_AHCI_IO_TIMEOUT_MS
 
+/*
+ * ‼ A DISK THAT STOPS ANSWERING MUST SAY SO OUT LOUD.
+ *
+ * Every give-up on this path used to be a debug_printf, which compiles to
+ * NOTHING in every build anybody makes — so on a machine whose only diagnostic
+ * is its screen, a disk that had stopped answering was completely silent, and
+ * no oracle could ask about it either. The chatter stays where it was; the
+ * moments where the driver gives up on a command are said.
+ */
+
 /* What ended the wait for a command slot. Four answers, and only the last one
  * is a clock. */
 typedef enum {
@@ -158,9 +168,9 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         }
 
         if (how == AHCI_SLOT_SILENT) {
-            debug_printf("[AHCI Sync] Read on slot %d unanswered after %u ms "
-                         "(retry %d/%d)\n", slot, AHCI_CMD_PATIENCE_MS,
-                         retry + 1, AHCI_MAX_RETRIES);
+            kprintf("[AHCI] port %u: the disk did not answer a read in %u ms "
+                    "(attempt %d of %d)\n", port, AHCI_CMD_PATIENCE_MS,
+                    retry + 1, AHCI_MAX_RETRIES);
             __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
         } else {
             debug_printf("[AHCI Sync] Error on read, retrying (%d/%d)...\n",
@@ -172,7 +182,8 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
     }
 
     pmm_free(dma_page, pages_needed);
-    debug_printf("[AHCI Sync] Read failed after %d retries\n", AHCI_MAX_RETRIES);
+    kprintf("[AHCI] port %u: a read failed after %d attempts\n",
+            port, AHCI_MAX_RETRIES);
     return -1;
 }
 
@@ -238,9 +249,9 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
             break;
         }
         if (how == AHCI_SLOT_SILENT) {
-            debug_printf("[AHCI Sync] Write on slot %d unanswered after %u ms "
-                         "(retry %d/%d)\n", slot, AHCI_CMD_PATIENCE_MS,
-                         retry + 1, AHCI_MAX_RETRIES);
+            kprintf("[AHCI] port %u: the disk did not answer a write in %u ms "
+                    "(attempt %d of %d)\n", port, AHCI_CMD_PATIENCE_MS,
+                    retry + 1, AHCI_MAX_RETRIES);
             __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
         } else {
             debug_printf("[AHCI Sync] Error on write, retrying (%d/%d)...\n",
@@ -252,7 +263,8 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
     }
 
     pmm_free(dma_page, pages_needed);
-    debug_printf("[AHCI Sync] Write failed after %d retries\n", AHCI_MAX_RETRIES);
+    kprintf("[AHCI] port %u: a write failed after %d attempts\n",
+            port, AHCI_MAX_RETRIES);
     return -1;
 }
 
@@ -306,15 +318,16 @@ int ahci_flush_cache_sync(uint8_t port) {
             break;
         }
         if (how == AHCI_SLOT_SILENT) {
-            debug_printf("[AHCI Sync] Flush cache unanswered after %u ms "
-                         "(retry %d/%d)\n", AHCI_CMD_PATIENCE_MS,
-                         retry + 1, AHCI_MAX_RETRIES);
+            kprintf("[AHCI] port %u: the disk did not answer a cache flush in "
+                    "%u ms (attempt %d of %d)\n", port, AHCI_CMD_PATIENCE_MS,
+                    retry + 1, AHCI_MAX_RETRIES);
         }
         if (retry < AHCI_MAX_RETRIES - 1) {
             ahci_port_recover(port_state);
         }
     }
 
-    debug_printf("[AHCI Sync] Flush cache failed after %d retries\n", AHCI_MAX_RETRIES);
+    kprintf("[AHCI] port %u: a cache flush failed after %d attempts\n",
+            port, AHCI_MAX_RETRIES);
     return -1;
 }
