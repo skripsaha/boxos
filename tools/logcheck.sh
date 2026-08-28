@@ -613,6 +613,18 @@ run_healthy() {
     # with the same words, and that one is about somebody else's ground.
     grep -qE '^\[TagFS\] seat [0-9]+: its far copy agrees' "$L"
     chk $? "the mount checked the far end of the volume it stood on"
+
+    # (10) THE PASS ARRIVED THE WAY THE LOADER WROTE IT.
+    #
+    # The volume identity the whole boot leans on is read out of a block in
+    # low memory that nothing defends. Until the seal it was believed because
+    # its magic looked right — which a block half-overwritten by firmware also
+    # manages. Both loaders seal it now; the kernel says which of the two
+    # things it has: a block that adds up, or a block it had to take on trust.
+    grep -q "the loader left a pass with 4 stamp(s)" "$L"
+    chk $? "the pass carries its seal as well as its three facts"
+    grep -q "sealed, and the seal agrees" "$L"
+    chk $? "and the block adds up to what the loader sealed it with"
 }
 
 # ── a volume whose metadata will not read ────────────────────────────────
@@ -752,6 +764,32 @@ run_uefi() {
     strangers=$(grep -c "not in its muster" "$L")
     [ "$strangers" = 0 ]
     chk $? "no name the muster declared was called a stranger ($strangers)"
+
+    # ── what the loader hands over, and where it puts it ───────────────────
+    #
+    # TagBoot writes the E820 map at 0x500, boot_info at 0xA000 and the pass
+    # at 0xA600 — three fixed addresses it had never asked the firmware for,
+    # while calling that same firmware's allocator several more times before
+    # ExitBootServices. Two of those calls are AllocateAnyPages, which lets
+    # the firmware pick, and low conventional memory is exactly what it may
+    # pick. Now the pages are claimed first, and the loader SAYS how many it
+    # got — a board whose firmware refuses one names it instead of booting
+    # strangely.
+    grep -qE "TagBoot: set aside [0-9]+ of 3 handoff page\(s\)" "$L"
+    chk $? "the loader asked for the pages it writes the handoff into"
+    grep -q "TagBoot: set aside 3 of 3 handoff page(s)" "$L"
+    chk $? "and this firmware gave it all three"
+    # ‼ This one cannot go red here and is kept anyway: OVMF gives all three,
+    # so there is no refusal to report and removing the claim entirely leaves
+    # it green. Its value is on a board whose firmware says no — which is the
+    # only place the question was ever open.
+    ! grep -q "would not set aside" "$L"
+    chk $? "no handoff page was written into unclaimed"
+
+    # The UEFI half of the seal — a different loader, a different CRC, the
+    # same block and the same kernel check.
+    grep -q "sealed, and the seal agrees" "$L"
+    chk $? "the pass TagBoot wrote adds up too"
 }
 
 # Does the medium actually carry this text? Read off the image rather than
@@ -1530,6 +1568,121 @@ run_twoctrl() {
     chk $? "no slot was left standing because nobody came to take it down"
 }
 
+# ── a pass that did not survive the journey ────────────────────────────────
+#
+# The seal exists for one case that cannot be staged any other way: the block
+# still carries a valid magic, states lengths that fit, and walks cleanly —
+# and is not what the loader wrote. Firmware handing the page to something
+# else between the write and ExitBootServices produces exactly that, and so
+# does a loader that died halfway.
+#
+# So the mutation corrupts the pass AFTER it has been sealed. One byte, inside
+# the span the seal covers, in the stamp the kernel leans on hardest.
+seal_on() {
+    cp src/boot/stage2/stage2.asm "$SCRATCH/stage2.seal.bak"
+    python3 - <<'EOF'
+p = "src/boot/stage2/stage2.asm"
+s = open(p).read()
+anchor = "    mov [BOARDING_PASS_ADDR+68], eax\n    ret\n"
+assert anchor in s, "seal anchor missing"
+s = s.replace(anchor,
+              "    mov [BOARDING_PASS_ADDR+68], eax\n"
+              "    mov byte [BOARDING_PASS_ADDR+41], 0x7F   ; logcheck mutation: the block rots after it was sealed\n"
+              "    ret\n", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/boot/stage2/stage2.asm || { echo "seal install FAILED"; exit 1; }
+    sleep 1; touch src/boot/stage2/stage2.asm
+}
+seal_off() {
+    cp "$SCRATCH/stage2.seal.bak" src/boot/stage2/stage2.asm
+    sleep 1; touch src/boot/stage2/stage2.asm
+}
+
+# ── a pass from a loader newer than this kernel ────────────────────────────
+#
+# The other half of the same question: what may be believed off the block.
+# The version used to throw the WHOLE pass away on any number the kernel had
+# not been compiled against — volume identity and all — which is the version
+# ladder boarding_pass.h promises not to build. The stamps are self-describing
+# and the header is frozen, so a later loader is readable.
+passver_on() {
+    cp src/boot/stage2/stage2.asm "$SCRATCH/stage2.ver.bak"
+    python3 - <<'EOF'
+p = "src/boot/stage2/stage2.asm"
+s = open(p).read()
+anchor = "    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version\n"
+assert anchor in s, "pass-version anchor missing"
+s = s.replace(anchor,
+              "    mov word  [BOARDING_PASS_ADDR+4],   2   ; logcheck mutation: a loader newer than this kernel\n", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/boot/stage2/stage2.asm || { echo "pass-version install FAILED"; exit 1; }
+    sleep 1; touch src/boot/stage2/stage2.asm
+}
+passver_off() {
+    cp "$SCRATCH/stage2.ver.bak" src/boot/stage2/stage2.asm
+    sleep 1; touch src/boot/stage2/stage2.asm
+}
+
+run_seal() {
+    echo "== seal: the pass was written, then something walked over it =="
+    seal_on; build
+    boot seal.broken
+    seal_off
+    local L="$SCRATCH/serial.seal.broken.log"
+
+    # The kernel CAUGHT it, and said both sums rather than "bad pass".
+    grep -qE "the seal on the pass is broken: [0-9]+ bytes sum to 0x[0-9a-f]+ and the loader wrote 0x[0-9a-f]+" "$L"
+    chk $? "the broken seal was caught, and both sums named"
+
+    # And having caught it, refused the block ENTIRELY. A pass that does not
+    # add up must not have some of its stamps believed.
+    grep -q "the loader left no pass" "$L"
+    chk $? "and the whole pass was refused, not part of it"
+
+    ! grep -q "read out of the volume" "$L"
+    chk $? "no volume identity was taken off a block that did not add up"
+
+    # And the room does not go on crediting a loader whose word it threw
+    # away. A healthy boot prints "the loader said so on its boarding pass"
+    # over the seat it mounts; after a refused pass that sentence must be
+    # gone, because nothing on the block is usable — not the volume id, and
+    # not the confidence. This is the check that would catch a kernel which
+    # rejects the pass and then quietly uses a value it took off it anyway.
+    ! grep -q "the loader said so on its boarding pass" "$L"
+    chk $? "the room does not credit a pass it refused"
+
+    # It still found the volume — by its own means, which is the arrangement
+    # the pass was only ever an improvement on.
+    grep -qE '^\[TagFS\] volume on seat [0-9]+' "$L"
+    chk $? "and found the volume anyway, without being told"
+
+    # ‼ AND THE MACHINE STILL BOOTS. A corrupted pass is not a reason to
+    # refuse a machine: the pass is an optimisation over a rule that works.
+    grep -q "BoxOS Shell" "$L";  chk $? "the machine still reaches a shell"
+    typed_ok "$L";               chk $? "and still answers a keystroke"
+
+    # ── and now a pass this kernel is too old to have heard of ─────────────
+    passver_on; build
+    boot seal.newer
+    passver_off
+    local N="$SCRATCH/serial.seal.newer.log"
+
+    grep -q "the pass is version 2 and this kernel was built for 1" "$N"
+    chk $? "a newer pass is noticed and named"
+
+    # THE point. The stamps are self-describing and the header is frozen, so
+    # everything this kernel knows how to read is still there to be read. The
+    # old rule discarded the block whole and sent the room back to guessing.
+    grep -q "read out of the volume" "$N"
+    chk $? "and its volume identity is still read off it"
+    grep -q "the loader said so on its boarding pass" "$N"
+    chk $? "and the room is told which seat, by a loader it does not know"
+    grep -q "sealed, and the seal agrees" "$N"
+    chk $? "and the seal on it still checks out"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -1547,9 +1700,10 @@ case "${1:-both}" in
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
+    seal)     run_seal ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|both|all]"; exit 2 ;;
 esac
 
 echo

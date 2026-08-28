@@ -89,6 +89,7 @@ BOARDING_HDR_BYTES    equ 16
 BOARDING_STAMP_VOLUME equ 1
 BOARDING_STAMP_MEDIUM equ 2
 BOARDING_STAMP_LOADER equ 3
+BOARDING_STAMP_SEAL   equ 4
 BOARDING_FIRMWARE_BIOS equ 0
 ; ---------------------------------------------------------------------------
 ; The Deed, by offset.
@@ -480,7 +481,7 @@ long_mode_start:
 ; ---------------------------------------------------------------------------
 ; The Boarding Pass.
 ;
-; Three stamps, and the one that matters is the first: the identity of the
+; Four stamps, and the one that matters is the first: the identity of the
 ; volume this kernel was just read out of. It is sitting in the Deed this
 ; loader read at the start, sixteen bytes at DEED_OFF_UUID.
 ;
@@ -499,9 +500,9 @@ write_boarding_pass:
     mov dword [BOARDING_PASS_ADDR],     BOARDING_PASS_MAGIC     ; +0  magic
     mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version
     mov word  [BOARDING_PASS_ADDR+6],   BOARDING_HDR_BYTES      ; +6  header_bytes
-    mov word  [BOARDING_PASS_ADDR+8],   64                      ; +8  used_bytes
+    mov word  [BOARDING_PASS_ADDR+8],   72                      ; +8  used_bytes
     mov word  [BOARDING_PASS_ADDR+10],  BOARDING_PASS_BYTES     ; +10 capacity
-    mov word  [BOARDING_PASS_ADDR+12],  3                       ; +12 count
+    mov word  [BOARDING_PASS_ADDR+12],  4                       ; +12 count
     mov word  [BOARDING_PASS_ADDR+14],  0                       ; +14 reserved
 
     ; Stamp 1 at +16: the volume, sixteen bytes out of its Deed.
@@ -534,6 +535,37 @@ write_boarding_pass:
     mov [BOARDING_PASS_ADDR+56], eax
     mov word  [BOARDING_PASS_ADDR+60],  1                       ; major
     mov word  [BOARDING_PASS_ADDR+62],  0                       ; minor
+
+    ; Stamp 4 at +64: the seal, and it is last because it covers everything
+    ; ahead of it — the header, the three stamps, and its own kind/length pair.
+    ; The rule and the reasoning live in src/include/boarding_pass.h; what is
+    ; here is the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
+    ;
+    ; It cannot reuse crc32_chunk further down this file: that one addresses
+    ; through ES:DI and belongs to the real-mode half, and this runs in long
+    ; mode. Sixty-eight bytes, once per boot.
+    mov word  [BOARDING_PASS_ADDR+64],  BOARDING_STAMP_SEAL
+    mov word  [BOARDING_PASS_ADDR+66],  4
+
+    mov esi, BOARDING_PASS_ADDR
+    mov ecx, 68                         ; up to the seal's payload, not into it
+    mov eax, 0xFFFFFFFF
+.seal_byte:
+    movzx edx, byte [rsi]
+    xor eax, edx
+    mov edx, 8
+.seal_bit:
+    shr eax, 1                          ; CF = the bit that just fell off
+    jnc .seal_next
+    xor eax, 0xEDB88320
+.seal_next:
+    dec edx
+    jnz .seal_bit
+    inc rsi
+    dec ecx
+    jnz .seal_byte
+    not eax
+    mov [BOARDING_PASS_ADDR+68], eax
     ret
 
 
