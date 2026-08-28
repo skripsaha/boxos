@@ -48,6 +48,12 @@ typedef struct {
  * Zero is a complete answer, not a failure: a medium with no table, a table
  * that does not check out, or a table with nothing of ours in it are all
  * "there is no BoxOS ground here", and each says so on its own line.
+ *
+ * ‼ Asked twice of the same occupant of the same seat, this answers the second
+ * time from what it read the first — the table is on the medium and nothing in
+ * this kernel writes one. A medium that leaves and comes back is a different
+ * occupant of the chair and is read again. Anything that ever DOES write a
+ * partition table has to drop that memory; ground.c says where.
  */
 uint8_t GroundSurvey(uint8_t seat, MediumGround *out, uint8_t max);
 

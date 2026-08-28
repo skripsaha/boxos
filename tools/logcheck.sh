@@ -526,6 +526,37 @@ run_healthy() {
 
     # (7) the kernel's ear works — mutation-proven harness, see commit
     grep -q "TOUCH WATCH TEST. PASSED: all 20 checks OK" "$L"; chk $? "TouchWatch self-test 20/20"
+
+    # (8) THE MEDIUM IS ASKED ONCE, NOT FIVE TIMES.
+    #
+    # A boot used to read this seat's partition table five times and its deed
+    # four, because five parties that know nothing about each other each asked
+    # the same question: the room describing what it seated, the filesystem
+    # looking for its volume, the filesystem asking the chosen seat again just
+    # for the identity, the mount standing on the ground, and the boot survey.
+    # On a flash drive every one of those is a real transfer.
+    #
+    # The reads themselves are silent, so what is checked here is the symptom
+    # that was visible: the volume was DESCRIBED twice, three identical lines
+    # each time. One description means one reader reached it.
+    local described
+    described=$(grep -cE '^\[Deed\] seat [0-9]+: volume [0-9a-f]{32}, ' "$L")
+    [ "$described" = 1 ]
+    chk $? "the volume is described once, not once per reader ($described)"
+
+    # And the survey says so rather than skipping quietly. A survey that leaves
+    # a ground out without naming it is a survey nobody can count.
+    grep -q "carries the volume this machine is standing on"  "$L"
+    chk $? "the boot survey names the ground already stood on instead of re-reading it"
+
+    # (9) THE MOUNT CHECKS ITS OWN FAR COPY, AND SAYS SO.
+    #
+    # It always did — and only ever spoke when the far copy did NOT answer, so
+    # a volume whose whole extent is present looked exactly like a volume
+    # nobody had checked. [TagFS], not [Deed]: the boot survey has its own line
+    # with the same words, and that one is about somebody else's ground.
+    grep -qE '^\[TagFS\] seat [0-9]+: its far copy agrees' "$L"
+    chk $? "the mount checked the far end of the volume it stood on"
 }
 
 # ── a volume whose metadata will not read ────────────────────────────────

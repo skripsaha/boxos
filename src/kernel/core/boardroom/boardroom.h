@@ -236,10 +236,18 @@ int BoardroomFlush(uint8_t seat);
  * stick while carrying an old volume on an internal disk should not quietly
  * mount the wrong decade. That rule is a guess, and it is printed as one.
  *
+ * `out_uuid` — optional — is filled with what the chosen seat's volume calls
+ * itself. This is not a convenience: the room has ALREADY been told that
+ * identity by the probe, and the caller that wants it used to get it by
+ * probing the same seat a second time — which for a filesystem means reading
+ * that medium's partition table and its deed all over again, for sixteen bytes
+ * the room was holding and threw away.
+ *
  * Returns the seat, or 0xFF when nothing was recognised.
  */
 typedef bool (*BoardroomProbe)(void* ctx, uint8_t seat, uint8_t out_uuid[16]);
-uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx);
+uint8_t BoardroomFindVolume(BoardroomProbe probe, void* ctx,
+                            uint8_t out_uuid[16]);
 
 #define BOARDROOM_NO_SEAT 0xFF
 

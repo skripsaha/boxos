@@ -402,6 +402,19 @@ error_t  tagfs_init(void);
 uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
 
 /*
+ * Where this volume's ground begins on that medium, in the medium's own
+ * sectors. Zero when nothing is mounted.
+ *
+ * The one absolute address TagFS holds. It is not written down inside the
+ * volume — it is discovered from the medium's partition table each time the
+ * volume is met — so anybody who needs to talk about the SAME run of sectors
+ * from outside has to be told it. The boot survey is the caller: it walks every
+ * ground on every medium, and this is how it recognises the one that has
+ * already been read, checked and described by the mount.
+ */
+uint64_t tagfs_get_volume_base(void);
+
+/*
  * A medium has arrived somewhere in the Boardroom.
  *
  * Either the volume this kernel had is back — same identity, and unchanged
