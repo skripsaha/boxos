@@ -607,9 +607,18 @@ void xhci_tick(void) {
         xhci_enum_watchdog(ctrl);
         xhci_enum_pump(ctrl);
     }
-    /* And the reads nobody is standing over. Not per controller — a unit knows
-     * which one it belongs to, and there is one list of them. */
-    xhci_msd_watchdog();
+    /*
+     * ‼ The reads nobody is standing over are NOT looked at from here.
+     *
+     * Giving up on one means resetting the transport, and a Bulk-Only
+     * Transport reset is three control transfers with a budget of a second
+     * each — three seconds inside IRQ0, which does not send its
+     * end-of-interrupt until it returns. Measured against the rest of this
+     * file: that is the same fault as aborting the command ring from the tick,
+     * and it has the same answer. xhci_msd_watchdog is called from the guide
+     * loop and the idle loop instead, where waiting is allowed; it compares a
+     * TSC deadline, so the cadence it runs at is nobody's business but its own.
+     */
     __atomic_store_n(&g_no_waiting, 0, __ATOMIC_RELEASE);
 }
 

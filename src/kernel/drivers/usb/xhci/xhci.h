@@ -163,6 +163,26 @@ typedef struct {
     uint32_t cmd_nudges;
 
     /*
+     * The command ring has to be taken back, and this is where that is
+     * remembered until somewhere allowed to wait picks it up.
+     *
+     * ‼ Aborting a ring is a five-second poll of CRCR (Section 4.6.1.2), and
+     * the watchdog that decides it is needed runs from the timer interrupt —
+     * which does not send its end-of-interrupt until it returns. So the abort
+     * used to happen INSIDE IRQ0: five seconds during which pit_get_uptime_us
+     * stops advancing, the scheduler clock stops, key repeat stops, Touch
+     * delivery stops and both disk watchdogs stop. The machine loses five
+     * seconds of its own time at precisely the moment something has already
+     * gone wrong.
+     *
+     * This driver already states the rule three times over and already has the
+     * shape that keeps it: the tick NOTICES, and the guide loop DOES. That is
+     * how a controller that has halted is brought back (xhci_recover_if_needed)
+     * and how an unplugged device is taken down. The ring abort now joins them.
+     */
+    volatile uint32_t cmd_abort_wanted;
+
+    /*
      * How many times a drain found somebody else already draining and went
      * away.
      *
@@ -238,10 +258,19 @@ int xhci_start(xhci_controller_t* ctrl);
 xhci_controller_t* xhci_get_controller(void);
 
 /*
- * Bring back any controller that has stopped itself with an internal or host
- * system error. Called from the K-Core guide loop, because it waits — up to a
- * second for a reset — and because that is where deferred work in this kernel
- * actually runs. Does nothing, cheaply, when nothing has failed.
+ * The two repairs that take seconds, done where seconds may be spent.
+ *
+ * A controller that has stopped itself with an internal or host system error
+ * needs a reset — up to a second. A command ring that has stopped answering
+ * needs to be taken back — up to five, because that is what the specification
+ * allows the controller to stop it in (Section 4.6.1.2). Both are decided
+ * elsewhere, by watchdogs that run from the timer interrupt, and neither may
+ * be carried out there: IRQ0 sends its end-of-interrupt only when it returns,
+ * so a second spent inside it is a second of the machine's own timekeeping.
+ *
+ * Called from the K-Core guide loop and the idle loop, which is where deferred
+ * work in this kernel actually runs. Does nothing, cheaply, when neither has
+ * happened — one load of a flag per controller.
  */
 void xhci_recover_if_needed(void);
 

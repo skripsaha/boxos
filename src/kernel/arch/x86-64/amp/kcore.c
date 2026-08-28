@@ -1,6 +1,7 @@
 #include "kcore.h"
 #include "boardroom.h"
 #include "xhci_hub.h"
+#include "xhci_msd.h"
 #include "xhci_enumeration.h"
 #include "process.h"
 #include "guide.h"
@@ -276,9 +277,21 @@ void kcore_run_loop(void)
         /* And a controller that has stopped itself. Host Controller Error and
          * Host System Error both mean it has halted and will not start again
          * on its own; the answer is a reset, which takes up to a second and so
-         * cannot happen where the error was noticed. One core does it and the
-         * rest go away. One load of a flag when nothing has failed. */
+         * cannot happen where the error was noticed. The same call now also
+         * takes back a command ring that has stopped answering, which the
+         * specification allows the controller five seconds to let go of — and
+         * five seconds is what the timer interrupt that noticed would have
+         * spent not sending its end-of-interrupt. One core does both and the
+         * rest go away. One load of a flag per controller when nothing has
+         * failed. */
         xhci_recover_if_needed();
+
+        /* And a read on a USB disk that nobody is standing over and that was
+         * never answered: giving up on one means resetting the transport, and
+         * a Bulk-Only Transport reset is three control transfers. Same
+         * reasoning, same context; it compares a TSC deadline, so it does not
+         * care how often it is asked. */
+        xhci_msd_watchdog();
 
         /* And a medium that arrived after the room was called to order — a
          * stick pushed in while the machine runs, or the one it booted from

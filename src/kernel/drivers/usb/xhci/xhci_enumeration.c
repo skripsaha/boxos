@@ -1554,6 +1554,21 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
          * cost a walk of two tables when there is nothing to find.
          */
         xhci_check_command_timeouts(ctrl);
+
+        /*
+         * And the abort the watchdog above only ASKS for.
+         *
+         * It asks rather than acts because it is also reached from the timer
+         * interrupt, where a five-second poll of CRCR would be five seconds of
+         * the machine's clock (xhci.h, cmd_abort_wanted). The guide loop is
+         * what carries it out at runtime — and the guide loop does not exist
+         * yet here: this runs during boot, before `sti`, on the one core there
+         * is. So this loop is the guide loop for as long as boot lasts, and
+         * without this line a ring that stopped answering during enumeration
+         * would never be taken back at all.
+         */
+        xhci_command_abort_if_wanted(ctrl);
+
         xhci_enum_watchdog(ctrl);
         xhci_enum_pump(ctrl);
 

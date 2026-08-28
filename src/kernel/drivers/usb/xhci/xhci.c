@@ -495,11 +495,28 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
 }
 
 /*
- * One core does the recovery, and the rest go away rather than queue up behind
- * it to do the same thing — the arrangement the hubs and the slot teardown
- * already use, and for the same reason. Called from the K-Core guide loop,
- * which is where deferred work in this kernel actually runs: cpu_idle on a
- * multi-core machine is not entered at all.
+ * The two repairs that take seconds, carried out where seconds may be spent.
+ *
+ * One core does them and the rest go away rather than queue up behind it — the
+ * arrangement the hubs and the slot teardown already use, and for the same
+ * reason. Called from the K-Core guide loop and from the idle loop, which is
+ * where deferred work in this kernel actually runs: cpu_idle on a multi-core
+ * machine is not entered at all, and the K-Core loop is not reached on one.
+ *
+ * ‼ The command-ring abort is here rather than where it is decided because
+ * where it is decided is IRQ0. The specification allows a controller five
+ * seconds to stop its ring (Section 4.6.1.2), and a timer interrupt that does
+ * not return for five seconds does not send its end-of-interrupt for five
+ * seconds either: the PIT stops being counted, the scheduler clock stops, key
+ * repeat stops, Touch delivery stops, and both disk watchdogs stop. That is
+ * the machine losing five seconds of its own time at the exact moment
+ * something has already gone wrong with it.
+ *
+ * The abort comes FIRST, and that order is not cosmetic: taking the ring back
+ * is what releases the devices whose commands were in flight, and the reset
+ * below throws every device away regardless. Doing the reset first would
+ * discard the one report that says which of them the controller had actually
+ * addressed.
  */
 void xhci_recover_if_needed(void)
 {
@@ -507,7 +524,9 @@ void xhci_recover_if_needed(void)
 
     bool any = false;
     for (uint8_t i = 0; i < g_controller_count; i++) {
-        if (g_controllers[i].error_state) {
+        if (g_controllers[i].error_state ||
+            __atomic_load_n(&g_controllers[i].cmd_abort_wanted,
+                            __ATOMIC_ACQUIRE)) {
             any = true;
             break;
         }
@@ -518,6 +537,10 @@ void xhci_recover_if_needed(void)
 
     if (__atomic_exchange_n(&busy, 1u, __ATOMIC_ACQUIRE) != 0) {
         return;
+    }
+
+    for (uint8_t i = 0; i < g_controller_count; i++) {
+        xhci_command_abort_if_wanted(&g_controllers[i]);
     }
 
     for (uint8_t i = 0; i < g_controller_count; i++) {
