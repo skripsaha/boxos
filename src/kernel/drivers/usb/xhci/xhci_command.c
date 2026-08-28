@@ -240,6 +240,24 @@ int xhci_post_reset_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* ow
     return post_command(ctrl, &trb, slot_id, owner);
 }
 
+int xhci_post_stop_endpoint_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
+                                uint8_t slot_id, uint8_t dci)
+{
+    if (!ctrl || !ctrl->running || slot_id == 0 || slot_id > ctrl->max_slots ||
+        dci == 0 || dci > 31) {
+        return -1;
+    }
+
+    /* Suspend (bit 23) is left clear. It asks the controller to suspend the
+     * device as well as stop the endpoint, and nothing here wants that: the
+     * device is fine, it is the transfer that is being taken back. */
+    xhci_trb_t trb = {0};
+    trb.control = TRB_SET_TYPE(TRB_TYPE_STOP_ENDPOINT) |
+                  ((uint32_t)dci << 16) | ((uint32_t)slot_id << 24);
+
+    return post_command(ctrl, &trb, slot_id, owner);
+}
+
 int xhci_post_set_tr_dequeue_cmd(xhci_controller_t* ctrl, xhci_device_slot_t* owner,
                                  uint8_t slot_id, uint8_t dci,
                                  uint64_t dequeue_ptr_with_dcs)

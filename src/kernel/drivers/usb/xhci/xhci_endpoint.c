@@ -501,6 +501,63 @@ int xhci_ep_transfer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
     return code;
 }
 
+uint8_t xhci_ep_context_state(xhci_controller_t* ctrl,
+                              const xhci_device_slot_t* slot, uint8_t dci)
+{
+    if (!ctrl || !slot || !slot->dev_ctx || dci < 1 || dci > XHCI_MAX_DCI) {
+        return XHCI_EP_STATE_DISABLED;
+    }
+
+    /*
+     * The Device Context is the Slot Context followed by one Endpoint Context
+     * per Device Context Index, each of them `context_size` bytes — 32, or 64
+     * on a controller that sets CSZ. The arithmetic is done here rather than
+     * through xhci_device_context_t because that structure is declared for the
+     * 32-byte layout, and on a 64-byte controller every field past the slot in
+     * it names the wrong half of something.
+     */
+    const uint8_t* ctx = (const uint8_t*)slot->dev_ctx;
+    const xhci_endpoint_context_t* ep_ctx =
+        (const xhci_endpoint_context_t*)(ctx + (size_t)ctrl->context_size * dci);
+
+    return (uint8_t)(ep_ctx->dwords[0] & 0x7u);
+}
+
+const char* xhci_ep_state_name(uint8_t state)
+{
+    switch (state) {
+        case XHCI_EP_STATE_DISABLED: return "Disabled";
+        case XHCI_EP_STATE_RUNNING:  return "Running";
+        case XHCI_EP_STATE_HALTED:   return "Halted";
+        case XHCI_EP_STATE_STOPPED:  return "Stopped";
+        case XHCI_EP_STATE_ERROR:    return "Error";
+        default:                     return "a reserved value";
+    }
+}
+
+/*
+ * Where the next transfer on this endpoint will begin.
+ *
+ * A Reset Endpoint or a Stop Endpoint leaves the controller's dequeue pointer
+ * on the transfer it stopped at; the ring's enqueue position is where the next
+ * one gets written. Moving it is the second half of both repairs and is
+ * spelled once.
+ */
+static void ep_resume_where_software_stands(xhci_controller_t* ctrl,
+                                            xhci_device_slot_t* slot,
+                                            uint8_t dci, xhci_ring_t* ring)
+{
+    uint64_t resume = ring->trbs_phys +
+                      (uint64_t)ring->enqueue_idx * sizeof(xhci_trb_t);
+
+    /* And the TRBs being stepped over give their slots back: nothing will ever
+     * execute them, so nothing will ever answer for them. */
+    xhci_ring_abandon(ring);
+
+    xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, dci,
+                                 resume | (ring->cycle_state ? 1u : 0u));
+}
+
 void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t dci)
 {
     if (!ctrl || !slot || !slot->endpoints || dci < 1 || dci > XHCI_MAX_DCI) {
@@ -530,6 +587,30 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
         return;
     }
 
+    /*
+     * ‼ ASKED, NOT ASSERTED.
+     *
+     * Reset Endpoint is defined for a HALTED endpoint and for nothing else
+     * (Section 4.6.8), and so is the Set TR Dequeue Pointer that follows it
+     * (Section 4.6.10 wants Stopped or Error). This used to print "halted —
+     * clearing it" and post both regardless, and the one caller that reaches
+     * here without having seen a stall — the mass-storage transport reset,
+     * which clears both pipes whatever went wrong — made that sentence false
+     * and both commands refused: `Reset Endpoint on slot 2 was refused:
+     * Context State Error`, twice per pipe, every time.
+     *
+     * The controller keeps the answer in the Output Endpoint Context and
+     * updates it as it goes (Section 4.10.2.1 halts an endpoint on a stall), so
+     * this is the controller being asked rather than this driver guessing.
+     */
+    uint8_t state = xhci_ep_context_state(ctrl, slot, dci);
+    if (state != XHCI_EP_STATE_HALTED) {
+        debug_printf("[xHCI] slot %u endpoint %u is %s, not halted — nothing "
+                     "to clear\n", slot->slot_id, dci,
+                     xhci_ep_state_name(state));
+        return;
+    }
+
     kprintf("[xHCI] slot %u endpoint %u halted — clearing it\n",
             slot->slot_id, dci);
 
@@ -537,16 +618,71 @@ void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t 
         return;
     }
 
-    /* Resume where software stands. The reset leaves the controller's dequeue
-     * pointer on the transfer that halted; the ring's enqueue position is
-     * where the next one will be written. */
-    uint64_t resume = ring->trbs_phys +
-                      (uint64_t)ring->enqueue_idx * sizeof(xhci_trb_t);
+    ep_resume_where_software_stands(ctrl, slot, dci, ring);
+}
 
-    /* And the TRBs being stepped over give their slots back: nothing will ever
-     * execute them, so nothing will ever answer for them. */
-    xhci_ring_abandon(ring);
+void xhci_ep_abandon(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t dci)
+{
+    if (!ctrl || !slot || !slot->endpoints || dci < 1 || dci > XHCI_MAX_DCI) {
+        return;
+    }
 
-    xhci_post_set_tr_dequeue_cmd(ctrl, slot, slot->slot_id, dci,
-                                 resume | (ring->cycle_state ? 1u : 0u));
+    xhci_endpoint_t* ep = &slot->endpoints[dci];
+    if (ep->xfer_state != XHCI_XFER_IN_FLIGHT) {
+        return;                 /* nothing outstanding: nothing to take back */
+    }
+
+    /*
+     * First, and before any command is posted.
+     *
+     * Stop Endpoint answers with a Transfer Event for the transfer it stopped
+     * on, and that event must not be able to reach a job that is being given
+     * up on — the job's completion node lives inside memory its owner is about
+     * to free. Clearing this is what makes the event land nowhere instead of
+     * on a K-Core.
+     */
+    ep->xfer_done = NULL;
+
+    xhci_ring_t* ring = (dci == 1) ? slot->ep0_ring : ep->ring;
+
+    /* A device that has gone takes nothing back, for the reason spelled out in
+     * xhci_ep_recover: the commands would be held by the controller for a slot
+     * that is about to be handed in, and the slot cannot be taken down while
+     * anything is outstanding for it. */
+    if (ring && xhci_slot_is_live(slot)) {
+        uint8_t state = xhci_ep_context_state(ctrl, slot, dci);
+
+        if (state == XHCI_EP_STATE_RUNNING) {
+            kprintf("[xHCI] slot %u endpoint %u: the transfer on it is no "
+                    "longer wanted — stopping it\n", slot->slot_id, dci);
+            if (xhci_post_stop_endpoint_cmd(ctrl, slot, slot->slot_id, dci) == 0) {
+                xhci_command_wait_idle(ctrl, XHCI_CMD_TIMEOUT_MS);
+                ep_resume_where_software_stands(ctrl, slot, dci, ring);
+                xhci_command_wait_idle(ctrl, XHCI_CMD_TIMEOUT_MS);
+            }
+        } else if (state == XHCI_EP_STATE_HALTED) {
+            /* The device halted it as well as failing to answer. That is the
+             * other repair, and xhci_ep_recover is where it lives. */
+            xhci_ep_recover(ctrl, slot, dci);
+            xhci_command_wait_idle(ctrl, XHCI_CMD_TIMEOUT_MS);
+        } else if (state == XHCI_EP_STATE_ERROR) {
+            ep_resume_where_software_stands(ctrl, slot, dci, ring);
+            xhci_command_wait_idle(ctrl, XHCI_CMD_TIMEOUT_MS);
+        }
+        /* Stopped and Disabled need nothing: the controller is already not
+         * reading this ring. */
+    }
+
+    /*
+     * And now the endpoint is free for the next transfer.
+     *
+     * Written last, because until the controller has stopped, "the endpoint is
+     * idle" is a statement about the software side that the hardware has not
+     * agreed to yet — and ep_submit would put a second transfer on a ring the
+     * controller is still walking.
+     */
+    ep->xfer_trb_phys = 0;
+    ep->xfer_code     = 0;
+    ep->xfer_residual = 0;
+    ep->xfer_state    = XHCI_XFER_IDLE;
 }

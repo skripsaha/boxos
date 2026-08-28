@@ -175,8 +175,71 @@ int  xhci_ep_transfer(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
 bool xhci_ep_take_result(xhci_device_slot_t* slot, uint8_t dci,
                          uint8_t* out_code, uint32_t* out_residual);
 
-/* Clear a halted endpoint and put its dequeue pointer where software is. */
+/*
+ * What the CONTROLLER says an endpoint is doing, as opposed to what this
+ * driver last asked it to do.
+ *
+ * The Output Endpoint Context's EP State (xHCI 1.2 Section 6.2.3, dword0 bits
+ * 2:0) is written by the controller and never by software. It is the one thing
+ * that separates an endpoint the device HALTED from one that is simply still
+ * Running because the device is slow — and those two need opposite commands,
+ * which is why guessing cost this driver every recovery it ever attempted on a
+ * slow medium.
+ *
+ * ‼ Read with the controller's own context size, never through
+ * xhci_device_context_t: that structure is declared for 32-byte contexts, and
+ * on a controller with CSZ set every endpoint in it is at the wrong offset.
+ */
+#define XHCI_EP_STATE_DISABLED 0
+#define XHCI_EP_STATE_RUNNING  1
+#define XHCI_EP_STATE_HALTED   2
+#define XHCI_EP_STATE_STOPPED  3
+#define XHCI_EP_STATE_ERROR    4
+
+uint8_t     xhci_ep_context_state(xhci_controller_t* ctrl,
+                                  const xhci_device_slot_t* slot, uint8_t dci);
+const char* xhci_ep_state_name(uint8_t state);
+
+/* Clear a halted endpoint and put its dequeue pointer where software is.
+ *
+ * Asks the controller whether the endpoint IS halted before it says so. It used
+ * to assert it — the line it prints is "endpoint N halted — clearing it" — and
+ * on a merely slow endpoint that sentence was false and the two commands that
+ * followed it were both refused with Context State Error. */
 void xhci_ep_recover(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t dci);
+
+/*
+ * Nobody is coming for this answer.
+ *
+ * The opposite door to xhci_ep_take_result, and until now there was none: a
+ * caller that gave up on a transfer simply stopped looking, and the endpoint
+ * was never told. Two things then stayed true for the rest of the boot.
+ *
+ * `xfer_state` stayed IN_FLIGHT, so every later submission on that endpoint was
+ * refused with "one transfer at a time" — ONE slow read and the disk was never
+ * readable again. Measured: a medium held to 512 bytes a second for a single
+ * block, and afterwards, at full speed, the machine could not run a program off
+ * it and did not answer a keystroke.
+ *
+ * And `xfer_done` went on pointing into the job that was about to be freed, so
+ * a device answering LATE — which is exactly what a flash drive doing its own
+ * garbage collection does — handed a K-Core a freed pointer to run.
+ *
+ * The controller is told with the command that means it: Stop Endpoint for one
+ * that is Running, Reset Endpoint for one the device halted. Then the dequeue
+ * pointer is moved past what was abandoned, so the next transfer starts where
+ * software stands.
+ *
+ * Does nothing, cheaply, when the endpoint has nothing outstanding — so it is
+ * safe to say at the end of any transfer, whether or not one was given up on.
+ *
+ * ‼ For a device that has finished coming up. The commands it may post are
+ * ones the enumeration state machine claims as its own steps while a slot is
+ * still being brought up (xhci_command.c, cmd_is_enumeration_step), so saying
+ * this mid-enumeration would answer a question nobody asked. Everything that
+ * reaches here today holds the slot open, which means CONFIGURED.
+ */
+void xhci_ep_abandon(xhci_controller_t* ctrl, xhci_device_slot_t* slot, uint8_t dci);
 
 /* Record a completion against the endpoint it belongs to. Called from the
  * transfer-event handler. */

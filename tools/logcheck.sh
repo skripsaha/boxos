@@ -1063,6 +1063,153 @@ run_yank() {
     chk $? "no caller was still inside the slot when it wanted to leave"
 }
 
+run_stillthere() {
+    echo "== stillthere: the read was slow, and the device never went anywhere =="
+
+    # yank    pulls the stick while it is being read  -> the answer NEVER comes
+    # replug  pulls it while the machine is idle      -> nothing is in flight
+    #
+    # This is the third thing, and it is the one a real flash drive does: it
+    # answers LATE. A device doing its own garbage collection stops replying
+    # for seconds and then carries on, and from a driver's side that is
+    # indistinguishable from silence — the difference only shows up afterwards,
+    # in whether the machine is still usable.
+    #
+    # Nothing here is unplugged. The stick is in the machine from the first
+    # line to the last, and every check below is about what the driver did to a
+    # device that was still there the whole time.
+    latearrival_on; build
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        grep -q "hands over" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    # ── the control is the boot itself ──────────────────────────────────────
+    #
+    # Everything below is "and now it does not work", which is worth nothing
+    # unless the machine has been shown to work first. It has: reaching a shell
+    # at all means display.elf and shell.bin were read off this stick and run,
+    # and that is in the log already.
+    #
+    # ‼ IT USED TO BE A `files` TYPED HERE, AND THAT MADE THE RUN UNRELIABLE.
+    # TagFS reads ahead, so running the program once put it in memory and the
+    # throttled read below was then served without touching the medium — the
+    # scenario passed by never reaching the situation it exists for. Measured:
+    # green on its own, red in the matrix, same tree. A control that warms what
+    # the test is about is not a control.
+    cp build/serial.log "$SCRATCH/serial.stillthere.control.log"
+
+    # ── 512 bytes a second ──────────────────────────────────────────────────
+    # One 4 KiB filesystem block is eight seconds at this rate, which is longer
+    # than MSD_XFER_TIMEOUT_MS. Nothing in the guest is touched: the emulator is
+    # being told to stop behaving like a RAM disk. The mount is already done, so
+    # this is aimed at reading a PROGRAM and at nothing else.
+    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 512 0 0 0 0" >/dev/null 2>&1
+    sleep 1
+
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
+
+    # Waited out on the FACT, not on a clock: the run is interesting only once
+    # the driver has actually given up on a transfer, and that is a line it
+    # prints. The ceiling exists so a build where it never happens ends.
+    i=0
+    while [ $i -lt 45 ]; do
+        tail -n +$((MARK + 1)) build/serial.log 2>/dev/null | \
+            grep -qE "no answer in .* at stage|a read nobody was waiting on" && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+
+    # ── and the medium is quick again ───────────────────────────────────────
+    #
+    # ‼ THE CHECK IS A RELATIONSHIP INSIDE THE LOG, NOT A MARK IN THIS SCRIPT.
+    #
+    # Twice this was written as "look at what appears after a point I chose",
+    # first by cutting the log at a line number and then by counting listings
+    # from just before the command — and both were wrong for the same reason:
+    # the shell is still working through the previous command when the mark is
+    # taken, so the answer this check is looking for lands on the wrong side of
+    # it and a machine that answered is reported as one that did not. Green on
+    # its own, red in the matrix, three times out of three, on a tree where the
+    # machine visibly worked.
+    #
+    # What is actually being claimed has nothing to do with when this script
+    # looks: AFTER THE DRIVER GAVE UP ON A TRANSFER, THE MACHINE READ A PROGRAM
+    # OFF THIS DISK. Both halves of that are lines in the log, in order, and the
+    # order between them cannot drift. Measured against the run that found this
+    # defect: zero listings after the give-up on the old code, one on the new.
+    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 0 0 0 0 0" >/dev/null 2>&1
+    sleep 2
+    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    # Waited on the listing arriving, not on a number of seconds: a machine that
+    # is going to answer answers, and one that is not has the ceiling.
+    i=0
+    while [ $i -lt 30 ]; do
+        awk '/no answer in .* at stage|a read nobody was waiting on/{f=1} f' \
+            build/serial.log 2>/dev/null | grep -q "^shell.bin " && break
+        sleep 1; i=$((i+1))
+    done
+
+    make run-stop >/dev/null 2>&1
+    tail -n +$((MARK + 1)) build/serial.log > "$SCRATCH/serial.stillthere.log"
+    latearrival_off
+
+    local C="$SCRATCH/serial.stillthere.control.log"
+    local L="$SCRATCH/serial.stillthere.log"
+
+    grep -q "AUTOSTART. Started .shell.bin" "$C"
+    chk $? "the machine reads programs off this stick at full speed"
+
+    # The anchor. Without it every "! grep" below is green on a run that never
+    # reached the situation at all, which is the shape of a check that guards
+    # nothing.
+    grep -qE "no answer in .* at stage|a read nobody was waiting on" "$L"
+    chk $? "a transfer outran the driver's patience, which is what this tests"
+
+    # The device is in the machine. Anything that says otherwise is the driver
+    # inventing a departure out of a delay.
+    ! grep -q "the device has left" "$L"
+    chk $? "nothing claimed a device had left that was still plugged in"
+
+    # ‼ Reset Endpoint is defined for a HALTED endpoint (xHCI 1.2 4.6.8) and a
+    # merely slow one is Running, so the controller refuses it — and says so, in
+    # its own words, once per attempt. A refused command is a repair that did
+    # not happen.
+    ! grep -qE "Reset Endpoint on slot .* refused: Context State Error" "$L"
+    chk $? "no endpoint was reset that the controller did not consider halted"
+
+    ! grep -qE "Set TR Dequeue Pointer on slot .* refused: Context State Error" "$L"
+    chk $? "and no dequeue pointer was moved on a ring still being read"
+
+    # The whole point. A medium that was slow for a moment is a medium, and the
+    # machine has to be able to use it afterwards.
+    awk '/no answer in .* at stage|a read nobody was waiting on/{f=1} f' "$L" | \
+        grep -q "^shell.bin "
+    chk $? "the disk still reads a program after the driver gave one up"
+
+    ! grep -q "has been leaving for" "$L"
+    chk $? "no slot was left with somebody stuck inside it"
+}
+
 run_twoctrl() {
     echo "== twoctrl: two host controllers, and the stick on the SECOND one =="
 
@@ -1148,12 +1295,13 @@ case "${1:-both}" in
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     yank)     run_yank ;;
+    stillthere) run_stillthere ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|both|all]"; exit 2 ;;
 esac
 
 echo
