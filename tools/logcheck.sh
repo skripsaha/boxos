@@ -1277,6 +1277,86 @@ run_stillthere() {
     chk $? "no slot was left with somebody stuck inside it"
 }
 
+run_slowdisk() {
+    echo "== slowdisk: the disk was slow, and that is all it was =="
+
+    # A drive that meets a marginal sector retries the head inside itself before
+    # it answers. Seven seconds is ordinary on a desktop disk without
+    # configurable error recovery and the standard sets no ceiling at all — so a
+    # two-second clock on a command is not patience, it is a driver deciding a
+    # healthy disk is broken, recovering the port, retrying three times and
+    # reporting a failure on a read that would have arrived.
+    #
+    # ‼ THE DRIVER ALREADY HELD THE RIGHT NUMBER IN ONE HALF OF ITSELF. The
+    # ASYNCHRONOUS path has always given a command CONFIG_AHCI_IO_TIMEOUT_MS
+    # (thirty seconds, through ahci_watchdog_scan); only the SYNCHRONOUS one —
+    # every metadata read a filesystem makes — used two.
+    #
+    # ‼ WHAT THIS DOES NOT COVER, SAID RATHER THAN LEFT TO BE FOUND. The legacy
+    # IDE channels take the same fix (CONFIG_ATA_IO_TIMEOUT_MS) and are NOT
+    # tested here: ATA PIO waits for DRQ once per 512-byte SECTOR, so making one
+    # of those outlast the old five seconds means a hundred bytes a second, and
+    # reading a program at that rate is a quarter of an hour. It is exercised by
+    # every other scenario in the ordinary way, and the change to it is a
+    # ceiling nothing in an emulator ever reaches.
+    build
+
+    make run-stop >/dev/null 2>&1
+    make run-bg AHCI=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    wait_for_prompt
+
+    # 1536 bytes a second puts ONE 4 KiB filesystem block at not quite three
+    # seconds — past the two this driver used to allow a whole command, and
+    # nowhere near the thirty the class gives one. Everything below must simply
+    # work, slowly.
+    #
+    # The volume is already mounted, so this is aimed at what a filesystem does
+    # afterwards: `files` is a tag query, and a tag query is metadata reads,
+    # and metadata reads are the synchronous path.
+    ./tools/qemu-input.sh raw "block_set_io_throttle disk0 0 1536 0 0 0 0" >/dev/null 2>&1
+    sleep 1
+    type_line "files"
+
+    i=0
+    while [ $i -lt 180 ]; do
+        grep -q "^shell.bin " build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    ./tools/qemu-input.sh raw "block_set_io_throttle disk0 0 0 0 0 0 0" >/dev/null 2>&1
+    sleep 2
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.slowdisk.log"
+    L="$SCRATCH/serial.slowdisk.log"
+
+    # The control, and it is the boot: reaching a shell means the machine read
+    # its programs off this disk at full speed.
+    grep -q "AUTOSTART. Started" "$L"
+    chk $? "the machine reads programs off the AHCI disk at full speed"
+
+    grep -q "seat 0: AHCI port" "$L"
+    chk $? "and the volume really is behind the AHCI controller"
+
+    # The point. A disk that takes seconds is a disk, and the machine has to go
+    # on using it.
+    grep -q "^shell.bin " "$L"
+    chk $? "the filesystem still answers with the disk at 1536 bytes a second"
+
+    ! grep -q "did not answer a" "$L"
+    chk $? "and nothing was given up on while it was being read"
+
+    ! grep -qE "a (read|write|cache flush) failed after" "$L"
+    chk $? "no command was abandoned after retries on a disk that was answering"
+
+    ! grep -q "the link is no longer established" "$L"
+    chk $? "and the cable was never called unplugged"
+}
+
 run_twoctrl() {
     echo "== twoctrl: two host controllers, and the stick on the SECOND one =="
 
@@ -1362,13 +1442,14 @@ case "${1:-both}" in
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
     yank)     run_yank ;;
+    slowdisk) run_slowdisk ;;
     stillthere) run_stillthere ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|both|all]"; exit 2 ;;
 esac
 
 echo
