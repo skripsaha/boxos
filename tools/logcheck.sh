@@ -860,6 +860,105 @@ run_manyports() {
     chk $? "and the device there came up"
 }
 
+run_usbrecover() {
+    echo "== usbrecover: the deck is asked to put a controller back in service =="
+
+    # Four cores, for the reason latearrival and replug already give above: the
+    # deferred work of this kernel runs from the K-Core guide loop and from
+    # cpu_idle, and on one core neither of them runs. Measured again here by
+    # probe while this scenario was written — with CORES=1 the proof below is
+    # never reached at all.
+    #
+    # The build key exists because this costs the machine every USB device it
+    # has. A shipped build does not do that to itself.
+    make USBRECOVER=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
+    fi
+
+    make run-stop >/dev/null 2>&1
+    make run-bg USBRECOVER=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+
+    # Typed AFTER the controller has been taken down and brought back. The
+    # keyboard is on that controller: this is the whole point of the scenario.
+    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 4
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.usbrecover.log"
+    L="$SCRATCH/serial.usbrecover.log"
+
+    # The surface first: the two opcodes that used to break the machine are
+    # withdrawn, and their numbers answer to nothing rather than to something
+    # else. hw.usb.reset is still there and still system-only.
+    grep -q "the two withdrawn opcodes answer to nothing" "$L"
+    chk $? "hw.usb.init and hw.usb.stop are gone and their numbers are spent"
+
+    grep -q "hw.usb.reset is registered, system-only" "$L"
+    chk $? "hw.usb.reset is still there, and still system-only"
+
+    # Then the op itself, reached through the registry the way the dispatcher
+    # reaches it — so what is proved is the surface and not the driver behind.
+    grep -q "asked for the controller on .* to be put back in service" "$L"
+    chk $? "the deck was asked, by name, through the op registry"
+
+    # And what it did. A bare xhci_reset — which is what this op used to be —
+    # prints the first of these and none of the rest, and leaves the machine
+    # with no USB and no line saying so.
+    grep -q "putting the controller back in service" "$L"
+    chk $? "the driver began the whole repair, not a bare reset"
+
+    grep -q "back in service — looking again at what is plugged in" "$L"
+    chk $? "and finished it: the controller is running and the bus resurveyed"
+
+    # THE check. The keyboard lives on the controller that was just reset, so
+    # it went away with it. A repair that stops halfway leaves this line absent
+    # and the machine unusable from that moment on.
+    #
+    # ‼ The anchor must EXIST, and this check said so only after a mutation
+    # proved it did not. Written as `awk -v n="${began:-0}"`, a missing anchor
+    # became line zero and the check then matched the keyboard's ORIGINAL boot
+    # enumeration — it passed with the repair reverted to the bare reset it
+    # replaced, which is the one case it exists to catch.
+    local began came_back
+    began=$(grep -n "putting the controller back in service" "$L" | head -1 | cut -d: -f1)
+    came_back=""
+    if [ -n "$began" ]; then
+        came_back=$(awk -v n="$began" 'NR>n && /keyboard .* is live/ {print NR; exit}' "$L")
+    fi
+    [ -n "$came_back" ]
+    chk $? "the keyboard came back after the controller did"
+
+    grep -q "USB RECOVER TEST. PASSED" "$L"
+    chk $? "the op answered success"
+
+    ! grep -q "USB RECOVER TEST. FAIL" "$L"
+    chk $? "nothing in the proof failed"
+
+    # And the machine, afterwards. Typing is the only question the board
+    # failure was ever really about, and here it is asked of a keyboard that
+    # has been through a controller reset.
+    typed_ok "$L";    chk $? "and the machine answers a keystroke after all that"
+    external_ok "$L"; chk $? "and the prompt came back after an external utility"
+
+    # The volume was not on that controller in this configuration, and must not
+    # have noticed anything at all.
+    ! grep -q "the medium the volume lives on has left" "$L"
+    chk $? "the volume on the other seat was untouched by any of it"
+}
+
 run_yank() {
     echo "== yank: the stick is pulled while the volume is being read =="
 
@@ -1051,9 +1150,10 @@ case "${1:-both}" in
     yank)     run_yank ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
+    usbrecover) run_usbrecover ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_manyports; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|both|all]"; exit 2 ;;
 esac
 
 echo

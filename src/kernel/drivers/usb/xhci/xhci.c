@@ -398,7 +398,7 @@ static void xhci_publish_structures(xhci_controller_t* ctrl)
 }
 
 /*
- * Bringing a controller back after it has stopped itself.
+ * Bringing a controller back — the whole of it, in one place.
  *
  * Host Controller Error and Host System Error both mean the same thing in
  * practice: the controller has hit something it cannot continue past and has
@@ -415,14 +415,23 @@ static void xhci_publish_structures(xhci_controller_t* ctrl)
  * scratchpad the controller asked for — is kept and re-published, because none
  * of it was what went wrong and re-allocating it is a second way to fail.
  *
+ * ‼ A RESET IS NOT THIS, AND THE DIFFERENCE IS THE WHOLE POINT.
+ *
+ * `xhci_reset` halts the controller and clears it. That is one step of eleven.
+ * Afterwards CONFIG, DCBAAP, CRCR and ERSTBA are zero, RUN is clear, and this
+ * driver's own `running`, `initialized` and `error_state` still say the
+ * controller is healthy — so nothing will ever come back for it, and every
+ * device slot goes on claiming a device the silicon has forgotten. A caller
+ * that wants a controller put right wants all eleven steps or none, and the
+ * eleven are only correct in this order.
+ *
  * Reached from ordinary kernel context, never from the handler that noticed:
  * this waits up to a second for a reset, and an interrupt handler is not
  * somewhere to spend a second.
  */
 static void xhci_controller_recover(xhci_controller_t* ctrl)
 {
-    kprintf("[xHCI %s] resetting the controller after the error it "
-            "reported\n", ctrl->name);
+    kprintf("[xHCI %s] putting the controller back in service\n", ctrl->name);
 
     /* Nothing may believe a device is still there. */
     /*
@@ -508,8 +517,15 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
  * One core does them and the rest go away rather than queue up behind it — the
  * arrangement the hubs and the slot teardown already use, and for the same
  * reason. Called from the K-Core guide loop and from the idle loop, which is
- * where deferred work in this kernel actually runs: cpu_idle on a multi-core
- * machine is not entered at all, and the K-Core loop is not reached on one.
+ * where deferred work in this kernel actually runs.
+ *
+ * ‼ AND ON A ONE-CORE MACHINE, NEITHER OF THEM RUNS. The K-Core loop is only
+ * entered when the machine is multi-core, and the idle process is never
+ * scheduled on a single-core boot — measured by probe: with CORES=1 nothing in
+ * this block is reached at all. The line that used to stand here said the
+ * opposite, that cpu_idle was the single-core half of the arrangement; it is
+ * not, and every scenario that needs this work already asks for four cores
+ * because of it (tools/logcheck.sh). That hole is not this function's to close.
  *
  * ‼ The command-ring abort is here rather than where it is decided because
  * where it is decided is IRQ0. The specification allows a controller five
@@ -526,10 +542,58 @@ static void xhci_controller_recover(xhci_controller_t* ctrl)
  * discard the one report that says which of them the controller had actually
  * addressed.
  */
+/*
+ * One core is inside a repair at a time, and the rest go away rather than
+ * queue up behind it. Shared with the door below, because "put this controller
+ * back in service" and "put back whichever controller asked to be" are the same
+ * work reached by two routes, and two cores doing it at once would each reset a
+ * controller the other is halfway through publishing.
+ */
+static volatile uint32_t g_repair_busy = 0;
+
+/*
+ * Put ONE named controller back in service, because somebody asked.
+ *
+ * The same eleven steps the automatic repair runs, on a controller that has
+ * not necessarily failed — which is the whole difference between this and
+ * xhci_recover_if_needed: that one asks "has anything gone wrong?", and this
+ * one is told "put this right". A person at a machine whose USB has stopped
+ * answering has no way to make the first question say yes; a controller wedged
+ * in a way it does not report is exactly the case where nothing sets
+ * error_state and nothing ever comes back for it.
+ *
+ * Returns whether the controller is running when this returns. False is a real
+ * answer and not an exception: a controller that will not reset is out of
+ * service, and it has already said so on its own line.
+ *
+ * ‼ Every USB device on this controller goes away and comes back, including
+ * the medium a filesystem may be mounted from. That is not a side effect to be
+ * apologised for — it is what a reset IS — and the machinery that carries a
+ * volume through it already exists, because a hand pulling the stick out does
+ * the same thing.
+ */
+bool xhci_put_back_in_service(xhci_controller_t* ctrl)
+{
+    if (!ctrl || !ctrl->cap_regs) {
+        return false;
+    }
+
+    /* Waiting rather than refusing: a caller that asked for this wants it done,
+     * and whoever is inside is doing exactly the work being asked for. The wait
+     * is bounded by that work. */
+    while (__atomic_exchange_n(&g_repair_busy, 1u, __ATOMIC_ACQUIRE) != 0) {
+        cpu_pause();
+    }
+
+    xhci_controller_recover(ctrl);
+    bool running = ctrl->running;
+
+    __atomic_store_n(&g_repair_busy, 0u, __ATOMIC_RELEASE);
+    return running;
+}
+
 void xhci_recover_if_needed(void)
 {
-    static volatile uint32_t busy = 0;
-
     bool any = false;
     for (uint8_t i = 0; i < g_controller_count; i++) {
         if (g_controllers[i].error_state ||
@@ -543,7 +607,7 @@ void xhci_recover_if_needed(void)
         return;
     }
 
-    if (__atomic_exchange_n(&busy, 1u, __ATOMIC_ACQUIRE) != 0) {
+    if (__atomic_exchange_n(&g_repair_busy, 1u, __ATOMIC_ACQUIRE) != 0) {
         return;
     }
 
@@ -557,7 +621,7 @@ void xhci_recover_if_needed(void)
         }
     }
 
-    __atomic_store_n(&busy, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_repair_busy, 0u, __ATOMIC_RELEASE);
 }
 
 /*

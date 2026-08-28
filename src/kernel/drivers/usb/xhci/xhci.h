@@ -300,6 +300,31 @@ xhci_controller_t* xhci_get_controller(void);
  */
 void xhci_recover_if_needed(void);
 
+/*
+ * Put ONE named controller back in service, because somebody asked.
+ *
+ * The same work xhci_recover_if_needed does when it finds a controller that
+ * has stopped itself — retire every device, reset, rebuild the rings, publish
+ * them again, start, re-read the port protocols, power the ports, survey what
+ * is plugged in — on a controller that has not necessarily failed.
+ *
+ * ‼ THE DIFFERENCE FROM xhci_reset IS EVERYTHING, AND IT IS WHY THIS EXISTS.
+ *
+ * xhci_reset halts the controller and clears it. On its own that leaves CONFIG,
+ * DCBAAP, CRCR and ERSTBA at zero and RUN clear, while this driver's `running`,
+ * `initialized` and `error_state` still say the controller is healthy — so
+ * nothing ever comes back for it, every slot goes on claiming a device the
+ * silicon has forgotten, and the machine's USB is dead with no line anywhere
+ * saying why. The hardware deck used to offer exactly that as "hw.usb.reset".
+ *
+ * One core is inside a repair at a time; a second waits, because the work it
+ * is waiting for is the work it came to ask for.
+ *
+ * Returns whether the controller is running afterwards. False is a real answer:
+ * a controller that will not reset is out of service and has said so.
+ */
+bool xhci_put_back_in_service(xhci_controller_t* ctrl);
+
 /* Every controller in service. Anything that means "all the USB on this
  * machine" walks these rather than asking for "the" controller. */
 uint8_t            xhci_controller_count(void);

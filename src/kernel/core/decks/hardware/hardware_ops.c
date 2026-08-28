@@ -27,6 +27,7 @@
 #include "irqchip.h"
 #include "ata.h"
 #include "tagfs.h"
+#include "boardroom.h"
 #include "system_halt.h"
 #include "xhci.h"
 #include "xhci_port.h"
@@ -809,12 +810,32 @@ static int HwSystemShutdown(const ManifestOp *op, Crate *crates, uint16_t crate_
  *  USB (xHCI control surface)
  * ========================================================================= */
 
-static int HwUsbInit(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)op; (void)crates; (void)crate_count; (void)ctx;
-    return xhci_init() == 0 ? OK : ERR_INTERNAL;
-}
+/*
+ * ‼ WHAT THIS SURFACE DELIBERATELY NO LONGER OFFERS
+ *
+ * `hw.usb.init` (opcode 0x90) and `hw.usb.stop` (0x93) are gone, and their
+ * numbers are retired for ever — see hardware_deck.h. They were not operations.
+ * They were two of the driver's own boot steps, exposed by name to anything
+ * carrying the system tag.
+ *
+ *   init  ran xhci_init() a second time. That begins with a memset of the whole
+ *         device-slot table — every live device on the machine, including the
+ *         medium the filesystem is mounted from, silently becomes idle — and
+ *         then finds the SAME PCI function again and brings it up a second time
+ *         into a second controller structure: a second MMIO mapping, a second
+ *         set of rings and DCBAA (the first leaks), a reset that drops the bus,
+ *         and MSI moved to the neighbouring vector so interrupts arrive at the
+ *         new structure while the old one is drained for ever by every "for
+ *         each controller" loop in the driver.
+ *
+ *   stop  returned OK and did nothing at all, and said so in its own comment.
+ *         There is no xhci_stop, and halting the controller a machine reads its
+ *         volume through is not an operation anybody wants offered by name.
+ *
+ * What replaced them is one honest thing: hw.usb.reset now means "put this
+ * controller back in service", which is the whole eleven-step repair the driver
+ * already implements — not the single step it used to run.
+ */
 
 /*
  * Every USB op below names the controller it is about, as its first parameter.
@@ -835,13 +856,31 @@ static xhci_controller_t *usb_named_controller(const ManifestOp *op)
     return xhci_controller_at(op->params[0]);
 }
 
+/*
+ * HW_USB_RESET  params:[u8 controller] — put this controller back in service.
+ *
+ * The whole repair, not the first step of it. What this used to be was a bare
+ * xhci_reset: the controller was halted and cleared, and then nothing — its
+ * registers left at zero, this driver's own `running` and `initialized` still
+ * claiming it was healthy, `error_state` still clear so the automatic repair
+ * would never come for it, and every device slot still naming a device the
+ * silicon had just forgotten. One system-authorised call and the machine's USB
+ * was dead until it was switched off and on, with no line anywhere saying so.
+ *
+ * A door, not a screwdriver from the lock.
+ */
 static int HwUsbReset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                       const OpContext *ctx)
 {
-    (void)crates; (void)crate_count; (void)ctx;
+    (void)crates; (void)crate_count;
     xhci_controller_t *c = usb_named_controller(op);
     if (!c) return ERR_NOT_INITIALIZED;
-    return xhci_reset(c) == 0 ? OK : ERR_INTERNAL;
+
+    kprintf("[HardwareDeck] PID %u asked for the controller on %s to be put "
+            "back in service\n",
+            (ctx && ctx->proc) ? ctx->proc->pid : 0, c->name);
+
+    return xhci_put_back_in_service(c) ? OK : ERR_INTERNAL;
 }
 
 static int HwUsbStart(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -851,15 +890,6 @@ static int HwUsbStart(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     xhci_controller_t *c = usb_named_controller(op);
     if (!c) return ERR_NOT_INITIALIZED;
     return xhci_start(c) == 0 ? OK : ERR_INTERNAL;
-}
-
-static int HwUsbStop(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)op; (void)crates; (void)crate_count; (void)ctx;
-    /* No xhci_stop API in the driver — keep semantics aligned with legacy:
-     * acknowledge the request without actually halting the controller. */
-    return OK;
 }
 
 /* HW_USB_PORT_STATUS  params:[u8 controller, u8 port]  out_crate: u32 portsc */
@@ -973,6 +1003,97 @@ static int HwUsbGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     if (crate_write(out, ctx, blob, 3) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
+
+/* ── proving the door, on the machine it has to hold ──────────────────────────
+ *
+ * A boot self-test rather than a unit test, for the reason the Boardroom's and
+ * the ring's already give: the thing being tested is a conversation with the
+ * silicon in front of it. Whether a controller comes back from a reset, whether
+ * the devices on it are found again, and whether the keyboard a person is
+ * typing on survives the whole of it are facts about THIS machine and cannot be
+ * established anywhere else.
+ *
+ * ‼ IT IS THE OP THAT IS PROVED, NOT THE DRIVER BEHIND IT. The handler is
+ * reached the way the dispatcher reaches it — looked up in the registry by
+ * op_kind, called with a ManifestOp built the way a caller builds one. A test
+ * that called xhci_put_back_in_service directly would prove the driver and say
+ * nothing about the surface, and the surface is what had two ops on it that
+ * broke the machine.
+ *
+ * WHEN, and it is a fact rather than a clock: the first pass through the idle
+ * or guide loop on which this machine has a controller in service AND a volume
+ * mounted. Before that there is nothing to lose and the proof would prove
+ * nothing; there is no moment to wait out and no deadline to expire.
+ *
+ * Gated behind USBRECOVER=on. This costs the machine every USB device it has,
+ * once, and is not something a shipped build does to itself.
+ */
+#if CONFIG_USB_RECOVER_PROOF
+void HardwareDeckUsbRecoverProof(void)
+{
+    static volatile uint32_t done = 0;
+
+    if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) != 0)   return;
+    if (xhci_controller_count() == 0)                    return;
+    if (tagfs_get_seat() == BOARDROOM_NO_SEAT)           return;
+    if (__atomic_exchange_n(&done, 1u, __ATOMIC_ACQUIRE) != 0) return;
+
+    kprintf("[USB RECOVER TEST] begin — a controller in service and a volume "
+            "on seat %u\n", tagfs_get_seat());
+
+    /* The two that were withdrawn. Their numbers are spent for ever, so the
+     * only right answer the registry can give about them is "no such op". */
+    int gone = 0;
+    if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x90u))) gone++;
+    if (!OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, 0x93u))) gone++;
+    if (gone == 2) {
+        kprintf("[USB RECOVER TEST] PASS: the two withdrawn opcodes answer to "
+                "nothing\n");
+    } else {
+        kprintf("[USB RECOVER TEST] FAIL: a withdrawn opcode is registered "
+                "again\n");
+    }
+
+    const OpRegistration *reg =
+        OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, HW_USB_RESET));
+    if (!reg || !reg->handler) {
+        kprintf("[USB RECOVER TEST] FAILED: hw.usb.reset is not registered\n");
+        return;
+    }
+    if (reg->security_mask != OP_AUTH_SYSTEM) {
+        kprintf("[USB RECOVER TEST] FAIL: hw.usb.reset is not system-only\n");
+    } else {
+        kprintf("[USB RECOVER TEST] PASS: hw.usb.reset is registered, "
+                "system-only\n");
+    }
+
+    /* One op, one parameter: which controller. Built the way a caller builds
+     * one, packed so `params` really does begin where the header ends. */
+    struct __packed {
+        ManifestOp head;
+        uint8_t    params[1];
+    } req;
+    req.head.op_kind    = OP_KIND(HARDWARE_DECK_ID, HW_USB_RESET);
+    req.head.flags      = 0;
+    req.head.in_crate   = CRATE_INDEX_NONE;
+    req.head.out_crate  = CRATE_INDEX_NONE;
+    req.head.param_size = 1;
+    req.params[0]       = 0;                    /* the first controller */
+
+    OpContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+
+    int rc = reg->handler(&req.head, NULL, 0, &ctx);
+
+    if (rc == OK) {
+        kprintf("[USB RECOVER TEST] %[S]PASSED%[D]: the controller was put back "
+                "in service through hw.usb.reset\n");
+    } else {
+        kprintf("[USB RECOVER TEST] %[R]FAILED%[D]: hw.usb.reset answered %d\n",
+                rc);
+    }
+}
+#endif /* CONFIG_USB_RECOVER_PROOF */
 
 /* =========================================================================
  *  Debug print — serial output from userspace via kernel kprintf
@@ -1113,11 +1234,11 @@ error_t HardwareDeckRegister(void)
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
         { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
         { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
-        /* USB: hardware control, system+. */
-        { HW_USB_INIT,           HwUsbInit,          OP_AUTH_SYSTEM, "hw.usb.init"      },
+        /* USB: hardware control, system+. Nothing here can leave a controller
+         * halfway through anything — see the note above HwUsbReset for the two
+         * that could and are gone. */
         { HW_USB_RESET,          HwUsbReset,         OP_AUTH_SYSTEM, "hw.usb.reset"     },
         { HW_USB_START,          HwUsbStart,         OP_AUTH_SYSTEM, "hw.usb.start"     },
-        { HW_USB_STOP,           HwUsbStop,          OP_AUTH_SYSTEM, "hw.usb.stop"      },
         { HW_USB_PORT_STATUS,    HwUsbPortStatus,    OP_AUTH_SYSTEM, "hw.usb.port.status"},
         { HW_USB_PORT_RESET,     HwUsbPortReset,     OP_AUTH_SYSTEM, "hw.usb.port.reset"},
         { HW_USB_PORT_QUERY,     HwUsbPortQuery,     OP_AUTH_SYSTEM, "hw.usb.port.query"},
