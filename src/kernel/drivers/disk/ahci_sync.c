@@ -6,6 +6,86 @@
 #include "klib.h"
 #include "atomics.h"
 
+/*
+ * ‼ HOW LONG A DISK IS GIVEN TO ANSWER, AND WHY IT IS NOT TWO SECONDS.
+ *
+ * It was two — CONFIG_AHCI_CMD_TIMEOUT_MS — and a spinning disk does not obey
+ * it. A drive that meets a marginal sector retries the head internally before
+ * it answers, and how long it may spend doing that is a property of the drive:
+ * desktop drives without configurable error recovery routinely take seven
+ * seconds and are permitted far more. Under a two-second clock every one of
+ * those reads was declared a timeout, the port was recovered, and the read was
+ * tried again — three times, and then reported as a failure on a disk that
+ * would have answered.
+ *
+ * Every host stack gives a disk command tens of seconds: Linux's SCSI layer
+ * uses thirty (drivers/scsi/sd.h, SD_TIMEOUT) and this kernel already had that
+ * number written down, in CONFIG_AHCI_IO_TIMEOUT_MS, and did not use it here.
+ *
+ * And it is the LAST RESORT rather than the test. What ends the wait below in
+ * every case anybody can name is a FACT the port reports: the slot clearing,
+ * an error bit, or the link no longer being established.
+ */
+#define AHCI_CMD_PATIENCE_MS  CONFIG_AHCI_IO_TIMEOUT_MS
+
+/* What ended the wait for a command slot. Four answers, and only the last one
+ * is a clock. */
+typedef enum {
+    AHCI_SLOT_DONE,      /* the controller cleared it: the command ran */
+    AHCI_SLOT_FAULTED,   /* the port reported an error, and PxIS is cleared */
+    AHCI_SLOT_GONE,      /* the link is not established any more */
+    AHCI_SLOT_SILENT     /* attached, no error, and still not finished */
+} AhciSlotEnd;
+
+/*
+ * Wait for one command slot, and say WHY the wait ended.
+ *
+ * This used to be written out three times — read, write, flush — with the same
+ * two facts and the same clock in each, which is three places for the third
+ * fact to be missing from. It is missing from all three: PxSSTS says whether
+ * there is still a device on the other end of the cable and whether the PHY is
+ * talking to it (AHCI 1.3.1 §3.3.10, DET), and a command outstanding on a link
+ * that has dropped is a command nobody is going to answer. Waiting out the
+ * whole budget for it is the disk equivalent of waiting for a stick that has
+ * been pulled.
+ */
+static AhciSlotEnd ahci_wait_for_slot(ahci_port_t* port_state,
+                                      volatile ahci_port_regs_t* regs,
+                                      uint8_t slot, bool queued)
+{
+    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(AHCI_CMD_PATIENCE_MS);
+
+    for (;;) {
+        uint32_t ci   = regs->ci;
+        uint32_t sact = queued ? regs->sact : 0;
+        if (!(ci & (1U << slot)) && !(sact & (1U << slot))) {
+            return AHCI_SLOT_DONE;
+        }
+
+        uint32_t is = regs->is;
+        if (is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
+            ahci_log_error(port_state, is);
+            regs->is = is;
+            return AHCI_SLOT_FAULTED;
+        }
+
+        /* The cable, asked before the clock. Anything other than "device
+         * present and communication established" means the answer this is
+         * waiting for cannot arrive. */
+        if ((regs->ssts & AHCI_SSTS_DET_MASK) != AHCI_SSTS_DET_PRESENT) {
+            kprintf("[AHCI] port %u: the link is no longer established "
+                    "(SSTS=0x%08x) — the command on slot %u has nobody to "
+                    "answer it\n", port_state->port_num, regs->ssts, slot);
+            return AHCI_SLOT_GONE;
+        }
+
+        if ((int64_t)(rdtsc() - give_up_at) >= 0) {
+            return AHCI_SLOT_SILENT;
+        }
+        cpu_pause();
+    }
+}
+
 int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
                            uint16_t sector_count, void* buffer) {
     if (!buffer || sector_count == 0) return -1;
@@ -60,42 +140,34 @@ int ahci_read_sectors_sync(uint8_t port, uint64_t lba,
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
-        uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
+        AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
+                                             port_state->ncq);
+        ahci_free_slot(port, slot);
 
-        while (rdtsc() < timeout_tsc) {
-            uint32_t ci = regs->ci;
-            uint32_t sact = regs->sact;
-
-            if (!(ci & (1U << slot)) && !(sact & (1U << slot))) {
-                ahci_free_slot(port, slot);
-                memcpy(buffer, dma_virt, sector_count * 512);
-                pmm_free(dma_page, pages_needed);
-                return 0;
-            }
-
-            uint32_t is = regs->is;
-            if (is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
-                ahci_log_error(port_state, is);
-                regs->is = is;
-                ahci_free_slot(port, slot);
-
-                if (retry < AHCI_MAX_RETRIES - 1) {
-                    debug_printf("[AHCI Sync] Error on read, retrying (%d/%d)...\n", retry + 1, AHCI_MAX_RETRIES);
-                    ahci_port_recover(port_state);
-                }
-                break;
-            }
-
-            cpu_pause();
+        if (how == AHCI_SLOT_DONE) {
+            memcpy(buffer, dma_virt, sector_count * 512);
+            pmm_free(dma_page, pages_needed);
+            return 0;
         }
 
-        if (rdtsc() >= timeout_tsc) {
-            debug_printf("[AHCI Sync] Timeout on slot %d (retry %d/%d)\n", slot, retry + 1, AHCI_MAX_RETRIES);
+        /* A link that is not there is not a command to retry: recovering the
+         * port and asking again three times spends the whole of a boot on a
+         * cable somebody has unplugged. */
+        if (how == AHCI_SLOT_GONE) {
+            break;
+        }
+
+        if (how == AHCI_SLOT_SILENT) {
+            debug_printf("[AHCI Sync] Read on slot %d unanswered after %u ms "
+                         "(retry %d/%d)\n", slot, AHCI_CMD_PATIENCE_MS,
+                         retry + 1, AHCI_MAX_RETRIES);
             __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
-            ahci_free_slot(port, slot);
-            if (retry < AHCI_MAX_RETRIES - 1) {
-                ahci_port_recover(port_state);
-            }
+        } else {
+            debug_printf("[AHCI Sync] Error on read, retrying (%d/%d)...\n",
+                         retry + 1, AHCI_MAX_RETRIES);
+        }
+        if (retry < AHCI_MAX_RETRIES - 1) {
+            ahci_port_recover(port_state);
         }
     }
 
@@ -154,38 +226,28 @@ int ahci_write_sectors_sync(uint8_t port, uint64_t lba,
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
-        uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
+        AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
+                                             port_state->ncq);
+        ahci_free_slot(port, slot);
 
-        while (rdtsc() < timeout_tsc) {
-            if (!(regs->ci & (1U << slot)) && !(regs->sact & (1U << slot))) {
-                ahci_free_slot(port, slot);
-                pmm_free(dma_page, pages_needed);
-                return 0;
-            }
-
-            uint32_t is = regs->is;
-            if (is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
-                ahci_log_error(port_state, is);
-                regs->is = is;
-                ahci_free_slot(port, slot);
-
-                if (retry < AHCI_MAX_RETRIES - 1) {
-                    debug_printf("[AHCI Sync] Error on write, retrying (%d/%d)...\n", retry + 1, AHCI_MAX_RETRIES);
-                    ahci_port_recover(port_state);
-                }
-                break;
-            }
-
-            cpu_pause();
+        if (how == AHCI_SLOT_DONE) {
+            pmm_free(dma_page, pages_needed);
+            return 0;
         }
-
-        if (rdtsc() >= timeout_tsc) {
-            debug_printf("[AHCI Sync] Timeout on slot %d (retry %d/%d)\n", slot, retry + 1, AHCI_MAX_RETRIES);
+        if (how == AHCI_SLOT_GONE) {
+            break;
+        }
+        if (how == AHCI_SLOT_SILENT) {
+            debug_printf("[AHCI Sync] Write on slot %d unanswered after %u ms "
+                         "(retry %d/%d)\n", slot, AHCI_CMD_PATIENCE_MS,
+                         retry + 1, AHCI_MAX_RETRIES);
             __atomic_fetch_add(&port_state->stats.timeout_count, 1, __ATOMIC_RELAXED);
-            ahci_free_slot(port, slot);
-            if (retry < AHCI_MAX_RETRIES - 1) {
-                ahci_port_recover(port_state);
-            }
+        } else {
+            debug_printf("[AHCI Sync] Error on write, retrying (%d/%d)...\n",
+                         retry + 1, AHCI_MAX_RETRIES);
+        }
+        if (retry < AHCI_MAX_RETRIES - 1) {
+            ahci_port_recover(port_state);
         }
     }
 
@@ -232,34 +294,24 @@ int ahci_flush_cache_sync(uint8_t port) {
         regs->ci = (1U << slot);
         spin_unlock(&port_state->lock);
 
-        uint64_t timeout_tsc = rdtsc() + cpu_ms_to_tsc(AHCI_TIMEOUT_CMD_DEFAULT);
+        /* FLUSH CACHE EXT is never queued, so PxSACT says nothing about it. */
+        AhciSlotEnd how = ahci_wait_for_slot(port_state, regs, (uint8_t)slot,
+                                             false);
+        ahci_free_slot(port, slot);
 
-        while (rdtsc() < timeout_tsc) {
-            if (!(regs->ci & (1U << slot))) {
-                ahci_free_slot(port, slot);
-                return 0;
-            }
-
-            uint32_t is = regs->is;
-            if (is & (AHCI_PIS_TFES | AHCI_PIS_HBFS | AHCI_PIS_IFS)) {
-                ahci_log_error(port_state, is);
-                regs->is = is;
-                ahci_free_slot(port, slot);
-                if (retry < AHCI_MAX_RETRIES - 1) {
-                    ahci_port_recover(port_state);
-                }
-                break;
-            }
-
-            cpu_pause();
+        if (how == AHCI_SLOT_DONE) {
+            return 0;
         }
-
-        if (rdtsc() >= timeout_tsc) {
-            debug_printf("[AHCI Sync] Flush cache timeout (retry %d/%d)\n", retry + 1, AHCI_MAX_RETRIES);
-            ahci_free_slot(port, slot);
-            if (retry < AHCI_MAX_RETRIES - 1) {
-                ahci_port_recover(port_state);
-            }
+        if (how == AHCI_SLOT_GONE) {
+            break;
+        }
+        if (how == AHCI_SLOT_SILENT) {
+            debug_printf("[AHCI Sync] Flush cache unanswered after %u ms "
+                         "(retry %d/%d)\n", AHCI_CMD_PATIENCE_MS,
+                         retry + 1, AHCI_MAX_RETRIES);
+        }
+        if (retry < AHCI_MAX_RETRIES - 1) {
+            ahci_port_recover(port_state);
         }
     }
 

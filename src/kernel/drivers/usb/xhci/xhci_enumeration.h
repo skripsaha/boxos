@@ -129,6 +129,25 @@ struct xhci_device_slot {
 
     uint64_t timestamp_started;
 
+    /*
+     * What the watchdog last saw this slot doing, and when it started seeing
+     * it. Written by nothing else — enumeration advances through twenty-nine
+     * places and none of them has to remember to stamp a clock.
+     *
+     * ‼ THE BUDGET IS ON A STEP, WHICH IS WHAT IT ALWAYS SAID IT WAS.
+     *
+     * It used to be measured from `timestamp_started`, which is stamped when
+     * the device's turn begins and never again — so it was a budget for the
+     * WHOLE of enumeration wearing the words "any single step". A device whose
+     * Address Device took ten seconds (measured, on the owner's board) arrived
+     * at its next step with the budget already spent, and was thrown away
+     * without being given any time at all: not for being stuck, for being
+     * slow. Watching the state itself makes the sentence true — the clock runs
+     * from the last thing that HAPPENED, and anything that happens resets it.
+     */
+    uint8_t  watch_state;
+    uint64_t watch_since;
+
     /* Device Context (allocated, pointed to by DCBAA) */
     void* dev_ctx;
     uint64_t dev_ctx_phys;
@@ -338,9 +357,22 @@ bool     xhci_slot_is_live(const xhci_device_slot_t* slot);
  * port-status change path, which is the only thing that knows when. */
 void xhci_enum_port_reset_done(xhci_controller_t* ctrl, uint8_t port);
 
-/* How long any single step of enumeration may go unanswered. Every step is one
- * round trip on the bus, so this is generous by three orders of magnitude —
- * it is here to name a failure, never to pace a success. */
+/*
+ * How long any single step of enumeration may go unanswered — and it is a step
+ * now, watched by xhci_enum_watchdog through `watch_state`, rather than the
+ * whole of a device's arrival wearing those words.
+ *
+ * Every step is one round trip on the bus. The specification puts numbers on
+ * the ones that are control transfers: a standard request with no data stage
+ * completes in 50 ms and one with data keeps its stages 500 ms apart (USB 2.0
+ * §9.2.6.4). Two seconds is four times the slowest of those, and it is reached
+ * only after the facts below have been asked and have said nothing is wrong.
+ *
+ * ‼ IT IS THE LAST RESORT, NOT THE TEST. A device that has been unplugged is
+ * ended by its port saying so, and a step with a command outstanding belongs
+ * to the command watchdog, which asks whether the CONTROLLER has answered
+ * anything rather than how long this one request has lived.
+ */
 #define XHCI_ENUM_TIMEOUT_MS 2000
 
 /* Report and release any enumeration that stopped being answered. Driven from

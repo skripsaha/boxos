@@ -181,6 +181,62 @@ stranger_off() {
 #
 # Four cores, because that chain is driven from the K-Core guide loop. On a
 # single core it does not run at all — see the note at the end of this file.
+# Wait until the shell is READY, which is not the same as the last command
+# having printed its answer.
+#
+# ‼ A COMMAND THAT FINISHES IS NOT A SHELL THAT IS FREE. It still has to reap
+# the child and put its own house in order, and that is reads — on a medium
+# throttled to a hundred and twenty-eight bytes a second, tens of seconds of
+# them. Throttling the medium in that window and typing into it is how four
+# runs reported a machine that was simply busy as a machine that was broken.
+#
+# The prompt is two bytes, `~ ` with no newline after it, so the fact is the
+# END OF THE FILE rather than a line in it — read as hex, because command
+# substitution eats the trailing space that is half the evidence.
+wait_for_prompt() {
+    local i=0
+    while [ $i -lt 300 ]; do
+        if [ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ]; then
+            sleep 2
+            [ "$(tail -c 2 build/serial.log 2>/dev/null | xxd -p)" = "7e20" ] && return 0
+        fi
+        sleep 1; i=$((i+1))
+    done
+    echo "  (the shell never came back to its prompt)"
+    return 1
+}
+
+# Type a command line and make sure the machine TOOK it.
+#
+# ‼ A KEYSTROKE THAT DOES NOT LAND IS SILENT, AND THAT COST FOUR RUNS.
+#
+# `qemu-input.sh type` talks to the monitor, and a monitor command that fails
+# says nothing at all on the guest's serial line — the replug scenario already
+# has that written down for `drive_add`. The same is true of the keystrokes
+# themselves: type into a shell that is still working through the last command
+# and the characters go nowhere, the scenario waits out its ceiling, and it
+# reports a machine that never had a chance as a machine that failed.
+#
+# The shell echoes what it was given, so the echo is the fact that it landed.
+# Tried twice, and said out loud if it still did not, because a scenario that
+# quietly tests nothing is worse than one that fails.
+type_line() {
+    local cmd="$1" attempt=0 i
+    while [ $attempt -lt 2 ]; do
+        ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        i=0
+        while [ $i -lt 10 ]; do
+            grep -q "~ $cmd" build/serial.log 2>/dev/null && return 0
+            sleep 1; i=$((i+1))
+        done
+        attempt=$((attempt+1))
+    done
+    echo "  (the machine never echoed '$cmd' — the keystrokes did not land)"
+    return 1
+}
+
 latearrival_on() {
     cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.late.bak"
     python3 - <<'EOF'
@@ -1071,13 +1127,13 @@ run_stillthere() {
     #
     # This is the third thing, and it is the one a real flash drive does: it
     # answers LATE. A device doing its own garbage collection stops replying
-    # for seconds and then carries on, and from a driver's side that is
-    # indistinguishable from silence — the difference only shows up afterwards,
-    # in whether the machine is still usable.
+    # for seconds and then carries on, and from the host's side that is
+    # indistinguishable from silence — on BULK it is not even silence, it is
+    # the device NAKing, which the controller retries for as long as it takes.
     #
     # Nothing here is unplugged. The stick is in the machine from the first
-    # line to the last, and every check below is about what the driver did to a
-    # device that was still there the whole time.
+    # line to the last, and every check is about what the driver did to a
+    # device that was there the whole time.
     latearrival_on; build
     cp build/boxos.img "$SCRATCH/stick.img"
 
@@ -1103,8 +1159,7 @@ run_stillthere() {
     #
     # Everything below is "and now it does not work", which is worth nothing
     # unless the machine has been shown to work first. It has: reaching a shell
-    # at all means display.elf and shell.bin were read off this stick and run,
-    # and that is in the log already.
+    # at all means display.elf and shell.bin were read off this stick and run.
     #
     # ‼ IT USED TO BE A `files` TYPED HERE, AND THAT MADE THE RUN UNRELIABLE.
     # TagFS reads ahead, so running the program once put it in memory and the
@@ -1113,61 +1168,75 @@ run_stillthere() {
     # green on its own, red in the matrix, same tree. A control that warms what
     # the test is about is not a control.
     cp build/serial.log "$SCRATCH/serial.stillthere.control.log"
-
-    # ── 512 bytes a second ──────────────────────────────────────────────────
-    # One 4 KiB filesystem block is eight seconds at this rate, which is longer
-    # than MSD_XFER_TIMEOUT_MS. Nothing in the guest is touched: the emulator is
-    # being told to stop behaving like a RAM disk. The mount is already done, so
-    # this is aimed at reading a PROGRAM and at nothing else.
-    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 512 0 0 0 0" >/dev/null 2>&1
-    sleep 1
-
     local MARK
     MARK=$(wc -l < build/serial.log)
-    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
 
-    # Waited out on the FACT, not on a clock: the run is interesting only once
-    # the driver has actually given up on a transfer, and that is a line it
-    # prints. The ceiling exists so a build where it never happens ends.
+    # ── PART ONE: slow, and that is ALL it is ──────────────────────────────
+    #
+    # 512 bytes a second puts one 4 KiB filesystem block at eight seconds —
+    # longer than the five this driver used to allow a transfer, and well
+    # inside what a flash drive doing its own housekeeping takes, but nowhere
+    # near what the class gives a whole command. NOTHING may be given up on
+    # here. This is the check the whole change is for, and on the old tree it
+    # goes red within five seconds.
+    #
+    # ‼ THE PROGRAM MATTERS AS MUCH AS THE RATE. TagFS reads ahead, and
+    # measurement says some programs are already in memory by the time a shell
+    # appears: `files` and `bench` came back in two seconds at SIXTY-FOUR bytes
+    # a second, while `today` and `mtest` took a hundred and twenty-two at five
+    # hundred and twelve. A scenario aimed at a program that is already in
+    # memory tests nothing and says PASS. Both programs used here were measured
+    # cold, and neither is used twice.
+    local GAVE_UP_BEFORE GAVE_UP_AFTER
+    GAVE_UP_BEFORE=$(grep -cE "giving up on the command|no answer in .* at stage" build/serial.log)
+    wait_for_prompt
+    ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 512 0 0 0 0" >/dev/null 2>&1
+    sleep 1
+    type_line "today"
+
+    # ‼ WAITED ON THE PROGRAM'S OWN ANSWER, AND NOTHING IS TYPED UNTIL IT COMES.
+    #
+    # Fixed pauses here cost two whole runs. The shell is one thing doing one
+    # thing at a time: a command typed while the last one is still reading is a
+    # command that lands in a buffer, and the scenario then reports a machine
+    # that was never given a chance as a machine that failed. `today` prints a
+    # date, and the date arriving is the fact that it was read.
     i=0
-    while [ $i -lt 45 ]; do
+    while [ $i -lt 240 ]; do
         tail -n +$((MARK + 1)) build/serial.log 2>/dev/null | \
-            grep -qE "no answer in .* at stage|a read nobody was waiting on" && break
+            grep -qE "^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] " && break
         sleep 1; i=$((i+1))
     done
-    sleep 3
-
-    # ── and the medium is quick again ───────────────────────────────────────
-    #
-    # ‼ THE CHECK IS A RELATIONSHIP INSIDE THE LOG, NOT A MARK IN THIS SCRIPT.
-    #
-    # Twice this was written as "look at what appears after a point I chose",
-    # first by cutting the log at a line number and then by counting listings
-    # from just before the command — and both were wrong for the same reason:
-    # the shell is still working through the previous command when the mark is
-    # taken, so the answer this check is looking for lands on the wrong side of
-    # it and a machine that answered is reported as one that did not. Green on
-    # its own, red in the matrix, three times out of three, on a tree where the
-    # machine visibly worked.
-    #
-    # What is actually being claimed has nothing to do with when this script
-    # looks: AFTER THE DRIVER GAVE UP ON A TRANSFER, THE MACHINE READ A PROGRAM
-    # OFF THIS DISK. Both halves of that are lines in the log, in order, and the
-    # order between them cannot drift. Measured against the run that found this
-    # defect: zero listings after the give-up on the old code, one on the new.
+    GAVE_UP_AFTER=$(grep -cE "giving up on the command|no answer in .* at stage" build/serial.log)
     ./tools/qemu-input.sh raw "block_set_io_throttle stick 0 0 0 0 0 0" >/dev/null 2>&1
     sleep 2
-    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
-    # Waited on the listing arriving, not on a number of seconds: a machine that
-    # is going to answer answers, and one that is not has the ceiling.
-    i=0
-    while [ $i -lt 30 ]; do
-        awk '/no answer in .* at stage|a read nobody was waiting on/{f=1} f' \
-            build/serial.log 2>/dev/null | grep -q "^shell.bin " && break
-        sleep 1; i=$((i+1))
-    done
+
+    # ── ‼ WHAT IS NOT TESTED HERE, AND WHY IT IS SAID OUT LOUD ──────────────
+    #
+    # The other half of the change is the LAST RESORT: a device slower than the
+    # class allows is given up on, the transfer is taken off the endpoint with
+    # the command the controller accepts, and the disk still works afterwards.
+    # That was OBSERVED WORKING — a medium held to 128 bytes a second produced
+    #
+    #   [USB disk 0] the device has been asking for more time for 30000 ms at
+    #                stage 2 — giving up on the command
+    #   [USB disk 0] resetting the transport
+    #   [mtest] HW VGA via Manifest works
+    #
+    # — the give-up, the reset, and then the same program arriving anyway once
+    # the medium was quick again.
+    #
+    # It is not a CHECK here because reaching it needs a SECOND typed command,
+    # and a second command does not reliably land: when the first one has just
+    # finished, the shell is still doing its own reads, and on a medium this
+    # slow those take tens of seconds. Five runs went into that, and a check
+    # that is red for the instrument's reasons is worse than no check — it
+    # teaches everyone to ignore the matrix.
+    #
+    # The shape that has never once failed is ONE typed command per run, which
+    # means the slow-but-tolerable half above has to be proved by the BOOT
+    # rather than by typing. That is a scenario of its own and it is written
+    # down as owed, not forgotten.
 
     make run-stop >/dev/null 2>&1
     tail -n +$((MARK + 1)) build/serial.log > "$SCRATCH/serial.stillthere.log"
@@ -1179,11 +1248,15 @@ run_stillthere() {
     grep -q "AUTOSTART. Started .shell.bin" "$C"
     chk $? "the machine reads programs off this stick at full speed"
 
-    # The anchor. Without it every "! grep" below is green on a run that never
-    # reached the situation at all, which is the shape of a check that guards
-    # nothing.
-    grep -qE "no answer in .* at stage|a read nobody was waiting on" "$L"
-    chk $? "a transfer outran the driver's patience, which is what this tests"
+    # ‼ THE POINT OF THE WHOLE CHANGE. On bulk, a device that is busy NAKs, and
+    # the controller retries for as long as it takes; trouble arrives as an
+    # EVENT and busy arrives as nothing at all. A driver that gives up on
+    # "nothing" gives up on a healthy device that is doing its housekeeping.
+    grep -qE "^20[0-9][0-9]-[0-9][0-9]-[0-9][0-9] " "$L"
+    chk $? "a program read off a medium at 512 bytes a second still runs"
+
+    [ "$GAVE_UP_AFTER" = "$GAVE_UP_BEFORE" ]
+    chk $? "and nothing was given up on while it was being read ($GAVE_UP_BEFORE -> $GAVE_UP_AFTER)"
 
     # The device is in the machine. Anything that says otherwise is the driver
     # inventing a departure out of a delay.
@@ -1199,12 +1272,6 @@ run_stillthere() {
 
     ! grep -qE "Set TR Dequeue Pointer on slot .* refused: Context State Error" "$L"
     chk $? "and no dequeue pointer was moved on a ring still being read"
-
-    # The whole point. A medium that was slow for a moment is a medium, and the
-    # machine has to be able to use it afterwards.
-    awk '/no answer in .* at stage|a read nobody was waiting on/{f=1} f' "$L" | \
-        grep -q "^shell.bin "
-    chk $? "the disk still reads a program after the driver gave one up"
 
     ! grep -q "has been leaving for" "$L"
     chk $? "no slot was left with somebody stuck inside it"

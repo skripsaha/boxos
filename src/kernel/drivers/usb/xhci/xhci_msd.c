@@ -75,9 +75,45 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
 #define SCSI_WRITE_16             0x8A
 #define SCSI_SYNC_CACHE_16        0x91
 
-/* One transfer's worth of patience. A flash drive answering a read takes
- * milliseconds; five seconds is the point at which it is not answering. */
-#define MSD_XFER_TIMEOUT_MS   5000
+/*
+ * ‼ WHAT BOUNDS A BULK TRANSFER, AND WHY IT IS NOT A CLOCK.
+ *
+ * ON BULK, SILENCE MEANS THE DEVICE IS SAYING "NOT YET".
+ *
+ * A device that is busy answers NAK, and a NAK is not an error: it does not
+ * touch the endpoint's error count, and the controller simply asks again, for
+ * as long as it takes. A device that has gone, or broken, is the opposite —
+ * the transaction fails, the controller retries it CErr times and then posts a
+ * Transfer Event that says so. The bus reports TROUBLE as an event and reports
+ * BUSY as nothing at all, so a driver that reads "nothing" as "trouble" has
+ * the two exactly the wrong way round.
+ *
+ * That is what a five-second deadline on a transfer was doing here, and the
+ * objection is not theoretical: a flash drive stops answering for seconds at a
+ * time while it does its own garbage collection, and this kernel boots from
+ * one. Measured — a medium held to 512 bytes a second for a single 4 KiB block
+ * was declared broken and had its transport reset.
+ *
+ * No host stack puts a clock on the transfer itself. Linux's usb-storage says
+ * so in as many words — "transfer one buffer via bulk pipe, WITHOUT TIMEOUTS"
+ * — and passes MAX_SCHEDULE_TIMEOUT; the bound lives a layer up, on the whole
+ * COMMAND, and it is the SCSI disk timeout (drivers/scsi/sd.h SD_TIMEOUT,
+ * thirty seconds).
+ *
+ * So: ONE bound, on a command rather than on a stage, sized by the class
+ * rather than invented here, and it is the LAST RESORT rather than the test.
+ * What ends a wait in every case anybody can name is a FACT, asked every pass:
+ * the device is still in the socket, its endpoint is not in an error state,
+ * and the controller has not stopped. The clock is left for the one device
+ * nothing else can catch — broken firmware that answers neither way and NAKs
+ * for ever — and it says that is what it is.
+ */
+#define MSD_COMMAND_PATIENCE_MS 30000
+
+/* A control transfer is a different animal, and the specification does put
+ * numbers on it: a standard request with no data stage completes in 50 ms, and
+ * one with data keeps its stages 500 ms apart (USB 2.0 §9.2.6.4). A second is
+ * generous for every one of them. */
 #define MSD_CTRL_TIMEOUT_MS   1000
 
 /* The bounce buffer every transfer passes through, and therefore the largest
@@ -85,10 +121,39 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
  * so no caller has to know this number exists. */
 #define MSD_BOUNCE_BYTES      (64u * 1024u)
 
-/* A medium can legitimately be "becoming ready" for a while after a device is
- * plugged in — the spin-up of a disk, the initialisation of a card reader. */
-#define MSD_READY_ATTEMPTS    40
+/*
+ * Coming up is something the device SAYS, and this waits for exactly as long
+ * as it goes on saying it.
+ *
+ * A medium is legitimately not ready for a while after it is plugged in — a
+ * disk spinning up, a card reader initialising — and SCSI has a sentence for
+ * exactly that: NOT READY / LOGICAL UNIT IS IN PROCESS OF BECOMING READY. It
+ * also has different sentences for "there is no medium in me" and for "I want
+ * a START UNIT first", and those are not waiting matters at all.
+ *
+ * This used to be forty attempts and a fixed pause, which is two seconds of
+ * patience for something the standard puts no bound on, and it asked the
+ * device why only to look for one answer. A stick that takes three seconds to
+ * come up was a stick this machine refused — and on a machine that boots from
+ * one, refusing it is the whole boot.
+ *
+ * So the loop runs while the device says it is coming up and stops the moment
+ * it says anything else. The clock below is the last resort, for a device that
+ * says it is coming up for ever, and its size is the class's: Linux gives a
+ * disk tens of seconds to spin up before it gives in.
+ */
+#define MSD_READY_PATIENCE_MS 30000
 #define MSD_READY_WAIT_MS     50
+
+/* The sense keys this driver acts on, by the names SPC gives them. */
+#define SENSE_NOT_READY       0x02
+#define SENSE_UNIT_ATTENTION  0x06
+
+/* And the additional codes that turn "not ready" into an answer. */
+#define ASC_NOT_READY         0x04    /* ASCQ says which kind */
+#define ASCQ_BECOMING_READY   0x01
+#define ASCQ_START_NEEDED     0x02
+#define ASC_NO_MEDIUM         0x3A
 
 struct MsdAsyncReq;
 struct MsdJob;
@@ -311,9 +376,16 @@ static void msd_give_back(XhciMsdUnit* u)
  *
  * There is deliberately NO deadline on the wait for a turn. A deadline here
  * would abandon a request that was about to succeed, and it would be a
- * deadline on the wrong thing: the holder cannot wait for ever, because every
- * transfer it makes carries its own, so the gate is always released. A long
- * wait is worth SAYING on a board, and it is said once.
+ * deadline on the wrong thing: the holder cannot hold for ever, because the
+ * COMMAND it is running is bounded — by the facts msd_job_run asks every pass,
+ * and behind them by MSD_COMMAND_PATIENCE_MS — so the gate is always released.
+ * A long wait is worth SAYING on a board, and it is said once.
+ *
+ * ‼ THAT SENTENCE IS LOAD-BEARING, AND IT WAS ONCE FALSE. An asynchronous job
+ * is released by msd_async_done and by nothing else, so its holder is bounded
+ * only for as long as xhci_msd_watchdog goes on running — which is the guide
+ * loop and the idle loop. Anything that stops those from running turns this
+ * wait into a permanent one, with a slot visit held throughout.
  */
 #define MSD_GATE_COMPLAIN_MS 2000
 
@@ -790,8 +862,11 @@ static void msd_job_run(MsdJob* j)
 {
     msd_job_begin(j);
 
-    uint64_t deadline   = rdtsc() + cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS);
-    uint8_t  seen_phase = j->phase;
+    /* The last resort, and it covers the WHOLE command rather than a stage of
+     * it — see MSD_COMMAND_PATIENCE_MS. Nothing below reaches it except a
+     * device that is present, whose endpoint is well, on a controller that is
+     * running, and which has still not spoken. */
+    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_COMMAND_PATIENCE_MS);
 
     while (!__atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
         xhci_process_events();
@@ -801,22 +876,15 @@ static void msd_job_run(MsdJob* j)
             break;
         }
 
-        /* A stage that finished is progress, and progress starts the clock
-         * again — otherwise a command whose three stages are each answered
-         * slowly is cut off for being long rather than for being stuck. */
-        if (j->phase != seen_phase) {
-            seen_phase = j->phase;
-            deadline   = rdtsc() + cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS);
-        }
         /*
-         * The fact first, the clock only after it.
+         * ── the facts, asked every pass ────────────────────────────────────
          *
-         * A device that has been pulled is not a device that is answering
-         * slowly, and there is a precise answer to which of the two this is —
-         * so it is asked every pass rather than waited out. Without it a stick
-         * pulled mid-read cost the full budget here and then the transport
-         * reset after it, and the whole of that time the slot could not be
-         * taken down and the unit number could not be given back.
+         * Is it still in the socket. A device that has been pulled is not a
+         * device that is answering slowly, and there is a precise answer to
+         * which of the two this is. Without it a stick pulled mid-read cost
+         * the whole budget here and the transport reset after it, and for all
+         * of that time the slot could not be taken down and the unit number
+         * could not be given back.
          */
         if (!msd_device_is_there(j->u)) {
             msd_note_gone(j->u, "an answer was owed at this stage");
@@ -826,19 +894,47 @@ static void msd_job_run(MsdJob* j)
         }
 
         /*
-         * The one deadline in the exchange, and it is on the exchange rather
-         * than on each of its three transfers: what a caller needs to know is
-         * whether the device answered, and the device stops being answerable
-         * as a whole, not a stage at a time.
-         *
-         * It is a watchman of SILENCE and nothing else: it is reached only
-         * when the device is still there by both facts above and simply has
-         * not spoken, which no register distinguishes from slow.
+         * Is the pipe well. The controller keeps the endpoint's state in the
+         * Output Endpoint Context and writes it as things happen to it, so an
+         * endpoint that has gone to Error or been taken away is a fact this
+         * loop can read rather than a silence it has to wait out. Halted is
+         * NOT one of these: a stall arrives as a Transfer Event of its own and
+         * the job above knows what to do with it.
          */
-        if ((int64_t)(rdtsc() - deadline) >= 0) {
-            kprintf("[USB disk %u] no answer in %u ms at stage %u — resetting "
-                    "the transport\n", j->u->number, MSD_XFER_TIMEOUT_MS,
-                    j->phase);
+        uint8_t ep_state = xhci_ep_context_state(j->u->ctrl, j->u->slot, j->dci);
+        if (ep_state == XHCI_EP_STATE_ERROR ||
+            ep_state == XHCI_EP_STATE_DISABLED) {
+            kprintf("[USB disk %u] the pipe this command is on is %s — not "
+                    "waiting for an answer that cannot come\n",
+                    j->u->number, xhci_ep_state_name(ep_state));
+            xhci_ep_abandon(j->u->ctrl, j->u->slot, j->dci);
+            msd_job_finish(j, -1);
+            break;
+        }
+
+        /* Is anybody driving. A controller that has stopped itself is not
+         * going to answer this or anything else, and it says so in USBSTS —
+         * which the drain above reads on every pass. */
+        if (j->u->ctrl->error_state) {
+            kprintf("[USB disk %u] the controller has stopped — this command "
+                    "has nobody to answer it\n", j->u->number);
+            msd_job_finish(j, -1);
+            break;
+        }
+
+        /*
+         * ── and only then the clock ────────────────────────────────────────
+         *
+         * Reached only by a device that is present, on a well pipe, on a
+         * running controller, and still silent — which on bulk means it has
+         * been saying "not yet" for half a minute. That is not a device this
+         * driver can go on holding a caller for, and it is the one case no
+         * register anywhere distinguishes from a healthy one.
+         */
+        if ((int64_t)(rdtsc() - give_up_at) >= 0) {
+            kprintf("[USB disk %u] the device has been asking for more time "
+                    "for %u ms at stage %u — giving up on the command\n",
+                    j->u->number, MSD_COMMAND_PATIENCE_MS, j->phase);
             /*
              * The host side first, and the order is not a preference.
              *
@@ -905,20 +1001,25 @@ static int msd_command(XhciMsdUnit* u, const uint8_t* cdb, uint8_t cdb_len,
 }
 /* Ask the device why it refused. Used for its own sake — the sense key is what
  * tells "no medium" apart from "still spinning up" apart from "broken". */
-static int msd_request_sense(XhciMsdUnit* u, uint8_t* out_key, uint8_t* out_asc)
+static int msd_request_sense(XhciMsdUnit* u, uint8_t* out_key, uint8_t* out_asc,
+                             uint8_t* out_ascq)
 {
     uint8_t cdb[6] = { SCSI_REQUEST_SENSE, 0, 0, 0, 18, 0 };
     uint32_t got = 0;
 
     memset(u->bounce_virt, 0, 18);
     int rc = msd_command(u, cdb, sizeof(cdb), u->bounce_phys, 18, true, &got);
+    /* The qualifier is byte 13, so fourteen bytes is not enough to have it —
+     * and it is the byte that separates "I am coming up" from "start me
+     * first", which are opposite answers to the same question. */
     if (rc != 0 || got < 14) {
         return -1;
     }
 
     const uint8_t* s = (const uint8_t*)u->bounce_virt;
-    if (out_key) *out_key = s[2] & 0x0F;
-    if (out_asc) *out_asc = s[12];
+    if (out_key)  *out_key  = s[2] & 0x0F;
+    if (out_asc)  *out_asc  = s[12];
+    if (out_ascq) *out_ascq = (got > 13) ? s[13] : 0;
     return 0;
 }
 
@@ -1027,31 +1128,83 @@ static int msd_read_capacity(XhciMsdUnit* u)
 static int msd_wait_ready(XhciMsdUnit* u)
 {
     uint8_t cdb[6] = { SCSI_TEST_UNIT_READY, 0, 0, 0, 0, 0 };
+    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_READY_PATIENCE_MS);
+    bool said_coming_up = false;
 
-    for (unsigned attempt = 0; attempt < MSD_READY_ATTEMPTS; attempt++) {
+    for (;;) {
         int rc = msd_command(u, cdb, sizeof(cdb), 0, 0, false, NULL);
         if (rc == 0) {
+            if (said_coming_up) {
+                kprintf("[USB disk %u] ready\n", u->number);
+            }
             return 0;
         }
         if (rc < 0) {
             return -1;                  /* the transport, not the medium */
         }
 
-        uint8_t key = 0, asc = 0;
-        if (msd_request_sense(u, &key, &asc) == 0) {
-            /* 0x02 NOT READY with 0x04 "logical unit not ready" is a device
-             * still coming up, and waiting is the right answer. 0x3A is no
-             * medium at all — a card reader with no card — and waiting is
-             * not, because nothing is going to change. */
-            if (key == 0x02 && asc == 0x3A) {
-                kprintf("[USB disk %u] no medium\n", u->number);
-                return -1;
-            }
+        /*
+         * It refused, so ask it why. Everything below is the device's own
+         * answer being acted on, and a device that will not say why is a
+         * device this driver has nothing to wait FOR.
+         */
+        uint8_t key = 0, asc = 0, ascq = 0;
+        if (msd_request_sense(u, &key, &asc, &ascq) != 0) {
+            kprintf("[USB disk %u] refused a command and would not say why\n",
+                    u->number);
+            return -1;
         }
+
+        /* A state change — a medium arriving, a reset, a power-on — is not a
+         * refusal, it is the device clearing its throat. Asked again at once
+         * rather than after a pause. */
+        if (key == SENSE_UNIT_ATTENTION) {
+            continue;
+        }
+
+        if (key != SENSE_NOT_READY) {
+            kprintf("[USB disk %u] is not ready and does not say it is coming "
+                    "up (sense key 0x%x, code 0x%02x/0x%02x)\n",
+                    u->number, key, asc, ascq);
+            return -1;
+        }
+
+        if (asc == ASC_NO_MEDIUM) {
+            /* A card reader with nothing in it. Waiting changes nothing, and
+             * this is the device saying so rather than a clock deciding. */
+            kprintf("[USB disk %u] no medium\n", u->number);
+            return -1;
+        }
+
+        if (asc != ASC_NOT_READY || ascq == ASCQ_START_NEEDED) {
+            /* Either it is not ready for a reason that is not time, or it is
+             * waiting to be told to start — which is a command, not a wait,
+             * and this driver does not send it. Named either way, because a
+             * medium refused for a reason nobody printed is a machine with no
+             * filesystem and no explanation. */
+            kprintf("[USB disk %u] is not ready and waiting will not change it "
+                    "(code 0x%02x/0x%02x%s)\n", u->number, asc, ascq,
+                    ascq == ASCQ_START_NEEDED ? " — it wants a START UNIT" : "");
+            return -1;
+        }
+
+        /* NOT READY / IN PROCESS OF BECOMING READY. This is the one answer
+         * that means "ask me again", and it is the only one waited on. */
+        if (!said_coming_up) {
+            said_coming_up = true;
+            kprintf("[USB disk %u] says it is still coming up — waiting for "
+                    "it to say otherwise\n", u->number);
+        }
+
+        if ((int64_t)(rdtsc() - give_up_at) >= 0) {
+            kprintf("[USB disk %u] has been coming up for %u ms and has not "
+                    "finished — not using it\n", u->number,
+                    MSD_READY_PATIENCE_MS);
+            return -1;
+        }
+
         msd_pause_ms(MSD_READY_WAIT_MS);
     }
-
-    return -1;
 }
 
 static void msd_read_identity(XhciMsdUnit* u)
@@ -1426,12 +1579,12 @@ static int msd_run_blocks(XhciMsdUnit* u, uint64_t block, uint32_t nblocks,
     uint32_t moved = 0;
     int rc = msd_command(u, cdb, cdb_len, u->bounce_phys, bytes, !write, &moved);
     if (rc != 0 || moved != bytes) {
-        uint8_t key = 0, asc = 0;
-        msd_request_sense(u, &key, &asc);
+        uint8_t key = 0, asc = 0, ascq = 0;
+        msd_request_sense(u, &key, &asc, &ascq);
         kprintf("[USB disk %u] %s of %u block(s) at %llu failed "
-                "(sense key 0x%x, code 0x%x)\n",
+                "(sense key 0x%x, code 0x%02x/0x%02x)\n",
                 u->number, write ? "write" : "read", nblocks,
-                (unsigned long long)block, key, asc);
+                (unsigned long long)block, key, asc, ascq);
         return -1;
     }
     return 0;
@@ -1650,24 +1803,44 @@ void xhci_msd_watchdog(void)
     MsdJob*      late_job  = NULL;
     XhciMsdUnit* late_unit = NULL;
 
+    bool gone = false;
+
     spin_lock(&g_units_lock);
     for (XhciMsdUnit* u = g_units; u; u = u->next) {
         MsdJob* j = __atomic_load_n(&u->watched, __ATOMIC_ACQUIRE);
         if (!j || __atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
             continue;
         }
+
+        /*
+         * ‼ THE FACT FIRST, AND IT IS WHY THIS PASS EXISTS AT ALL.
+         *
+         * A caller that stayed asks this every pass of its own loop. One that
+         * did not stay has nobody to ask it — so a read left on a device that
+         * has been pulled used to wait out the WHOLE budget before anything
+         * noticed, and for every one of those milliseconds the slot could not
+         * be taken down, the unit number could not come back, and the medium
+         * could not be announced as gone. With several reads outstanding that
+         * is the budget over and over, one after another.
+         *
+         * The device having left is a fact — the slot's tenancy and the port's
+         * own register — and it ends the wait now.
+         */
+        bool here = msd_device_is_there(u);
         uint64_t since = __atomic_load_n(&u->watched_since, __ATOMIC_RELAXED);
-        if ((int64_t)(rdtsc() - since) < (int64_t)cpu_ms_to_tsc(MSD_XFER_TIMEOUT_MS)) {
+        if (here && (int64_t)(rdtsc() - since) <
+                        (int64_t)cpu_ms_to_tsc(MSD_COMMAND_PATIENCE_MS)) {
             continue;
         }
-        /* Claimed here, so a second tick on another core cannot give up on the
+        /* Claimed here, so a second pass on another core cannot give up on the
          * same job twice. */
         if (__atomic_exchange_n(&u->watched, NULL, __ATOMIC_ACQ_REL) != j) {
             continue;
         }
         late_job  = j;
         late_unit = u;
-        break;                  /* one per tick is plenty; the next comes in 10 ms */
+        gone      = !here;
+        break;                  /* one per pass is plenty; the next comes round */
     }
     spin_unlock(&g_units_lock);
 
@@ -1675,9 +1848,16 @@ void xhci_msd_watchdog(void)
         return;
     }
 
-    kprintf("[USB disk %u] a read nobody was waiting on went unanswered for "
-            "%u ms at stage %u — resetting the transport\n",
-            late_unit->number, MSD_XFER_TIMEOUT_MS, late_job->phase);
+    if (gone) {
+        msd_note_gone(late_unit, "a read nobody was waiting on was outstanding");
+        xhci_ep_abandon(late_unit->ctrl, late_unit->slot, late_job->dci);
+        msd_job_finish(late_job, -1);
+        return;
+    }
+
+    kprintf("[USB disk %u] a read nobody was waiting on has been asking for "
+            "more time for %u ms at stage %u — giving up on the command\n",
+            late_unit->number, MSD_COMMAND_PATIENCE_MS, late_job->phase);
     /* The transfer comes off the endpoint before anything else happens — see
      * the note on the same call in msd_job_run. It matters more here: this job
      * carries a completion node, and the node lives inside memory that

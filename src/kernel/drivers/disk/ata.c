@@ -129,8 +129,15 @@ static int ata_wait_ready(uint8_t drive_idx) {
     return ATA_ERR_TIMEOUT;
 }
 
+/*
+ * The drive has been given a command and this waits for it to carry it out, so
+ * the patience is the DRIVE'S rather than a register handshake's — see
+ * CONFIG_ATA_IO_TIMEOUT_MS. Three facts end it before the clock ever does: the
+ * bus reading 0xFF, which is nothing being there at all; the drive raising
+ * ERR; and the drive raising DRQ, which is the answer.
+ */
 static int ata_wait_drq(uint8_t drive_idx) {
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_TIMEOUT_MS);
+    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(CONFIG_ATA_IO_TIMEOUT_MS);
     while (rdtsc() < deadline) {
         uint8_t s = ata_read_status(drive_idx);
         if (s == 0xFF) return ATA_ERR_NO_DEVICE;
@@ -571,7 +578,10 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
 
     /* Protocol compliance: BSY must clear before the next command goes
      * out, and ERR must not be set, otherwise the write is uncertain. */
-    if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_TIMEOUT_MS) != 0) {
+    /* The write is on the medium when the drive stops being busy, so this is
+     * the drive carrying a command out and not a handshake — the same patience
+     * the read's DRQ wait uses. */
+    if (ata_wait_clear_bsy(drive_idx, CONFIG_ATA_IO_TIMEOUT_MS) != 0) {
         debug_printf("[ATA] drv%u: BSY-clear timeout after WRITE @LBA %lu\n",
                      drive_idx, (unsigned long)lba);
         spin_unlock(&g_ata_lock);
