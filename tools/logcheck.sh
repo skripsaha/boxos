@@ -1357,6 +1357,105 @@ run_slowdisk() {
     chk $? "and the cable was never called unplugged"
 }
 
+run_gpt() {
+    echo "== gpt: the table is kept at both ends, and the far one is read =="
+
+    # A GPT is written TWICE — the primary at LBA 1 and a copy in the last
+    # sector of the medium — and UEFI 2.10 §5.3.2 requires a reader whose
+    # primary does not check out to use the other one. This kernel did not: it
+    # returned nothing, and every caller read that as "there is no BoxOS ground
+    # on this disk". One dead erase block under sector 1 — the commonest way a
+    # GPT is lost — and a perfectly good disk did not mount, without a word.
+    #
+    # Reaching the far copy needs one fact no driver would hand out until now:
+    # how far the medium runs. BoardroomSeatSectors is that door.
+    #
+    # The disk under test arrives as a SECOND medium rather than as the one the
+    # machine booted from, deliberately: the loaders read a partition table
+    # too, and a scenario that damages the disk it is booting from measures
+    # them as much as the kernel. Here the machine boots the ordinary way and
+    # the damaged disk is handed to it afterwards, so what is measured is the
+    # Ground survey and nothing else.
+    build
+    ./tools/make_gpt_boot.py build/boxos.img "$SCRATCH/gpt-good.img" >/dev/null 2>&1
+    cp "$SCRATCH/gpt-good.img" "$SCRATCH/gpt-bad.img"
+    python3 - "$SCRATCH/gpt-bad.img" <<'EOF'
+import sys
+p = sys.argv[1]
+with open(p, 'r+b') as f:
+    f.seek(512)              # LBA 1: the primary GPT header
+    f.write(b'\x00' * 512)   # one dead erase block, which is how they go
+EOF
+    local GOOD_LOG="$SCRATCH/serial.gpt.good.log"
+    local BAD_LOG="$SCRATCH/serial.gpt.bad.log"
+
+    local which img wait_for log
+    for which in good bad; do
+        img="$SCRATCH/gpt-$which.img"
+        if [ "$which" = good ]; then
+            wait_for="from GPT entry"; log="$GOOD_LOG"
+        else
+            wait_for="the copy at the far end"; log="$BAD_LOG"
+        fi
+
+        make run-stop >/dev/null 2>&1
+        make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
+        local i=0
+        while [ $i -lt 40 ]; do
+            grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+            sleep 1; i=$((i+1))
+        done
+
+        local MARK
+        MARK=$(wc -l < build/serial.log)
+        ./tools/qemu-input.sh raw "drive_add 0 if=none,id=gptdisk,file=$img,format=raw" >/dev/null 2>&1
+        sleep 1
+        ./tools/qemu-input.sh raw "device_add usb-storage,drive=gptdisk,id=gptstick" >/dev/null 2>&1
+
+        # Waited on the survey having spoken, not on a clock.
+        i=0
+        while [ $i -lt 60 ]; do
+            tail -n +$((MARK + 1)) build/serial.log 2>/dev/null | \
+                grep -q "$wait_for" && break
+            sleep 1; i=$((i+1))
+        done
+        sleep 2
+        make run-stop >/dev/null 2>&1
+        tail -n +$((MARK + 1)) build/serial.log > "$log"
+    done
+
+    # ── the disk with both copies intact ────────────────────────────────────
+    grep -q "from GPT entry" "$GOOD_LOG"
+    chk $? "a healthy GPT disk gives up its BoxOS ground"
+
+    ! grep -qE "its GPT (is damaged|is not where)" "$GOOD_LOG"
+    chk $? "and nothing called a healthy table damaged"
+
+    ! grep -q "made for a smaller disk" "$GOOD_LOG"
+    chk $? "and the table matches the medium it is on"
+
+    # ── and the same disk with its primary header gone ──────────────────────
+    grep -q "its GPT is not where the disk says it is" "$BAD_LOG"
+    chk $? "a lost primary header is called damage, not an empty disk"
+
+    grep -q "reading the copy at the far end, sector 122325" "$BAD_LOG"
+    chk $? "and the far copy is looked for in the last sector of the medium"
+
+    grep -q "the copy at the far end is good" "$BAD_LOG"
+    chk $? "and it is read"
+
+    grep -q "from GPT entry" "$BAD_LOG"
+    chk $? "and the BoxOS ground on that disk is found after all"
+
+    # And the machine that was handed a damaged table finished the pass it was
+    # in rather than stopping inside it — the room says so on its way out.
+    grep -q "arrived after the room was called to order" "$BAD_LOG"
+    chk $? "and the room finished seating it"
+
+    ! grep -qiE "panic|fault at" "$BAD_LOG"
+    chk $? "and nothing fell over reading a broken table"
+}
+
 run_twoctrl() {
     echo "== twoctrl: two host controllers, and the stick on the SECOND one =="
 
@@ -1443,13 +1542,14 @@ case "${1:-both}" in
     logsave)  run_logsave ;;
     yank)     run_yank ;;
     slowdisk) run_slowdisk ;;
+    gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|both|all]"; exit 2 ;;
 esac
 
 echo

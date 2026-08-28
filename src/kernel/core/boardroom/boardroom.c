@@ -542,6 +542,50 @@ uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
     }
 }
 
+/*
+ * A medium's own logical sectors, in the 512-byte ones this room speaks.
+ *
+ * Almost always the identity: both disk drivers refuse anything but 512-byte
+ * logical sectors, and the USB path converts before it answers. It is written
+ * out anyway because "the number the device gave" and "the number this room
+ * means" are different quantities, and the one place they are the same is
+ * exactly where nobody notices when they stop being.
+ */
+static uint64_t seat_sectors_in_512(uint64_t total, uint32_t logical)
+{
+    if (logical == 0 || (logical % BOARDROOM_SECTOR_BYTES) != 0) {
+        return 0;               /* not something this room can express */
+    }
+    return total * (uint64_t)(logical / BOARDROOM_SECTOR_BYTES);
+}
+
+uint64_t BoardroomSeatSectors(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    if (!s) return 0;
+
+    switch (s->kind) {
+    case BOARD_USB:
+        /* Already in this room's sectors — the disk driver does the conversion
+         * where it learns the geometry, because it is the one that has to
+         * split a request across the device's own blocks. */
+        return xhci_msd_unit_sectors(s->index);
+    case BOARD_AHCI: {
+        ahci_port_t* p = ahci_get_port_state(s->index);
+        return p ? seat_sectors_in_512(p->total_sectors, p->logical_sector_size)
+                 : 0;
+    }
+    case BOARD_ATA:
+        if (s->index < 4) {
+            return seat_sectors_in_512(g_ata_devices[s->index].total_sectors,
+                                       g_ata_devices[s->index].logical_sector_size);
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 uint8_t BoardroomSeatIndex(uint8_t seat)
 {
     BoardSeat* s = seat_taken(seat);
