@@ -26,4 +26,13 @@ int xhci_claim_from_firmware(xhci_controller_t* ctrl);
  * and a zero is a port this driver refuses to enumerate rather than guess at. */
 void xhci_map_port_protocols(xhci_controller_t* ctrl);
 
+/*
+ * Work out which pairs of root ports are one physical socket, and say how many
+ * there are. Called by xhci_map_port_protocols once it knows what each port
+ * is; separate only because it is a different question with a different answer
+ * — see the note on ctrl->port_pair for why the answer is an assumption and
+ * how the assumption is kept visible.
+ */
+void xhci_pair_port_halves(xhci_controller_t* ctrl);
+
 #endif

@@ -103,6 +103,32 @@ typedef struct {
     uint8_t port_major[XHCI_PORT_MAP_ENTRIES];
     uint8_t port_slot_type[XHCI_PORT_MAP_ENTRIES];
 
+    /*
+     * The OTHER root port of the same physical socket, or zero.
+     *
+     * A USB 3 socket is two root ports: one that carries SuperSpeed and one
+     * that carries everything below it. Which of them a device turns up on is
+     * decided by the device and the cable, not by the socket — so a stick
+     * whose SuperSpeed link does not train appears, disappears and reappears
+     * under a DIFFERENT port number, and from the controller's side that is
+     * indistinguishable from somebody pulling it out and putting a second one
+     * in. It was measured that way by another developer on a live laptop:
+     * connect on port 6, disconnect on port 6, connect on port 2, one socket.
+     *
+     * ‼ THE PAIRING IS A CONVENTION, AND THIS SAYS SO RATHER THAN PRETENDING.
+     * The Supported Protocol capability states which ports carry which
+     * protocol and nothing at all about which of them share a connector. Every
+     * controller in existence lays them out so that the n-th USB 2 port and
+     * the n-th USB 3 port are the same socket, and that is what is assumed
+     * here — stated in the boot description so a machine that disagrees can be
+     * caught by reading it, rather than by a fault nobody can explain.
+     *
+     * What it buys is one question that could not be asked before: when a
+     * device goes, IS THE SOCKET EMPTY? A hand and a link that fell back look
+     * the same on one port and completely different across the pair.
+     */
+    uint8_t port_pair[XHCI_PORT_MAP_ENTRIES];
+
     uint8_t irq_line;       /* PCI interrupt line, for the INTx fallback */
     uint8_t irq_vector;     /* MSI vector when MSI is in use, else 0 */
     bool use_msi;

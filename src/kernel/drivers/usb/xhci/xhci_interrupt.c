@@ -129,14 +129,42 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
                 uint16_t _reserved;
             } ev = { port, 0, 0, 0, 0 };
 
+            /*
+             * ‼ AND WHETHER THE SOCKET IS EMPTY, WHICH IS A DIFFERENT QUESTION.
+             *
+             * A USB 3 socket is two root ports. A device whose SuperSpeed link
+             * does not train disappears from one of them and turns up on the
+             * other — measured on a live laptop by another developer: connect
+             * on port 6, disconnect on port 6, connect on port 2, one hole in
+             * the case. On the port it left, that is bit-for-bit what a hand
+             * pulling it out looks like, and telling the two apart from a log
+             * was not possible: both are CSC set with CCS clear.
+             *
+             * Asking the OTHER half separates them, with a register read
+             * rather than a clock. An empty socket is a hand. An occupied one
+             * is the machine dropping to a slower half of the same connector,
+             * and the device is still there.
+             */
+            bool socket_empty = xhci_port_socket_is_empty(ctrl, port);
+            uint8_t other     = xhci_port_other_half(ctrl, port);
+
             xhci_device_slot_t* slot = xhci_get_device_slot_by_port(ctrl, port);
             if (slot) {
                 ev.vendor_id  = slot->device_desc.idVendor;
                 ev.product_id = slot->device_desc.idProduct;
                 ev.speed      = slot->speed;
-                kprintf("[xHCI] port %u: %04x:%04x unplugged\n",
-                        port, slot->device_desc.idVendor,
-                        slot->device_desc.idProduct);
+                if (socket_empty) {
+                    kprintf("[xHCI] port %u: %04x:%04x unplugged — the socket "
+                            "is empty\n",
+                            port, slot->device_desc.idVendor,
+                            slot->device_desc.idProduct);
+                } else {
+                    kprintf("[xHCI] port %u: %04x:%04x left this port, and "
+                            "port %u — the other half of the same socket — "
+                            "has something in it\n",
+                            port, slot->device_desc.idVendor,
+                            slot->device_desc.idProduct, other);
+                }
 
                 /* Only a device that was announced gets a departure. */
                 if (slot->state == ENUM_STATE_CONFIGURED) {

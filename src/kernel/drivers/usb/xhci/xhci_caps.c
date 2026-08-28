@@ -212,4 +212,61 @@ void xhci_map_port_protocols(xhci_controller_t* ctrl)
             ctrl->port_major[port] = 2;
         }
     }
+
+    xhci_pair_port_halves(ctrl);
+}
+
+/*
+ * Which two root ports are one socket.
+ *
+ * The controller says which ports carry which protocol and says NOTHING about
+ * which of them share a connector — there is no field for it in Section 7.2
+ * and no other register that answers. What every controller does is lay the
+ * two protocols out in step: the first USB 3 port is the SuperSpeed half of
+ * the same socket as the first USB 2 port, the second of the second, and so on
+ * until one of the two runs out. The USB 2 ports left over are the sockets
+ * that were never wired for SuperSpeed.
+ *
+ * So this is an assumption, and the way to keep an assumption honest is to say
+ * it out loud where somebody will read it — which is what the port description
+ * at the end of the boot survey does, one line per port, naming the other
+ * half. A machine that is wired differently is then a machine somebody can
+ * SEE is wired differently, instead of one where a device seems to arrive
+ * twice for no reason.
+ *
+ * Walked with two cursors rather than two arrays: the ports are visited in
+ * ascending order once, which is the same order any list of them would have
+ * been built in.
+ */
+void xhci_pair_port_halves(xhci_controller_t* ctrl)
+{
+    memset(ctrl->port_pair, 0, sizeof(ctrl->port_pair));
+
+    unsigned below = 1;         /* next USB 2 port not yet spoken for */
+    unsigned super = 1;         /* next USB 3 port not yet spoken for */
+    unsigned sockets = 0;
+
+    for (;;) {
+        while (below <= ctrl->max_ports && ctrl->port_major[below] != 2) {
+            below++;
+        }
+        while (super <= ctrl->max_ports && ctrl->port_major[super] < 3) {
+            super++;
+        }
+        if (below > ctrl->max_ports || super > ctrl->max_ports) {
+            break;
+        }
+
+        ctrl->port_pair[below] = (uint8_t)super;
+        ctrl->port_pair[super] = (uint8_t)below;
+        sockets++;
+        below++;
+        super++;
+    }
+
+    if (sockets > 0) {
+        kprintf("[xHCI %s] %u socket(s) have both halves — a USB 3 port and a "
+                "USB 2 port each, paired by position because the controller "
+                "does not say\n", ctrl->name, sockets);
+    }
 }

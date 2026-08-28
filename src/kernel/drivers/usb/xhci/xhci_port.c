@@ -85,6 +85,30 @@ uint8_t xhci_port_protocol(xhci_controller_t* ctrl, uint8_t port)
     return ctrl->port_major[port];
 }
 
+uint8_t xhci_port_other_half(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!ctrl || port == 0 || port >= XHCI_PORT_MAP_ENTRIES) {
+        return 0;
+    }
+    return ctrl->port_pair[port];
+}
+
+bool xhci_port_socket_is_empty(xhci_controller_t* ctrl, uint8_t port)
+{
+    if (!port_valid(ctrl, port)) {
+        return false;
+    }
+    if (portsc_read(ctrl, port) & XHCI_PORTSC_CCS) {
+        return false;
+    }
+
+    uint8_t other = xhci_port_other_half(ctrl, port);
+    if (other == 0 || !port_valid(ctrl, other)) {
+        return true;            /* a socket with one port is that port */
+    }
+    return (portsc_read(ctrl, other) & XHCI_PORTSC_CCS) == 0;
+}
+
 /*
  * Port power.
  *
@@ -150,13 +174,25 @@ void xhci_port_describe(xhci_controller_t* ctrl, uint8_t port)
         "Recovery", "Hot Reset", "Compliance", "Test", "?", "?", "?", "Resume"
     };
 
-    kprintf("[xHCI %s] port %u: %s, %s, link %s, speed %u  (PORTSC 0x%x, USB %u)\n",
+    /* And which other port is the same hole in the case. Printed because the
+     * pairing is an assumption this driver makes and not something the
+     * controller states — a board wired differently is a board somebody can
+     * see is wired differently, from this line, instead of one where a device
+     * appears to arrive twice for no reason. */
+    uint8_t other = xhci_port_other_half(ctrl, port);
+    char socket[32];
+    socket[0] = '\0';
+    if (other) {
+        ksnprintf(socket, sizeof(socket), ", same socket as port %u", other);
+    }
+
+    kprintf("[xHCI %s] port %u: %s, %s, link %s, speed %u  (PORTSC 0x%x, USB %u%s)\n",
             ctrl->name, port,
             (sc & XHCI_PORTSC_PP)  ? "powered"   : "NOT powered",
             (sc & XHCI_PORTSC_CCS) ? "something attached" : "nothing attached",
             link[pls],
             (unsigned)XHCI_PORTSC_SPEED(sc),
-            sc, ctrl->port_major[port]);
+            sc, ctrl->port_major[port], socket);
 }
 
 const char* xhci_port_reset_kind_name(uint8_t kind)
