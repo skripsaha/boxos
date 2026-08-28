@@ -57,15 +57,26 @@ void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
  *   dword4: Average TRB Length[15:0], Max ESIT Payload Lo[31:16]
  *   dword5-7: Reserved
  */
-void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx, uint64_t ring_phys, uint16_t max_packet) {
+void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx,
+                           uint64_t dequeue_with_dcs, uint16_t max_packet) {
     if (!ep0_ctx) return;
     memset(ep0_ctx, 0, sizeof(xhci_endpoint_context_t));
     /* dword1: CErr=3 (3 retries), EP Type=4 (Control Bidirectional), Max Packet Size */
     ep0_ctx->dwords[1] = (3 << 1) | (4 << 3) | ((uint32_t)max_packet << 16);
-    /* dword2: TR Dequeue Pointer Low | DCS=1 */
-    ep0_ctx->dwords[2] = (uint32_t)(ring_phys & 0xFFFFFFF0) | 1;
-    /* dword3: TR Dequeue Pointer High */
-    ep0_ctx->dwords[3] = (uint32_t)(ring_phys >> 32);
+    /*
+     * dword2-3: TR Dequeue Pointer, with the Dequeue Cycle State in bit 0.
+     *
+     * ‼ Where software STANDS, not where the ring begins. Addressing a device
+     * takes two Address Device commands (Section 4.3.4) with a descriptor read
+     * between them, so by the time the second one is built the control ring
+     * already carries three executed TRBs — and a context handing the
+     * controller the ring's own base address tells it to run them again. The
+     * caller works the position out; this only writes it down, because the two
+     * halves of a 64-bit pointer and the cycle bit riding in it are exactly
+     * the sort of thing that should be spelled once.
+     */
+    ep0_ctx->dwords[2] = (uint32_t)(dequeue_with_dcs & 0xFFFFFFF1u);
+    ep0_ctx->dwords[3] = (uint32_t)(dequeue_with_dcs >> 32);
     /* dword4: Average TRB Length = 8 (for control endpoint setup packets) */
     ep0_ctx->dwords[4] = 8;
 }

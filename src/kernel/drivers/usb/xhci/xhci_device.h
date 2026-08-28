@@ -50,7 +50,11 @@ _Static_assert(sizeof(xhci_device_context_t) == 1024, "Device Context must be 10
 struct xhci_device_slot;
 void xhci_fill_slot_context(xhci_slot_context_t* slot_ctx,
                             const struct xhci_device_slot* slot);
-void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx, uint64_t ring_phys, uint16_t max_packet);
+/* `dequeue_with_dcs` is the physical address the controller should pick the
+ * control ring up at, with the Dequeue Cycle State in bit 0 — see the note on
+ * the definition for why it is not simply the ring's base. */
+void xhci_init_ep0_context(xhci_endpoint_context_t* ep0_ctx,
+                           uint64_t dequeue_with_dcs, uint16_t max_packet);
 
 /*
  * What the CONTROLLER thinks of a device, as opposed to what this driver

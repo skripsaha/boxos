@@ -36,6 +36,12 @@ typedef struct {
 #define TRB_IOC                      (1 << 5)
 #define TRB_IDT                      (1 << 6)
 
+/* Block Set Address Request, Address Device Command TRB only (xHCI 1.2
+ * Section 6.4.3.4, bit 9 of the control dword). Set, the controller does its
+ * own half of addressing and puts nothing on the bus; clear, it also sends the
+ * device a USB SET_ADDRESS. */
+#define TRB_BSR                      (1 << 9)
+
 #define TRB_TYPE_SHIFT               10
 #define TRB_TYPE_MASK                (0x3F << TRB_TYPE_SHIFT)
 

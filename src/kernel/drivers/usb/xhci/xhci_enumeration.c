@@ -916,9 +916,44 @@ static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
     }
 }
 
-/* Build an Input Context describing the slot and EP0, and ask the controller
- * to address the device with it. */
-static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
+/*
+ * Addressing a device, which the specification describes as TWO commands.
+ *
+ * xHCI 1.2 Section 4.3.4. The first carries Block Set Address Request: the
+ * controller assigns the slot its internal resources and moves it to the
+ * Default state, and puts NOTHING on the bus. The device goes on answering the
+ * default address — which is where it can be asked, on its own control pipe,
+ * how large that pipe's packets are. The second carries BSR clear, and it is
+ * that one which makes the controller send the device a USB SET_ADDRESS.
+ *
+ * ‼ WHAT THE ONE-STEP VERSION COST, MEASURED ON THE OWNER'S BOARD
+ *
+ * SET_ADDRESS was the FIRST thing this driver ever said to a device, ten
+ * milliseconds after its port reset ended. When a device was not ready to hear
+ * it, what failed was a COMMAND — and a command that is never answered is not
+ * a device this driver can give up on and move past. The Command Ring executes
+ * strictly in order, so everything behind it stops too, and the only way out
+ * is to take the ring away from the controller: five seconds of silence, a
+ * doorbell, five more, a five-second abort, and then a reset of the whole
+ * controller with twenty-four ports on it. `Address Device on slot 3 took
+ * 10005 ms` is that ladder, printed.
+ *
+ * With the two steps, the same device failing at the same moment fails a
+ * TRANSFER instead. A transfer that goes wrong raises a Transfer Event, names
+ * itself, halts one endpoint, and is retried on a cleared pipe by machinery
+ * this driver already has. Nothing else on the bus notices.
+ *
+ * That is the point of the change, and it holds whether or not the device's
+ * unreadiness was ever the root cause: it moves the failure off the one queue
+ * that has no way to skip an entry.
+ *
+ * `max_packet` is what EP0 is declared with. On the first step it is the
+ * specification's value for the speed; on the second it is what the device
+ * itself said in the first eight bytes of its descriptor — which is why this
+ * driver no longer needs an Evaluate Context to correct it afterwards.
+ */
+static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot* slot,
+                                uint16_t max_packet, bool block_set_address)
 {
     uint32_t pages = xhci_input_ctx_pages(ctrl);
     void* input_ctx_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
@@ -940,15 +975,32 @@ static void enum_address_device(xhci_controller_t* ctrl, struct xhci_device_slot
         (xhci_slot_context_t*)(input_base + ctrl->context_size);
     xhci_fill_slot_context(slot_ctx, slot);
 
-    slot->ep0_max_packet = ep0_initial_max_packet(slot->speed);
+    /*
+     * Where the controller should pick the control ring up.
+     *
+     * The first step names the ring's beginning, because nothing has been put
+     * on it yet. The second names where software actually stands — the eight
+     * descriptor bytes read between the two steps left three executed TRBs
+     * behind, and handing back the base address would tell the controller to
+     * run them again. The cycle bit rides in bit 0 for the same reason it does
+     * everywhere else: the controller has to know which half of the ring's
+     * life this position belongs to.
+     */
+    slot->ep0_max_packet = max_packet;
+    uint64_t resume = slot->ep0_ring->trbs_phys +
+                      (uint64_t)slot->ep0_ring->enqueue_idx * sizeof(xhci_trb_t);
+    resume |= slot->ep0_ring->cycle_state ? 1u : 0u;
+
     xhci_endpoint_context_t* ep0_ctx =
         (xhci_endpoint_context_t*)(input_base + ctrl->context_size * 2);
-    xhci_init_ep0_context(ep0_ctx, slot->ep0_ring->trbs_phys, slot->ep0_max_packet);
+    xhci_init_ep0_context(ep0_ctx, resume, max_packet);
 
-    slot->state = ENUM_STATE_WAIT_ADDRESS_DEVICE;
+    slot->state = block_set_address ? ENUM_STATE_WAIT_ADDRESS_DEVICE_BSR
+                                    : ENUM_STATE_WAIT_ADDRESS_DEVICE;
 
     if (xhci_post_address_device_cmd(ctrl, slot, slot->slot_id,
-                                     (uint64_t)input_ctx_phys) < 0) {
+                                     (uint64_t)input_ctx_phys,
+                                     block_set_address) < 0) {
         debug_printf("[xHCI ENUM] Failed to post Address Device\n");
         xhci_slot_retire(ctrl, slot);
     }
@@ -1030,42 +1082,6 @@ static void enum_ask_again(xhci_controller_t* ctrl, struct xhci_device_slot* slo
      * commands and makes the second attempt start from the same place a
      * recovered one does — which is one path through this instead of two. */
     xhci_enum_recover_ep0(ctrl, slot, slot->state, true);
-}
-
-/*
- * Install a corrected EP0 max packet size with an Evaluate Context command.
- * Only the endpoint context is being changed, so only A1 is set — the slot
- * context comes along because the specification requires A0 to accompany it.
- */
-static void enum_evaluate_ep0(xhci_controller_t* ctrl, struct xhci_device_slot* slot,
-                              uint16_t max_packet)
-{
-    uint32_t pages = xhci_input_ctx_pages(ctrl);
-    void* input_ctx_phys = pmm_alloc_zero(pages, PHYS_TAG_DMA32);
-    if (!input_ctx_phys) {
-        kprintf("[xHCI] out of memory correcting EP0 on port %u\n", slot->port_num);
-        xhci_slot_retire(ctrl, slot);
-        return;
-    }
-    slot->input_ctx_phys = (uint64_t)input_ctx_phys;
-
-    uint8_t* input_base = (uint8_t*)vmm_phys_to_virt((uintptr_t)input_ctx_phys);
-
-    xhci_input_control_context_t* icc = (xhci_input_control_context_t*)input_base;
-    icc->add_context_flags = (1 << 1);           /* EP0 only */
-
-    xhci_endpoint_context_t* ep0_ctx =
-        (xhci_endpoint_context_t*)(input_base + ctrl->context_size * 2);
-    xhci_init_ep0_context(ep0_ctx, slot->ep0_ring->trbs_phys, max_packet);
-
-    slot->ep0_max_packet = max_packet;
-    slot->state = ENUM_STATE_WAIT_EVALUATE_CONTEXT;
-
-    if (xhci_post_evaluate_context_cmd(ctrl, slot, slot->slot_id,
-                                       (uint64_t)input_ctx_phys) < 0) {
-        debug_printf("[xHCI ENUM] Failed to post Evaluate Context\n");
-        xhci_slot_retire(ctrl, slot);
-    }
 }
 
 static void enum_free_input_ctx(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
@@ -1284,9 +1300,9 @@ const char* xhci_enum_state_name(uint8_t state) {
         case ENUM_STATE_WAIT_PORT_RESET:        return "waiting for the port reset";
         case ENUM_STATE_WAIT_RESET_RECOVERY:    return "letting the device come up after its reset";
         case ENUM_STATE_WAIT_ENABLE_SLOT:       return "waiting for Enable Slot";
+        case ENUM_STATE_WAIT_ADDRESS_DEVICE_BSR:return "waiting for Address Device, with the bus left alone";
         case ENUM_STATE_WAIT_ADDRESS_DEVICE:    return "waiting for Address Device";
         case ENUM_STATE_WAIT_GET_DESC_HEADER:   return "reading the first 8 descriptor bytes";
-        case ENUM_STATE_WAIT_EVALUATE_CONTEXT:  return "correcting the EP0 packet size";
         case ENUM_STATE_WAIT_GET_DESCRIPTOR:    return "reading the device descriptor";
         case ENUM_STATE_WAIT_GET_CONFIG_HEADER: return "reading the configuration header";
         case ENUM_STATE_WAIT_GET_CONFIG_DESC:   return "reading the configuration";
@@ -1810,6 +1826,31 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
          * had already unwound. The pipe is usable either way, and throwing the
          * device away for it turns a recovered stall into a lost device.
          */
+        /*
+         * A controller that will not do the first half of addressing on its own.
+         *
+         * Blocking the SET_ADDRESS is what every xHCI since 1.0 offers and what
+         * Section 4.3.4 is written around, but the bit is one this driver hands
+         * to somebody else's silicon and the refusal is a completion code, not
+         * a crash. So a controller that answers the blocked command with
+         * anything other than Success is asked the old way instead — one step,
+         * SET_ADDRESS straight away — which is what this driver did for its
+         * whole life and is worse than the two steps rather than broken.
+         *
+         * Said out loud, because it is a permanent property of the machine and
+         * it explains every enumeration after it.
+         */
+        if (slot->state == ENUM_STATE_WAIT_ADDRESS_DEVICE_BSR) {
+            kprintf("[xHCI %s] port %u: this controller refused to address a "
+                    "device without speaking to it (%s) — doing it in one step "
+                    "instead\n", ctrl->name, slot->port_num,
+                    xhci_completion_name(completion_code));
+            enum_free_input_ctx(ctrl, slot);
+            enum_address_device(ctrl, slot,
+                                ep0_initial_max_packet(slot->speed), false);
+            return;
+        }
+
         if (slot->state == ENUM_STATE_WAIT_EP0_RESET &&
             completion_code == TRB_COMPLETION_CONTEXT_STATE) {
             kprintf("[xHCI %s] port %u: the control pipe was not halted after "
@@ -1884,7 +1925,29 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             /* Register in DCBAA. */
             ctrl->dcbaa->device_context_ptrs[slot_id] = slot->dev_ctx_phys;
 
-            enum_address_device(ctrl, slot);
+            /* The first of the two: the slot moves to Default and nothing is
+             * said on the bus (Section 4.3.4). The packet size is the one the
+             * specification fixes for this speed, because the device has not
+             * been asked yet — full speed is the exception and gets 8, which
+             * every full-speed device must accept. */
+            enum_address_device(ctrl, slot,
+                                ep0_initial_max_packet(slot->speed), true);
+            break;
+        }
+
+        case ENUM_STATE_WAIT_ADDRESS_DEVICE_BSR: {
+            enum_free_input_ctx(ctrl, slot);
+
+            /* Eight bytes, asked of a device that still answers the default
+             * address. That is everything up to and including bMaxPacketSize0,
+             * which is the one endpoint parameter a device cannot be asked
+             * about until it has already been talked to. */
+            slot->state = ENUM_STATE_WAIT_GET_DESC_HEADER;
+            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8) < 0) {
+                kprintf("[xHCI %s] port %u: could not ask for the device "
+                        "descriptor\n", ctrl->name, slot->port_num);
+                xhci_slot_retire(ctrl, slot);
+            }
             break;
         }
 
@@ -1892,14 +1955,8 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             debug_printf("[xHCI ENUM] Device addressed: slot=%u\n", slot_id);
             enum_free_input_ctx(ctrl, slot);
 
-            /* Eight bytes first. That is everything up to and including
-             * bMaxPacketSize0, which is the field that decides whether the rest
-             * of this conversation can even be held at the packet size the
-             * endpoint context currently names. */
-            slot->state = ENUM_STATE_WAIT_GET_DESC_HEADER;
-            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 8) < 0) {
-                kprintf("[xHCI %s] port %u: could not ask for the device "
-                        "descriptor\n", ctrl->name, slot->port_num);
+            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
+            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
                 xhci_slot_retire(ctrl, slot);
             }
             break;
@@ -1931,27 +1988,17 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                 return;
             }
 
-            if (real_mps != slot->ep0_max_packet) {
-                debug_printf("[xHCI ENUM] EP0 packet size is %u, not %u — "
-                             "correcting\n", real_mps, slot->ep0_max_packet);
-                enum_evaluate_ep0(ctrl, slot, real_mps);
-                return;
-            }
-
-            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
-            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
-                xhci_slot_retire(ctrl, slot);
-            }
-            break;
-        }
-
-        case ENUM_STATE_WAIT_EVALUATE_CONTEXT: {
-            enum_free_input_ctx(ctrl, slot);
-
-            slot->state = ENUM_STATE_WAIT_GET_DESCRIPTOR;
-            if (enum_get_descriptor(ctrl, slot, USB_DT_DEVICE, 18) < 0) {
-                xhci_slot_retire(ctrl, slot);
-            }
+            /*
+             * And now the device may be given its address.
+             *
+             * The packet size it just named goes into this command's Input
+             * Context, so the endpoint is described correctly the first time
+             * it matters. What that replaced was an Evaluate Context posted
+             * afterwards to correct a context which had been wrong in between
+             * — a whole extra command, and one more thing that could be left
+             * half-done on a bus that had already gone quiet.
+             */
+            enum_address_device(ctrl, slot, real_mps, false);
             break;
         }
 
