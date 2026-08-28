@@ -536,8 +536,15 @@ bool xhci_command_oldest_for(xhci_controller_t* ctrl,
  * so every device with a command in flight is released here. That is honest:
  * they were going nowhere.
  */
-static void xhci_command_ring_abort(xhci_controller_t* ctrl)
+void xhci_command_abort_if_wanted(xhci_controller_t* ctrl)
 {
+    if (!ctrl || !ctrl->op_regs) {
+        return;
+    }
+    if (__atomic_exchange_n(&ctrl->cmd_abort_wanted, 0u, __ATOMIC_ACQ_REL) == 0) {
+        return;
+    }
+
     volatile uint32_t* crcr_lo = (volatile uint32_t*)&ctrl->op_regs->crcr;
 
     /* The pointer half of CRCR reads as zero, so this writes the abort bit and
@@ -857,6 +864,17 @@ void xhci_check_command_timeouts(xhci_controller_t* ctrl)
                 ctrl->name, XHCI_CMD_NUDGES);
     }
 
+    /*
+     * Asked for, not done here.
+     *
+     * This function is reached from xhci_tick, which runs inside IRQ0 and does
+     * not send its end-of-interrupt until it returns. The abort below is a
+     * five-second poll of CRCR, and spending it here stops the machine's clock
+     * for five seconds — see the note on cmd_abort_wanted in xhci.h. The K-Core
+     * guide loop and the idle loop both call xhci_recover_if_needed, which is
+     * where seconds are allowed to be spent; during boot, before either of them
+     * runs, xhci_enum_settle carries it out on this core.
+     */
     ctrl->cmd_nudges = 0;
-    xhci_command_ring_abort(ctrl);
+    __atomic_store_n(&ctrl->cmd_abort_wanted, 1u, __ATOMIC_RELEASE);
 }

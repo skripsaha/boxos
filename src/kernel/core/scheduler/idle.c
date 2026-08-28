@@ -1,6 +1,7 @@
 #include "idle.h"
 #include "boardroom.h"
 #include "xhci_hub.h"
+#include "xhci_msd.h"
 #include "xhci_enumeration.h"
 #include "process.h"
 #include "nightwatch.h"
@@ -163,10 +164,18 @@ void cpu_idle(void) {
     xhci_slot_service_if_pending();
 
     /* And a controller that stopped itself with an error it cannot continue
-     * past. The reset that brings it back takes up to a second, which is not
-     * something the handler that noticed can spend. Same shape as the two
-     * above; one load of a flag when nothing has failed. */
+     * past, or one whose command ring has to be taken back. The reset takes up
+     * to a second and the abort up to five, and neither is something the timer
+     * interrupt that noticed can spend — it does not send its end-of-interrupt
+     * until it returns. Same shape as the two above; one load of a flag per
+     * controller when nothing has failed. */
     xhci_recover_if_needed();
+
+    /* And a read on a USB disk that nobody is standing over and that was never
+     * answered. Giving up on one means resetting the transport, which is three
+     * control transfers — for the same reason as everything else in this block,
+     * that cannot happen in the tick that measures the deadline. */
+    xhci_msd_watchdog();
 
     /* And a medium that turned up after the room was called to order — a stick
      * pushed in while the machine runs, or the one that was there all along

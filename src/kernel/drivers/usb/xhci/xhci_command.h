@@ -115,6 +115,24 @@ bool xhci_command_oldest_for(xhci_controller_t* ctrl,
                              uint8_t* out_trb_type, uint32_t* out_age_ms);
 
 void xhci_handle_command_completion(xhci_controller_t* ctrl, xhci_trb_t* event);
+
+/*
+ * Has this controller answered anything lately, and ring the doorbell once if
+ * it has not. Cheap and non-blocking, which is what lets it run from the timer
+ * tick: when the ladder runs out it does not take the ring back, it ASKS for
+ * the ring to be taken back and leaves.
+ */
 void xhci_check_command_timeouts(xhci_controller_t* ctrl);
+
+/*
+ * Take the command ring back, if the watchdog above has asked for it.
+ *
+ * Section 4.6.1.2: software sets CRCR.CA and waits for the controller to stop
+ * the ring, which it is allowed five seconds to do. That wait is why this is
+ * separate from the watchdog that decides it is needed — the watchdog runs in
+ * the timer interrupt and this must not. Does nothing, cheaply, when nothing
+ * has been asked for.
+ */
+void xhci_command_abort_if_wanted(xhci_controller_t* ctrl);
 
 #endif
