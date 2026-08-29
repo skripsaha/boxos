@@ -61,7 +61,23 @@ static bool                g_rt_available = false;
 static spinlock_t          g_rt_lock;
 static bool                g_rt_lock_init = false;
 
-/* For diagnostics. */
+/* Every descriptor carrying EFI_MEMORY_RUNTIME — which is exactly what the
+ * SetVirtualAddressMap array must contain, and NOT the same number as the
+ * descriptors that got page-table entries.
+ *
+ * ‼ These two were one counter, and that was a bug with a quiet failure mode.
+ * EFI_MEMORY_MAPPED_IO_PORT_SPACE is given a virtual_start and deliberately
+ * no mapping (UEFI 2.10 §8.4), so efi_map_rt_descriptor returns before the
+ * increment — while the descriptor still has to reach the firmware, because
+ * the firmware asked for a virtual address for it. Sizing the SVAM array by
+ * the MAPPED count would leave it one entry short of the RUNTIME count, and
+ * the copy loop would drop the last runtime region on the map: a real RT code
+ * or data range the firmware would then never convert pointers into. Rare on
+ * x86 — that memory type is an Itanium inheritance — and silent when it
+ * happens, which is the combination worth spelling out. */
+static uint32_t g_rt_svam_descriptors    = 0;
+
+/* For diagnostics: the ones that actually got page-table entries. */
 static uint32_t g_rt_runtime_descriptors = 0;
 static uint64_t g_rt_runtime_pages_total = 0;
 static uint32_t g_rt_fw_revision         = 0;
@@ -563,12 +579,14 @@ bool efi_runtime_init(void)
     uint8_t *end = map + bi->efi_mmap_size;
     uint32_t desc_size = bi->efi_mmap_desc_size;
 
+    g_rt_svam_descriptors    = 0;
     g_rt_runtime_descriptors = 0;
     g_rt_runtime_pages_total = 0;
 
     while (p + desc_size <= end) {
         EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)p;
         if (d->attribute & EFI_MEMORY_RUNTIME) {
+            g_rt_svam_descriptors++;
             if (!efi_map_rt_descriptor(d, kctx)) {
                 kprintf("[EFI] a runtime region could not be mapped — "
                         "no EFI runtime services on this boot\n");
@@ -578,6 +596,12 @@ bool efi_runtime_init(void)
         p += desc_size;
     }
 
+    /* The MAPPED count, deliberately, not the runtime count: if nothing got a
+     * page-table entry there is no virtual map to install, and calling SVAM
+     * with an array the firmware cannot be given addresses for is worse than
+     * staying physical. A firmware publishing only IO-port-space runtime
+     * descriptors lands here and keeps physical-mode runtime services, which
+     * is correct. */
     if (g_rt_runtime_descriptors == 0) {
         debug_printf("[EFI] no EFI_MEMORY_RUNTIME descriptors found; "
                      "calling RT in physical mode\n");
@@ -641,7 +665,7 @@ bool efi_runtime_init(void)
      *     our CR3 happens to map it; the register dump from the laptop that
      *     panicked here shows those very pointers inside firmware code. Linux
      *     passes __pa(new_memmap) and identity-maps it first. So do we. */
-    size_t   rt_bytes  = (size_t)g_rt_runtime_descriptors * desc_size;
+    size_t   rt_bytes  = (size_t)g_rt_svam_descriptors * desc_size;
     size_t   rt_pages  = (rt_bytes + 0xFFFu) / 0x1000u;
     uintptr_t svam_phys = (uintptr_t)pmm_alloc(rt_pages);
     if (!svam_phys) {
@@ -666,7 +690,7 @@ bool efi_runtime_init(void)
     for (uint8_t *q = map; q + desc_size <= end; q += desc_size) {
         EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)q;
         if (!(d->attribute & EFI_MEMORY_RUNTIME)) continue;
-        if (svam_count >= g_rt_runtime_descriptors) break;
+        if (svam_count >= g_rt_svam_descriptors) break;
         memcpy(svam_map + (size_t)svam_count * desc_size, d, desc_size);
         svam_count++;
     }
