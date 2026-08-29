@@ -54,15 +54,15 @@ void AutostartNoteVolumeLaunched(void)
 }
 
 /* Collect a file's tags into the comma-separated string process_create wants.
- * The tags are the volume's, so this needs the volume's registry — which is
- * mounted by definition here, since a mount is what got us called. */
-static void autostart_collect_tags(TagRegistry *reg, const TagFSMetadata *meta,
+ * The names are the volume's, so they are asked of it one at a time and copied
+ * out: the registry they live in belongs to a mount, and a mount ends. */
+static void autostart_collect_tags(const TagFSMetadata *meta,
                                    char *out, size_t out_size)
 {
     size_t pos = 0;
     for (uint16_t t = 0; t < meta->tag_count; t++) {
-        const char *key = tag_registry_key(reg, meta->tag_ids[t]);
-        if (!key) continue;
+        char key[128];
+        if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
         size_t klen = strlen(key);
         if (pos + klen + 2 > out_size) break;
         if (pos > 0) out[pos++] = ',';
@@ -72,13 +72,13 @@ static void autostart_collect_tags(TagRegistry *reg, const TagFSMetadata *meta,
     out[pos] = '\0';
 }
 
-static bool autostart_wanted(TagRegistry *reg, const TagFSMetadata *meta)
+static bool autostart_wanted(const TagFSMetadata *meta)
 {
     bool has_autostart = false;
     bool has_exec_tag  = false;
     for (uint16_t t = 0; t < meta->tag_count; t++) {
-        const char *key = tag_registry_key(reg, meta->tag_ids[t]);
-        if (!key) continue;
+        char key[128];
+        if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
         if (strcmp(key, "autostart") == 0) has_autostart = true;
         if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
             has_exec_tag = true;
@@ -161,8 +161,10 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
 {
     if (out_first) *out_first = NULL;
 
+    /* Is there a volume? Asked of the flag rather than of the registry
+     * pointer beside it, which a re-mount frees. */
     TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) return 0;
+    if (!fs || !fs->initialized) return 0;
 
     uint32_t max_files = (fs->ledger.total_files > 0)
                          ? fs->ledger.total_files : TAGFS_MAX_FILES;
@@ -179,13 +181,13 @@ int AutostartLaunchFromVolume(process_t **out_first, bool scheduler_live)
         TagFSMetadata meta;
         if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
         if (!(meta.flags & TAGFS_FILE_ACTIVE) ||
-            !autostart_wanted(fs->registry, &meta)) {
+            !autostart_wanted(&meta)) {
             tagfs_metadata_free(&meta);
             continue;
         }
 
         char tags[PROCESS_TAG_SIZE];
-        autostart_collect_tags(fs->registry, &meta, tags, sizeof(tags));
+        autostart_collect_tags(&meta, tags, sizeof(tags));
 
         process_t *proc = autostart_launch_one(file_ids[i], &meta, tags);
         if (!proc) {

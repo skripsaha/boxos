@@ -1713,6 +1713,147 @@ run_yank() {
     chk $? "no caller was still inside the slot when it wanted to leave"
 }
 
+# ── holdground: the volume comes back while somebody is still inside it ────
+#
+# replug proves a volume that leaves and comes home is re-read. It proves it on
+# an IDLE machine, which is the one case where the re-read is free: nobody is
+# in the filesystem, so the memory it hands back — the tag registry, the tag
+# index, the block bitmap, the free list, the file table, the metadata pool —
+# is memory nobody is holding. That is not the machine this has to survive.
+#
+# `make HOLDGROUND=on` puts somebody there. At the moment the medium is noticed
+# gone, one caller steps into the volume and does not step out until the volume
+# is back; and a file is held OPEN across the whole departure. Three separate
+# lines of the repair are then falsifiable, and each was measured against its
+# own mutation:
+#
+#   take the "somebody is inside" refusal out of tagfs_abandon      -> the
+#      take-down says nothing and frees the volume under the caller.
+#      MEASURED: 6 passed, 7 failed;
+#   take the mounting stamp off the handle (handle_belongs_here)    -> the old
+#      handle reads block numbers that now belong to another file, and says
+#      nothing. MEASURED: 11 passed, 2 failed — and exactly the two;
+#   put memset(g_open_files, ...) back into tagfs_init              -> the
+#      entry a live handle owns is no longer the one the table hands out, so
+#      two writers to one file take two different locks.
+#      MEASURED: 11 passed, 2 failed — and exactly the other two.
+run_holdground() {
+    echo "== holdground: the volume comes back while somebody is still in it =="
+
+    # The stick must BE the volume — the same mutation replug and yank use, and
+    # it stays installed for the whole run for the reason written there.
+    latearrival_on
+    make HOLDGROUND=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (HOLDGROUND=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        latearrival_off; bad "HOLDGROUND=on build"; return
+    fi
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    # ‼ The key goes on run-bg TOO: it decides which mark file the tree carries,
+    # and a bare `make run-bg` rebuilds the kernel without it. Same trap that
+    # cost mountfail a whole run.
+    make run-bg HOLDGROUND=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    # First arrival: the stick becomes this machine's volume, and the probe
+    # opens a file on it.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        grep -q "hands over" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    local FIRST_LINES
+    FIRST_LINES=$(wc -l < build/serial.log)
+
+    # Pulled out — and waited on the PROBE's own line, not on a clock: it is
+    # the fact that there is somebody inside the volume to protect.
+    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 30 ]; do
+        grep -q "HOLDGROUND. a caller was inside the volume" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    # And pushed back in. drive_add first: an HMP drive is auto-delete and went
+    # with the device.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        tail -n +$((FIRST_LINES + 1)) build/serial.log 2>/dev/null | \
+            grep -q "HOLDGROUND. the open-file entry" && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.holdground.log"
+    latearrival_off
+    L="$SCRATCH/serial.holdground.log"
+    tail -n +$((FIRST_LINES + 1)) "$L" > "$SCRATCH/serial.holdground.second.log"
+    local S="$SCRATCH/serial.holdground.second.log"
+
+    # ── the situation was actually reached ──────────────────────────────────
+    grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
+    chk $? "the stick was mounted on its first arrival"
+    grep -q "HOLDGROUND. holding file .* open across whatever happens" "$L"
+    chk $? "and a file was held open on it"
+    grep -q "HOLDGROUND. a caller was inside the volume when its medium left" "$S"
+    chk $? "somebody was inside the volume when the medium left"
+    grep -q "the volume is back, in seat" "$S"
+    chk $? "and the volume came back"
+
+    # ── ‼ THE BARRIER. Nothing is let go of while somebody is on it ─────────
+    grep -qE "the volume is on its way out and [1-9][0-9]* caller\(s\) are still inside it" "$S"
+    chk $? "the take-down found a caller inside and let go of nothing"
+
+    grep -q "the last caller is out and the old volume has been let go of" "$S"
+    chk $? "and finished only once that caller was out"
+
+    # In that ORDER. A "let go of" line that precedes the "still inside" line
+    # would mean the memory went back first and the sentence came after.
+    local WAIT_AT FREE_AT MOUNT_AT
+    WAIT_AT=$(grep -nE "the volume is on its way out and [1-9]" "$S" | head -1 | cut -d: -f1)
+    FREE_AT=$(grep -n  "the last caller is out and the old volume" "$S" | head -1 | cut -d: -f1)
+    MOUNT_AT=$(grep -n "the volume on seat .* is MOUNTED" "$S" | tail -1 | cut -d: -f1)
+    [ -n "$WAIT_AT" ] && [ -n "$FREE_AT" ] && [ -n "$MOUNT_AT" ] && \
+        [ "$WAIT_AT" -lt "$FREE_AT" ] && [ "$FREE_AT" -lt "$MOUNT_AT" ]
+    chk $? "waited, then let go, then mounted — in that order (${WAIT_AT:-?}, ${FREE_AT:-?}, ${MOUNT_AT:-?})"
+
+    # ── ‼ THE HANDLE FROM BEFORE IS REFUSED, NOT FOLLOWED ──────────────────
+    grep -q "was opened on an earlier mounting of this volume" "$S"
+    chk $? "a read through the handle from the previous mounting is refused"
+
+    grep -q "HOLDGROUND. a read through the handle from before returned -1" "$S"
+    chk $? "and the refusal reaches the caller as a failure"
+
+    # ── ‼ THE OPEN-FILE TABLE BELONGS TO THE MACHINE ───────────────────────
+    grep -q "HOLDGROUND. the open-file entry that handle owns is still in the table" "$S"
+    chk $? "the entry a live handle owns survived the re-mount"
+
+    grep -q "HOLDGROUND. opening the same file again found the same entry" "$S"
+    chk $? "and one file still has exactly one entry, so its writers share one lock"
+
+    # ── and the machine is usable afterwards, which is the point ───────────
+    grep -q "the volume on seat .* is MOUNTED" "$S"
+    chk $? "the volume was taken back up"
+    grep -q "BoxOS Shell" "$L"
+    chk $? "the machine still has a shell"
+}
+
 run_stillthere() {
     echo "== stillthere: the read was slow, and the device never went anywhere =="
 
@@ -2415,6 +2556,7 @@ case "${1:-both}" in
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
+    holdground) run_holdground ;;
     seal)     run_seal ;;
     ctrlgiveup) run_ctrlgiveup ;;
     isoch)    run_isoch ;;
@@ -2422,8 +2564,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

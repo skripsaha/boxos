@@ -1619,16 +1619,9 @@ bool process_has_tag(process_t *proc, const char *tag)
     if (!proc || !proc->cabin || !tag || tag[0] == '\0')
         return false;
 
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry)
-        return false;
-    TagRegistry *reg = fs->registry;
-
     if (!tag_is_wildcard(tag))
     {
-        char key[256], value[256];
-        tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-        uint16_t tid = tag_registry_lookup(reg, key, value[0] ? value : NULL);
+        uint16_t tid = tagfs_tag_lookup(tag);
         if (tid == TAGFS_INVALID_TAG_ID)
             return false;
         return process_has_tag_id(proc, tid);
@@ -1639,22 +1632,16 @@ bool process_has_tag(process_t *proc, const char *tag)
     {
         uint16_t i = (uint16_t)__builtin_ctzll(bits);
         bits &= bits - 1;
-        const char *k = tag_registry_key(reg, i);
-        const char *v = tag_registry_value(reg, i);
-        if (!k) continue;
         char full[512];
-        tagfs_format_tag(full, sizeof(full), k, v);
+        if (!tagfs_tag_text(i, full, sizeof(full))) continue;
         if (tag_match(tag, full))
             return true;
     }
     for (uint16_t j = 0; j < proc->cabin->tag_overflow_count; j++)
     {
-        uint16_t tid = proc->cabin->tag_overflow_ids[j];
-        const char *k = tag_registry_key(reg, tid);
-        const char *v = tag_registry_value(reg, tid);
-        if (!k) continue;
         char full[512];
-        tagfs_format_tag(full, sizeof(full), k, v);
+        if (!tagfs_tag_text(proc->cabin->tag_overflow_ids[j], full, sizeof(full)))
+            continue;
         if (tag_match(tag, full))
             return true;
     }
@@ -1669,8 +1656,12 @@ int process_add_tag(process_t *proc, const char *tag)
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
+    /* Is there a volume? A tag id is the volume's to issue, and this used to
+     * be asked by looking at its registry pointer — the one thing a re-mount
+     * gives back to the allocator. The flag beside it says the same thing and
+     * is not a pointer. */
     TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry)
+    if (!fs || !fs->initialized)
     {
         /*
          * No volume, so no membership — a tag id is the volume's to issue and
@@ -1712,7 +1703,7 @@ int process_add_tag(process_t *proc, const char *tag)
 
     spin_lock(&process_lock);
 
-    uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
+    uint16_t tid = tagfs_tag_intern(tag);
     if (tid == TAGFS_INVALID_TAG_ID)
     {
         spin_unlock(&process_lock);
@@ -1735,14 +1726,16 @@ int process_remove_tag(process_t *proc, const char *tag)
     if (!proc || !proc->cabin || !tag || tag[0] == '\0')
         return -1;
 
+    /* No volume, no membership to take away — and the answer is the refusal it
+     * has always been rather than "nothing to do", which reads as success. */
     TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry)
+    if (!fs || !fs->initialized)
         return -1;
 
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
-    uint16_t tid = tag_registry_lookup(fs->registry, key, value[0] ? value : NULL);
+    uint16_t tid = tagfs_tag_lookup(tag);
     if (tid == TAGFS_INVALID_TAG_ID)
         return 0;
 
@@ -1818,18 +1811,38 @@ void process_start_initial(process_t *proc)
         asm volatile("cli; hlt");
 }
 
+/*
+ * One tag, appended to a comma-separated list. False when it would not fit,
+ * which ends the list.
+ *
+ * The two loops below used to carry a copy of this each, forty lines apart and
+ * identical, and both of them wrote the separator BEFORE finding out whether
+ * what follows it fits — so a list that ran out of room ended in a comma.
+ */
+static bool snapshot_append_tag(char *buffer, size_t buffer_size, size_t *pos,
+                                bool *first, uint16_t tag_id)
+{
+    char text[512];
+    if (!tagfs_tag_text(tag_id, text, sizeof(text)))
+        return true;                /* this volume has no such tag — skip it */
+
+    size_t len  = strlen(text);
+    size_t need = len + (*first ? 0u : 1u);
+    if (*pos + need >= buffer_size)
+        return false;
+
+    if (!*first)
+        buffer[(*pos)++] = ',';
+    *first = false;
+    memcpy(buffer + *pos, text, len);
+    *pos += len;
+    return true;
+}
+
 size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
 {
     if (!proc || !proc->cabin || !buffer || buffer_size == 0)
         return 0;
-
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry)
-    {
-        buffer[0] = '\0';
-        return 0;
-    }
-    TagRegistry *reg = fs->registry;
 
     spin_lock(&process_lock);
 
@@ -1841,57 +1854,15 @@ size_t process_snapshot_tags(process_t *proc, char *buffer, size_t buffer_size)
     {
         uint16_t i = (uint16_t)__builtin_ctzll(bits);
         bits &= bits - 1;
-        const char *k = tag_registry_key(reg, i);
-        const char *v = tag_registry_value(reg, i);
-        if (!k) continue;
-
-        if (!first && pos < buffer_size - 1)
-            buffer[pos++] = ',';
-        first = false;
-
-        size_t klen = strlen(k);
-        size_t vlen = v ? strlen(v) : 0;
-
-        if (vlen > 0)
-        {
-            if (pos + klen + 1 + vlen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
-            buffer[pos++] = ':';
-            memcpy(buffer + pos, v, vlen); pos += vlen;
-        }
-        else
-        {
-            if (pos + klen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
-        }
+        if (!snapshot_append_tag(buffer, buffer_size, &pos, &first, i))
+            break;
     }
 
     for (uint16_t j = 0; j < proc->cabin->tag_overflow_count; j++)
     {
-        uint16_t tid = proc->cabin->tag_overflow_ids[j];
-        const char *k = tag_registry_key(reg, tid);
-        const char *v = tag_registry_value(reg, tid);
-        if (!k) continue;
-
-        if (!first && pos < buffer_size - 1)
-            buffer[pos++] = ',';
-        first = false;
-
-        size_t klen = strlen(k);
-        size_t vlen = v ? strlen(v) : 0;
-
-        if (vlen > 0)
-        {
-            if (pos + klen + 1 + vlen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
-            buffer[pos++] = ':';
-            memcpy(buffer + pos, v, vlen); pos += vlen;
-        }
-        else
-        {
-            if (pos + klen >= buffer_size) break;
-            memcpy(buffer + pos, k, klen); pos += klen;
-        }
+        if (!snapshot_append_tag(buffer, buffer_size, &pos, &first,
+                                 proc->cabin->tag_overflow_ids[j]))
+            break;
     }
 
     buffer[pos] = '\0';

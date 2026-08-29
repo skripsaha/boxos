@@ -19,6 +19,7 @@
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 #include "nightwatch.h"
 #include "storage_completion.h"  /* Never-drop MPSC: async storage continuations */
+#include "tagfs.h"
 
 KCorePocketQueue *g_kcore_queues = NULL;
 
@@ -307,6 +308,14 @@ void kcore_run_loop(void)
          * it how large it is and whether it is ready, which is transfers, so
          * it belongs here for the same reason as the three above. */
         BoardroomAttendIfPending();
+
+        /* And a volume that was shut when its medium left and could not be let
+         * go of, because somebody was still inside it. It is here for the same
+         * reason as everything above: giving the memory back and mounting again
+         * cannot happen where the departure was noticed, and on a multi-core
+         * machine this loop is where the cores actually are. One atomic load
+         * when there is nothing to do. */
+        TagFSServiceIfPending();
 
         if ((++loop_count % 10) == 0) {
             /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before

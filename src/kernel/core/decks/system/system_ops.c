@@ -189,12 +189,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     /* Resolve the tag to its registry id once, outside the process-list
      * lock — sys_proc_has_tag's string/wildcard path would re-acquire
      * process_lock through process_snapshot_tags and self-deadlock. */
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) return ERR_ROUTE_NO_SUBSCRIBERS;
-    char key[256], value[256];
-    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-    uint16_t tid = tag_registry_lookup(fs->registry,
-                                       key, value[0] ? value : NULL);
+    uint16_t tid = tagfs_tag_lookup(tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
     /* Phase 1: snapshot matching pids under process_list_lock so the
@@ -809,7 +804,6 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (!file_ids) return ERR_NO_MEMORY;
 
     int file_count = tagfs_list_all_files(file_ids, EXEC_SCAN_MAX);
-    TagFSState *tfs = tagfs_get_state();
 
     uint32_t found_id = 0;
     char     found_tags[PROCESS_TAG_SIZE];
@@ -825,8 +819,8 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
         bool has_name = false, has_exec_tag = false;
         for (uint16_t t = 0; t < meta.tag_count; t++) {
-            const char *key = tfs ? tag_registry_key(tfs->registry, meta.tag_ids[t]) : NULL;
-            if (!key) continue;
+            char key[128];
+            if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
             if (strcmp(key, filename) == 0)                      has_name = true;
             if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
         }
@@ -835,8 +829,8 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
             found_id = file_ids[i];
             size_t pos = 0;
             for (uint16_t t = 0; t < meta.tag_count; t++) {
-                const char *key = tfs ? tag_registry_key(tfs->registry, meta.tag_ids[t]) : NULL;
-                if (!key) continue;
+                char key[128];
+                if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
                 size_t klen = strlen(key);
                 if (pos + klen + 2 > PROCESS_TAG_SIZE) break;
                 if (pos > 0) found_tags[pos++] = ',';

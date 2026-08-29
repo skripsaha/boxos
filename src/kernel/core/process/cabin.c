@@ -126,38 +126,33 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
 
     if (tags && tags[0] != '\0')
     {
-        TagFSState *fs = tagfs_get_state();
-        if (fs && fs->registry)
+        const char *pos = tags;
+        while (*pos)
         {
-            const char *pos = tags;
-            while (*pos)
+            const char *comma = strchr(pos, ',');
+            size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
+            if (len > 0 && len < 256)
             {
-                const char *comma = strchr(pos, ',');
-                size_t len = comma ? (size_t)(comma - pos) : strlen(pos);
-                if (len > 0 && len < 256)
+                char tag_buf[256];
+                memcpy(tag_buf, pos, len);
+                tag_buf[len] = '\0';
+
+                char key[256], value[256];
+                tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
+
+                uint16_t tid = tagfs_tag_intern(tag_buf);
+                if (tid != TAGFS_INVALID_TAG_ID)
                 {
-                    char tag_buf[256];
-                    memcpy(tag_buf, pos, len);
-                    tag_buf[len] = '\0';
-
-                    char key[256], value[256];
-                    tagfs_parse_tag(tag_buf, key, sizeof(key), value, sizeof(value));
-
-                    uint16_t tid = tag_registry_intern(fs->registry, key,
-                                                       value[0] ? value : NULL);
-                    if (tid != TAGFS_INVALID_TAG_ID)
-                    {
-                        cabin_set_tag_bit(cabin, tid);
-                        /* Mirror the fixed auth bit for a bare auth key. Plain
-                         * OR: the cabin is not published to any core yet. */
-                        if (!value[0])
-                            cabin->auth_bits |= auth_bit_for_key(key);
-                    }
+                    cabin_set_tag_bit(cabin, tid);
+                    /* Mirror the fixed auth bit for a bare auth key. Plain
+                     * OR: the cabin is not published to any core yet. */
+                    if (!value[0])
+                        cabin->auth_bits |= auth_bit_for_key(key);
                 }
-                if (!comma)
-                    break;
-                pos = comma + 1;
             }
+            if (!comma)
+                break;
+            pos = comma + 1;
         }
     }
 
