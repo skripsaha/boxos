@@ -165,6 +165,11 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
 #define EFI_MEMORY_DESC_TYPE_OFFSET  0u
 #define EFI_MEMORY_DESC_PHYS_OFFSET  8u
 #define EFI_MEMORY_DESC_PAGES_OFFSET 24u
+/* type(4) pad(4) physical_start(8) virtual_start(8) number_of_pages(8)
+ * attribute(8). The firmware may report a LARGER descriptor_size — that is
+ * what the field is for — but never a smaller one, and a map that claims one
+ * is not a map this walk can read. */
+#define EFI_MEMORY_DESC_MIN_SIZE     40u
 
 static bool   pmm_bs_held        = false;
 static size_t pmm_bs_pages_held  = 0;
@@ -188,7 +193,7 @@ static bool pmm_for_each_boot_services_range(
     if (!boot_info_valid(bi)) return false;
     if (bi->boot_method != 1) return false;              /* BIOS */
     if (!bi->efi_mmap_phys || !bi->efi_mmap_size ||
-        bi->efi_mmap_desc_size < 32) return false;
+        bi->efi_mmap_desc_size < EFI_MEMORY_DESC_MIN_SIZE) return false;
 
     /* Identity during early boot, Pull Map afterwards — either way this is
      * the kernel-readable address of the staged map. */
