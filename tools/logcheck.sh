@@ -928,6 +928,23 @@ run_noexec() {
     ! grep -q "the loader's E820 is older than its own allocations" "$L"
     chk $? "the staged EFI map is not memory the allocator calls free"
 
+    # The firmware's own declaration of how tightly its runtime regions may be
+    # mapped (UEFI 2.10 §4.6.4), honoured whole. Applied only after SVAM,
+    # because the firmware writes to its own code during that call.
+    grep -q "\[EFI\] memory attributes: [0-9]* runtime region(s) tightened" "$L"
+    chk $? "runtime regions are tightened to what the firmware declared"
+    grep -q "tightened to what the firmware declared, 0 left as they were" "$L"
+    chk $? "and every entry in the table checked out"
+
+    # ‼ The only check here that is EVIDENCE rather than arrangement: a real
+    # runtime service, dispatched through the rebased pointer, into the
+    # relocated firmware code, off the pages just made read-only. Everything
+    # above it describes what was set up; this is the machine using it.
+    grep -q "\[EFI\] runtime services answer:" "$L"
+    chk $? "and a runtime service still answers afterwards"
+    grep -qE "firmware clock reads [0-9]{4}-[0-9]{2}-[0-9]{2}" "$L"
+    chk $? "with a date off the firmware's own clock"
+
     # ── half two: the boards' state, reproduced ─────────────────────────────
     echo "-- and again with NXE clear, the way both boards booted --"
     make NOEXEC=off >"$SCRATCH/build.log" 2>&1

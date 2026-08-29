@@ -362,7 +362,17 @@ EfiStatus efi_query_capsule_capabilities(EfiCapsuleHeader **capsule_header_array
  * ------------------------------------------------------------------------ */
 EfiConfigurationTable *efi_get_configuration_table(uint32_t *out_count);
 
-/* Look up a specific vendor table by GUID. Returns the entry's
+/* Published by firmware that describes how tightly its own runtime regions
+ * may be mapped — UEFI 2.10 §4.6.4. Defined in efi_runtime.c. */
+extern const EfiGuid EFI_MEMORY_ATTRIBUTES_TABLE_GUID;
+
+/* Look up a specific vendor table by GUID.
+ *
+ * ‼ The pointer it returns is a PHYSICAL address. The configuration table
+ * array is translated on the way in, but vendor_table inside each entry is
+ * whatever the firmware wrote there, which is physical and stays physical
+ * across SetVirtualAddressMap. Callers must vmm_phys_to_virt it before
+ * dereferencing. Returns the entry's
  * vendor_table field (a physical address; caller applies vmm_phys_to_virt)
  * or NULL if not present. */
 void *efi_find_configuration_table(const EfiGuid *target);
