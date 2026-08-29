@@ -31,6 +31,20 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
                           uint16_t data_length,
                           bool data_in);
 
+/*
+ * The one deliberate exercise of the give-up path, which no emulated device
+ * ever reaches on its own. Built only by `make CTRLGIVEUP=on`; off, it is not
+ * a call at all — the same arrangement HardwareDeckUsbRecoverProof has.
+ */
+#define XHCI_CTRL_GIVEUP_PROOF_MS 200
+#if CONFIG_XHCI_CTRL_GIVEUP_PROOF
+void xhci_ctrl_giveup_proof(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
+#else
+static inline void xhci_ctrl_giveup_proof(xhci_controller_t* ctrl,
+                                          xhci_device_slot_t* slot)
+{ (void)ctrl; (void)slot; }
+#endif
+
 void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event);
 
 #endif

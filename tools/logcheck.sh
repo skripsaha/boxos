@@ -1683,6 +1683,97 @@ run_seal() {
     chk $? "and the seal on it still checks out"
 }
 
+# ── the one control transfer nobody can answer ─────────────────────────────
+#
+# xhci_ep_wait gives up when the device has gone, when the pipe has broken, or
+# — last — when the time ran out, and on every one of those it has to take the
+# transfer back OFF the endpoint. Under emulation none of the three happens on
+# the control pipe: the emulated device answers everything immediately. That
+# was measured six ways before this scenario was written (a zero budget, yank,
+# stillthere, usbrecover, a hot-removed hub, an ordinary boot) and the path was
+# reached by none of them.
+#
+# So the kernel runs it deliberately, once, in a build made with CTRLGIVEUP=on:
+# a control transfer posted with the doorbell withheld, which is a faithful
+# "no answer came" rather than a simulated one. The proof is the transfer
+# AFTER it — see xhci_ctrl_giveup_proof.
+run_ctrlgiveup() {
+    echo "== ctrlgiveup: a control transfer is given up on, and taken back =="
+
+    make CTRLGIVEUP=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
+    fi
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    # Four cores, for the reason latearrival and replug give: the deferred work
+    # of this kernel runs from the K-Core guide loop and from cpu_idle, and on
+    # one core neither runs.
+    make run-stop >/dev/null 2>&1
+    make run-bg CTRLGIVEUP=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    # USB=on gives this machine a KEYBOARD, not a disk. The proof runs on the
+    # first mass-storage device the kernel configures, so one is plugged in —
+    # measured: without this the proof never runs and the scenario is vacuous.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 40 ]; do
+        grep -q "xHCI PROOF. the next control transfer" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.ctrlgiveup.log"
+    local L="$SCRATCH/serial.ctrlgiveup.log"
+
+    # It ran at all. The first version of this proof could decline in silence,
+    # which reads exactly like a proof that passed.
+    grep -q "a control transfer is posted and not rung for" "$L"
+    chk $? "the unanswerable transfer was posted"
+    ! grep -q "the give-up proof did NOT run" "$L"
+    chk $? "and the proof did not decline"
+
+    # The wait ended on the clock — the last question it asks, and the only one
+    # that can be reached here — and it NAMED that.
+    grep -q "it has not answered in the time it was given — taking the transfer back" "$L"
+    chk $? "the wait gave up and said which of its questions ended it"
+
+    # THE repair: the transfer comes off the endpoint at the controller, not
+    # just out of the driver's mind.
+    grep -qE "slot [0-9]+ endpoint 1: the transfer on it is no longer wanted — stopping it" "$L"
+    chk $? "and the controller was told to stop it"
+
+    grep -q "the wait ended with -1" "$L"
+    chk $? "the caller was told the transfer failed"
+
+    # ‼ AND THIS IS THE PROOF. The next question down the same pipe must get
+    # ITS OWN answer. Left where it was, the abandoned Setup runs first when
+    # the doorbell next rings, and its event is accepted for the new transfer
+    # because a control transfer sets xfer_trb_phys to zero and that turns the
+    # TRB match off — so the buffer holds a DEVICE descriptor (type 1) where
+    # the caller asked for a CONFIGURATION one (type 2), and cannot tell.
+    grep -q "the next control transfer asked something the device answers and got its own answer" "$L"
+    chk $? "the next control transfer got its own answer, not the abandoned one"
+
+    # And the device carried on being a disk afterwards.
+    grep -qE "\[USB disk [0-9]+\] .* sectors, .* MiB" "$L"
+    chk $? "the disk still enumerated after its control pipe was given up on"
+    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
+    typed_ok "$L";              chk $? "and still answers a keystroke"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -1701,9 +1792,10 @@ case "${1:-both}" in
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
     seal)     run_seal ;;
+    ctrlgiveup) run_ctrlgiveup ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|both|all]"; exit 2 ;;
 esac
 
 echo
