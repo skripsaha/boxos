@@ -221,6 +221,22 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
 typedef void (*BoardroomAsyncCb)(uint8_t index, uint8_t slot,
                                  error_t status, void* ctx);
 
+/*
+ * How big a run of sectors this seat takes in ONE call.
+ *
+ * The room used to impose a single number on every medium — 64 sectors, for
+ * everybody — and that number was wrong in both directions at once. It was far
+ * below what a SATA disk or a flash drive will swallow in one command, and it
+ * was ABOVE the eight sectors past which the legacy channel gives up its DMA
+ * path and moves the bytes with the processor. One guess cannot be right for
+ * three kinds of medium, so the medium is asked instead.
+ *
+ * In the room's 512-byte sectors, never zero. A caller that wants more is not
+ * refused: the room splits, which is why nothing above has to know this number
+ * exists.
+ */
+uint32_t BoardroomSeatRun(uint8_t seat);
+
 error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
                            void* dma_phys, BoardroomAsyncCb cb, void* ctx);
 

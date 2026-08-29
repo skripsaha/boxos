@@ -315,6 +315,23 @@ static void TagFSProbeDrive(void)
 
     kprintf("[TagFS] volume on seat %u: %s\n", g_tagfs_seat,
             BoardroomSeatName(g_tagfs_seat));
+
+    /*
+     * And how much this medium will be asked for at a time, said out loud
+     * because it is a property of the MEDIUM and not of the filesystem.
+     *
+     * A legacy channel answers eight sectors — one block — because past that
+     * it gives up its DMA path; a flash drive and a SATA port answer far more,
+     * and their neighbours are then fetched together. Printing it is what
+     * turns "why is this machine slower off that disk" into a sentence
+     * somebody can read off a screen.
+     */
+    uint32_t run = BoardroomSeatRun(g_tagfs_seat);
+    uint32_t blocks = run / 8u;
+    if (blocks == 0) blocks = 1;
+    if (blocks > TAGFS_READ_AHEAD_BLOCKS) blocks = TAGFS_READ_AHEAD_BLOCKS;
+    kprintf("[TagFS] this medium takes %u sector(s) at a time, so neighbouring "
+            "blocks are read %u at a time\n", run, blocks);
 }
 
 int tagfs_volume_read(uint64_t vlba, uint32_t count, void *buffer)
@@ -832,6 +849,21 @@ static int ReadAheadLookup(uint32_t block, void *buffer) {
     return -1;
 }
 
+/* Is this block already in hand? Asked without copying it: the reader wants to
+ * know whether to go to the medium at all, not what is in the block. */
+static bool ReadAheadHas(uint32_t block) {
+    bool here = false;
+    spin_lock(&g_read_ahead_lock);
+    for (uint32_t i = 0; i < TAGFS_READ_AHEAD_BLOCKS; i++) {
+        if (g_read_ahead_cache[i].valid && g_read_ahead_cache[i].block == block) {
+            here = true;
+            break;
+        }
+    }
+    spin_unlock(&g_read_ahead_lock);
+    return here;
+}
+
 static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
     if (count == 0)
         return;
@@ -867,16 +899,77 @@ static void ReadAheadPrefetch(uint32_t start_block, uint32_t count) {
     g_read_ahead_last_block = start_block + count - 1;
     spin_unlock(&g_read_ahead_lock);
 
-    // Phase 2: do disk I/O without holding the lock
-    for (uint32_t i = 0; i < n_fetch; i++) {
-        uint8_t tmp[TAGFS_BLOCK_SIZE];
-        if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
+    /*
+     * Phase 2: the disk I/O, without holding the lock — and blocks that lie
+     * NEXT TO EACH OTHER on the medium are fetched together.
+     *
+     * ‼ THIS LOOP ALREADY KNEW THEY WERE NEIGHBOURS AND ASKED FOR THEM ONE AT
+     * A TIME ANYWAY. Four consecutive blocks were four commands: on a SATA
+     * disk four round trips where one would do, and on the flash drive this
+     * kernel boots from on a real board, four Bulk-Only commands — twelve USB
+     * transfers, three per command — to move sixteen kilobytes that the device
+     * would have handed over in one.
+     *
+     * How long a run may be is the MEDIUM'S answer, not a number chosen here.
+     * The legacy channel says eight sectors because past that it gives up its
+     * DMA path and moves the bytes with the processor, so on it this coalesces
+     * nothing and that is the right answer for it; a flash drive says its
+     * whole bounce buffer, and a SATA port says more still.
+     */
+    uint32_t run_blocks = BoardroomSeatRun(tagfs_get_seat()) / 8u;
+    if (run_blocks == 0) {
+        run_blocks = 1;
+    }
+    if (run_blocks > TAGFS_READ_AHEAD_BLOCKS) {
+        run_blocks = TAGFS_READ_AHEAD_BLOCKS;
+    }
+
+    uint32_t i = 0;
+    while (i < n_fetch) {
+        /* How many of the blocks still to fetch are consecutive from here.
+         * to_fetch[] is filled in increasing block order, so this is a walk
+         * rather than a search. */
+        uint32_t len = 1;
+        while (i + len < n_fetch &&
+               to_fetch[i + len] == to_fetch[i] + len &&
+               len < run_blocks) {
+            len++;
+        }
+
+        uint8_t *run = NULL;
+        if (len > 1) {
+            run = (uint8_t *)kmalloc(len * TAGFS_BLOCK_SIZE);
+            if (!run) {
+                len = 1;            /* no room to batch: one at a time still works */
+            }
+        }
+
+        if (len == 1) {
+            uint8_t tmp[TAGFS_BLOCK_SIZE];
+            if (disk_read_sectors(block_to_vlba(to_fetch[i]), 8, tmp) == 0) {
+                spin_lock(&g_read_ahead_lock);
+                memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
+                g_read_ahead_cache[slots[i]].block = to_fetch[i];
+                g_read_ahead_cache[slots[i]].valid = true;
+                spin_unlock(&g_read_ahead_lock);
+            }
+            i++;
+            continue;
+        }
+
+        if (disk_read_sectors(block_to_vlba(to_fetch[i]),
+                              (uint16_t)(len * 8u), run) == 0) {
             spin_lock(&g_read_ahead_lock);
-            memcpy(g_read_ahead_cache[slots[i]].data, tmp, TAGFS_BLOCK_SIZE);
-            g_read_ahead_cache[slots[i]].block = to_fetch[i];
-            g_read_ahead_cache[slots[i]].valid = true;
+            for (uint32_t k = 0; k < len; k++) {
+                memcpy(g_read_ahead_cache[slots[i + k]].data,
+                       run + k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE);
+                g_read_ahead_cache[slots[i + k]].block = to_fetch[i + k];
+                g_read_ahead_cache[slots[i + k]].valid = true;
+            }
             spin_unlock(&g_read_ahead_lock);
         }
+        kfree(run);
+        i += len;
     }
 }
 
@@ -2779,11 +2872,22 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
         memcpy(out + bytes_read, block_buf + offset_in_block, chunk);
         bytes_read += chunk;
 
-        // Read-ahead prefetch: if reading sequentially, prefetch next blocks
+        /*
+         * Read-ahead, and it runs when the next block is NOT already in hand.
+         *
+         * ‼ IT USED TO RUN AFTER EVERY BLOCK, and that is why it never read
+         * more than one. Asking for the next four when three of them are
+         * already cached leaves exactly one to fetch, so the window crawled
+         * forward a block at a time and the medium got one command per four
+         * kilobytes for the whole file — measured on a flash drive: 216
+         * commands to mount and start a volume, every one of them eight
+         * sectors. Waiting for the miss lets the window move a whole run, and
+         * a whole run of neighbours is one command (see ReadAheadPrefetch).
+         */
         if (offset_in_block == 0 && chunk == TAGFS_BLOCK_SIZE) {
             uint32_t next_block = disk_block + 1;
             uint32_t blocks_remaining_in_extent = handle->extents[found].block_count - block_index - 1;
-            if (blocks_remaining_in_extent > 0) {
+            if (blocks_remaining_in_extent > 0 && !ReadAheadHas(next_block)) {
                 ReadAheadPrefetch(next_block, blocks_remaining_in_extent < TAGFS_READ_AHEAD_BLOCKS ?
                                     blocks_remaining_in_extent : TAGFS_READ_AHEAD_BLOCKS);
             }

@@ -39,6 +39,17 @@ void xhci_msd_release(xhci_device_slot_t* slot);
  * the order they attached and keep their number until they leave. */
 uint8_t     xhci_msd_unit_count(void);
 bool        xhci_msd_unit_present(uint8_t unit);
+/*
+ * The largest run of sectors this unit moves in one pass over the bus.
+ *
+ * Bulk-Only Transport is a strictly serial conversation and every command goes
+ * through one bounce buffer, so this is that buffer in sectors. Bigger
+ * requests are not refused — msd_rw splits them — but each extra pass is
+ * another command wrapper, another data stage and another status wrapper, and
+ * on a real flash drive those are what the time goes on.
+ */
+uint32_t    xhci_msd_unit_max_run(uint8_t unit);
+
 uint64_t    xhci_msd_unit_sectors(uint8_t unit);
 uint32_t    xhci_msd_unit_physical_bytes(uint8_t unit);
 const char* xhci_msd_unit_name(uint8_t unit);

@@ -653,6 +653,20 @@ static void ata_retry_diag(uint8_t drive_idx, int retry) {
     while (rdtsc() < until) cpu_pause();
 }
 
+uint32_t ata_max_run_sectors(uint8_t drive_idx)
+{
+    if (drive_idx >= ATA_DRIVE_COUNT) {
+        return 8u;
+    }
+    if (ata_async_usable(drive_idx)) {
+        return (uint32_t)ATA_ASYNC_MAX_SECTORS;
+    }
+    /* PIO. The count is eight bits on the twenty-eight-bit command (zero
+     * meaning 256) and sixteen on the extended one; 128 stays inside both and
+     * inside every controller's patience. */
+    return 128u;
+}
+
 int ata_read_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* buffer) {
     for (int retry = 0; retry < CONFIG_ATA_MAX_RETRIES; retry++) {
         int rc = ata_read_sectors(drive_idx, lba, count, buffer);

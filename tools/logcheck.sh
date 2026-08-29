@@ -301,6 +301,18 @@ run_latearrival() {
     grep -q "mass storage" "$L";       chk $? "the stick enumerated after the boot"
     grep -q "arrived after the room was called to order\|seat 1:" "$L"
     chk $? "the room seated it"
+
+    # ‼ AND IT IS ASKED WHAT IT TAKES, and answers as itself rather than as the
+    # slowest medium in the machine. A flash drive swallows its whole bounce
+    # buffer in one command, so its neighbouring blocks are fetched together —
+    # measured on this path: 216 commands to mount and start a volume became
+    # 66, and the wall time from plugging in to a shell halved.
+    # 128 is this drive's bounce buffer in sectors (MSD_BOUNCE_BYTES / 512) —
+    # a number that comes from the DEVICE. Named exactly rather than loosely,
+    # so that going back to one figure imposed on every medium reddens this
+    # whichever figure is chosen.
+    grep -q "this medium takes 128 sector(s) at a time, so neighbouring blocks are read 4 at a time" "$L"
+    chk $? "the flash drive is asked what IT takes, and answers as itself"
     grep -q "seat 1 carries the volume this kernel was read out of" "$L"
     chk $? "and recognised it by the boarding pass, not by a rule"
     grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
@@ -625,6 +637,16 @@ run_healthy() {
     chk $? "the pass carries its seal as well as its three facts"
     grep -q "sealed, and the seal agrees" "$L"
     chk $? "and the block adds up to what the loader sealed it with"
+
+    # (11) THE MEDIUM SAYS HOW MUCH IT TAKES, AND IT IS ASKED.
+    #
+    # The room used to hand every medium the same 64 sectors. That is above the
+    # eight past which this channel gives up its bus-master DMA path and moves
+    # the bytes with the processor — so the one number was not merely a poor
+    # fit, it took the fast path away from the disk this machine boots from.
+    # Asked instead, the channel says eight and keeps it.
+    grep -q "this medium takes 8 sector(s) at a time, so neighbouring blocks are read 1 at a time" "$L"
+    chk $? "the legacy channel keeps the width its DMA path works at"
 }
 
 # ── a volume whose metadata will not read ────────────────────────────────

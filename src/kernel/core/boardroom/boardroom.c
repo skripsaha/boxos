@@ -95,10 +95,9 @@ static void seats_lock_init(void)
     }
 }
 
-/* The largest run of sectors handed to a controller at once. Both disk paths
- * take a 16-bit count, and the USB path splits internally anyway; keeping the
- * split here means every seat behaves the same to a caller. */
-#define BOARD_MAX_RUN 64u
+/* What a seat answers when it will not say, and the floor under every answer:
+ * one filesystem block, which is the unit everything above reads in. */
+#define BOARD_RUN_FALLBACK 8u
 
 /* Long enough that a slow stick answering one block is not called broken,
  * short enough that a machine with a dead one still boots. */
@@ -622,6 +621,34 @@ bool BoardroomSeatOccupied(uint8_t seat)
     }
 }
 
+uint32_t BoardroomSeatRun(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return BOARD_RUN_FALLBACK;
+    }
+
+    uint32_t run;
+    switch (s->kind) {
+    case BOARD_AHCI: run = ahci_max_run_sectors(s->index);        break;
+    case BOARD_ATA:  run = ata_max_run_sectors(s->index);         break;
+    case BOARD_USB:  run = xhci_msd_unit_max_run(s->index);       break;
+    default:         run = BOARD_RUN_FALLBACK;                    break;
+    }
+
+    /* A driver that answers nothing gets the floor rather than a division by
+     * zero or a loop that never advances. */
+    if (run == 0) {
+        run = BOARD_RUN_FALLBACK;
+    }
+    /* Both disk paths take a 16-bit count, whatever they believe about
+     * themselves. The room is where that truth is kept. */
+    if (run > 65535u) {
+        run = 65535u;
+    }
+    return run;
+}
+
 int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
 {
     BoardSeat* s = seat_taken(seat);
@@ -629,9 +656,10 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
         return -1;
     }
 
+    const uint32_t most = BoardroomSeatRun(seat);
     uint8_t* out = (uint8_t*)buffer;
     while (count > 0) {
-        uint32_t run = (count > BOARD_MAX_RUN) ? BOARD_MAX_RUN : count;
+        uint32_t run = (count > most) ? most : count;
         int rc;
 
         switch (s->kind) {
@@ -660,9 +688,10 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
         return -1;
     }
 
+    const uint32_t most = BoardroomSeatRun(seat);
     const uint8_t* in = (const uint8_t*)buffer;
     while (count > 0) {
-        uint32_t run = (count > BOARD_MAX_RUN) ? BOARD_MAX_RUN : count;
+        uint32_t run = (count > most) ? most : count;
         int rc;
 
         switch (s->kind) {
