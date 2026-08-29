@@ -324,6 +324,28 @@ endif
 
 NOEXEC_MARK = $(BUILDDIR)/.noexec.$(if $(filter off,$(NOEXEC)),off,on)
 
+# Let an interrupt in before the kernel is ready for one — the way the board did.
+#
+# On an i5-9400F booting UEFI, RFLAGS.IF was set by something outside this
+# kernel (a loader, or firmware returning from a runtime call in breach of
+# UEFI 2.10 §8.1). The first HPET tick then arrived inside cpu_calibrate_tsc,
+# thirty-six lines of kernel_main before scheduler_init() allocated any state,
+# and irq_handler wrote through the NULL it got back: #PF at 0x18, dead.
+#
+# `make EARLYIRQ=on` reproduces that machine state exactly — an sti straight
+# after the HPET tick is armed — so the window can be measured here instead of
+# on a monitor. A kernel built this way MUST still boot: the tick is real, it
+# simply has nowhere to be recorded yet, and everything else on that path is
+# safe without a scheduler.
+#
+# ‼ It is a REPRODUCTION, not a bug. Remove the NULL guard in irq_handler and
+# this key kills the machine at 0x18, exactly as the board did.
+ifeq ($(EARLYIRQ),on)
+CFLAGS += -DCONFIG_EARLY_INTERRUPTS_PROOF=1
+endif
+
+EARLYIRQ_MARK = $(BUILDDIR)/.earlyirq.$(if $(filter on,$(EARLYIRQ)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -584,12 +606,16 @@ $(NOEXEC_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.noexec.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) | $(BUILDDIR)
+$(EARLYIRQ_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.earlyirq.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

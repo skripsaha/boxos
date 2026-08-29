@@ -572,6 +572,14 @@ bool efi_runtime_init(void)
         return false;
     }
 
+    /* Before the first firmware call, not after the last one.
+     * SetVirtualAddressMap is a runtime service like any other and §8.1
+     * Table 8.1 forbids it while ANY other one is busy, so it goes through
+     * the same door — which means the door has to exist by now. It used to be
+     * built at the bottom of this function, after SVAM had already run
+     * unguarded. */
+    if (!g_rt_lock_init) { spinlock_init(&g_rt_lock); g_rt_lock_init = true; }
+
     /* Stage 1: map every EFI_MEMORY_RUNTIME descriptor. The same map is
      * used as input to SetVirtualAddressMap below, so the patch to
      * virtual_start happens inside efi_map_rt_descriptor. */
@@ -708,11 +716,19 @@ bool efi_runtime_init(void)
             (unsigned long)EFI_RT_VA_BASE,
             (unsigned long)rt_new_va);
 
+    /* Through the same door as every other runtime call — which this one was
+     * not, and it is the one most likely to need it: the first entry into
+     * firmware after ExitBootServices, made while the firmware is relocating
+     * itself. If it comes back with the interrupt flag set, efi_rt_unlock
+     * takes it back and says so. */
+    uint64_t svam_rflags;
+    efi_rt_lock(&svam_rflags);
     EfiStatus s = rt_phys->set_virtual_address_map(
         (EfiUintn)((EfiUintn)svam_count * desc_size),
         (EfiUintn)desc_size,
         bi->efi_mmap_desc_ver,
         (EfiMemoryDescriptor *)svam_phys);
+    efi_rt_unlock(svam_rflags);
 
     /* The array was only ever an argument. Firmware keeps no pointer to it
      * (EDK2 clears mVirtualMap on the way out of the same call), so the
@@ -851,6 +867,12 @@ bool efi_guid_equal(const EfiGuid *a, const EfiGuid *b)
     return memcmp(a, b, sizeof(EfiGuid)) == 0;
 }
 
+#define EFI_RFLAGS_IF  (1ULL << 9)
+
+/* Said once, the first time firmware breaks §8.1. Repeating it every runtime
+ * call would bury the boot log in a fact that does not change. */
+static bool g_rt_if_violation_said = false;
+
 void efi_rt_lock(uint64_t *saved_rflags)
 {
     uint64_t rflags;
@@ -859,10 +881,45 @@ void efi_rt_lock(uint64_t *saved_rflags)
     *saved_rflags = rflags;
 }
 
+/*
+ * Whatever the firmware did to the interrupt flag, it is this kernel's again
+ * from here.
+ *
+ * UEFI 2.10 §8.1: "The interrupt enable control bit will be returned to its
+ * entry state after the access to the critical hardware resources is
+ * complete." That is a requirement ON THE FIRMWARE, and this function used to
+ * trust it — it re-enabled interrupts when the caller had them on, and did
+ * nothing at all otherwise. So a firmware that returns with IF SET while the
+ * caller had it CLEAR handed this kernel interrupts it never asked for,
+ * silently, and permanently.
+ *
+ * ‼ Not hypothetical, and not cheap. On an i5-9400F booting UEFI the first
+ * timer tick after irqchip_init armed IRQ0 landed inside cpu_calibrate_tsc —
+ * about five hundred lines before kernel_main enables interrupts on purpose,
+ * and thirty-six before scheduler_init() had any state for irq_handler to
+ * count that tick into. The machine died in a #PF at 0x18 with nothing in the
+ * log naming the firmware call that let the interrupt in.
+ *
+ * Now the flag is FORCED back to the entry state, both directions, and the
+ * violation is named the first time it happens.
+ */
 void efi_rt_unlock(uint64_t saved_rflags)
 {
+    uint64_t on_return;
+    __asm__ volatile("pushfq; pop %0; cli" : "=r"(on_return));
+
     spin_unlock(&g_rt_lock);
-    if (saved_rflags & (1ULL << 9)) __asm__ volatile("sti");
+
+    if ((on_return & EFI_RFLAGS_IF) && !(saved_rflags & EFI_RFLAGS_IF) &&
+        !g_rt_if_violation_said) {
+        g_rt_if_violation_said = true;
+        kprintf("[EFI] firmware returned from a runtime call with interrupts "
+                "ENABLED where this kernel had them off — UEFI 2.10 §8.1 says "
+                "it must restore the flag. Cleared here, and after every call "
+                "from now on.\n");
+    }
+
+    if (saved_rflags & EFI_RFLAGS_IF) __asm__ volatile("sti");
 }
 
 void efi_rt_watch_start(uint64_t *t0)
@@ -907,10 +964,15 @@ void efi_reset_system(EfiResetType type, EfiStatus status,
 
     g_rt->reset_system(type, status, (EfiUintn)data_size, data);
 
-    /* If we return, the firmware refused the reset — release the lock
-     * and let the caller fall through to alternate methods. */
+    /* If we return, the firmware refused the reset — take the interrupt flag
+     * back before anything else, release the lock, and let the caller fall
+     * through to alternate methods. Interrupts stay off because that is the
+     * state this function was entered in: it does its own cli above, and a
+     * refused reset must not leave the machine more interruptible than the
+     * caller left it. */
+    __asm__ volatile("cli");
     spin_unlock(&g_rt_lock);
-    debug_printf("[EFI] ResetSystem returned (firmware refused)\n");
+    kprintf("[EFI] ResetSystem returned — the firmware refused the reset\n");
 }
 
 EfiStatus efi_get_time(EfiTime *time, EfiTimeCapabilities *cap)

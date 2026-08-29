@@ -981,6 +981,109 @@ run_noexec() {
     make >"$SCRATCH/build.log" 2>&1
 }
 
+# ── earlyirq: an interrupt that arrives before the kernel opened the door ───
+#
+# The second thing that kept BoxOS off a real machine, and the emulator could
+# not show it either: on an i5-9400F booting UEFI, RFLAGS.IF was set by
+# something OUTSIDE this kernel — stage2.asm clears it ten times over on the
+# BIOS path, TagBootJump clears it nowhere, and UEFI 2.10 §8.1 obliges
+# firmware to restore it after a runtime call, which is the kind of obligation
+# firmware breaks. The first HPET tick then landed inside cpu_calibrate_tsc,
+# thirty-six lines of kernel_main before scheduler_init() had allocated
+# anything, and irq_handler wrote through the NULL it got back: #PF at 0x18.
+#
+# Three things are asked here:
+#   1. On an ordinary boot NOTHING arrives early — the kernel owns the flag
+#      from _start and takes it back after every firmware call.
+#   2. The state the loader handed over is SAID, both paths, so a machine that
+#      inherits an open flag names it instead of behaving strangely.
+#   3. `make EARLYIRQ=on` reproduces the board's window exactly — the flag is
+#      opened for the length of TSC calibration and closed again — and the
+#      machine must survive it, say so, and boot.
+#
+# ‼ The narrow window is deliberate. Measured: leaving interrupts on for the
+# REST of early init deadlocks the kernel later in TouchLogbookResolve,
+# because early init is not written to be re-entered from an interrupt. That
+# is why the real fix is ownership of the flag, not surviving one tick.
+run_earlyirq() {
+    echo "== earlyirq: the kernel opens its own interrupt door =="
+
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.earlyirq.log"
+    L="$SCRATCH/serial.earlyirq.log"
+
+    grep -q "BoxOS Shell" "$L"; chk $? "uefi boot reaches the shell"
+
+    grep -q "\[BOOT\] the loader handed over RFLAGS=" "$L"
+    chk $? "the kernel says what interrupt state the loader handed it"
+
+    ! grep -q "arrived before this kernel was ready to be interrupted" "$L"
+    chk $? "and nothing was delivered before the kernel opened the door"
+
+    ! grep -q "Unhandled kernel #PF at 0x18" "$L"
+    chk $? "no fault at 0x18 — the address a NULL scheduler state faults at"
+
+    # The BIOS half, because the two loaders disagreed and only one was right.
+    make run-stop >/dev/null 2>&1
+    make run-bg >/dev/null 2>&1
+    i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.earlyirq_bios.log"
+    local B="$SCRATCH/serial.earlyirq_bios.log"
+
+    grep -q "\[BOOT\] the loader handed over RFLAGS=" "$B"
+    chk $? "the bios path says it too"
+    ! grep -q "arrived before this kernel was ready to be interrupted" "$B"
+    chk $? "and nothing arrives early there either"
+
+    # ── the board'"'"'s window, reproduced ───────────────────────────────────────
+    echo "-- and again with the flag opened where the board took its tick --"
+    make EARLYIRQ=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (EARLYIRQ=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "EARLYIRQ=on build"; return
+    fi
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on EARLYIRQ=on >/dev/null 2>&1
+    i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell\|System halted" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.earlyirq_on.log"
+    local E="$SCRATCH/serial.earlyirq_on.log"
+
+    grep -q "arrived before this kernel was ready to be interrupted" "$E"
+    chk $? "an interrupt that slips in early is named, with its vector"
+
+    ! grep -q "Unhandled kernel #PF at 0x18" "$E"
+    chk $? "and does not write through a scheduler that does not exist yet"
+
+    ! grep -q "KERNEL PANIC" "$E"
+    chk $? "and does not panic"
+
+    grep -q "BoxOS Shell" "$E"
+    chk $? "and the machine boots through it to a shell"
+
+    make >"$SCRATCH/build.log" 2>&1
+}
+
 run_logsave() {
     echo "== logsave: what the kernel said, written down where it can be read =="
 
@@ -2039,9 +2142,10 @@ case "${1:-both}" in
     ctrlgiveup) run_ctrlgiveup ;;
     isoch)    run_isoch ;;
     noexec)   run_noexec ;;
+    earlyirq) run_earlyirq ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

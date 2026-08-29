@@ -26,6 +26,30 @@ _start:
     dd _kernel_phys_end             ; 4 bytes — true kernel PHYSICAL end (includes BSS)
     times 16 db 0                   ; 16 bytes — reserved
 .past_header:
+    ; ---- Interrupts are OFF from this instruction, whoever we came from ----
+    ;
+    ; The kernel owns its interrupt state from its first instruction, the same
+    ; way it owns EFER.NXE — and for the same reason: it cannot be inherited.
+    ; stage2.asm clears IF ten times over on the BIOS path. TagBootJump clears
+    ; it NOWHERE, because UEFI runs with interrupts enabled and nothing in that
+    ; loader ever turned them off. So on a UEFI boot this kernel used to start
+    ; running with IF set, and the first device the init sequence armed could
+    ; interrupt it — roughly five hundred lines before the kernel was ready to
+    ; be interrupted.
+    ;
+    ; That is not theoretical. On an i5-9400F it killed the boot: irqchip_init
+    ; unmasked IRQ0, hpet_start_legacy_tick started the tick, and the very next
+    ; timer interrupt landed inside cpu_calibrate_tsc — thirty-six lines before
+    ; scheduler_init() had allocated any scheduler state. irq_handler wrote
+    ; through the NULL it got back and the machine halted in a #PF at 0x18.
+    ;
+    ; RFLAGS is captured first and kept in r15 across the BSS wipe, so the boot
+    ; log can SAY which state the loader handed over. A machine that only fixed
+    ; this silently would look identical on both paths and teach nothing.
+    pushfq
+    pop r15
+    cli
+
     ; Debug: 'K' on serial — we're alive at identity address
     mov al, 'K'
     mov dx, 0x3f8
@@ -92,6 +116,11 @@ _start:
     mov al, 'Z'
     mov dx, 0x3f8
     out dx, al
+
+    ; The RFLAGS the loader handed over, parked now that BSS exists — the wipe
+    ; above would have eaten it. kernel_main reads bit 9 out of it.
+    extern g_entry_rflags
+    mov [g_entry_rflags], r15
 
     call kernel_main
 

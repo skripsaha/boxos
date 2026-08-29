@@ -991,9 +991,37 @@ void exception_handler(interrupt_frame_t *frame)
     }
 }
 
+/*
+ * Is this kernel ready to be interrupted at all?
+ *
+ * Set once, from kernel_main, the moment scheduler_init() returns — because
+ * that is what irq_handler needs in order to do its job, and interrupts
+ * arriving before it find a handler with nowhere to record a tick. Anything
+ * delivered while this is false got in through a door the kernel did not
+ * open, and that is worth a sentence: on an i5-9400F booting UEFI the first
+ * HPET tick landed thirty-six lines early, inside TSC calibration, and the
+ * only evidence was a #PF at 0x18 with no hint of how an interrupt got in.
+ * The handler is safe either way now; this names the how.
+ */
+volatile bool g_kernel_ready_for_interrupts = false;
+
 void irq_handler(interrupt_frame_t *frame)
 {
     uint8_t vector = frame->vector;
+
+    if (!g_kernel_ready_for_interrupts)
+    {
+        /* Once. A storm of early interrupts is one fact, not a hundred. */
+        static volatile bool said = false;
+        if (!said)
+        {
+            said = true;
+            kprintf("[IRQ] vector %u arrived before this kernel was ready to "
+                    "be interrupted — something outside it set RFLAGS.IF "
+                    "(a loader, or firmware returning from a runtime call)\n",
+                    vector);
+        }
+    }
 
     // LAPIC spurious vector: do NOT send EOI
     if (vector == LAPIC_SPURIOUS_VECTOR)
@@ -1018,8 +1046,15 @@ void irq_handler(interrupt_frame_t *frame)
      * (b) AMP is inactive — i.e. there is no separate K-Core. */
     if (vector == LAPIC_TIMER_VECTOR)
     {
+        /* A tick can land before there is a scheduler to count it into.
+         * scheduler_get_state() answers NULL until scheduler_init() has
+         * allocated the per-core array, and the timer is armed long before
+         * that — irqchip_init and hpet_start_legacy_tick both run earlier in
+         * kernel_main. An interrupt handler may never assume the init order
+         * of anything it touches; the tick is still real, it simply has
+         * nowhere to be recorded yet. */
         scheduler_state_t *s = scheduler_get_state();
-        s->total_ticks++;
+        if (s) s->total_ticks++;
         /* Only App Cores reschedule on timer. K-Cores must NEVER call
          * schedule() — it would pick idle and hijack the K-Core's stack.
          *
@@ -1112,8 +1147,20 @@ void irq_handler(interrupt_frame_t *frame)
     case 0:
     {
         // Timer IRQ (PIT via PIC or IO-APIC GSI 0)
+        //
+        // ‼ The NULL check is not defensive dressing — it is the whole
+        // difference between a machine that boots and one that does not, and
+        // it took a board to say so. On an i5-9400F booting UEFI the first
+        // HPET tick arrived inside cpu_calibrate_tsc, thirty-six lines of
+        // kernel_main before scheduler_init() allocated any state, and this
+        // line wrote through the NULL it got back: #PF at 0x18, dead. The
+        // BIOS path never showed it because stage2 hands the kernel a machine
+        // with interrupts already off, so nothing could be delivered this
+        // early; _start now clears IF for both paths, which closes the window
+        // rather than making it narrower. Everything below this point is
+        // safe to run without a scheduler, and must stay that way.
         scheduler_state_t *sched = scheduler_get_state();
-        sched->total_ticks++;
+        if (sched) sched->total_ticks++;
         pit_tick();
 
         /* Advance the global scheduler clock from the MONOTONIC wall-clock at a

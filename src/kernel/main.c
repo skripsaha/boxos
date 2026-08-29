@@ -70,6 +70,14 @@
 #include "hardware_deck.h"
 #include "system_deck.h"
 
+/*
+ * RFLAGS as the loader left them, captured by _start before its very first
+ * cli. Bit 9 (IF) is the whole point: it is the difference between a kernel
+ * that is interrupted only when it says so and one that inherits whatever the
+ * firmware was doing. Written once, from assembly, after BSS is zeroed.
+ */
+uint64_t g_entry_rflags = 0;
+
 void kernel_main(void)
 {
     VideoInit();
@@ -78,6 +86,19 @@ void kernel_main(void)
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
             CABIN_INFO_ADDR, CABIN_POCKET_RING_ADDR, CABIN_RESULT_RING_ADDR, CABIN_CODE_START_ADDR);
     kprintf("\n");
+
+    /* What state the loader handed over, said out loud.
+     *
+     * IF set here means the loader left interrupts enabled and the kernel has
+     * been running interruptible since its entry point — which is what the
+     * UEFI path did, because TagBootJump never clears IF while stage2.asm
+     * clears it ten times over. _start now clears it unconditionally; this
+     * line reports which of the two the machine came from, because a fix that
+     * makes both paths silent teaches nothing about either. */
+    kprintf("[BOOT] the loader handed over RFLAGS=0x%lx (interrupts were %s; "
+            "they are off now, and stay off until this kernel says otherwise)\n",
+            (unsigned long)g_entry_rflags,
+            (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
@@ -467,7 +488,30 @@ void kernel_main(void)
     }
 
     debug_printf("[INIT] CPU Calibration...\n");
+#ifdef CONFIG_EARLY_INTERRUPTS_PROOF
+    /* `make EARLYIRQ=on` — the board's window, exactly, and no wider.
+     *
+     * An i5-9400F booting UEFI took its first HPET tick right here, inside
+     * TSC calibration, thirty-six lines before scheduler_init() had allocated
+     * anything for irq_handler to count it into. The machine died writing
+     * through that NULL: #PF at 0x18.
+     *
+     * The flag is opened for this call and closed again after it, which is
+     * the board's failure and not a broader one: leaving interrupts on for
+     * the rest of init is a DIFFERENT state, and a worse one — measured, the
+     * kernel deadlocks later in TouchLogbookResolve, because early init is
+     * not written to be re-entered from an interrupt. That is precisely why
+     * the real fix is that this kernel owns RFLAGS.IF from _start and takes
+     * it back after every firmware call, rather than merely surviving one
+     * tick. See the note in the Makefile. */
+    kprintf("[BOOT] EARLYIRQ: opening the interrupt flag for the length of "
+            "TSC calibration, which is where the board took its first tick\n");
+    asm volatile("sti");
     cpu_calibrate_tsc();
+    asm volatile("cli");
+#else
+    cpu_calibrate_tsc();
+#endif
     clockboard_set_tsc_freq_khz(cpu_get_tsc_freq_khz());
 
     /* IA32_UMWAIT_CONTROL on the BSP — Intel SDM Vol 4 §2.5.1.
@@ -508,6 +552,20 @@ void kernel_main(void)
     {
         panic("[PANIC] Scheduler init failed: %s\n", ErrorString(sched_err));
     }
+
+    /* From here this kernel can be interrupted safely.
+     *
+     * The anchor is scheduler_init and not the sti at the bottom of
+     * kernel_main, because the sti is not the moment interrupts become legal
+     * — scheduling the first process turns them on earlier and legitimately,
+     * every user context runs with RFLAGS.IF set. Measured: with the flag on
+     * the sti, an ordinary boot reported a perfectly normal device interrupt
+     * arriving "early", forty lines after userspace started. The question the
+     * board actually raised is narrower and this is where it is answered:
+     * an interrupt before THIS line finds irq_handler with no scheduler state
+     * to record it into, which is what killed an i5-9400F at #PF 0x18. */
+    { extern volatile bool g_kernel_ready_for_interrupts;
+      g_kernel_ready_for_interrupts = true; }
 
     debug_printf("[INIT] Guide Dispatcher...\n");
     guide_init();
