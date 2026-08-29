@@ -408,6 +408,34 @@ void exception_handler(interrupt_frame_t *frame)
      * is the whole point. */
     bool panic_claimed_here = false;
 
+    /*
+     * ‼ CR2 IS READ HERE, FIRST, AND NOWHERE ELSE.
+     *
+     * CR2 holds the address that caused the LAST page fault on this core, and
+     * nothing preserves it: the next #PF overwrites it. That makes "read it
+     * when you happen to need it" wrong, and it was wrong — the user-mode dump
+     * below read it AFTER nameplate_name_at, which walks the faulting
+     * process's own symbol table through get_user_u32. That helper is built on
+     * a .uaccess_fixup entry: the load really does fault and the handler
+     * really does recover it, so a process whose nameplate is not fully mapped
+     * — a half-loaded image, say, which is the very case worth dumping —
+     * rewrote CR2 with the nameplate's address before the dump printed it. The
+     * line then names an address nobody faulted on, which on a board is a
+     * morning spent hunting a pointer that does not exist.
+     *
+     * Nothing can spoil it before this point: the gates are interrupt gates
+     * (IDT_TYPE_INTERRUPT_GATE, IF clear), so no interrupt nests here, and the
+     * only thing that writes CR2 is a page fault — which, between the CPU
+     * delivering this one and this line, could only come from the stub's own
+     * pushes onto the kernel stack, and that is a #DF, not a recoverable #PF.
+     *
+     * Meaningful only for vector 14; for every other vector it is whatever the
+     * last fault on this core left, which is exactly what the panic block used
+     * to print anyway.
+     */
+    uint64_t fault_addr;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
+
     atomic_fetch_add_u64(&exception_count, 1);
 
 #ifdef CONFIG_BRINGUP_HOLD_ON_FIRST_FAULT
@@ -502,9 +530,6 @@ void exception_handler(interrupt_frame_t *frame)
 
     if (frame->vector == 14)
     {
-        uint64_t fault_addr;
-        __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
-
         /* uaccess fixup — kernel-mode #PF whose RIP lies inside a
          * copy_to/from_user / put_user / get_user inline asm region
          * gets handled here, BEFORE the demand-paging path runs. The
@@ -618,8 +643,6 @@ void exception_handler(interrupt_frame_t *frame)
 
             if (frame->vector == 14)
             {
-                uint64_t fault_addr;
-                __asm__ volatile("mov %%cr2, %0" : "=r"(fault_addr));
                 kprintf("[EXCEPTION] Page Fault at 0x%lx (P=%d W=%d U=%d R=%d)\n",
                         fault_addr,
                         (int)(frame->error_code & 0x1),
@@ -845,8 +868,9 @@ void exception_handler(interrupt_frame_t *frame)
     kprintf("  CS=%04lx  SS=%04lx\n", frame->cs, frame->ss);
     panic_name_addr("  fault at ", frame->rip, false);
 
-    uint64_t panic_cr2, panic_cr3;
-    __asm__ volatile("mov %%cr2, %0" : "=r"(panic_cr2));
+    /* The same value the handler read on the way in — see the note at the top.
+     * CR3 is read here because nothing about a fault disturbs it. */
+    uint64_t panic_cr2 = fault_addr, panic_cr3;
     __asm__ volatile("mov %%cr3, %0" : "=r"(panic_cr3));
     kprintf("  CR2=%016lx  CR3=%016lx\n", panic_cr2, panic_cr3);
 
