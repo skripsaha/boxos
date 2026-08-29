@@ -23,10 +23,31 @@
  * costs a bounded amount of boot rather than all of it. */
 #define XHCI_PORT_SURVEY_MS 1200
 
-/* TRSTRCY — what a device is owed between the end of its port reset and the
- * first thing the host says to it (USB 2.0 §7.1.7.5). Ten milliseconds, spent
- * by the device coming up in the Default state. */
-#define XHCI_PORT_RESET_RECOVERY_MS 10
+/*
+ * What a device is owed between the end of its port reset and the first thing
+ * the host says to it.
+ *
+ * USB 2.0 §7.1.7.5 calls it TRSTRCY and puts it at ten milliseconds — and ten
+ * is a FLOOR, not a budget. Every host stack in service adds to it: Linux's
+ * hub_port_reset ends with `msleep(10 + 40)` and the comment "TRSTRCY = 10 ms;
+ * plus some extra", which is fifty.
+ *
+ * ‼ WHY THE MARGIN IS NOT OPTIONAL, AND WHAT TOO LITTLE OF IT LOOKS LIKE.
+ *
+ * A device addressed before it has finished coming up does not fail loudly. It
+ * NAKs — and a NAK is not an error: it does not touch the endpoint's error
+ * count and the controller simply asks again, for as long as it takes. So the
+ * host sees NOTHING AT ALL, which is the one state no register distinguishes
+ * from health, until an outside deadline gives up on a step that never
+ * answered. That is exactly the shape measured on the owner's board: Enable
+ * Slot answered, Address Device answered, and then the first eight descriptor
+ * bytes were never read.
+ *
+ * The cost is forty milliseconds per device, once, at enumeration — and the
+ * DEVICE spends them, not the machine: this is a deadline carried on the slot
+ * (ENUM_STATE_WAIT_RESET_RECOVERY), not time spun out on a core.
+ */
+#define XHCI_PORT_RESET_RECOVERY_MS 50
 
 uint32_t xhci_get_port_status(xhci_controller_t* ctrl, uint8_t port);
 bool     xhci_port_has_device(xhci_controller_t* ctrl, uint8_t port);
