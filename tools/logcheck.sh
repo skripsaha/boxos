@@ -836,6 +836,134 @@ sys.exit(0 if re.search(sys.argv[2].encode(), img) else 1)
 PY
 }
 
+# ── noexec: bit 63 is nobody's business until somebody takes it up ──────────
+#
+# This is the scenario for the failure that kept BoxOS off two real machines,
+# and it exists because the emulator cannot show it by accident: OVMF leaves
+# IA32_EFER.NXE set, so the UEFI path always found the bit already legal here
+# while both boards found it clear.
+#
+# What went wrong there: the kernel wrote bit 63 into the page table entries
+# for EFI runtime data, then called firmware through those pages — while NXE
+# was still 0 and bit 63 was therefore a RESERVED bit (Intel SDM Vol 3A §4.5).
+# Every access through such an entry faults, so the firmware's first read of
+# its own data was #PF err=0x9 = P|RSVD, inside SetVirtualAddressMap. The BIOS
+# path never showed it because stage2 sets NXE on its way into long mode.
+#
+# Two halves, and the second is the one the emulator could never give:
+#
+#   1. On an ordinary UEFI boot the kernel must take no-execute up, and must
+#      do it BEFORE the two things that used to come first — the EFI runtime
+#      mapping, and per_core_init_bsp, where the write used to live. Order in
+#      the log IS the property; a check that only asked "did it happen" would
+#      have passed on the broken kernel too.
+#   2. `make NOEXEC=off` reproduces the boards' machine state — NXE clear —
+#      and the machine must still BOOT. That is the whole claim of the fix:
+#      not "we set the bit", but "the kernel knows whether the bit is legal
+#      and never writes one that is not".
+run_noexec() {
+    echo "== noexec: bit 63 is taken up before anything writes it =="
+
+    # ── half one: the ordinary UEFI boot, where the panic happened ──────────
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.noexec.log"
+    L="$SCRATCH/serial.noexec.log"
+
+    grep -q "BoxOS Shell" "$L"; chk $? "uefi boot reaches the shell"
+
+    grep -q "\[CPU\] no-execute taken up" "$L"
+    chk $? "the kernel says it took no-execute up"
+
+    # The ordering, by line number, because that is the defect: both of these
+    # were AFTER the mapping that used the bit.
+    local nx_line rt_line pc_line
+    nx_line=$(grep -n "\[CPU\] no-execute taken up" "$L" | head -1 | cut -d: -f1)
+    rt_line=$(grep -n "\[EFI\] SetVirtualAddressMap" "$L" | head -1 | cut -d: -f1)
+    pc_line=$(grep -n "\[PER_CORE\] Initializing BSP" "$L" | head -1 | cut -d: -f1)
+
+    [ -n "$nx_line" ] && [ -n "$rt_line" ] && [ "$nx_line" -lt "$rt_line" ]
+    chk $? "no-execute is taken up before EFI runtime is mapped (${nx_line:-?} < ${rt_line:-?})"
+
+    [ -n "$nx_line" ] && [ -n "$pc_line" ] && [ "$nx_line" -lt "$pc_line" ]
+    chk $? "and before per-core init, where the write used to live (${nx_line:-?} < ${pc_line:-?})"
+
+    # The fault this whole change is about, named by the KIND of fault and not
+    # by the error code one board happened to print.
+    #
+    # ‼ It was written the other way first — `err=0x9`, straight off the photo
+    # — and that check stayed GREEN under a mutation that panicked the machine,
+    # because the emulator reports the same reserved-bit fault as err=0x8
+    # (P=0 where the boards had P=1). An oracle keyed to one machine's error
+    # code is an oracle for that machine.
+    ! grep -q "reserved bit set in a paging entry" "$L"
+    chk $? "no reserved-bit page fault"
+    ! grep -q "KERNEL PANIC" "$L"
+    chk $? "the boot does not panic"
+
+    # The memory held across SetVirtualAddressMap comes back. Held pages that
+    # are never released are a leak the machine cannot report any other way.
+    grep -q "\[PMM\] EFI boot-services memory returned to the machine" "$L"
+    chk $? "boot-services memory is given back after the firmware relocates"
+    ! grep -q "was only .* page(s) free" "$L"
+    chk $? "every boot-services range was this allocator's to hold"
+
+    # The E820 the kernel divides memory by is the one ExitBootServices
+    # accepted, not the one built several allocations earlier.
+    #
+    # ‼ This one cannot go red here and is kept anyway. Measured with the
+    # rebuild disabled: OVMF produces a BYTE-IDENTICAL table either way,
+    # because it answers the EfiACPIMemoryNVS request out of a region that was
+    # already NVS before the snapshot. The hazard is on firmware whose NVS
+    # pool has to grow into conventional memory — there the staged map lands
+    # in pages this allocator would hand out, and only this line would say so.
+    ! grep -q "the loader's E820 is older than its own allocations" "$L"
+    chk $? "the staged EFI map is not memory the allocator calls free"
+
+    # ── half two: the boards' state, reproduced ─────────────────────────────
+    echo "-- and again with NXE clear, the way both boards booted --"
+    make NOEXEC=off >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (NOEXEC=off) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "NOEXEC=off build"; return
+    fi
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on NOEXEC=off >/dev/null 2>&1
+    i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.noexec_off.log"
+    local N="$SCRATCH/serial.noexec_off.log"
+
+    grep -q "no-execute refused by this build" "$N"
+    chk $? "the kernel says bit 63 stays out of every entry"
+
+    grep -q "BoxOS Shell" "$N"
+    chk $? "a machine with NXE clear still boots to a shell"
+
+    ! grep -q "reserved bit set in a paging entry" "$N"
+    chk $? "and takes no reserved-bit fault doing it"
+
+    ! grep -q "KERNEL PANIC" "$N"
+    chk $? "and does not panic"
+
+    # Restore the tree's ordinary kernel so a later scenario does not inherit
+    # a NOEXEC=off build.
+    make >"$SCRATCH/build.log" 2>&1
+}
+
 run_logsave() {
     echo "== logsave: what the kernel said, written down where it can be read =="
 
@@ -1893,9 +2021,10 @@ case "${1:-both}" in
     seal)     run_seal ;;
     ctrlgiveup) run_ctrlgiveup ;;
     isoch)    run_isoch ;;
+    noexec)   run_noexec ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

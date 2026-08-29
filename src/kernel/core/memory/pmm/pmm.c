@@ -148,6 +148,136 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
     return OK;
 }
 
+/* ===========================================================================
+ * Boot services memory, held and released — see the note in pmm.h.
+ *
+ * The EFI memory map TagBoot staged in ACPI NVS is the only place the kernel
+ * can learn WHICH ranges were boot services; the E820 table cannot say,
+ * because E820 has no such type and calling them RESERVED there would lose
+ * the memory permanently on any board where the top of RAM happens to be one.
+ * ======================================================================== */
+
+/* UEFI 2.10 §7.2 Table 7.10 memory types. Spelled here rather than pulled
+ * from the EFI driver's header: this file is the physical allocator and has
+ * no other business with EFI. */
+#define EFI_TYPE_BOOT_SERVICES_CODE  3u
+#define EFI_TYPE_BOOT_SERVICES_DATA  4u
+#define EFI_MEMORY_DESC_TYPE_OFFSET  0u
+#define EFI_MEMORY_DESC_PHYS_OFFSET  8u
+#define EFI_MEMORY_DESC_PAGES_OFFSET 24u
+
+static bool   pmm_bs_held        = false;
+static size_t pmm_bs_pages_held  = 0;
+/* Set when a boot-services range was NOT taken in full — i.e. some of its
+ * pages were already spoken for when Hold ran. Releasing such a range would
+ * hand back memory this allocator never took, and whoever owned those pages
+ * would keep using them while the buddy offered them to somebody else. It
+ * cannot happen with the layouts either loader produces (the kernel image,
+ * the loader's tables and its stack are all EfiLoaderData, never boot
+ * services), which is exactly why it is worth checking rather than assuming:
+ * if it ever does happen, the machine keeps the memory and says so. */
+static bool   pmm_bs_partial     = false;
+
+/* Walk the staged EFI memory map, calling back for every boot-services
+ * range. Returns false when there is no map to walk (BIOS boot, or a UEFI
+ * boot whose loader could not stage one). */
+static bool pmm_for_each_boot_services_range(
+        void (*visit)(uintptr_t start, uintptr_t end))
+{
+    boot_info_t *bi = boot_info_get();
+    if (!boot_info_valid(bi)) return false;
+    if (bi->boot_method != 1) return false;              /* BIOS */
+    if (!bi->efi_mmap_phys || !bi->efi_mmap_size ||
+        bi->efi_mmap_desc_size < 32) return false;
+
+    /* Identity during early boot, Pull Map afterwards — either way this is
+     * the kernel-readable address of the staged map. */
+    uint8_t *map = (uint8_t *)vmm_phys_to_virt((uintptr_t)bi->efi_mmap_phys);
+    if (!map) return false;
+
+    uint32_t desc_size = bi->efi_mmap_desc_size;
+    uint8_t *end = map + bi->efi_mmap_size;
+
+    for (uint8_t *p = map; p + desc_size <= end; p += desc_size) {
+        uint32_t type;
+        uint64_t phys, pages;
+        memcpy(&type,  p + EFI_MEMORY_DESC_TYPE_OFFSET,  4);
+        memcpy(&phys,  p + EFI_MEMORY_DESC_PHYS_OFFSET,  8);
+        memcpy(&pages, p + EFI_MEMORY_DESC_PAGES_OFFSET, 8);
+
+        if (type != EFI_TYPE_BOOT_SERVICES_CODE &&
+            type != EFI_TYPE_BOOT_SERVICES_DATA) continue;
+        if (pages == 0) continue;
+
+        visit((uintptr_t)phys, (uintptr_t)(phys + pages * PMM_PAGE_SIZE));
+    }
+    return true;
+}
+
+/* How many pages of [start,end) this buddy zone actually manages. */
+static size_t pmm_pages_in_zone(uintptr_t start, uintptr_t end)
+{
+    uintptr_t zone_end = pmm_buddy.base + pmm_buddy.total_pages * PMM_PAGE_SIZE;
+    if (start < pmm_buddy.base) start = pmm_buddy.base;
+    if (end   > zone_end)       end   = zone_end;
+    if (start >= end) return 0;
+    start = (start + PMM_PAGE_SIZE - 1) & ~(uintptr_t)(PMM_PAGE_SIZE - 1);
+    end  &= ~(uintptr_t)(PMM_PAGE_SIZE - 1);
+    return (start < end) ? (end - start) / PMM_PAGE_SIZE : 0;
+}
+
+static void pmm_bs_reserve_one(uintptr_t start, uintptr_t end)
+{
+    size_t expected = pmm_pages_in_zone(start, end);
+    size_t before   = pmm_buddy.free_count;
+    buddy_reserve_range(&pmm_buddy, start, end);
+    size_t taken = before - pmm_buddy.free_count;
+
+    if (taken != expected) {
+        pmm_bs_partial = true;
+        kprintf("[PMM] boot-services range 0x%lx..0x%lx was only %zu of %zu "
+                "page(s) free — this memory will not be handed back\n",
+                (unsigned long)start, (unsigned long)end, taken, expected);
+    }
+    pmm_bs_pages_held += taken;
+}
+
+static void pmm_bs_release_one(uintptr_t start, uintptr_t end)
+{
+    buddy_free_range(&pmm_buddy, start, end);
+}
+
+void PmmHoldBootServicesMemory(void)
+{
+    if (pmm_bs_held) return;
+    pmm_bs_pages_held = 0;
+    pmm_bs_partial    = false;
+    if (!pmm_for_each_boot_services_range(pmm_bs_reserve_one)) return;
+
+    pmm_bs_held = true;
+    debug_printf("[PMM] holding %zu page(s) of EFI boot-services memory until "
+                 "SetVirtualAddressMap has returned\n", pmm_bs_pages_held);
+}
+
+void PmmReleaseBootServicesMemory(void)
+{
+    if (!pmm_bs_held) return;
+    pmm_bs_held = false;   /* first, so a re-entry cannot double-free */
+
+    if (pmm_bs_partial) {
+        kprintf("[PMM] keeping %zu page(s) of EFI boot-services memory: at "
+                "least one range was not this allocator's to give back\n",
+                pmm_bs_pages_held);
+        pmm_bs_pages_held = 0;
+        return;
+    }
+
+    (void)pmm_for_each_boot_services_range(pmm_bs_release_one);
+    kprintf("[PMM] EFI boot-services memory returned to the machine "
+            "(%zu page(s))\n", pmm_bs_pages_held);
+    pmm_bs_pages_held = 0;
+}
+
 error_t pmm_init(void) {
     if (pmm_initialized) {
         return ERR_ALREADY_INITIALIZED;
@@ -312,6 +442,11 @@ error_t pmm_init(void) {
     buddy_reserve_range(&pmm_buddy, deferred_base, deferred_base + deferred_size);
 
     pmm_initialized = true;
+
+    /* Before a single page can be handed out: take back the regions the
+     * firmware may still walk into during SetVirtualAddressMap. See the note
+     * on PmmHoldBootServicesMemory in pmm.h. */
+    PmmHoldBootServicesMemory();
 
     /* Phase 2F — allocate the MCE poison-page bitmap. Sized to mem_end
      * (one bit per 4 KiB page). Failure is non-fatal: pmm_set_poisoned

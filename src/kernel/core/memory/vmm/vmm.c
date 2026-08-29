@@ -44,6 +44,26 @@ uint64_t vmm_pte_addr_mask = 0x0000000FFFFFF000ULL;
  * is known. See vmm_set_keyid_widening below. */
 uint64_t vmm_pte_addr_mask_with_keyid = 0x0000000FFFFFF000ULL;
 
+/* Which flag bits this machine may legally put into a paging-structure
+ * entry. Starts WITHOUT bit 63, because bit 63 is a reserved bit until
+ * IA32_EFER.NXE is 1 (Intel SDM Vol 3A §4.5) and an entry carrying a
+ * reserved bit faults on the first access of any kind — read, write or
+ * fetch — with RSVD set in the #PF error code.
+ *
+ * vmm_note_no_execute() opens the bit once the CPU module has taken NXE
+ * up. Until then, and forever on a machine that has no NX, every
+ * VMM_FLAG_NO_EXECUTE a caller asks for is dropped: the mapping loses its
+ * hardening and stays a valid mapping, which is the only one of the two
+ * outcomes a machine can boot through. */
+uint64_t vmm_pte_flags_mask = VMM_PTE_FLAGS_MASK & ~VMM_FLAG_NO_EXECUTE;
+
+void vmm_note_no_execute(bool usable)
+{
+    vmm_pte_flags_mask = usable
+        ? VMM_PTE_FLAGS_MASK
+        : (VMM_PTE_FLAGS_MASK & ~VMM_FLAG_NO_EXECUTE);
+}
+
 /* 5-level paging (LA57) runtime state — see vmm.h for the contract.
  * Defaults to 4-level; vmm_init upgrades to 5-level when the CPU advertises
  * CPUID.07H.0:ECX[16] AND the runtime LA57 transition trampoline succeeds. */

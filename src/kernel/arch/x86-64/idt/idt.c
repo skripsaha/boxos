@@ -586,11 +586,46 @@ void exception_handler(interrupt_frame_t *frame)
              * second address that is a consequence, not a cause. */
             panic_claim_or_halt(&panic_claimed_here);
 
-            bool is_smap_candidate = (frame->error_code & 0x1ULL) &&
+            /* RSVD (bit 3) is asked FIRST, and it silences the SMAP claim.
+             *
+             * A reserved-bit fault and a SMAP fault look alike to the old
+             * test — both have P=1, both can land on a low address — and the
+             * old test only asked those two things, so it called every RSVD
+             * fault a SMAP candidate. That is not a near miss: it names the
+             * wrong subsystem, and it named it on both real machines BoxOS
+             * has booted, where the actual cause was bit 63 in a PTE while
+             * IA32_EFER.NXE was still 0 (Intel SDM Vol 3A §4.5 — bit 63 is
+             * RESERVED until NXE is set; Table 4-15 for the error code).
+             * A fault BoxOS cannot have any more, but a diagnostic that
+             * points away from the truth is worth removing regardless. */
+            bool is_rsvd = (frame->error_code & 0x8ULL) != 0;
+            bool is_smap_candidate = !is_rsvd &&
+                                     (frame->error_code & 0x1ULL) &&
                                      fault_addr < UACCESS_USER_VA_MAX;
-            kprintf("\n[VMM] Unhandled kernel #PF at 0x%lx err=0x%lx%s\n",
+            kprintf("\n[VMM] Unhandled kernel #PF at 0x%lx err=0x%lx%s%s\n",
                     fault_addr, frame->error_code,
+                    is_rsvd ? "  [reserved bit set in a paging entry]" : "",
                     is_smap_candidate ? "  [SMAP candidate]" : "");
+            if (is_rsvd)
+            {
+                /* Read EFER here rather than guess: whether NXE is on is the
+                 * single question that separates "bit 63 was illegal" from
+                 * every other reserved-bit cause, and the operator cannot
+                 * read an MSR off a halted screen. */
+                uint32_t nxe_lo, nxe_hi;
+                __asm__ volatile("rdmsr" : "=a"(nxe_lo), "=d"(nxe_hi)
+                                         : "c"(0xC0000080u));
+                bool nxe = (nxe_lo & (1u << 11)) != 0;
+                kprintf("[VMM]   A paging-structure entry on the way to this "
+                        "address has a reserved bit set.\n"
+                        "[VMM]   IA32_EFER.NXE=%u — %s\n",
+                        (unsigned)nxe,
+                        nxe
+                          ? "bit 63 is legal here, so look at bits above "
+                            "MAXPHYADDR or at PS/PAT in a non-leaf entry"
+                          : "bit 63 (NX) is RESERVED with NXE off, and an "
+                            "entry carrying it faults on ANY access");
+            }
             if (is_smap_candidate)
             {
                 kprintf("[VMM]   Kernel dereferenced user-mapped page via "

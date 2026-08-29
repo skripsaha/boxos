@@ -5,15 +5,20 @@
  *   1. Parse the EFI memory map preserved in boot_info v3/v4 (EfiACPIMemoryNVS
  *      region, kept alive across ExitBootServices).
  *   2. Map every EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE +
- *      physical_start. Cacheability is selected per descriptor type:
- *        - EFI_RUNTIME_SERVICES_CODE  → WB executable (no NX)
- *        - EFI_RUNTIME_SERVICES_DATA  → WB NX
- *        - EFI_MEMORY_MAPPED_IO       → UC (cache disable + write through)
- *        - EFI_MEMORY_MAPPED_IO_PORT  → never mapped; assigned VA for
- *          firmware's bookkeeping per UEFI 2.10 §8.4
- *   3. Call SetVirtualAddressMap (UEFI 2.10 §8.4) once with the patched
- *      descriptors. From this point on, firmware uses the virtual
- *      addresses we supplied.
+ *      physical_start, and identically at its physical address, since
+ *      firmware is still running physical when SVAM is called. Cacheability
+ *      comes from the descriptor's Attribute field — what the firmware said
+ *      the region supports — not from its type; execute permission is given
+ *      only to EFI_RUNTIME_SERVICES_CODE, and only when the firmware has not
+ *      marked it EFI_MEMORY_XP. EFI_MEMORY_MAPPED_IO_PORT_SPACE is never
+ *      paged; it gets a virtual_start for the firmware's bookkeeping and
+ *      nothing else, per UEFI 2.10 §8.4.
+ *   3. Call SetVirtualAddressMap (UEFI 2.10 §8.4) exactly once, handing it
+ *      an array of ONLY the runtime descriptors, at that array's physical
+ *      address. Boot-services regions are mapped for the duration and their
+ *      memory is held out of the allocator across the call, because shipping
+ *      firmware reaches into them while relocating. From this point on,
+ *      firmware uses the virtual addresses we supplied.
  *   4. Rebase the runtime_services pointer from physical → virtual so
  *      subsequent ResetSystem / GetTime / GetVariable calls land at the
  *      new VA where the firmware now expects to be entered.
@@ -35,7 +40,9 @@
 #include "efi.h"
 #include "efi_runtime_internal.h"
 #include "boot_info.h"
+#include "e820.h"
 #include "vmm.h"
+#include "pmm.h"
 #include "klib.h"
 #include "io.h"
 #include "cpu_calibrate.h"
@@ -68,35 +75,65 @@ static inline uint64_t efi_pages_to_bytes(uint64_t pages)
     return pages << EFI_PAGE_SHIFT;
 }
 
-/* Map flags for a runtime descriptor. Returns 0 if the descriptor must
- * be skipped (e.g. IO port space).
+/* Cacheability the firmware ASKED FOR, not the cacheability its type
+ * suggests. UEFI 2.10 §7.2 Table 7.10 gives every descriptor an Attribute
+ * field naming the memory types the region supports, and the OS is meant to
+ * pick from that set rather than infer one. Inferring is what this used to
+ * do, and it is wrong in both directions on real boards: a runtime-data
+ * region a firmware declares UC-only got write-back, and an MMIO aperture
+ * declared write-combining got strong uncacheable and ran at a crawl.
+ *
+ * Preference order matches Linux's efi_memory_desc → page-attribute mapping:
+ * write-back if offered, then write-through, then write-combining, then
+ * uncacheable. Anything that offers none of them is treated as device
+ * memory, which is the safe assumption for something that did not claim to
+ * be RAM.
+ *
+ * WC uses the PAT slot vmm_pat_init programs to write-combining (entry 6 =
+ * PAT_bit | PCD); the plain PCD+PWT pair below is PAT index 3, which is
+ * strong UC under the default IA32_PAT. */
+static uint64_t efi_rt_cache_flags(uint64_t attribute)
+{
+    if (attribute & EFI_MEMORY_WB) return 0;
+    if (attribute & EFI_MEMORY_WT) return VMM_FLAG_WRITE_THROUGH;
+    if (attribute & EFI_MEMORY_WC) return VMM_FLAG_PAT_BIT | VMM_FLAG_CACHE_DISABLE;
+    return VMM_FLAG_CACHE_DISABLE | VMM_FLAG_WRITE_THROUGH;   /* UC */
+}
+
+/* Map flags for a runtime descriptor. Returns 0 only for IO port space,
+ * which is given a virtual_start for the firmware's bookkeeping and no
+ * page-table entry at all.
  *
  * NX policy (defense-in-depth, Intel SDM Vol 3 §4.6):
- *   RT code is executable; everything else carries the NX bit so a
- *   firmware bug that branches into RT data / MMIO regions triple-faults
- *   instead of running attacker-controlled bytes. */
-static uint64_t efi_rt_map_flags(uint32_t type)
+ *   RT code is executable; everything else carries the NX bit so a firmware
+ *   bug that branches into RT data / MMIO regions faults instead of running
+ *   whatever bytes are there. Bit 63 only reaches the entry once the kernel
+ *   has taken no-execute up — vmm_make_pte drops it otherwise, and on this
+ *   path that mattered: mapping firmware data with bit 63 while EFER.NXE
+ *   was still 0 is what killed the UEFI boot on two real machines.
+ *
+ * ‼ The default arm is a MAPPING, not a refusal. It used to return 0 for
+ * every type this switch did not name, and efi_map_rt_descriptor turned
+ * that into "abort SVAM", which turned into "no EFI runtime services at
+ * all" — announced through debug_printf, which compiles to nothing in a
+ * production build. Real firmware does set EFI_MEMORY_RUNTIME on
+ * EfiReservedMemoryType and on EfiPersistentMemory. A descriptor the
+ * firmware declared as runtime is one the firmware intends to reach after
+ * SetVirtualAddressMap, and refusing to map it is refusing the whole
+ * service over a type number. */
+static uint64_t efi_rt_map_flags(const EfiMemoryDescriptor *d)
 {
-    switch (type) {
-        case EFI_RUNTIME_SERVICES_CODE:
-            /* Executable, writable for relocations during SVAM, WB. */
-            return VMM_FLAGS_KERNEL_RW;
-        case EFI_RUNTIME_SERVICES_DATA:
-        case EFI_ACPI_MEMORY_NVS:
-            /* Data — WB, NX. */
-            return VMM_FLAGS_KERNEL_RW | VMM_FLAG_NO_EXECUTE;
-        case EFI_MEMORY_MAPPED_IO:
-            /* MMIO — UC + WT (PCD=1, PWT=1 → UC- effective), NX. */
-            return VMM_FLAGS_KERNEL_RW
-                 | VMM_FLAG_CACHE_DISABLE
-                 | VMM_FLAG_WRITE_THROUGH
-                 | VMM_FLAG_NO_EXECUTE;
-        case EFI_MEMORY_MAPPED_IO_PORT_SPACE:
-            /* IO port space — assigned a VA in the map but not paged. */
-            return 0;
-        default:
-            return 0;
-    }
+    if (d->type == EFI_MEMORY_MAPPED_IO_PORT_SPACE) return 0;
+
+    uint64_t flags = VMM_FLAGS_KERNEL_RW | efi_rt_cache_flags(d->attribute);
+
+    /* Executable only where firmware keeps code. EFI_MEMORY_XP is the
+     * firmware saying "no execution here" explicitly; honour it even for a
+     * code-typed region, since it can only ever remove a permission. */
+    if (d->type != EFI_RUNTIME_SERVICES_CODE || (d->attribute & EFI_MEMORY_XP))
+        flags |= VMM_FLAG_NO_EXECUTE;
+
+    return flags;
 }
 
 /* Validate the CRC32 field in a table header (UEFI 2.10 §4.2).
@@ -155,12 +192,7 @@ static bool efi_map_rt_descriptor(EfiMemoryDescriptor *d, vmm_context_t *kctx)
 {
     if (!(d->attribute & EFI_MEMORY_RUNTIME)) return true;
 
-    uint64_t flags = efi_rt_map_flags(d->type);
-    if (flags == 0 && d->type != EFI_MEMORY_MAPPED_IO_PORT_SPACE) {
-        debug_printf("[EFI] RT desc type=%u unmappable, skipping (phys=0x%lx)\n",
-                     d->type, (unsigned long)d->physical_start);
-        return false;
-    }
+    uint64_t flags = efi_rt_map_flags(d);
 
     uintptr_t phys = (uintptr_t)d->physical_start;
     uintptr_t virt = EFI_RT_VA_BASE + phys;
@@ -178,10 +210,15 @@ static bool efi_map_rt_descriptor(EfiMemoryDescriptor *d, vmm_context_t *kctx)
      * code which still references physical addresses until SVAM. */
     vmm_map_result_t ri = vmm_map_pages(kctx, phys, phys, pages, flags);
     if (!ri.success) {
-        debug_printf("[EFI] identity vmm_map_pages failed for RT desc type=%u "
-                     "phys=0x%lx pages=%lu: %s\n",
-                     d->type, (unsigned long)phys, (unsigned long)pages,
-                     ri.error_msg ? ri.error_msg : "(no msg)");
+        /* kprintf, not debug_printf: failing here costs the machine its
+         * entire EFI runtime surface — ResetSystem, GetTime, variables,
+         * Secure Boot state — and debug_printf compiles to nothing in a
+         * production build, so this used to be lost in exactly the builds
+         * that ship. */
+        kprintf("[EFI] identity mapping failed for RT desc type=%u "
+                "phys=0x%lx pages=%lu: %s\n",
+                d->type, (unsigned long)phys, (unsigned long)pages,
+                ri.error_msg ? ri.error_msg : "(no msg)");
         return false;
     }
 
@@ -189,17 +226,77 @@ static bool efi_map_rt_descriptor(EfiMemoryDescriptor *d, vmm_context_t *kctx)
      * after SVAM. */
     vmm_map_result_t rv = vmm_map_pages(kctx, virt, phys, pages, flags);
     if (!rv.success) {
-        debug_printf("[EFI] virtual vmm_map_pages failed for RT desc type=%u "
-                     "phys=0x%lx virt=0x%lx pages=%lu: %s\n",
-                     d->type, (unsigned long)phys, (unsigned long)virt,
-                     (unsigned long)pages,
-                     rv.error_msg ? rv.error_msg : "(no msg)");
+        kprintf("[EFI] runtime-VA mapping failed for RT desc type=%u "
+                "phys=0x%lx virt=0x%lx pages=%lu: %s\n",
+                d->type, (unsigned long)phys, (unsigned long)virt,
+                (unsigned long)pages,
+                rv.error_msg ? rv.error_msg : "(no msg)");
         return false;
     }
 
     g_rt_runtime_descriptors++;
     g_rt_runtime_pages_total += pages;
     return true;
+}
+
+/*
+ * Boot-services regions, mapped where firmware still thinks they are.
+ *
+ * UEFI 2.10 §7.4 hands EfiBootServicesCode / EfiBootServicesData to the OS
+ * the moment ExitBootServices returns, and both loaders report them to the
+ * kernel as usable RAM on that authority. But SetVirtualAddressMap runs
+ * later, and it is the one call made while firmware is still moving itself —
+ * a long line of shipping firmwares touch their boot-services memory while
+ * doing it. Linux maps those regions for exactly this reason
+ * (should_map_region in arch/x86/platform/efi/efi.c, "a workaround for buggy
+ * firmware that accesses them even when they shouldn't") and unmaps them
+ * again immediately after the call.
+ *
+ * The pages themselves are already held out of the allocator by
+ * PmmHoldBootServicesMemory, so this alias cannot collide with anything the
+ * kernel owns. Failure to map one is not fatal: it costs the workaround, not
+ * the boot, and the descriptor is named so a board that needs it can be
+ * recognised from its log.
+ *
+ * `unmap` runs the same walk in reverse, so the two are one function with a
+ * direction rather than two that could drift apart.
+ */
+static void efi_boot_services_alias(uint8_t *map, uint32_t map_size,
+                                    uint32_t desc_size, vmm_context_t *kctx,
+                                    bool install)
+{
+    uint32_t regions = 0;
+    for (uint8_t *p = map; p + desc_size <= map + map_size; p += desc_size) {
+        EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)p;
+        if (d->type != EFI_BOOT_SERVICES_CODE &&
+            d->type != EFI_BOOT_SERVICES_DATA) continue;
+        if (d->number_of_pages == 0) continue;
+
+        uintptr_t phys  = (uintptr_t)d->physical_start;
+        size_t    pages = (size_t)d->number_of_pages;
+
+        if (install) {
+            /* Writable and never executable: the firmware may read and write
+             * its own scratch here, but nothing gives it a reason to branch
+             * into memory the OS already owns. */
+            vmm_map_result_t r = vmm_map_pages(kctx, phys, phys, pages,
+                                               VMM_FLAGS_KERNEL_RW |
+                                               VMM_FLAG_NO_EXECUTE);
+            if (!r.success) {
+                kprintf("[EFI] could not alias boot-services region "
+                        "0x%lx (%lu page(s)): %s\n",
+                        (unsigned long)phys, (unsigned long)pages,
+                        r.error_msg ? r.error_msg : "(no msg)");
+                continue;
+            }
+        } else {
+            vmm_unmap_pages(kctx, phys, pages);
+        }
+        regions++;
+    }
+
+    debug_printf("[EFI] %s %u boot-services region(s) for the SVAM call\n",
+                 install ? "aliased" : "released", regions);
 }
 
 /* Locate the descriptor that covers a given physical address. The map
@@ -264,6 +361,48 @@ bool efi_runtime_init(void)
         return false;
     }
 
+    /*
+     * Is the map the kernel is about to walk memory the allocator believes is
+     * free? It used to be, on every UEFI boot, and nothing said so.
+     *
+     * TagBoot asks the firmware for this buffer AFTER it has already written
+     * the E820 table, and the firmware answers out of ordinary conventional
+     * memory. In the E820 the kernel received, those pages were still
+     * CONVENTIONAL — so the buddy allocator owned them, could hand them out,
+     * and whatever landed there would be read here as memory descriptors. The
+     * loader now rebuilds E820 from the map ExitBootServices accepted, which
+     * describes the buffer as ACPI NVS and puts it out of reach.
+     *
+     * ‼ MEASURED, and the measurement is worth writing down: on OVMF this
+     * check cannot go red. With the rebuild disabled, the E820 the kernel
+     * receives is BYTE-IDENTICAL to the rebuilt one — OVMF satisfies the
+     * EfiACPIMemoryNVS request out of a region that was already ACPI NVS in
+     * the earlier snapshot, and the page-table allocation reads as USABLE
+     * either way. So the emulator cannot exercise this hazard, exactly as it
+     * could not exercise the NX one. The check stays because a firmware whose
+     * NVS pool has to grow into conventional memory WILL put the staged map
+     * in pages the allocator calls free, and this line is the only thing that
+     * would turn that into a sentence instead of a mystery.
+     */
+    {
+        e820_entry_t *e = memory_map_get_entries();
+        size_t        n = memory_map_get_entry_count();
+        uint64_t      a = bi->efi_mmap_phys;
+        bool          loose = false;
+        for (size_t i = 0; i < n && e; i++) {
+            if (e[i].type != E820_USABLE || e[i].length == 0) continue;
+            if (a >= e[i].base && a < e[i].base + e[i].length) { loose = true; break; }
+        }
+        if (loose) {
+            kprintf("[EFI] the staged memory map at 0x%lx sits in memory the "
+                    "allocator calls free — the loader's E820 is older than "
+                    "its own allocations\n", (unsigned long)a);
+        } else {
+            debug_printf("[EFI] staged memory map at 0x%lx is out of the "
+                         "allocator's reach\n", (unsigned long)a);
+        }
+    }
+
     debug_printf("[EFI] runtime init: mmap=0x%lx size=%u desc_size=%u "
                  "desc_ver=%u rt_services=0x%lx fw_rev=0x%x\n",
                  (unsigned long)bi->efi_mmap_phys,
@@ -293,7 +432,8 @@ bool efi_runtime_init(void)
         EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)p;
         if (d->attribute & EFI_MEMORY_RUNTIME) {
             if (!efi_map_rt_descriptor(d, kctx)) {
-                debug_printf("[EFI] failed to map RT desc — aborting SVAM\n");
+                kprintf("[EFI] a runtime region could not be mapped — "
+                        "no EFI runtime services on this boot\n");
                 return false;
             }
         }
@@ -337,23 +477,91 @@ bool efi_runtime_init(void)
     EfiRuntimeServices *rt_phys = (EfiRuntimeServices *)vmm_phys_to_virt(
         (uintptr_t)bi->efi_rt_services_phys);
     if (!rt_phys || !rt_phys->set_virtual_address_map) {
-        debug_printf("[EFI] RT services table at 0x%lx has no SVAM thunk\n",
-                     (unsigned long)bi->efi_rt_services_phys);
+        kprintf("[EFI] RT services table at 0x%lx has no SVAM entry\n",
+                (unsigned long)bi->efi_rt_services_phys);
         return false;
     }
 
-    debug_printf("[EFI] calling SetVirtualAddressMap: %u runtime desc, "
-                 "%lu pages mapped at base 0x%lx; rt_services VA=0x%lx\n",
-                 g_rt_runtime_descriptors,
-                 (unsigned long)g_rt_runtime_pages_total,
-                 (unsigned long)EFI_RT_VA_BASE,
-                 (unsigned long)rt_new_va);
+    /* Stage 3a: build the array the firmware is actually given — the runtime
+     * descriptors, and nothing else, at an address that is its own physical
+     * address.
+     *
+     * Two changes from handing over the whole map by its Pull Map pointer,
+     * and both are about not relying on a courtesy:
+     *
+     *   - ONLY RUNTIME. UEFI 2.10 §8.4 describes VirtualMap as the new
+     *     addresses "for all runtime ranges"; EDK2's RuntimeDriverSetVirtual-
+     *     AddressMap tolerates the rest by skipping every descriptor without
+     *     EFI_MEMORY_RUNTIME, and Linux never sends them at all. Sending
+     *     hundreds of descriptors a firmware is only specified to ignore is
+     *     leaning on one implementation's forgiveness.
+     *
+     *   - BY PHYSICAL ADDRESS. The firmware has not switched to virtual
+     *     addressing yet — that is what this call does — so a pointer it
+     *     receives is one it is entitled to read as physical. We were passing
+     *     0xFFFF8800_xxxxxxxx, a Pull Map address, which works only because
+     *     our CR3 happens to map it; the register dump from the laptop that
+     *     panicked here shows those very pointers inside firmware code. Linux
+     *     passes __pa(new_memmap) and identity-maps it first. So do we. */
+    size_t   rt_bytes  = (size_t)g_rt_runtime_descriptors * desc_size;
+    size_t   rt_pages  = (rt_bytes + 0xFFFu) / 0x1000u;
+    uintptr_t svam_phys = (uintptr_t)pmm_alloc(rt_pages);
+    if (!svam_phys) {
+        kprintf("[EFI] cannot allocate %lu page(s) for the SVAM map\n",
+                (unsigned long)rt_pages);
+        return false;
+    }
+    {
+        vmm_map_result_t rs = vmm_map_pages(kctx, svam_phys, svam_phys,
+                                            rt_pages, VMM_FLAGS_KERNEL_RW);
+        if (!rs.success) {
+            kprintf("[EFI] cannot identity-map the SVAM map at 0x%lx: %s\n",
+                    (unsigned long)svam_phys,
+                    rs.error_msg ? rs.error_msg : "(no msg)");
+            pmm_free((void *)svam_phys, rt_pages);
+            return false;
+        }
+    }
+
+    uint8_t *svam_map = (uint8_t *)vmm_phys_to_virt(svam_phys);
+    uint32_t svam_count = 0;
+    for (uint8_t *q = map; q + desc_size <= end; q += desc_size) {
+        EfiMemoryDescriptor *d = (EfiMemoryDescriptor *)q;
+        if (!(d->attribute & EFI_MEMORY_RUNTIME)) continue;
+        if (svam_count >= g_rt_runtime_descriptors) break;
+        memcpy(svam_map + (size_t)svam_count * desc_size, d, desc_size);
+        svam_count++;
+    }
+
+    /* Memory the firmware may still walk into while it relocates itself is
+     * held out of the allocator (PmmHoldBootServicesMemory, at pmm_init) and
+     * mapped where the firmware last saw it, for the duration of this call
+     * and no longer. */
+    efi_boot_services_alias(map, bi->efi_mmap_size, desc_size, kctx, true);
+
+    kprintf("[EFI] SetVirtualAddressMap: %u runtime region(s), %lu page(s) "
+            "at base 0x%lx; rt_services VA=0x%lx\n",
+            svam_count,
+            (unsigned long)g_rt_runtime_pages_total,
+            (unsigned long)EFI_RT_VA_BASE,
+            (unsigned long)rt_new_va);
 
     EfiStatus s = rt_phys->set_virtual_address_map(
-        (EfiUintn)bi->efi_mmap_size,
-        (EfiUintn)bi->efi_mmap_desc_size,
+        (EfiUintn)((EfiUintn)svam_count * desc_size),
+        (EfiUintn)desc_size,
         bi->efi_mmap_desc_ver,
-        (EfiMemoryDescriptor *)map);
+        (EfiMemoryDescriptor *)svam_phys);
+
+    /* The array was only ever an argument. Firmware keeps no pointer to it
+     * (EDK2 clears mVirtualMap on the way out of the same call), so the
+     * pages and their identity mapping go back now. */
+    vmm_unmap_pages(kctx, svam_phys, rt_pages);
+    pmm_free((void *)svam_phys, rt_pages);
+
+    /* Whatever the firmware answered, it is done relocating: the alias comes
+     * down and the memory goes back to the machine. */
+    efi_boot_services_alias(map, bi->efi_mmap_size, desc_size, kctx, false);
+    PmmReleaseBootServicesMemory();
 
     if (EFI_IS_ERROR(s)) {
         debug_printf("[EFI] SetVirtualAddressMap failed: 0x%lx\n",

@@ -13,9 +13,19 @@
  *   7. Allocate 32 KB for page tables after kernel_end + guard page
  *   8. Build identity + higher-half page tables (2 MB pages)
  *   9. Fill boot_info_t (v2) at BOOT_INFO_ADDR
- *  10. ExitBootServices
- *  11. Enable PAE, load CR3, enable EFER.LME+NXE, enable paging
- *  12. Jump to 0x100000
+ *  10. ExitBootServices, then rebuild the E820 map from the map whose key
+ *      the firmware accepted — the only one that describes this loader's
+ *      own late allocations
+ *  11. Install CR3, switch to the boot stack, jump to 0x100000
+ *
+ * What this loader does NOT do, and what said it did for a long time:
+ * touch EFER. UEFI hands us a machine already in long mode (LME=1, PG=1,
+ * PAE=1) and the kernel establishes every further EFER bit it needs — NXE
+ * in CpuTakeUpNoExecute, SCE in per_core_setup_notify_msrs. Three comments
+ * in this file used to claim EFER.LME+NXE was set here while
+ * tagboot_jump.asm said the opposite and did nothing; the kernel's own NXE
+ * write then landed after it had already mapped firmware pages with bit 63,
+ * and two real boards panicked inside SetVirtualAddressMap with err=0x9.
  */
 
 #include "uefi.h"
@@ -66,6 +76,11 @@ _Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
 #define E820_COUNT_ADDR       0x500ULL
 #define E820_SIZE_ADDR        0x502ULL
 #define E820_MAP_ADDR         0x504ULL
+/* Must stay equal to E820_MAX_ENTRIES in src/kernel/core/memory/e820/e820.h
+ * and in stage2.asm — all three describe the same bytes at the same address,
+ * and the ceiling is stage1's scratch at 0x1200 (asserted in stage2.asm).
+ * EmitE820 merges adjacent runs of the same type, which is what keeps a
+ * two-hundred-descriptor UEFI map an order of magnitude below this. */
 #define E820_MAX_ENTRIES      128U
 
 /* Page-table layout (offsets relative to g_pt_base):
@@ -1301,6 +1316,122 @@ typedef struct {
     uint32_t  e820_count;
 } MemMapResult;
 
+/* Set by EmitE820 when a map did not fit the table at 0x500. Read while
+ * the console still works — the second EmitE820 runs after
+ * ExitBootServices, where nothing can be printed. */
+static int g_e820_truncated = 0;
+
+/*
+ * EmitE820 — write one UEFI memory map out as the E820 table at 0x500.
+ *
+ * Called twice, and the second call is the point of the whole thing.
+ *
+ * ‼ The first call happens while boot services are still up, and the map it
+ * describes is ALREADY STALE by the time the kernel reads it: between that
+ * call and ExitBootServices this loader asks the firmware's allocator for
+ * the ESRT copy and for the buffer the final memory map is staged in, and
+ * both go through AllocateAnyPages — which lets the firmware pick, and EDK2
+ * picks top-down out of high conventional memory. In the E820 the kernel
+ * received, those pages were still CONVENTIONAL, therefore USABLE, therefore
+ * handed to the buddy allocator (pmm.c) and available to be given away and
+ * written over. The kernel then walks that same EFI map at runtime to call
+ * SetVirtualAddressMap. Nothing would say a word: a count is still a count.
+ *
+ * So it is called again from PostEbsPatchBootInfo, on the map whose key
+ * ExitBootServices ACCEPTED. That map is the only description of memory that
+ * includes this loader's own last allocations, and it is by definition
+ * current — the firmware would have refused the key otherwise.
+ *
+ * Adjacent runs of the same E820 type are merged. A UEFI map is far more
+ * granular than E820 needs (Linux merges for the same reason —
+ * efi_merge_regions), and merging is what keeps a 200-descriptor server map
+ * from meeting the ceiling at all. Nothing is lost: the kernel's EFI runtime
+ * driver reads the FULL descriptor list from boot_info->efi_mmap_phys, not
+ * from here, so per-descriptor attributes still reach the code that needs
+ * them.
+ *
+ * Returns the number of entries written.
+ */
+static uint32_t EmitE820(const uint8_t *map, uint64_t map_size, uint64_t desc_size)
+{
+    /* Volatile byte pointer with manual offsets: casting a raw physical
+     * address to a typed array fires -Warray-bounds on known-good memory. */
+    volatile uint8_t *e820_raw = (volatile uint8_t *)(uintptr_t)E820_MAP_ADDR;
+    uint32_t count = 0;
+
+    /* The run currently open, held back one entry so the next descriptor can
+     * still extend it. count is the number already WRITTEN. */
+    int      have_run   = 0;
+    uint64_t run_base   = 0;
+    uint64_t run_length = 0;
+    uint32_t run_type   = 0;
+
+    const uint8_t *p   = map;
+    const uint8_t *end = map + map_size;
+    int truncated = 0;
+
+    while (p + desc_size <= end) {
+        const EFI_MEMORY_DESCRIPTOR *desc = (const EFI_MEMORY_DESCRIPTOR *)p;
+        p += desc_size;
+
+        uint64_t base   = desc->physical_start;
+        uint64_t length = desc->number_of_pages * PAGE_4KB;
+        uint32_t type   = UefiTypeToE820(desc->type);
+
+        if (length == 0) continue;   /* a zero-page descriptor describes nothing */
+
+        if (have_run && run_type == type && run_base + run_length == base) {
+            run_length += length;
+            continue;
+        }
+
+        if (have_run) {
+            if (count >= E820_MAX_ENTRIES) { truncated = 1; break; }
+            volatile uint8_t *slot = e820_raw + count * sizeof(E820Entry);
+            /* ACPI 3.0 extended attributes (E820 entry +20):
+             *   bit 0 = "valid" (1 = use this entry, 0 = ignore)
+             *   bit 1 = "non-volatile"
+             * Every UEFI descriptor we copy is valid by definition — the
+             * firmware just told us about it — so bit 0 is set. Kernels that
+             * ignore ACPI 3.0 ignore the field; kernels that use it to filter
+             * stale BIOS-style entries need to see it. */
+            uint32_t acpi = 1;
+            MemCopy((void *)slot,       &run_base,   8);
+            MemCopy((void *)(slot + 8), &run_length, 8);
+            MemCopy((void *)(slot + 16), &run_type,  4);
+            MemCopy((void *)(slot + 20), &acpi,      4);
+            count++;
+        }
+
+        have_run   = 1;
+        run_base   = base;
+        run_length = length;
+        run_type   = type;
+    }
+
+    if (have_run && !truncated && count < E820_MAX_ENTRIES) {
+        volatile uint8_t *slot = e820_raw + count * sizeof(E820Entry);
+        uint32_t acpi = 1;
+        MemCopy((void *)slot,       &run_base,   8);
+        MemCopy((void *)(slot + 8), &run_length, 8);
+        MemCopy((void *)(slot + 16), &run_type,  4);
+        MemCopy((void *)(slot + 20), &acpi,      4);
+        count++;
+    } else if (have_run) {
+        truncated = 1;
+    }
+
+    PhysWrite16(E820_COUNT_ADDR, (uint16_t)count);
+    PhysWrite16(E820_SIZE_ADDR,  (uint16_t)(count * sizeof(E820Entry)));
+
+    /* A truncated memory map is not a smaller memory map — it is a map that
+     * stops describing memory partway through, and whatever it stopped before
+     * is unclaimed as far as the kernel is concerned. If it ever happens it
+     * has to be said, and it can only be said before ExitBootServices. */
+    g_e820_truncated = truncated;
+    return count;
+}
+
 /* =========================================================================
  * EFI runtime handoff state
  *
@@ -1401,8 +1532,15 @@ static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
     if (esrt_size > 65536U) return 0;   /* 64 KB cap — same reason as above */
 
     UINTN pages = (esrt_size + PAGE_4KB - 1) / PAGE_4KB;
-    EFI_PHYSICAL_ADDRESS buf = 0;
-    EFI_STATUS s = g_bs->allocate_pages(AllocateAnyPages,
+    /* Below 4 GB, deliberately. AllocateAnyPages lets the firmware answer
+     * from anywhere it likes, and EDK2 answers top-down — on a machine with
+     * memory above 4 GB that is where these pages land. The kernel reads
+     * this copy before it has built page tables of its own, through the
+     * loader's identity map, and that map covers the low 4 GB. Asking for a
+     * ceiling costs nothing and removes the one address range where the
+     * answer would be unreachable. */
+    EFI_PHYSICAL_ADDRESS buf = 0xFFFFF000ULL;
+    EFI_STATUS s = g_bs->allocate_pages(AllocateMaxAddress,
                                          EfiACPIMemoryNVS,
                                          pages,
                                          &buf);
@@ -1511,49 +1649,20 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
         return status;
     }
 
-    /* Convert to E820 entries at fixed address 0x504.
-     * Use a volatile byte pointer and manual offset to avoid GCC array-bounds
-     * false positives when casting raw physical addresses to typed arrays. */
-    volatile uint8_t *e820_raw = (volatile uint8_t *)(uintptr_t)E820_MAP_ADDR;
-    uint32_t  count = 0;
+    uint32_t count = EmitE820(map_buf, map_size, desc_size);
 
-    uint8_t *p   = map_buf;
-    uint8_t *end = map_buf + map_size;
-
-    while (p < end && count < E820_MAX_ENTRIES) {
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)p;
-        volatile uint8_t *slot = e820_raw + count * sizeof(E820Entry);
-
-        uint64_t base   = desc->physical_start;
-        uint64_t length = desc->number_of_pages * PAGE_4KB;
-        uint32_t type   = UefiTypeToE820(desc->type);
-        /* ACPI 3.0 extended attributes (E820 entry +20):
-         *   bit 0 = "valid" (1 = use this entry, 0 = ignore)
-         *   bit 1 = "non-volatile"
-         * Every UEFI memory descriptor we copy is by definition valid (the
-         * firmware just told us about it), so set bit 0. Kernels that don't
-         * understand ACPI 3.0 ignore the field — but kernels that DO use it
-         * to filter stale BIOS-style entries need to see acpi=1 here. */
-        uint32_t acpi   = 1;
-
-        MemCopy((void *)slot,      &base,   8);
-        MemCopy((void *)(slot+8),  &length, 8);
-        MemCopy((void *)(slot+16), &type,   4);
-        MemCopy((void *)(slot+20), &acpi,   4);
-        count++;
-
-        p += desc_size;
-    }
-
-    /* Write count and byte size at 0x500/0x502. */
-    PhysWrite16(E820_COUNT_ADDR, (uint16_t)count);
-    PhysWrite16(E820_SIZE_ADDR,  (uint16_t)(count * sizeof(E820Entry)));
+    /* The pool is ours and its only purpose was this conversion. Freeing it
+     * here rather than leaking it to ExitBootServices removes one descriptor
+     * from every map the firmware builds after this point — and one more
+     * reason for the map key to move under the EBS retry loop. */
+    g_bs->free_pool(map_buf);
+    map_buf = NULL;
 
     out->map_size     = map_size;
     out->map_key      = map_key;
     out->desc_size    = desc_size;
     out->desc_version = desc_version;
-    out->map_buf      = map_buf;
+    out->map_buf      = NULL;
     out->e820_count   = count;
 
     Print("TagBoot: memory map ");
@@ -1623,7 +1732,11 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
          * must outlive ExitBootServices because the kernel-side EFI RT
          * driver walks the staged map at runtime. EfiLoaderData would
          * survive EBS too, but PMM treats it as USABLE and frees it. */
-        EFI_STATUS s = g_bs->allocate_pages(AllocateAnyPages,
+        /* Below 4 GB — same reason as the ESRT copy above: the kernel walks
+         * this map through the loader's identity window, which ends at 4 GB,
+         * and PmmHoldBootServicesMemory reads it before vmm_init has run. */
+        buf_pa = 0xFFFFF000ULL;
+        EFI_STATUS s = g_bs->allocate_pages(AllocateMaxAddress,
                                             EfiACPIMemoryNVS,
                                             pages,
                                             &buf_pa);
@@ -1700,33 +1813,29 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
 static uint64_t g_pt_base   = 0;
 static uint64_t g_stack_base = 0;
 
-/* How many 2 MB identity pages to map.  Derived from E820 usable top. */
+/*
+ * How many 2 MB identity pages to map: all of them, the whole low 4 GB.
+ *
+ * This used to be derived from the top of USABLE memory, which is the wrong
+ * question by one word. What has to be reachable through these tables is not
+ * where RAM ends — it is where anything the early kernel touches lives, and
+ * on a UEFI machine the two are different: the GOP framebuffer, the local
+ * APIC, ECAM and every runtime-services region sit ABOVE the last byte of
+ * RAM, in the hole between it and 4 GB. A board with 2 GB of RAM and a
+ * framebuffer at 0xE0000000 got an identity map that stopped at 2 GB, and
+ * the kernel's first pixel was a page fault with no page tables of its own
+ * yet to report it.
+ *
+ * The cost of asking the wide question is zero: PD0..PD3 are allocated
+ * unconditionally either way (16 KB of the 32 KB block), and 2048 entries is
+ * exactly what fills them. Mapping MMIO write-back here is harmless — the
+ * firmware's MTRRs still mark those ranges UC, and UC wins over the PAT type
+ * of the page (Intel SDM Vol 3A §11.5.2, "Effective Memory Type"). These
+ * tables live only until vmm_init builds the kernel's own.
+ */
 static uint32_t CalculateIdentityMapPages(void)
 {
-    /* Read directly from fixed physical address using byte offsets to avoid
-     * GCC's -Warray-bounds when casting a raw address to a typed array. */
-    volatile uint8_t *e820_raw = (volatile uint8_t *)(uintptr_t)E820_MAP_ADDR;
-    uint16_t count;
-    MemCopy(&count, (const void *)(uintptr_t)E820_COUNT_ADDR, 2);
-    uint64_t max_end = 0;
-
-    for (uint16_t i = 0; i < count; i++) {
-        volatile uint8_t *slot = e820_raw + (uint32_t)i * sizeof(E820Entry);
-        uint64_t base, length;
-        uint32_t type;
-        MemCopy(&base,   (const void *)slot,      8);
-        MemCopy(&length, (const void *)(slot+8),  8);
-        MemCopy(&type,   (const void *)(slot+16), 4);
-        if (type != E820_USABLE) continue;
-        uint64_t end = base + length;
-        if (end > max_end) max_end = end;
-    }
-
-    /* Convert to 2 MB page count; cap at 2048 (= 4 GB). */
-    uint32_t pages = (uint32_t)((max_end + PAGE_2MB - 1) / PAGE_2MB);
-    if (pages < 64)   pages = 64;
-    if (pages > 2048) pages = 2048;
-    return pages;
+    return 2048;   /* 2048 x 2 MB = 4 GB */
 }
 
 static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
@@ -1749,15 +1858,37 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
                                              alloc_pages,
                                              &pt_alloc);
     if (EFI_ERROR(status)) {
-        g_bs->free_pages(pt_alloc, alloc_pages);
-        status = g_bs->allocate_pages(AllocateAddress,
-                                      EfiLoaderData,
-                                      alloc_pages,
-                                      &pt_alloc);
+        /*
+         * ‼ The retry only frees what THIS LOADER may already own.
+         *
+         * The range starts at the kernel's own physical end, so the usual
+         * reason AllocateAddress refuses is that we allocated it ourselves a
+         * moment ago while reserving the BSS. Handing that back and asking
+         * again is a legitimate re-claim.
+         *
+         * EFI_NOT_FOUND is exactly the answer that says "not allocated the
+         * way you think" (UEFI 2.10 §7.2, FreePages) and it is the ONLY
+         * refusal for which a blind free is safe. Any other status means the
+         * firmware holds these pages as its own — and EDK2's CoreFreePages
+         * will happily release a range that firmware allocated as
+         * EfiBootServicesData, which would put firmware memory into the pool
+         * this loader is about to hand the kernel as free RAM. That is not a
+         * retry; it is corruption with a spec section against it.
+         */
+        if (status == EFI_NOT_FOUND) {
+            g_bs->free_pages(pt_alloc, alloc_pages);
+            pt_alloc = (EFI_PHYSICAL_ADDRESS)g_pt_base;
+            status = g_bs->allocate_pages(AllocateAddress,
+                                          EfiLoaderData,
+                                          alloc_pages,
+                                          &pt_alloc);
+        }
         if (EFI_ERROR(status)) {
             Print("TagBoot: cannot allocate page tables + stack at ");
             PrintHex64(g_pt_base);
-            Print("\r\n");
+            Print(" (status=");
+            PrintHex64((uint64_t)status);
+            Print(")\r\n");
             return status;
         }
     }
@@ -2005,24 +2136,40 @@ static void PostEbsPatchBootInfo(void)
     bi->efi_mmap_size      = g_efi_mmap_copy_size;
     bi->efi_mmap_desc_size = g_efi_mmap_desc_size;
     bi->efi_mmap_desc_ver  = g_efi_mmap_desc_ver;
+
+    /* And the E820 the kernel will actually divide memory by is rewritten
+     * from the accepted map — see the note on EmitE820. The map built before
+     * ExitBootServices did not know about this loader's own last two
+     * allocations (the ESRT copy and the buffer this very map is staged in),
+     * both of which the firmware placed wherever it liked; the kernel's
+     * allocator would have found them free and given them away. */
+    if (g_efi_mmap_copy_phys && g_efi_mmap_copy_size && g_efi_mmap_desc_size) {
+        uint32_t n = EmitE820((const uint8_t *)(uintptr_t)g_efi_mmap_copy_phys,
+                              g_efi_mmap_copy_size,
+                              g_efi_mmap_desc_size);
+        bi->e820_count = (uint16_t)n;
+    }
 }
 
 /* =========================================================================
- * Kernel handoff: disable UEFI, enable long mode, jump to kernel
+ * Kernel handoff: install our tables and jump
  *
- * After ExitBootServices we have no UEFI services. We must:
- *   1. Enable PAE in CR4
- *   2. Load page table base into CR3
- *   3. Set EFER.LME | EFER.NXE via WRMSR
- *   4. Set CR0.PG
+ * After ExitBootServices we have no UEFI services. We are ALREADY in
+ * 64-bit long mode — UEFI spec §2.3.4 mandates LME=1, PG=1, PAE=1 for an
+ * x64 firmware — so there is no mode switch to perform. All that is left:
+ *   1. Enforce CR4.PAE (already set; cheap insurance)
+ *   2. Load our page table base into CR3
+ *   3. Switch RSP to the boot stack and jump
  *
- * At this point we are already in 64-bit mode (UEFI boots in long mode),
- * so we just reload CR3 with our new tables and jump to the kernel.
+ * EFER is deliberately NOT touched here. Every bit the kernel needs beyond
+ * what firmware left is the kernel's own business, and it takes them up
+ * itself before it uses them — NXE first of all, in CpuTakeUpNoExecute,
+ * before vmm_init builds anything.
  * ========================================================================= */
 
 /*
  * Implemented in tagboot_jump.asm — pure NASM, no inline asm ambiguity.
- * Installs our CR3, sets EFER.LME+NXE, CR0.PG, switches RSP, jumps to entry.
+ * Installs our CR3, switches RSP, jumps to entry. Does not write EFER.
  * Never returns.
  *
  * IMPORTANT: the NASM code uses System V AMD64 ABI registers (rdi, rsi, rdx).
@@ -2282,10 +2429,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
                           / PAGE_4KB;
         EFI_STATUS bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
                                                       bss_pages, &bss_pa);
-        if (EFI_ERROR(bss_status)) {
-            /* Non-fatal: memory may already be free conventional memory.
-             * Try free+reallocate in case it was marked as boot-services data. */
+        if (bss_status == EFI_NOT_FOUND) {
+            /* Same rule as the page-table allocation below: only EFI_NOT_FOUND
+             * says "you do not own this the way you think", and only then is
+             * giving it back and re-asking a re-claim rather than a release of
+             * somebody else's memory. UEFI 2.10 §7.2 (FreePages). */
             g_bs->free_pages(bss_pa, bss_pages);
+            bss_pa = (EFI_PHYSICAL_ADDRESS)kernel_end_phys;
             bss_status = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
                                               bss_pages, &bss_pa);
         }
@@ -2304,6 +2454,18 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     MemMapResult mmap;
     status = BuildMemoryMap(&mmap);
     if (EFI_ERROR(status)) Panic("failed to get UEFI memory map");
+
+    /* A memory map that did not fit is a map that stops describing memory
+     * partway through — and everything past the cut is unclaimed as far as
+     * the kernel is concerned, including regions that were RESERVED. The
+     * second pass runs after ExitBootServices where nothing can be printed,
+     * so the only place this can be reported is here, on the first pass;
+     * a firmware whose map overflows here will overflow there too. */
+    if (g_e820_truncated) {
+        Print("TagBoot: WARNING — the memory map does not fit ");
+        PrintDec(E820_MAX_ENTRIES);
+        Print(" entries and was cut short\r\n");
+    }
 
     /* ----- 7. Check EFI load address before switching CR3 ----- */
     CheckEfiLoadAddress();

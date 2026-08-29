@@ -17,6 +17,7 @@ global ap_trampoline_data
 %define DATA_OFFSET_STACK      (ap_trampoline_data - ap_trampoline_start + 8)
 %define DATA_OFFSET_CORE_IDX   (ap_trampoline_data - ap_trampoline_start + 16)
 %define DATA_OFFSET_EXTRA_CR4  (ap_trampoline_data - ap_trampoline_start + 20)
+%define DATA_OFFSET_EXTRA_EFER (ap_trampoline_data - ap_trampoline_start + 24)
 %define GDT_PTR_OFFSET         (ap_gdt_ptr - ap_trampoline_start)
 
 ap_trampoline_start:
@@ -80,10 +81,19 @@ ap_protected:
     mov eax, [ebx + DATA_OFFSET_CR3]
     mov cr3, eax
 
+    ; EFER: LME is mandatory to reach long mode at all. NXE (bit 11) is NOT
+    ; hardcoded here — it comes from the data area, because a CPU that does
+    ; not enumerate CPUID.80000001h:EDX[20] raises #GP on a WRMSR that sets
+    ; it, and "Execute Disable Bit" is a switch real firmware exposes. The
+    ; BSP already asked (g_cpu_caps.has_nx) and wrote the answer in for us,
+    ; the same way it writes the extra CR4 bits above. ebx must still hold
+    ; 0x8000 for the fetch, and it does — nothing below touched it.
+    mov ebx, 0x8000
+    mov esi, [ebx + DATA_OFFSET_EXTRA_EFER]
     mov ecx, 0xC0000080
     rdmsr
     or eax, (1 << 8)
-    or eax, (1 << 11)
+    or eax, esi
     wrmsr
 
     mov eax, cr0
@@ -149,5 +159,6 @@ ap_trampoline_data:
     db 0    ; +18: padding
     db 0    ; +19: padding
     dd 0    ; +20: extra CR4 bits (LA57 when 5-level paging is active on BSP)
+    dd 0    ; +24: extra EFER bits (NXE when this CPU enumerates NX)
 
 ap_trampoline_end:

@@ -50,7 +50,7 @@ BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 E820_COUNT_ADDR       equ 0x500
 E820_SIZE_ADDR        equ 0x502
 E820_MAP_ADDR         equ 0x504
-E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h
+E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h and tagboot.c
 E820_SEG              equ E820_COUNT_ADDR >> 4   ; 0x0050:0000 = 0x500
 ; Words to wipe before the firmware fills the map. It used to be a flat 1024,
 ; which covers 2048 bytes — but the map reaches 0x504 + 128*24 = 0x1104, so
@@ -2607,10 +2607,30 @@ enable_long_mode:
     mov eax, [dynamic_pt_base]
     mov cr3, eax
 
+    ; Does this CPU have NX at all? CPUID.80000001h:EDX[20]. Asked BEFORE
+    ; touching EFER, because WRMSR setting NXE on a CPU that does not
+    ; enumerate it raises #GP — and "Execute Disable Bit" is a switch real
+    ; firmware exposes and real operators turn off. esi carries the answer
+    ; across the EFER read-modify-write; cpuid clobbers eax/ebx/ecx/edx but
+    ; not esi. The kernel takes NX up again for itself in
+    ; CpuTakeUpNoExecute — this write only spares the very early kernel a
+    ; window in which bit 63 is reserved.
+    xor esi, esi
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .no_nx
+    mov eax, 0x80000001
+    cpuid
+    test edx, (1 << 20)
+    jz .no_nx
+    mov esi, (1 << 11)    ; NXE
+.no_nx:
+
     mov ecx, 0xC0000080   ; EFER MSR
     rdmsr
     or eax, (1 << 8)      ; LME
-    or eax, (1 << 11)     ; NXE
+    or eax, esi           ; NXE, only when the CPU said it has NX
     wrmsr
 
     mov eax, cr0

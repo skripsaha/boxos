@@ -275,9 +275,17 @@ static void per_core_load_gs(PerCoreData* pc) {
 // ---------------------------------------------------------------------------
 
 static void per_core_setup_notify_msrs(PerCoreData* pc) {
-    // EFER: enable SYSCALL + NX
+    // EFER: enable SYSCALL, and keep NX on.
+    //
+    // NX is not established here — CpuTakeUpNoExecute did that on the BSP
+    // before the first page table existed, and the AP trampoline does it for
+    // each AP before CR0.PG=1. This write only has to avoid CLEARING it, and
+    // must not set it on a CPU that does not enumerate NX: WRMSR of EFER.NXE
+    // with CPUID.80000001H:EDX[20]=0 raises #GP, and "Execute Disable Bit" is
+    // a switch real firmware exposes.
     uint64_t efer = rdmsr_pc(MSR_EFER);
-    efer |= EFER_SCE | EFER_NXE;
+    efer |= EFER_SCE;
+    if (g_cpu_caps.has_nx) efer |= EFER_NXE;
     wrmsr_pc(MSR_EFER, efer);
 
     // STAR: kernel CS/SS in [47:32], user base in [63:48]
