@@ -110,6 +110,37 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
  */
 #define MSD_COMMAND_PATIENCE_MS 30000
 
+/*
+ * ‼ AND IT IS A BUDGET PER COMMAND, WHICH ONLY MEANT ANYTHING WHILE EVERY
+ * COMMAND WAS THE SAME SIZE.
+ *
+ * Thirty seconds for the four-kilobyte block this kernel used to ask for is a
+ * floor of about a hundred and thirty bytes a second. Once the room began
+ * asking each medium how much it takes at a time, one command could carry four
+ * blocks — and the same thirty seconds then demanded four times the rate from
+ * the same device. A drive answering steadily at five hundred bytes a second
+ * passed while it was asked for one block and was declared broken when it was
+ * asked for four, having done nothing differently.
+ *
+ * So the floor is what is written down, and the budget is derived from it and
+ * the size of the request. The number now says something a person can check
+ * against a device's datasheet instead of being a duration that happened to
+ * fit one request size.
+ */
+#define MSD_SLOWEST_BYTES_PER_SEC 128u
+
+static uint32_t msd_patience_ms(uint32_t bytes)
+{
+    uint64_t ms = ((uint64_t)bytes * 1000u) / MSD_SLOWEST_BYTES_PER_SEC;
+    if (ms < MSD_COMMAND_PATIENCE_MS) {
+        ms = MSD_COMMAND_PATIENCE_MS;
+    }
+    if (ms > 0xFFFFFFFFull) {
+        ms = 0xFFFFFFFFull;
+    }
+    return (uint32_t)ms;
+}
+
 /* A control transfer is a different animal, and the specification does put
  * numbers on it: a standard request with no data stage completes in 50 ms, and
  * one with data keeps its stages 500 ms apart (USB 2.0 §9.2.6.4). A second is
@@ -866,7 +897,8 @@ static void msd_job_run(MsdJob* j)
      * it — see MSD_COMMAND_PATIENCE_MS. Nothing below reaches it except a
      * device that is present, whose endpoint is well, on a controller that is
      * running, and which has still not spoken. */
-    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(MSD_COMMAND_PATIENCE_MS);
+    const uint32_t patience = msd_patience_ms(j->data_len);
+    uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(patience);
 
     while (!__atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
         xhci_process_events();
@@ -934,7 +966,7 @@ static void msd_job_run(MsdJob* j)
         if ((int64_t)(rdtsc() - give_up_at) >= 0) {
             kprintf("[USB disk %u] the device has been asking for more time "
                     "for %u ms at stage %u — giving up on the command\n",
-                    j->u->number, MSD_COMMAND_PATIENCE_MS, j->phase);
+                    j->u->number, patience, j->phase);
             /*
              * The host side first, and the order is not a preference.
              *
@@ -1516,6 +1548,20 @@ bool xhci_msd_unit_present(uint8_t unit)
     return true;
 }
 
+uint32_t xhci_msd_unit_max_run(uint8_t unit)
+{
+    XhciMsdUnit* u = msd_take(unit);
+    if (!u) {
+        return MSD_BOUNCE_BYTES / XHCI_MSD_SECTOR_BYTES;
+    }
+    /* Whole device blocks, so a pass never has to split one — the same
+     * arithmetic msd_rw does per pass. */
+    uint32_t blocks = MSD_BOUNCE_BYTES / u->block_bytes;
+    uint32_t run    = blocks * u->per_sector;
+    msd_give_back(u);
+    return run ? run : (MSD_BOUNCE_BYTES / XHCI_MSD_SECTOR_BYTES);
+}
+
 uint64_t xhci_msd_unit_sectors(uint8_t unit)
 {
     if (!g_units_lock_ready) return 0;
@@ -1833,7 +1879,7 @@ void xhci_msd_watchdog(void)
         bool here = msd_device_is_there(u);
         uint64_t since = __atomic_load_n(&u->watched_since, __ATOMIC_RELAXED);
         if (here && (int64_t)(rdtsc() - since) <
-                        (int64_t)cpu_ms_to_tsc(MSD_COMMAND_PATIENCE_MS)) {
+                        (int64_t)cpu_ms_to_tsc(msd_patience_ms(j->data_len))) {
             continue;
         }
         /* Claimed here, so a second pass on another core cannot give up on the
@@ -1861,7 +1907,8 @@ void xhci_msd_watchdog(void)
 
     kprintf("[USB disk %u] a read nobody was waiting on has been asking for "
             "more time for %u ms at stage %u — giving up on the command\n",
-            late_unit->number, MSD_COMMAND_PATIENCE_MS, late_job->phase);
+            late_unit->number, msd_patience_ms(late_job->data_len),
+            late_job->phase);
     /* The transfer comes off the endpoint before anything else happens — see
      * the note on the same call in msd_job_run. It matters more here: this job
      * carries a completion node, and the node lives inside memory that

@@ -139,6 +139,21 @@ int  ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* 
 int  ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uint8_t* buffer);
 int  ata_flush_cache(uint8_t drive_idx);
 
+/*
+ * The largest run of sectors this drive takes in one command.
+ *
+ * ‼ AND IT IS SMALL ON PURPOSE. ata_read_sectors takes the bus-master DMA path
+ * only while the count is within ATA_ASYNC_MAX_SECTORS; one sector past that
+ * and the command falls back to programmed I/O, where the processor moves
+ * every word itself. So the honest answer for a drive whose DMA path is up is
+ * that path's width — asking for more is not a bigger bite, it is the same
+ * bytes moved the slow way.
+ *
+ * A drive with no usable DMA path is in PIO whatever it answers, and there a
+ * longer run is a real saving: one command's handshake instead of eight.
+ */
+uint32_t ata_max_run_sectors(uint8_t drive_idx);
+
 int  ata_read_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* buffer);
 int  ata_write_sectors_retry(uint8_t drive_idx, uint64_t lba, uint16_t count, const uint8_t* buffer);
 

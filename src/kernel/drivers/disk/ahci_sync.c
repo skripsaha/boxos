@@ -331,3 +331,12 @@ int ahci_flush_cache_sync(uint8_t port) {
             port, AHCI_MAX_RETRIES);
     return -1;
 }
+
+/* 128 KiB — thirty-two contiguous DMA32 pages, an order the buddy allocator
+ * satisfies routinely, and sixteen times the four-kilobyte block everything
+ * above this reads in. */
+uint32_t ahci_max_run_sectors(uint8_t port)
+{
+    (void)port;
+    return 256u;
+}
