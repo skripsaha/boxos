@@ -131,6 +131,17 @@ typedef enum {
  */
 int xhci_slots_attach(xhci_controller_t* ctrl);
 
+/*
+ * And the same records, given back.
+ *
+ * Only for a controller that never came up: the records are asked for before
+ * the rings, the scratchpad and the device context array, and the path that
+ * gives all of those back when bring-up fails did not know they existed. A
+ * controller that IS in service never comes here — its records outlive every
+ * device that passes through them, for the life of the machine.
+ */
+void xhci_slots_release(xhci_controller_t* ctrl);
+
 struct xhci_device_slot {
     /* Which controller handed out this slot.
      *
