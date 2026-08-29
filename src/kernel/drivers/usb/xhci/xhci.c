@@ -848,6 +848,13 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
         goto cleanup_resources;
     }
 
+    /* The records for this controller's devices, as many as it says it can
+     * address and no more — see xhci_controller_t::slots. */
+    if (xhci_slots_attach(ctrl) != 0) {
+        kprintf("[xHCI] no memory for %u device record(s)\n", ctrl->max_slots);
+        goto cleanup_resources;
+    }
+
     if (ctrl->max_ports == 0) {
         debug_printf("[xHCI] ERROR: Invalid max_ports %u\n", ctrl->max_ports);
         goto cleanup_resources;
@@ -1070,6 +1077,13 @@ static int xhci_bring_up(xhci_controller_t* ctrl) {
             ctrl->name, hciversion >> 8, hciversion & 0xFF, ctrl->max_ports,
             ctrl->max_slots,
             ctrl->use_polling ? "polled" : (ctrl->use_msi ? "MSI" : "INTx"));
+
+    /* And the records are ITS records, as many as it just said it can address.
+     * Printed because a machine with two controllers used to keep one array of
+     * sixty-four for both of them, and the number a controller carries is now
+     * a fact about that controller rather than about this kernel. */
+    kprintf("[xHCI %s] carries %u device record(s) of its own\n",
+            ctrl->name, ctrl->slot_count);
 
     /* Everything this controller said about itself is now on the screen —
      * capabilities, handoff, scratchpad, port power, protocols — and it is

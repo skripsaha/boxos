@@ -1598,6 +1598,33 @@ run_twoctrl() {
 
     ! grep -q "has been leaving for" "$L"
     chk $? "no slot was left standing because nobody came to take it down"
+
+    # ── each controller's records are ITS records ──────────────────────────
+    #
+    # Everything above this in the scenario is the damage the machine-wide
+    # table did: one array of sixty-four for every controller, one lock, and a
+    # special case in the retirement pass for "somebody else's device" that a
+    # live board proved was not enough — fifteen chairs from one flash drive.
+    # The records now live on the controller that hands out the slots.
+    local ctl rec
+    ctl=$(grep -c "controller ready:" build/serial.log)
+    rec=$(grep -c "carries .* device record(s) of its own" build/serial.log)
+    [ "$ctl" -ge 2 ] && [ "$ctl" = "$rec" ]
+    chk $? "every controller carries records of its own ($rec of $ctl)"
+
+    # And as many as it said it can address. ‼ This cannot fail here: QEMU's
+    # xHCI has no way to report anything but sixty-four slots, so a kernel that
+    # went back to one machine-wide 64 would satisfy it too. It bites on a
+    # board whose controller says something else — which is the only place the
+    # question was ever open.
+    local mismatched
+    mismatched=$(awk '
+        /controller ready:/ { match($0, /([0-9]+) slot\(s\)/, m); want = m[1] }
+        /carries [0-9]+ device record/ { match($0, /carries ([0-9]+) device/, g);
+            if (want != "" && g[1] != want) n++ }
+        END { print n+0 }' build/serial.log 2>/dev/null || echo 0)
+    [ "$mismatched" = 0 ]
+    chk $? "and as many of them as it said it can address ($mismatched wrong)"
 }
 
 # ── a pass that did not survive the journey ────────────────────────────────
