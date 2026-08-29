@@ -125,8 +125,11 @@ int meta_pool_flush(void) {
     return 0;
 }
 
-void meta_pool_shutdown(void) {
-    meta_pool_flush();
+void meta_pool_shutdown(bool write_back) {
+    if (write_back) {
+        meta_pool_flush();
+    }
+    g_current_dirty = false;
 
     if (g_mirror) {
         for (uint32_t i = 0; i < g_mirror_capacity; i++) {

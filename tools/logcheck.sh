@@ -291,6 +291,34 @@ run_latearrival() {
         sleep 1; i=$((i+1))
     done
     sleep 2
+
+    #
+    # ‼ IF IT DID NOT HAND OVER, FIND OUT WHETHER THE MACHINE IS STILL ALIVE.
+    #
+    # Measured 2026-08-29: this scenario failed once, inside a forty-minute
+    # matrix, with the log ending at `[AUTOSTART] Started 'display.elf'` and
+    # nothing after it for sixty seconds. Standing alone it then passed three
+    # times on that tree and three times on the tree before it — so it is not a
+    # regression, and it is not reproducible on demand either.
+    #
+    # What was missing was not another run. It was the one fact that separates
+    # the two things this can be: a machine WEDGED between two autostart
+    # launches, and a machine perfectly alive and merely slow reading a
+    # 772 KB program off a stick. The stand-in shell is still on the keyboard
+    # at that moment, so asking it is free — and a `help` that answers proves
+    # the cores are running, which moves the hunt onto the volume read and off
+    # the scheduler entirely.
+    #
+    # Costs four seconds on a run that fails and nothing at all on one that
+    # does not.
+    if ! grep -q "hands over" build/serial.log 2>/dev/null; then
+        echo "-- it did not hand over; asking whether the machine is alive --"
+        ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        sleep 3
+    fi
+
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.latearrival.log"
     latearrival_off
@@ -320,6 +348,19 @@ run_latearrival() {
     grep -q "AUTOSTART. Started .display.elf" "$L"; chk $? "the volume's display daemon started"
     grep -q "AUTOSTART. Started .shell.bin" "$L";   chk $? "the volume's shell started"
     grep -q "the stand-in .PID 1. hands over" "$L"; chk $? "and the stand-in handed over"
+
+    # Only meaningful when the line above went red — and then it is the whole
+    # of what the next session needs. Not a check: a fact, printed.
+    if ! grep -q "the stand-in .PID 1. hands over" "$L"; then
+        if typed_ok "$L"; then
+            echo "       the machine was ALIVE and answering the keyboard"
+            echo "       => the stall is in reading the volume, not in the scheduler"
+        else
+            echo "       the machine did NOT answer the keyboard"
+            echo "       => it was wedged, and the last line it printed says where"
+        fi
+        echo "       last line: $(tail -1 "$L")"
+    fi
 }
 
 # ── replug: the stick is pulled out and pushed back in ─────────────────────
@@ -433,6 +474,11 @@ run_replug() {
     grep -q "the volume is back, in seat" "$S"
     chk $? "TagFS took the volume back up"
 
+    # And FINISHED doing so. "The volume is back" is said before the mount is
+    # attempted; it is the return starting, not the return working.
+    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$S"
+    chk $? "and the second mount finished, rather than only beginning"
+
     # Into the chair it left, not a new one. The room must not grow a chair
     # per plug cycle — sixteen of them is what a live board showed.
     grep -q "seat 2:" "$S"
@@ -539,6 +585,18 @@ run_healthy() {
 
     grep -q "BoxOS Shell" "$L"; chk $? "boot reaches the shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
+
+    # ‼ THE MOUNT FINISHED, WHICH IS NOT WHAT ANY OTHER LINE HERE SAYS.
+    #
+    # Everything TagFS prints while mounting — the deed, the far copy, the
+    # file count — is printed just as readily by a mount that then fails eight
+    # steps later. On the owner's board that is exactly what happened, twice,
+    # and it was read off a photograph as a healthy volume while the shell
+    # answered `Unknown command` to every file on it. One line closes it.
+    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$L"
+    chk $? "and the volume actually finished mounting"
+    ! grep -q "\[TagFS\] this volume is NOT mounted" "$L"
+    chk $? "with nothing refused along the way"
 
     # Running a PROGRAM, and coming back. A builtin never leaves the shell;
     # this is the only check in the file that exercises spawn-and-wait.
@@ -1200,6 +1258,105 @@ run_lastsaid() {
 
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.lastsaid.log"
+    make >"$SCRATCH/build.log" 2>&1
+}
+
+# ── mountfail: a mount that fails is a mount, not the end of the volume ─────
+#
+# The board failure this closes: the room seats the medium, the deed is read,
+# "6009 data blocks, 410 free, 58 files" is printed — and the shell answers
+# `Unknown command` to every one of those files. Two photographs of it, and
+# the decisive fact was a line that WAS NOT THERE.
+#
+# tagfs_init brings up eleven things in order. A mount that failed partway used
+# to leave the first five standing and nothing ever took them down, so every
+# LATER mount died at TagFS_CowInit with ERR_ALREADY_INITIALIZED — reported by
+# a debug_printf, which compiles to nothing in a shipped build. One transient
+# read error cost the machine its filesystem for the rest of its boot, silently.
+#
+# Nothing in QEMU ever fails a mount, so this whole path was unreachable from
+# the desk and the repair would have been green by construction. MOUNTFAIL=on
+# fails the FIRST mount at the worst point there is, with all five of those
+# subsystems up, and this scenario checks the whole story: the failure is SAID,
+# the catch-up mount SUCCEEDS, and the shell can then find and run a program
+# that lives on the volume.
+#
+# ‼ MEASURED AGAINST THE MUTATION IT EXISTS FOR. With the clearing taken out of
+# mount_refused, the second mount answers "its copy-on-write layer would not
+# start" and the machine falls back to its embedded shell with no files — the
+# board, reproduced on the desk. Two other mutations were tried first and both
+# stayed green, which is why this one is written against the line that does the
+# work rather than the one that reads as though it does.
+run_mountfail() {
+    echo "== mountfail: one failed mount does not cost the volume for good =="
+
+    make MOUNTFAIL=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (MOUNTFAIL=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "MOUNTFAIL=on build"; return
+    fi
+
+    make run-stop >/dev/null 2>&1
+    # ‼ The key goes on run-bg TOO. It decides which mark file the tree carries,
+    # and a bare `make run-bg` rebuilds the whole kernel without it — measured,
+    # and it cost a run that looked like the reproduction had failed.
+    make run-bg MOUNTFAIL=on >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 4
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.mountfail.log"
+    local L="$SCRATCH/serial.mountfail.log"
+
+    # ── the failure happened, and it SAID so ────────────────────────────────
+    grep -q "\[TagFS\] this volume is NOT mounted: MOUNTFAIL=on asked this one to fail" "$L"
+    chk $? "the first mount fails where it was told to, and says so out loud"
+
+    grep -q "\[Storage Deck\] no volume yet" "$L"
+    chk $? "and the deck carries the refusal up rather than swallowing it"
+
+    # ‼ The line that was missing on the board. Everything printed during a
+    # mount — the deed, the far copy, the file count — is printed by a mount
+    # that then fails, so none of it answers "is there a filesystem". This does.
+    local said mounted
+    said=$(grep -c "\[TagFS\] this volume is NOT mounted" "$L")
+    mounted=$(grep -c "\[TagFS\] the volume on seat .* is MOUNTED" "$L")
+    [ "$said" = 1 ] && [ "$mounted" = 1 ]
+    chk $? "exactly one mount refused and exactly one mounted (said $said, mounted $mounted)"
+
+    # ── and the SECOND mount, on the same medium, works ─────────────────────
+    grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
+    chk $? "the catch-up mount takes the volume up after the failure"
+
+    # The one that goes red under the mutation: with the ground left uncleared,
+    # this line reads "its copy-on-write layer would not start" instead.
+    ! grep -q "copy-on-write layer would not start" "$L"
+    chk $? "the second mount is not poisoned by the first one's remains"
+
+    # ── and the machine can actually USE it, which is the whole point ────────
+    #
+    # Autostart reads its files off the volume. A machine whose volume did not
+    # come back says "No autostart files found" and falls back to the embedded
+    # shell — which is exactly what the board did, with a stick in the socket.
+    grep -q "\[AUTOSTART\] Started 'shell.bin'" "$L"
+    chk $? "shell.bin is found on the volume and started"
+    ! grep -q "No autostart files found" "$L"
+    chk $? "and the machine does not fall back to the shell built into it"
+
+    grep -q "CPU features" "$L"
+    chk $? "an external utility off the volume runs"
+    external_ok "$L"
+    chk $? "and the prompt comes back after it"
+
     make >"$SCRATCH/build.log" 2>&1
 }
 
@@ -2250,6 +2407,7 @@ case "${1:-both}" in
     replug)   run_replug ;;
     nofsgsbase) run_nofsgsbase ;;
     logsave)  run_logsave ;;
+    mountfail) run_mountfail ;;
     yank)     run_yank ;;
     slowdisk) run_slowdisk ;;
     gpt)      run_gpt ;;
@@ -2264,8 +2422,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

@@ -7,6 +7,7 @@
 #include "tag_bitmap/tag_bitmap.h"
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
+#include "context/tagfs_context.h"
 #include "disk_book/disk_book.h"
 #include "bcdc/bcdc.h"
 #include "error.h"
@@ -640,6 +641,11 @@ static bool volume_medium_gone(void)
  */
 static void tagfs_abandon(void);
 
+/* Everything a mount brought up, put back down — including a mount that only
+ * got halfway. See the note on the definition; it is the piece whose absence
+ * made one failed mount permanent. */
+static void tagfs_clear_the_ground(void);
+
 static bool TagFSVolumeReturned(void)
 {
     if (!g_medium_left || !g_volume_uuid_known) {
@@ -683,6 +689,12 @@ static bool TagFSVolumeReturned(void)
         tagfs_abandon();
 
         if (tagfs_init() == OK) {
+            /* Said on every road to a mounted volume, because the per-process
+             * contexts every storage op looks for are set up by whoever
+             * mounted — and this road did not, while both of the others did.
+             * Idempotent, so a machine whose processes already have theirs
+             * keeps them; the asymmetry was the whole of the risk. */
+            tagfs_context_init();
             return true;
         }
 
@@ -1471,6 +1483,30 @@ void tagfs_init_well_known_tags(void)
 // tagfs_init
 // ----------------------------------------------------------------------------
 
+/*
+ * This volume did not mount, and here is the sentence that says so.
+ *
+ * ‼ TWO THINGS, AND NEITHER OF THEM USED TO HAPPEN.
+ *
+ * It is SAID — out loud, with kprintf, naming the step. Four of the fatal
+ * refusals below reported with debug_printf, which compiles to nothing in a
+ * shipped build, so on the owner's board a volume that would not mount looked
+ * exactly like one that had: the room seated the medium, the deed was read,
+ * "6009 data blocks, 410 free, 58 files" was printed, and then nothing. The
+ * shell answered `Unknown command` to every name on a volume it could see.
+ *
+ * And the ground is CLEARED. Everything this attempt brought up goes back down,
+ * so the next attempt starts from a true blank slate rather than from the
+ * wreckage of this one — which is what made the first failure permanent.
+ */
+static error_t mount_refused(const char *what, error_t why)
+{
+    kprintf("[TagFS] this volume is NOT mounted: %s (error %d)\n",
+            what, (int)why);
+    tagfs_clear_the_ground();
+    return why;
+}
+
 error_t tagfs_init(void) {
     if (g_state.initialized) {
         debug_printf("[TagFS] Already initialized\n");
@@ -1478,6 +1514,22 @@ error_t tagfs_init(void) {
     }
 
     debug_printf("[TagFS] Initializing...\n");
+
+    /*
+     * ‼ NOTHING IS CLEARED HERE, AND THAT IS DELIBERATE.
+     *
+     * The obvious place to guarantee "this attempt starts from a blank slate"
+     * is the top of this function. It was written that way first, and then
+     * measured: with MOUNTFAIL=on the scenario stayed GREEN with the line
+     * taken out, because every failure below already clears at the site
+     * (mount_refused). A guard that cannot be shown to do anything is the same
+     * kind of thing as the ring-full check this driver's sibling carried for
+     * years — unreachable, unfalsifiable, and believed.
+     *
+     * So the guarantee lives in ONE place, where the failure is, and it is
+     * provable: take the clearing out of mount_refused and the second mount
+     * dies at TagFS_CowInit exactly as the board did.
+     */
 
     /* Detect which ATA drive (master/slave) holds the TagFS volume.
      * Must run before any disk I/O so g_tagfs_drive is correct. */
@@ -1526,8 +1578,8 @@ error_t tagfs_init(void) {
 
     // --- CoW Snapshots init ---
     if (TagFS_CowInit() != OK) {
-        debug_printf("[TagFS] CoW init failed\n");
-        return ERR_COW_NOT_INITIALIZED;
+        return mount_refused("its copy-on-write layer would not start",
+                             ERR_COW_NOT_INITIALIZED);
     }
 
     // --- Restore CoW snapshots from on-disk manifest ---
@@ -1573,8 +1625,8 @@ error_t tagfs_init(void) {
 
     // --- Data Deduplication init ---
     if (TagFS_DedupInit() != OK) {
-        debug_printf("[TagFS] Dedup init failed\n");
-        return ERR_DEDUP_NOT_INITIALIZED;
+        return mount_refused("its deduplication index would not start",
+                             ERR_DEDUP_NOT_INITIALIZED);
     }
 
     // --- Self-Healing init ---
@@ -1582,69 +1634,85 @@ error_t tagfs_init(void) {
 
     // --- Bcdc Compression init ---
     if (BcdcInit() != OK) {
-        debug_printf("[TagFS] Bcdc init failed\n");
-        return ERR_NO_MEMORY;
+        return mount_refused("its compression dictionaries would not start",
+                             ERR_NO_MEMORY);
     }
 
     // --- Test Framework init ---
     if (TagFS_TestsInit() != OK) {
-        debug_printf("[TagFS] Test framework init failed\n");
-        return ERR_NO_MEMORY;
+        return mount_refused("its test framework would not start",
+                             ERR_NO_MEMORY);
     }
+
+    /*
+     * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
+     *
+     * Every refusal from here down leaves five subsystems standing — DiskBook,
+     * CoW, Dedup, Self-Heal, Bcdc and the test framework — and until
+     * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
+     * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
+     * dying there for the rest of the boot, saying nothing. Nothing in QEMU
+     * ever fails a mount, so the whole path was unreachable from the desk and
+     * this repair would have been green by construction.
+     *
+     * `make MOUNTFAIL=on` fails the FIRST mount here, once, with all of them
+     * up: the worst case, and the exact shape the board was in. What must then
+     * happen is the whole of the fix — the failure is said out loud, the ground
+     * is cleared, and the catch-up mount storage_deck_init makes straight
+     * afterwards succeeds and reaches "data-integrity verify-on-read active".
+     *
+     * ‼ It is a REPRODUCTION, not a bug. Take the clear-the-ground out of the
+     * top of this function and this key leaves the machine exactly as the board
+     * was: a seated medium, a described deed, a printed file count, and a shell
+     * that cannot find one of those files.
+     */
+#if CONFIG_TAGFS_MOUNT_FAIL_ONCE
+    {
+        static bool tripped = false;
+        if (!tripped) {
+            tripped = true;
+            return mount_refused("MOUNTFAIL=on asked this one to fail",
+                                 ERR_TAGFS_CORRUPTED);
+        }
+    }
+#endif
 
     // --- Tag Registry ---
     g_state.registry = kmalloc(sizeof(TagRegistry));
     if (!g_state.registry) {
-        debug_printf("[TagFS] Failed to allocate tag registry\n");
-        return ERR_NO_MEMORY;
+        return mount_refused("there is no memory for its tag registry",
+                             ERR_NO_MEMORY);
     }
     if (tag_registry_init(g_state.registry) != OK) {
-        debug_printf("[TagFS] tag_registry_init failed\n");
         kfree(g_state.registry);
         g_state.registry = NULL;
-        return ERR_TAGFS_REGISTRY_FULL;
+        return mount_refused("its tag registry would not be built",
+                             ERR_TAGFS_REGISTRY_FULL);
     }
     /* Same rule as the bitmap below: a registry that would not read is not an
      * empty registry. Every tag id on this volume is defined there, so a mount
      * that continues without it renames nothing and mislabels everything. */
     if (tag_registry_load(g_state.registry, data_block_of(g_state.layout.tag_registry_block)) != OK) {
-        kprintf("[TagFS] this volume's tag registry would not read — not "
-                "mounting it\n");
-        tag_registry_destroy(g_state.registry);
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return ERR_TAGFS_CORRUPTED;
+        return mount_refused("its tag registry would not read", ERR_TAGFS_CORRUPTED);
     }
 
     // --- File Table ---
     if (file_table_init(data_block_of(g_state.layout.file_table_block), g_state.layout.file_table_blocks) != OK) {
-        debug_printf("[TagFS] file_table_init failed\n");
-        tag_registry_destroy(g_state.registry);
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return ERR_FILE_TABLE_CORRUPT;
+        return mount_refused("its file table would not read",
+                             ERR_FILE_TABLE_CORRUPT);
     }
 
     // --- Metadata Pool ---
     if (meta_pool_init(data_block_of(g_state.layout.metadata_pool_block), g_state.layout.metadata_pool_blocks) != OK) {
-        debug_printf("[TagFS] meta_pool_init failed\n");
-        file_table_shutdown();
-        tag_registry_destroy(g_state.registry);
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return ERR_METADATA_POOL_FULL;
+        return mount_refused("its metadata pool would not read",
+                             ERR_METADATA_POOL_FULL);
     }
 
     // --- Bitmap Index ---
     g_state.bitmap_index = tag_bitmap_create(TAGFS_BITMAP_INITIAL_TAG_CAP, TAGFS_BITMAP_INITIAL_FILE_CAP);
     if (!g_state.bitmap_index) {
-        debug_printf("[TagFS] tag_bitmap_create failed\n");
-        meta_pool_shutdown();
-        file_table_shutdown();
-        tag_registry_destroy(g_state.registry);
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return ERR_NO_MEMORY;
+        return mount_refused("there is no memory for its tag index",
+                             ERR_NO_MEMORY);
     }
 
     // --- Block Bitmap ---
@@ -1652,15 +1720,8 @@ error_t tagfs_init(void) {
     g_state.block_bitmap.bitmap = kmalloc(bitmap_bytes);
     if (!g_state.block_bitmap.bitmap)
     {
-        debug_printf("[TagFS] Failed to allocate block bitmap\n");
-        tag_bitmap_destroy(g_state.bitmap_index);
-        g_state.bitmap_index = NULL;
-        meta_pool_shutdown();
-        file_table_shutdown();
-        tag_registry_destroy(g_state.registry);
-        kfree(g_state.registry);
-        g_state.registry = NULL;
-        return -1;
+        return mount_refused("there is no memory for its block bitmap",
+                             ERR_NO_MEMORY);
     }
     memset(g_state.block_bitmap.bitmap, 0, bitmap_bytes);
     g_state.block_bitmap.total_blocks = g_state.layout.data_blocks;
@@ -1673,8 +1734,8 @@ error_t tagfs_init(void) {
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (!bm_buf)
     {
-        kprintf("[TagFS] no memory to read this volume's block bitmap\n");
-        return ERR_NO_MEMORY;
+        return mount_refused("there is no memory to read its block bitmap",
+                             ERR_NO_MEMORY);
     }
 
     /*
@@ -1702,11 +1763,11 @@ error_t tagfs_init(void) {
                                      TAGFS_BLOCK_SECTORS),
                           (uint16_t)bm_sector_count, bm_buf) != 0)
     {
-        kprintf("[TagFS] this volume's block bitmap would not read — not "
-                "mounting it, because a bitmap that is missing reads as a "
-                "volume with nothing on it and the next write would take it\n");
         kfree(bm_buf);
-        return ERR_TAGFS_CORRUPTED;
+        return mount_refused("its block bitmap would not read, and a missing "
+                             "bitmap reads as a volume with nothing on it — "
+                             "the next write would take everything",
+                             ERR_TAGFS_CORRUPTED);
     }
 
     uint32_t copy_bytes = bitmap_bytes < bm_buf_size ? bitmap_bytes : bm_buf_size;
@@ -1884,7 +1945,23 @@ error_t tagfs_init(void) {
     else
         kprintf("[TagFS] data-integrity verify-on-read active\n");
 
-    debug_printf("[TagFS] Initialized successfully\n");
+    /*
+     * ‼ THE SENTENCE THAT WAS MISSING, AND ITS ABSENCE IS THE WHOLE STORY.
+     *
+     * Everything printed above this line is said DURING a mount and says
+     * nothing about whether one finished: the deed is described, the far copy
+     * is checked, "6009 data blocks, 410 free, 58 files" is printed — and then
+     * eight more things have to work. On the owner's board they did not, and
+     * nothing said so, so a machine with no filesystem printed the same twelve
+     * lines as a machine with one. It was read off a photograph as a healthy
+     * mount, twice, and the shell answering `Unknown command` to every name was
+     * hunted somewhere else entirely.
+     *
+     * This is the counterpart to mount_refused, and between them there is now
+     * exactly one line that ends the question either way.
+     */
+    kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
+            g_tagfs_seat, (unsigned long long)g_state.ledger.total_files);
     return 0;
 }
 
@@ -1943,6 +2020,69 @@ void tagfs_sync(void)
 }
 
 /*
+ * ‼ EVERYTHING THIS VOLUME BROUGHT UP, PUT BACK DOWN — INCLUDING HALF OF IT.
+ *
+ * This is the piece that did not exist, and its absence is what turned one
+ * transient read error into a machine with no filesystem for the rest of its
+ * boot. tagfs_init brings up eleven things in order and any of them may refuse;
+ * when one did, the ten before it were left standing and nothing anywhere took
+ * them down — tagfs_teardown begins with `if (!g_state.initialized) return`,
+ * and a mount that failed never set that flag.
+ *
+ * The next attempt then met a CoW layer that was already up, and TagFS_CowInit
+ * answers ERR_ALREADY_INITIALIZED to that. tagfs_init treated it as fatal and
+ * said so with debug_printf, which compiles to nothing. So every later mount
+ * died at the same line, silently, for ever: the room seated the medium, the
+ * deed was read, "58 files" was printed, and the shell could not find one of
+ * them. Measured on the owner's board, twice, in photographs.
+ *
+ * Every shutdown below already asks whether the thing it takes down is up, so
+ * calling all of them against a mount that got three steps in is exactly as
+ * correct as calling them against one that finished.
+ *
+ * ‼ NOT ONE BYTE IS WRITTEN. What is held in memory describes the volume as it
+ * was BEFORE whatever went wrong, and the medium under the head may not even be
+ * the same one any more. That is why the two flushing shutdowns are told so
+ * explicitly rather than being relied upon to find the medium gone.
+ */
+static void tagfs_clear_the_ground(void)
+{
+    if (g_state.registry) {
+        tag_registry_destroy(g_state.registry);
+        kfree(g_state.registry);
+        g_state.registry = NULL;
+    }
+
+    if (g_state.bitmap_index) {
+        tag_bitmap_destroy(g_state.bitmap_index);
+        g_state.bitmap_index = NULL;
+    }
+
+    file_table_shutdown(false);
+    meta_pool_shutdown(false);
+
+    free_list_destroy();
+    if (g_state.block_bitmap.bitmap)
+    {
+        kfree(g_state.block_bitmap.bitmap);
+        g_state.block_bitmap.bitmap = NULL;
+    }
+    g_state.block_bitmap.total_blocks = 0;
+
+    TagFS_CowShutdown();
+    TagFS_DedupShutdown();
+    TagFS_SelfHealShutdown();
+    BraidShutdown();
+    BcdcShutdown();
+    IntegrityShutdown();
+    TagFS_TestsShutdown();
+    /* Last, so everything above it has been journaled by the time it goes. */
+    DiskBookShutdown();
+
+    g_state.initialized = false;
+}
+
+/*
  * Taking the volume down, with or without writing anything back.
  *
  * write_back is the ordinary case: the machine is stopping and what is in
@@ -1961,49 +2101,7 @@ static void tagfs_teardown(bool write_back)
         tagfs_sync();
     }
 
-    tag_registry_destroy(g_state.registry);
-    kfree(g_state.registry);
-    g_state.registry = NULL;
-
-    tag_bitmap_destroy(g_state.bitmap_index);
-    g_state.bitmap_index = NULL;
-
-    file_table_shutdown();
-    meta_pool_shutdown();
-
-    free_list_destroy();
-    if (g_state.block_bitmap.bitmap)
-    {
-        kfree(g_state.block_bitmap.bitmap);
-        g_state.block_bitmap.bitmap = NULL;
-    }
-    g_state.block_bitmap.total_blocks = 0;
-
-    // Shutdown CoW snapshots
-    TagFS_CowShutdown();
-
-    // Shutdown deduplication
-    TagFS_DedupShutdown();
-
-    // Shutdown self-healing
-    TagFS_SelfHealShutdown();
-
-    // Shutdown Braid multi-disk layer
-    BraidShutdown();
-
-    // Shutdown Bcdc compression
-    BcdcShutdown();
-
-    // Flush + release the data-integrity map
-    IntegrityShutdown();
-
-    // Shutdown test framework
-    TagFS_TestsShutdown();
-
-    // Flush and shutdown DiskBook WAL last (ensures all above shutdowns are journaled)
-    DiskBookShutdown();
-
-    g_state.initialized = false;
+    tagfs_clear_the_ground();
     debug_printf("[TagFS] Shutdown complete\n");
 }
 void tagfs_shutdown(void)

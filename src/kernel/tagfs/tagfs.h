@@ -373,7 +373,7 @@ int             tag_bitmap_tag_count_for_file(TagBitmapIndex* idx, uint32_t file
 // ----------------------------------------------------------------------------
 
 int  file_table_init(uint32_t first_block, uint32_t block_count);
-void file_table_shutdown(void);
+void file_table_shutdown(bool write_back);
 int  file_table_lookup(uint32_t file_id, uint32_t* out_block, uint32_t* out_offset);
 int  file_table_update(uint32_t file_id, uint32_t meta_block, uint32_t meta_offset);
 int  file_table_delete(uint32_t file_id);
@@ -384,7 +384,7 @@ int  file_table_flush(void);
 // ----------------------------------------------------------------------------
 
 int      meta_pool_init(uint32_t first_block, uint32_t block_count);
-void     meta_pool_shutdown(void);
+void     meta_pool_shutdown(bool write_back);
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);
 int      meta_pool_delete(uint32_t block, uint32_t offset);

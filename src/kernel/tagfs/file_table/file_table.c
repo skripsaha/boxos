@@ -79,8 +79,10 @@ int file_table_init(uint32_t first_block, uint32_t block_count) {
     return 0;
 }
 
-void file_table_shutdown(void) {
-    file_table_flush();
+void file_table_shutdown(bool write_back) {
+    if (write_back) {
+        file_table_flush();
+    }
 
     if (g_entries) {
         kfree(g_entries);
