@@ -47,7 +47,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 # Source files
 CORE_SRCS = shell.c parser.c executor.c line_edit.c
-CMD_SRCS = commands/cmd_use.c commands/cmd_exit.c commands/cmd_clear.c commands/cmd_help.c
+CMD_SRCS = commands/cmd_use.c commands/cmd_exit.c commands/cmd_clear.c commands/cmd_help.c commands/cmd_said.c
 
 SRCS = $(CORE_SRCS) $(CMD_SRCS)
 OBJS = $(SRCS:.c=.o)
