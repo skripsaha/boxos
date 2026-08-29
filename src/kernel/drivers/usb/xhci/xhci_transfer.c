@@ -499,6 +499,25 @@ void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
             return;
         }
 
+        /*
+         * ‼ THE ANSWER TO "STOP", WHICH IS NOT THE ANSWER TO THE TRANSFER.
+         *
+         * Stop Endpoint reports the transfer it stopped on, and it reports it
+         * as a Transfer Event — code Stopped, or Stopped with the length not
+         * to be believed. That is the controller confirming it has let go, not
+         * a device failing anything, and enumeration is being carried forward
+         * by the COMMAND's completion rather than by this.
+         *
+         * Without this line the block below reads it as a step that failed and
+         * releases the slot — which is exactly the device the stop was issued
+         * to save.
+         */
+        if (slot->state == ENUM_STATE_WAIT_EP0_STOP &&
+            (code == TRB_COMPLETION_STOPPED ||
+             code == TRB_COMPLETION_STOPPED_LENGTH)) {
+            return;
+        }
+
         if (!ok) {
             /* An optional class request the device does not implement. Clear
              * the pipe and step over it — that is the answer.

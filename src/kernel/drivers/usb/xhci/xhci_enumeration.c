@@ -1398,6 +1398,7 @@ const char* xhci_enum_state_name(uint8_t state) {
         case ENUM_STATE_WAIT_SET_PROTOCOL:      return "waiting for Set Protocol";
         case ENUM_STATE_WAIT_SET_IDLE:          return "waiting for Set Idle";
         case ENUM_STATE_WAIT_EP0_RESET:         return "clearing a stalled control pipe";
+        case ENUM_STATE_WAIT_EP0_STOP:          return "taking back a control transfer that was never answered";
         case ENUM_STATE_WAIT_EP0_DEQUEUE:       return "repositioning the control ring";
         case ENUM_STATE_WAIT_CONFIGURE_ENDPOINT:return "waiting for Configure Endpoint";
         case ENUM_STATE_CONFIGURED:             return "configured";
@@ -1923,6 +1924,70 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
                     ctrl->command_ring.cycle_state,
                     xhci_command_outstanding(ctrl));
         }
+
+        /*
+         * ‼ AND THEN THE SAME ROAD THE ERROR TAKES, BECAUSE IT IS THE SAME FACT.
+         *
+         * "This step did not deliver" reaches this driver two ways, and until
+         * now they cost wildly different amounts. A device that answers with an
+         * error goes to xhci_enum_recover_ep0: the pipe is cleared and the step
+         * is asked again, in microseconds, keeping its slot. A device that
+         * answers NOTHING came here and had its slot thrown away — Disable
+         * Slot, a teardown, a fresh port reset, Enable Slot and two Address
+         * Devices, two seconds of boot, and then the same question asked again
+         * anyway.
+         *
+         * Measured on the owner's board, one run: the error road was taken
+         * ELEVEN times and recovered eleven times. The silence road was taken
+         * once and also recovered — the long way round. The first control
+         * transaction after a port reset is simply unreliable on that machine,
+         * which is what every USB host is built to expect.
+         *
+         * ‼ WHY Stop Endpoint AND NOT xhci_ep_abandon, WHICH ALREADY EXISTS.
+         *
+         * Two reasons, and both are fatal to the shorter version. This function
+         * is reached from xhci_tick, which runs INSIDE IRQ0 and does not send
+         * its end-of-interrupt until it returns — and xhci_ep_abandon waits for
+         * the command ring twice, up to five seconds each. That is the fault
+         * this driver already spent a session taking out of the tick. And
+         * xhci_ep_abandon does nothing at all unless the endpoint is marked
+         * in-flight, which enumeration's control transfers never are: they are
+         * driven by the state machine, not waited on.
+         *
+         * So the command is POSTED and the state says what is being waited for,
+         * exactly like every other step here. Nothing waits.
+         *
+         * Bounded by the same budget the error road uses, so a device that is
+         * genuinely not going to answer still loses its slot — after the same
+         * number of tries, not before them.
+         */
+        if (xhci_enum_step_can_be_asked_again(state) &&
+            slot->step_retry < XHCI_STEP_RETRIES &&
+            slot->ep0_ring && slot->slot_id != 0) {
+
+            slot->step_retry++;
+            kprintf("[xHCI %s] port %u: %s — taking the transfer back and "
+                    "asking again (attempt %u of %u)\n",
+                    ctrl->name, slot->port_num, xhci_enum_state_name(state),
+                    slot->step_retry, XHCI_STEP_RETRIES);
+
+            slot->step_resume  = state;
+            slot->step_reissue = true;
+            __atomic_store_n(&slot->state, (uint8_t)ENUM_STATE_WAIT_EP0_STOP,
+                             __ATOMIC_RELEASE);
+
+            /* The step's clock starts again here rather than at the next pass:
+             * this IS something happening to the device, and the watchdog
+             * measures silence, not elapsed life. */
+            slot->watch_state = ENUM_STATE_WAIT_EP0_STOP;
+            slot->watch_since = now;
+
+            if (xhci_post_stop_endpoint_cmd(ctrl, slot, slot->slot_id, 1) < 0) {
+                xhci_slot_retire(ctrl, slot);
+            }
+            continue;
+        }
+
         xhci_slot_retire(ctrl, slot);
     }
 }
@@ -2317,10 +2382,27 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             break;
         }
 
+        /*
+         * ‼ TWO ROADS, ONE JUNCTION, AND EVERYTHING AFTER IT IS SHARED.
+         *
+         * A device that answered with an error halted the pipe, and the halt
+         * was cleared with Reset Endpoint. A device that answered NOTHING
+         * halted nothing, and the transfer was taken off it with Stop
+         * Endpoint. Two different commands, because the specification defines
+         * each of them for a different endpoint state — and the same thing to
+         * do next either way: the TRBs in front of the controller will never
+         * be executed, so it is told where software actually stands.
+         *
+         * Falling through rather than copying is the point. What separates the
+         * two cases is one command; what follows is one repair, and it should
+         * be impossible to fix one of them and not the other.
+         */
+        case ENUM_STATE_WAIT_EP0_STOP:
         case ENUM_STATE_WAIT_EP0_RESET: {
-            /* The halt is gone. The transfer that stalled is still sitting on
-             * the ring in front of the controller's dequeue pointer, so tell
-             * it where software has actually got to. */
+            /* The transfer is off the endpoint, by whichever of the two
+             * commands was right for the state it was in. What it left on the
+             * ring is still in front of the controller's dequeue pointer, so
+             * tell it where software has actually got to. */
             uint64_t resume = slot->ep0_ring->trbs_phys +
                               (uint64_t)slot->ep0_ring->enqueue_idx *
                               sizeof(xhci_trb_t);
