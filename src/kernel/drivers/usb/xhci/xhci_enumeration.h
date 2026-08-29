@@ -81,6 +81,27 @@ typedef enum {
     ENUM_STATE_WAIT_SET_PROTOCOL,
     ENUM_STATE_WAIT_SET_IDLE,
     ENUM_STATE_WAIT_EP0_RESET,
+
+    /*
+     * The transfer is being TAKEN BACK, which is not the same as clearing a
+     * halt — and telling the two apart is what this state exists for.
+     *
+     * A device that answers a step with an error halts the pipe, and a halted
+     * pipe is cleared with Reset Endpoint (Section 4.6.8, which is defined for
+     * Halted and for nothing else). A device that answers NOTHING halts
+     * nothing: measured on the owner's board, the control pipe was still
+     * Running with all three stages queued and none of them answered. Reset
+     * Endpoint there is refused with a Context State Error, and the three TRBs
+     * stay where they are — so the controller may execute them later, into a
+     * scratch page the next attempt is already using.
+     *
+     * Stop Endpoint is the command for that state. It answers with a Transfer
+     * Event saying the transfer was Stopped, and then the ring is repositioned
+     * exactly as it is after a Reset Endpoint — which is why both roads join at
+     * ENUM_STATE_WAIT_EP0_DEQUEUE and share every line after it.
+     */
+    ENUM_STATE_WAIT_EP0_STOP,
+
     ENUM_STATE_WAIT_EP0_DEQUEUE,
     ENUM_STATE_WAIT_CONFIGURE_ENDPOINT,
     ENUM_STATE_CONFIGURED,

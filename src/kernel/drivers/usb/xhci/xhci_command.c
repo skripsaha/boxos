@@ -308,6 +308,11 @@ static bool cmd_is_enumeration_step(uint8_t trb_type,
         case TRB_TYPE_ADDRESS_DEVICE:
         case TRB_TYPE_CONFIGURE_ENDPOINT:
         case TRB_TYPE_RESET_ENDPOINT:
+        /* Enumeration takes a control transfer back with this when the device
+         * answered nothing at all — Reset Endpoint is defined for a HALTED
+         * pipe, and a pipe nobody answered on is still Running. Its answer
+         * carries the state machine to the repositioning both roads share. */
+        case TRB_TYPE_STOP_ENDPOINT:
         case TRB_TYPE_SET_TR_DEQUEUE:
             return true;
         default:
