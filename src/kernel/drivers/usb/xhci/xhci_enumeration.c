@@ -1762,6 +1762,40 @@ static void xhci_report_stuck(xhci_controller_t* ctrl,
             xhci_port_protocol(ctrl, slot->port_num),
             slot->reset_took_ms, slot->ep0_max_packet);
 
+    /*
+     * ‼ AND WHAT THE CONTROL PIPE ITSELF IS DOING, WHICH IS THE ONE FACT THAT
+     * SEPARATES THE THREE WAYS A DESCRIPTOR READ CAN GO QUIET.
+     *
+     * The lines above describe the SLOT, and a slot reading Default with an
+     * address of zero is the correct, healthy state for a device that has been
+     * addressed with BSR set and is about to be asked who it is. It is
+     * therefore identical on a bus that is working and on the board where the
+     * next step never answered — which is why seven reports of this failure
+     * named nothing that could be acted on.
+     *
+     * The endpoint answers it, and the controller writes that answer itself:
+     *
+     *   Running, and the ring still queued  — the stages are there and the
+     *       device is NAKing them. A NAK is not an error and is retried for
+     *       ever, so this is the only failure on the bus that reports itself as
+     *       silence: the device has not finished coming up. Look at the
+     *       recovery it was given (XHCI_PORT_RESET_RECOVERY_MS).
+     *   Halted   — the transfer failed and the event that said so was lost.
+     *   Error / Disabled — the context is wrong, and nothing was ever tried.
+     *
+     * The two ring positions are what "still queued" is made of: enqueue is
+     * where software wrote the last stage, dequeue only moves when a transfer
+     * event names a TRB. Equal means every stage has been answered; apart means
+     * the controller has not finished with them.
+     */
+    if (slot->ep0_ring) {
+        kprintf("[xHCI %s]   its control pipe is %s; software has queued to %u "
+                "and the controller has answered up to %u\n",
+                ctrl->name,
+                xhci_ep_state_name(xhci_ep_context_state(ctrl, slot, 1)),
+                slot->ep0_ring->enqueue_idx, slot->ep0_ring->dequeue_idx);
+    }
+
     if (waiting) {
         kprintf("[xHCI %s]   still waiting on %s, posted %u ms ago\n",
                 ctrl->name, xhci_command_name(cmd_type), cmd_age);
