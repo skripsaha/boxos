@@ -1113,6 +1113,12 @@ cleanup_resources:
     xhci_ring_destroy(&ctrl->event_ring);
     xhci_erst_destroy(&ctrl->event_ring_segment_table);
 
+    /* And the device records, which were asked for before any of the above and
+     * were the one thing this path walked past. Nothing has been enumerated
+     * yet — bring-up is the only road here and it fails before the ports are
+     * looked at — so there is no live device being taken away with them. */
+    xhci_slots_release(ctrl);
+
     ctrl->initialized = false;
     return -1;
 }

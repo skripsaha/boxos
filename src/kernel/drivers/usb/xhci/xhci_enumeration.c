@@ -53,8 +53,7 @@ int xhci_slots_attach(xhci_controller_t* ctrl)
     ctrl->by_id = (struct xhci_device_slot**)
                   kmalloc(sizeof(struct xhci_device_slot*) * (count + 1u));
     if (!ctrl->by_id) {
-        kfree(ctrl->slots);
-        ctrl->slots = NULL;
+        xhci_slots_release(ctrl);
         return -1;
     }
 
@@ -63,6 +62,37 @@ int xhci_slots_attach(xhci_controller_t* ctrl)
     spinlock_init(&ctrl->slots_lock);
     ctrl->slot_count = (uint8_t)count;
     return 0;
+}
+
+/*
+ * ‼ A CONTROLLER THAT DID NOT COME UP TOOK ITS RECORDS WITH IT.
+ *
+ * The records are the FIRST thing bring-up asks for and were the one thing its
+ * failure path never gave back: it released the scratchpad, the mapping, the
+ * device context array, both rings and the event ring table, and left two
+ * allocations of its own standing. They were not even leaked in a way anything
+ * could find afterwards — xhci_init leaves the controller count where it was
+ * when bring-up fails, so the next controller found is written into the same
+ * entry with a memset over the whole of it, pointers included. Thirteen
+ * kilobytes at sixty-four slots, per controller that refuses.
+ *
+ * Safe on a controller that never got them, and safe twice: the count goes
+ * with the memory, so nothing walks a table that is no longer there.
+ */
+void xhci_slots_release(xhci_controller_t* ctrl)
+{
+    if (!ctrl) {
+        return;
+    }
+    if (ctrl->by_id) {
+        kfree(ctrl->by_id);
+        ctrl->by_id = NULL;
+    }
+    if (ctrl->slots) {
+        kfree(ctrl->slots);
+        ctrl->slots = NULL;
+    }
+    ctrl->slot_count = 0;
 }
 
 static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
