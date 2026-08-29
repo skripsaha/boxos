@@ -29,6 +29,14 @@ const ShellCommand g_commands[] = {
     {"use",   cmd_use,   "use [tags]", "Set/clear context tags"},
     {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)"},
     {"clear", cmd_clear, "clear",      "Clear screen"},
+    /* Built in, and that is the whole point of it: the board failure being
+     * chased is one where the volume mounts and reports its files while the
+     * shell can find none of them, so `logsave` and `lastsaid` — both ELF
+     * files ON that volume — come back Unknown at the exact moment the log is
+     * worth having. This needs no lookup and no spawn. Both of those tools
+     * remain; this is the copy that cannot be taken away. */
+    {"said",  cmd_said,  "said [before]",
+                                 "What this machine said (add a NAME to file it)"},
     {NULL, NULL, NULL, NULL}
 };
 

@@ -1165,6 +1165,39 @@ run_lastsaid() {
     grep -qE "byte\(s\) written to now.log" build/serial.log
     chk $? "and logsave still writes this boot's log, untouched"
 
+    # ── the copy that cannot be taken away ──────────────────────────────────
+    #
+    # Both tools above are ELF files ON the volume. The board failure being
+    # chased is one where the volume mounts, reports its files, and the shell
+    # can find none of them — so at the moment the log is worth having,
+    # nothing that could write it can be started. `said` is compiled into
+    # shell.bin and needs no lookup and no spawn.
+    ./tools/qemu-input.sh type "said" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 8
+    grep -qE "^-- [0-9]+ byte\(s\): what this boot has said --" build/serial.log
+    chk $? "the built-in prints this boot's log without loading anything"
+
+    ./tools/qemu-input.sh type "said before" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 8
+    grep -qE "^-- [0-9]+ byte\(s\): what the run before this one said --" build/serial.log
+    chk $? "and the previous run's, through the same door"
+
+    ./tools/qemu-input.sh type "said kept.log" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 8
+    grep -qE "written to kept.log" build/serial.log
+    chk $? "and files it when given a name"
+
+    grep -q "said \[before\]" build/serial.log || {
+        ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        sleep 4
+    }
+    grep -q "said \[before\]" build/serial.log
+    chk $? "and help names it, so it can be found without being known"
+
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.lastsaid.log"
     make >"$SCRATCH/build.log" 2>&1
