@@ -590,7 +590,11 @@ static void hub_port_gone(XhciHub* h, uint8_t port)
     kprintf("[USB hub slot %u] port %u: device removed\n",
             h->slot->slot_id, port);
 
-    for (int guard = 0; guard < XHCI_MAX_DEVICE_SLOTS; guard++) {
+    /* A hub cannot have more descendants than the controller has slots, so
+     * that is the bound — it used to be a machine-wide 64 that had nothing to
+     * do with this controller. */
+    uint32_t guard_max = h->ctrl ? h->ctrl->slot_count : 0u;
+    for (uint32_t guard = 0; guard < guard_max; guard++) {
         xhci_device_slot_t* child = NULL;
         /* Find a device whose parent is this hub port. Repeated rather than
          * recursive: releasing a child that is itself a hub releases its own

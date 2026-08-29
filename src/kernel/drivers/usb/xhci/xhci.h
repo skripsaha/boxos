@@ -79,6 +79,47 @@ typedef struct {
     uint64_t dcbaa_phys;
 
     uint8_t max_slots;
+
+    /*
+     * ── this controller's devices, and only this controller's ─────────────
+     *
+     * There used to be ONE array of sixty-four records for the whole machine,
+     * behind ONE spinlock, walked from end to end on every lookup — including
+     * the lookup every transfer event does, inside the interrupt handler, with
+     * interrupts off. Two controllers contended for that lock while neither
+     * had anything to do with the other's devices, and a whole special case
+     * existed in the retirement pass for "this record belongs to somebody
+     * else, do not touch it but do not forget it either".
+     *
+     * A controller states how many devices it can address — MaxSlots in
+     * HCSPARAMS1 — and the driver already sizes the Device Context Base
+     * Address Array by that number. The records are sized by it too: a
+     * controller that can address four devices carries four, one that can
+     * address 255 carries 255, and neither is told a number this kernel
+     * invented.
+     *
+     * `by_id` turns the hot lookup into an index. Slot IDs are what the
+     * CONTROLLER hands out, 1..max_slots, unique while they are in use, so
+     * the event handler stops searching for the device an event names.
+     */
+    struct xhci_device_slot*  slots;      /* slot_count records */
+    struct xhci_device_slot** by_id;      /* slot_count + 1, indexed by slot id */
+    uint8_t                   slot_count;
+    spinlock_t                slots_lock;
+
+    /*
+     * Something of THIS controller's is retiring, and somebody is or is not
+     * already taking it down.
+     *
+     * These were one pair for the whole machine, and they had to be while the
+     * records were: a departure anywhere raised the one flag. Once the records
+     * belong to a controller the flag has to as well — a pass by one
+     * controller consuming a flag raised by another leaves that other's device
+     * standing for ever, which is the fifteen-chairs failure wearing a
+     * different hat. Moved with them, deliberately and at the same time.
+     */
+    volatile uint32_t         retire_pending;
+    volatile uint32_t         retire_busy;
     uint8_t max_ports;
     uint16_t max_interrupters;
     uint8_t context_size;

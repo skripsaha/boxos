@@ -16,12 +16,53 @@
 #include "cpu_calibrate.h"
 #include "boardroom.h"
 
-static struct xhci_device_slot device_slots[XHCI_MAX_DEVICE_SLOTS];
-static spinlock_t device_slots_lock;
-
+/*
+ * ‼ THERE IS NO TABLE HERE ANY MORE, and that is the point.
+ *
+ * The records live on the controller that handed out the slots, sized by what
+ * that controller says it can address. See xhci_slots_attach and the note on
+ * xhci_controller_t::slots.
+ */
 void xhci_enumeration_init(void) {
-    spinlock_init(&device_slots_lock);
-    memset(device_slots, 0, sizeof(device_slots));
+    /*
+     * Deliberately nothing.
+     *
+     * This used to memset a machine-wide array — which is why offering it to
+     * userspace as `hw.usb.init` was withdrawn: calling it a second time wiped
+     * every live device on the machine, including the one the volume was
+     * mounted from, while drivers still held pointers into it. There is no
+     * such array left to wipe.
+     */
+}
+
+int xhci_slots_attach(xhci_controller_t* ctrl)
+{
+    if (!ctrl || ctrl->max_slots == 0) {
+        return -1;
+    }
+    if (ctrl->slots) {
+        return 0;                       /* already standing */
+    }
+
+    uint32_t count = ctrl->max_slots;
+    ctrl->slots = (struct xhci_device_slot*)
+                  kmalloc(sizeof(struct xhci_device_slot) * count);
+    if (!ctrl->slots) {
+        return -1;
+    }
+    ctrl->by_id = (struct xhci_device_slot**)
+                  kmalloc(sizeof(struct xhci_device_slot*) * (count + 1u));
+    if (!ctrl->by_id) {
+        kfree(ctrl->slots);
+        ctrl->slots = NULL;
+        return -1;
+    }
+
+    memset(ctrl->slots, 0, sizeof(struct xhci_device_slot) * count);
+    memset(ctrl->by_id, 0, sizeof(struct xhci_device_slot*) * (count + 1u));
+    spinlock_init(&ctrl->slots_lock);
+    ctrl->slot_count = (uint8_t)count;
+    return 0;
 }
 
 static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
@@ -30,8 +71,7 @@ static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot);
  * the pass that takes it down. One core does that at a time, and the others
  * go away rather than queue up behind it — the same arrangement the hubs use,
  * and for the same reason. */
-static volatile uint32_t retire_pending = 0;
-static volatile uint32_t retire_busy = 0;
+/* The retirement flags live on the controller now — see xhci_controller_t. */
 
 /*
  * A slot somebody may still speak to.
@@ -68,20 +108,24 @@ bool xhci_slot_still_is(const xhci_device_slot_t* slot, uint32_t epoch)
            slot_is_live(slot);
 }
 
-static struct xhci_device_slot* find_free_slot(void) {
-    spin_lock(&device_slots_lock);
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].state == ENUM_STATE_IDLE) {
+static struct xhci_device_slot* find_free_slot(xhci_controller_t* ctrl) {
+    if (!ctrl || !ctrl->slots) {
+        return NULL;
+    }
+    spin_lock(&ctrl->slots_lock);
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        if (ctrl->slots[i].state == ENUM_STATE_IDLE) {
             /* A new tenancy, and it says so before anything can be posted on
              * its behalf. Answers to the previous occupant's questions carry
              * the old number and are turned away. */
-            __atomic_add_fetch(&device_slots[i].epoch, 1, __ATOMIC_ACQ_REL);
-            device_slots[i].state = ENUM_STATE_CLAIMING;
-            spin_unlock(&device_slots_lock);
-            return &device_slots[i];
+            __atomic_add_fetch(&ctrl->slots[i].epoch, 1, __ATOMIC_ACQ_REL);
+            ctrl->slots[i].state = ENUM_STATE_CLAIMING;
+            ctrl->slots[i].ctrl  = ctrl;
+            spin_unlock(&ctrl->slots_lock);
+            return &ctrl->slots[i];
         }
     }
-    spin_unlock(&device_slots_lock);
+    spin_unlock(&ctrl->slots_lock);
     return NULL;
 }
 
@@ -102,8 +146,33 @@ static void slot_wipe(struct xhci_device_slot* slot)
 {
     uint32_t epoch = slot->epoch;
     uint8_t  state = slot->state;
+    /* A record belongs to the controller whose table it lives in, for the
+     * whole life of the machine. Wiping that would leave an entry nothing
+     * could be posted on behalf of. */
+    xhci_controller_t* owner = slot->ctrl;
+
+    /*
+     * ‼ AND THE INDEX GOES WITH THE NUMBER.
+     *
+     * by_id maps a controller's slot id to the record holding it. A record
+     * that stops holding one must leave the index, and this is the single
+     * place every record is reset — clearing it only where a slot is taken
+     * down leaves a stale pointer, and a stale pointer here is not harmless:
+     * the record is reused, gets a DIFFERENT id, and becomes live again while
+     * the old id still points at it. An event naming the old id would then be
+     * delivered to a device that is not the one it is about.
+     */
+    if (owner && owner->by_id && slot->slot_id != 0 &&
+        slot->slot_id <= owner->slot_count) {
+        spin_lock(&owner->slots_lock);
+        if (owner->by_id[slot->slot_id] == slot) {
+            owner->by_id[slot->slot_id] = NULL;
+        }
+        spin_unlock(&owner->slots_lock);
+    }
 
     memset(slot, 0, sizeof(*slot));
+    slot->ctrl = owner;
 
     slot->epoch = epoch;
     slot->state = state;
@@ -111,33 +180,40 @@ static void slot_wipe(struct xhci_device_slot* slot)
 
 static struct xhci_device_slot* find_slot_by_port(xhci_controller_t* ctrl,
                                                  uint8_t port) {
-    spin_lock(&device_slots_lock);
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl == ctrl && device_slots[i].port_num == port &&
-            slot_is_live(&device_slots[i])) {
-            spin_unlock(&device_slots_lock);
-            return &device_slots[i];
+    if (!ctrl || !ctrl->slots) {
+        return NULL;
+    }
+    spin_lock(&ctrl->slots_lock);
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        if (ctrl->slots[i].port_num == port && slot_is_live(&ctrl->slots[i])) {
+            spin_unlock(&ctrl->slots_lock);
+            return &ctrl->slots[i];
         }
     }
-    spin_unlock(&device_slots_lock);
+    spin_unlock(&ctrl->slots_lock);
     return NULL;
 }
 
+/*
+ * The device an event names, without looking for it.
+ *
+ * Called from the event drain for every transfer and every command answer,
+ * which is why it is worth being an index rather than a walk: this ran a
+ * sixty-four-entry search under a machine-wide lock, with interrupts off, per
+ * event.
+ */
 xhci_device_slot_t* xhci_get_device_slot(xhci_controller_t* ctrl, uint8_t slot_id) {
-    if (!ctrl || slot_id == 0 || slot_id > ctrl->max_slots) {
+    if (!ctrl || !ctrl->by_id || slot_id == 0 || slot_id > ctrl->slot_count) {
         return NULL;
     }
 
-    spin_lock(&device_slots_lock);
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl == ctrl && device_slots[i].slot_id == slot_id &&
-            slot_is_live(&device_slots[i])) {
-            spin_unlock(&device_slots_lock);
-            return &device_slots[i];
-        }
+    spin_lock(&ctrl->slots_lock);
+    struct xhci_device_slot* slot = ctrl->by_id[slot_id];
+    if (slot && !slot_is_live(slot)) {
+        slot = NULL;
     }
-    spin_unlock(&device_slots_lock);
-    return NULL;
+    spin_unlock(&ctrl->slots_lock);
+    return slot;
 }
 
 xhci_device_slot_t* xhci_get_device_slot_by_port(xhci_controller_t* ctrl,
@@ -285,7 +361,7 @@ static int enum_admit(xhci_controller_t* ctrl, struct xhci_device_slot* slot)
      * ‼ AND THE WINDOW IS IN THIS FUNCTION, not in the caller. The old shape
      * released the lock and only THEN marked the slot as queued:
      *
-     *     spin_unlock(&device_slots_lock);
+     *     spin_unlock(&ctrl->slots_lock);
      *     if (!mine) { ...store QUEUED... }
      *
      * Between those two lines the slot is waiting for the bus and is INVISIBLE
@@ -325,7 +401,7 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
     struct xhci_device_slot* next = NULL;
     struct xhci_device_slot* recovered = NULL;
 
-    spin_lock(&device_slots_lock);
+    spin_lock(&ctrl->slots_lock);
 
     struct xhci_device_slot* active = ctrl->enum_active;
 
@@ -342,7 +418,7 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
     }
 
     if (recovered) {
-        spin_unlock(&device_slots_lock);
+        spin_unlock(&ctrl->slots_lock);
         enum_begin_slot(ctrl, recovered);
         return;
     }
@@ -354,7 +430,7 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
                             state != ENUM_STATE_CONFIGURED &&
                             state != ENUM_STATE_RETIRING);
         if (still_going) {
-            spin_unlock(&device_slots_lock);
+            spin_unlock(&ctrl->slots_lock);
             return;                     /* its turn is not over */
         }
         ctrl->enum_active = NULL;
@@ -376,18 +452,17 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
      * retry counter is about root ports, and a hub rescans its own.
      */
     bool next_is_retry = true;
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl != ctrl ||
-            __atomic_load_n(&device_slots[i].state, __ATOMIC_ACQUIRE) !=
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        if (__atomic_load_n(&ctrl->slots[i].state, __ATOMIC_ACQUIRE) !=
                 ENUM_STATE_QUEUED) {
             continue;
         }
-        uint8_t born = device_slots[i].born_port;
+        uint8_t born = ctrl->slots[i].born_port;
         bool retry = (born != 0 && born <= ctrl->max_ports &&
                       ctrl->enum_attempts[born] > 0);
 
         if (!next || (next_is_retry && !retry)) {
-            next          = &device_slots[i];
+            next          = &ctrl->slots[i];
             next_is_retry = retry;
             if (!retry) {
                 break;      /* nothing outranks a first attempt */
@@ -398,7 +473,7 @@ void xhci_enum_pump(xhci_controller_t* ctrl)
         ctrl->enum_active = next;
     }
 
-    spin_unlock(&device_slots_lock);
+    spin_unlock(&ctrl->slots_lock);
 
     if (next) {
         enum_start(ctrl, next);
@@ -437,7 +512,7 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
         return -8;
     }
 
-    struct xhci_device_slot* slot = find_free_slot();
+    struct xhci_device_slot* slot = find_free_slot(ctrl);
     if (!slot) {
         kprintf("[xHCI] no free device slot for port %u\n", port);
         return -5;
@@ -461,19 +536,7 @@ int xhci_enumerate_device(xhci_controller_t* ctrl, uint8_t port) {
 xhci_device_slot_t* xhci_get_device_slot_by_id(xhci_controller_t* ctrl,
                                                uint8_t slot_id)
 {
-    if (slot_id == 0) {
-        return NULL;
-    }
-    spin_lock(&device_slots_lock);
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl == ctrl && device_slots[i].slot_id == slot_id &&
-            slot_is_live(&device_slots[i])) {
-            spin_unlock(&device_slots_lock);
-            return &device_slots[i];
-        }
-    }
-    spin_unlock(&device_slots_lock);
-    return NULL;
+    return xhci_get_device_slot(ctrl, slot_id);
 }
 
 bool xhci_slot_enter(xhci_device_slot_t* slot)
@@ -547,7 +610,7 @@ void xhci_slot_retire(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
         xhci_post_disable_slot_cmd(ctrl, slot, slot->slot_id);
     }
 
-    __atomic_store_n(&retire_pending, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctrl->retire_pending, 1, __ATOMIC_RELEASE);
 }
 
 int xhci_slot_service(xhci_controller_t* ctrl)
@@ -555,50 +618,33 @@ int xhci_slot_service(xhci_controller_t* ctrl)
     if (!ctrl) {
         return 0;
     }
-    if (__atomic_load_n(&retire_pending, __ATOMIC_ACQUIRE) == 0) {
+    if (__atomic_load_n(&ctrl->retire_pending, __ATOMIC_ACQUIRE) == 0) {
         return 0;
     }
-    if (__atomic_exchange_n(&retire_busy, 1, __ATOMIC_ACQUIRE) != 0) {
+    if (__atomic_exchange_n(&ctrl->retire_busy, 1, __ATOMIC_ACQUIRE) != 0) {
         return 0;                       /* somebody is already doing this */
     }
 
-    __atomic_store_n(&retire_pending, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctrl->retire_pending, 0, __ATOMIC_RELEASE);
 
     int done = 0;
     bool more = false;
 
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        struct xhci_device_slot* slot = &device_slots[i];
-        /* This controller's devices only. The table is shared; taking down
-         * another controller's device with this one in hand posts its Disable
-         * Slot to silicon that never enabled it, and frees an input context
-         * sized by the wrong controller's context size. */
-        if (slot->ctrl != ctrl) {
-            /*
-             * Somebody else's device, and this pass is not allowed to touch
-             * it — but it is not allowed to FORGET it either.
-             *
-             * The flag this pass consumed is one flag for the whole machine,
-             * and it was raised by a departure that may well have been on the
-             * other controller. Skipping quietly left it lowered with work
-             * still to do, so on a machine with two controllers every pass by
-             * the first one ate the flag and the second one's devices were
-             * never taken down at all: the unit was never released, its number
-             * never came back, the next arrival got a higher one — and a
-             * higher number is a chair nobody was sitting in.
-             *
-             * Measured on a live board with an Intel and an NVIDIA
-             * controller: fifteen chairs from ONE flash drive, slot ids
-             * climbing to 34, and not a single "is gone" in the whole log. In
-             * QEMU, which has one controller, the same ten replugs reuse usb0
-             * ten times over. Saying "there is more" is what keeps the pass
-             * for the OTHER controller reachable.
-             */
-            if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) == ENUM_STATE_RETIRING) {
-                more = true;
-            }
-            continue;
-        }
+    /*
+     * This controller's records, because they are the only ones it has.
+     *
+     * A whole special case used to live here: the table was shared, so a pass
+     * by one controller met the other's devices, could not touch them — a
+     * Disable Slot posted to silicon that never enabled the slot, an input
+     * context freed at the wrong controller's context size — and could not
+     * ignore them either, because the "something is retiring" flag was one
+     * flag for the machine. Measured on a board with an Intel and an NVIDIA
+     * controller before that was understood: fifteen chairs from ONE flash
+     * drive and not a single "is gone" in the log. The records moved onto the
+     * controller and the special case has nothing left to be about.
+     */
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        struct xhci_device_slot* slot = &ctrl->slots[i];
         if (__atomic_load_n(&slot->state, __ATOMIC_ACQUIRE) != ENUM_STATE_RETIRING) {
             continue;
         }
@@ -635,15 +681,24 @@ int xhci_slot_service(xhci_controller_t* ctrl)
     }
 
     if (more) {
-        __atomic_store_n(&retire_pending, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&ctrl->retire_pending, 1, __ATOMIC_RELEASE);
     }
-    __atomic_store_n(&retire_busy, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&ctrl->retire_busy, 0, __ATOMIC_RELEASE);
     return done;
 }
 
 bool xhci_slot_retire_pending(void)
 {
-    return __atomic_load_n(&retire_pending, __ATOMIC_ACQUIRE) != 0;
+    /* Any controller with work waiting. The idle loop asks before walking
+     * them, so this stays a question about the machine even though the answer
+     * is kept per controller. */
+    for (uint8_t i = 0; i < xhci_controller_count(); i++) {
+        xhci_controller_t* c = xhci_controller_at(i);
+        if (c && __atomic_load_n(&c->retire_pending, __ATOMIC_ACQUIRE) != 0) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void xhci_slot_service_if_pending(void)
@@ -694,7 +749,7 @@ int xhci_enumerate_behind_hub(xhci_controller_t* ctrl,
         return -2;
     }
 
-    struct xhci_device_slot* slot = find_free_slot();
+    struct xhci_device_slot* slot = find_free_slot(ctrl);
     if (!slot) {
         kprintf("[xHCI] no free device slot for hub slot %u port %u\n",
                 hub->slot_id, hub_port);
@@ -897,6 +952,15 @@ static void slot_take_down(xhci_controller_t* ctrl, xhci_device_slot_t* slot) {
      * start, so a device that came up costs nothing.
      */
     uint8_t retry_port = (!slot->ever_configured && ctrl) ? slot->born_port : 0;
+
+    if (ctrl && ctrl->by_id && slot->slot_id != 0 &&
+        slot->slot_id <= ctrl->slot_count) {
+        spin_lock(&ctrl->slots_lock);
+        if (ctrl->by_id[slot->slot_id] == slot) {
+            ctrl->by_id[slot->slot_id] = NULL;
+        }
+        spin_unlock(&ctrl->slots_lock);
+    }
 
     slot->slot_id = 0;
     slot->port_num = 0;
@@ -1618,11 +1682,8 @@ int xhci_enum_settle(xhci_controller_t* ctrl, uint32_t timeout_ms)
         xhci_slot_service(ctrl);
 
         int busy = 0;
-        for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-            if (device_slots[i].ctrl != ctrl) {
-                continue;   /* another controller's bus, not this one's */
-            }
-            uint8_t state = __atomic_load_n(&device_slots[i].state,
+        for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+            uint8_t state = __atomic_load_n(&ctrl->slots[i].state,
                                             __ATOMIC_ACQUIRE);
             if (state != ENUM_STATE_IDLE && state != ENUM_STATE_CONFIGURED &&
                 state != ENUM_STATE_RETIRING) {
@@ -1646,16 +1707,12 @@ void xhci_enum_for_each_configured(xhci_controller_t* ctrl,
     if (!visit || !ctrl) {
         return;
     }
-    /* One controller's devices, not every device on the machine. The slot
-     * table is shared, and a caller working through the controllers one at a
-     * time would otherwise be handed the second controller's disk while it is
-     * holding the first one — measured: the disk attached to the wrong
-     * controller, every transfer went to silicon that had never heard of it,
-     * and it "never became ready". */
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        if (device_slots[i].ctrl == ctrl &&
-            device_slots[i].state == ENUM_STATE_CONFIGURED) {
-            visit(ctx, &device_slots[i]);
+    if (!ctrl->slots) {
+        return;
+    }
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        if (ctrl->slots[i].state == ENUM_STATE_CONFIGURED) {
+            visit(ctx, &ctrl->slots[i]);
         }
     }
 }
@@ -1739,22 +1796,8 @@ void xhci_enum_watchdog(xhci_controller_t* ctrl)
     uint64_t budget = cpu_ms_to_tsc(XHCI_ENUM_TIMEOUT_MS);
     static bool reported_controller = false;
 
-    for (int i = 0; i < XHCI_MAX_DEVICE_SLOTS; i++) {
-        struct xhci_device_slot* slot = &device_slots[i];
-
-        /*
-         * This controller's devices only.
-         *
-         * The watchdog runs once per controller over a table they share, so
-         * without this the first controller reaps the second one's devices —
-         * and reaps them with itself in hand, which retires a slot against
-         * silicon that never enabled it. Measured on a board with two: four
-         * devices on the chipset controller were given up on, by name, by the
-         * controller inside the graphics card.
-         */
-        if (slot->ctrl != ctrl) {
-            continue;
-        }
+    for (uint32_t i = 0; i < ctrl->slot_count; i++) {
+        struct xhci_device_slot* slot = &ctrl->slots[i];
 
         uint8_t state = __atomic_load_n(&slot->state, __ATOMIC_ACQUIRE);
         if (state == ENUM_STATE_IDLE || state == ENUM_STATE_CONFIGURED ||
@@ -1949,6 +1992,13 @@ void xhci_enum_advance_state(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
             }
 
             slot->slot_id = slot_id;
+            /* And the index the event drain reads, so the next event naming
+             * this slot finds it without a search. */
+            if (ctrl->by_id && slot_id <= ctrl->slot_count) {
+                spin_lock(&ctrl->slots_lock);
+                ctrl->by_id[slot_id] = slot;
+                spin_unlock(&ctrl->slots_lock);
+            }
 
             /*
              * A root-port device learns its speed from the port. One behind a

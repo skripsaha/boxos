@@ -131,6 +131,8 @@ _Static_assert(sizeof(MsdCsw) == 13, "a status wrapper is 13 bytes");
 
 static uint32_t msd_patience_ms(uint32_t bytes)
 {
+    /* Callers pass what the device has to get through, which is this command
+     * plus whatever it may still be finishing — see MsdJob::behind. */
     uint64_t ms = ((uint64_t)bytes * 1000u) / MSD_SLOWEST_BYTES_PER_SEC;
     if (ms < MSD_COMMAND_PATIENCE_MS) {
         ms = MSD_COMMAND_PATIENCE_MS;
@@ -245,6 +247,22 @@ typedef struct XhciMsdUnit {
 
     /* Whether this unit has already said its device left. */
     bool     said_gone;
+
+    /*
+     * How much the last command on this unit asked for.
+     *
+     * ‼ A DEVICE IS NOT IDLE THE INSTANT IT ANSWERS. Flash does its own
+     * housekeeping after a read, and the bigger the read the longer that
+     * takes — so the command AFTER a large one is made to wait by it, without
+     * anything being wrong with either. Once the room began handing whole runs
+     * of neighbouring blocks to a medium that accepts them, a four-kilobyte
+     * command could be queued behind sixteen and be given only its own four
+     * kilobytes' worth of patience. Measured: at five hundred and twelve bytes
+     * a second the small command took the whole of the budget sized for it
+     * alone, and was called broken — a margin exactly as wide as the driver's
+     * own error, which is not a margin.
+     */
+    uint32_t prev_bytes;
 
     void*    cmd_virt;   uint64_t cmd_phys;      /* wrappers, one page */
     void*    bounce_virt;uint64_t bounce_phys;   /* data */
@@ -688,6 +706,7 @@ typedef struct MsdJob {
     uint8_t   csw_tries;
     bool      hand_to_kcore;        /* false = the caller is driving */
 
+    uint32_t  behind;               /* bytes the device was last asked for */
     uint32_t  transferred;          /* bytes the data stage moved */
     int       status;               /* 0 carried out, 1 refused, -1 broken */
     volatile uint8_t finished;
@@ -725,6 +744,10 @@ static void msd_job_begin(MsdJob* j)
     MsdCbw* cbw = (MsdCbw*)u->cmd_virt;
 
     j->tag = ++u->tag;
+
+    /* What this one may be waiting on, and what the next one may wait on. */
+    j->behind      = u->prev_bytes;
+    u->prev_bytes  = j->data_len;
 
     /* Where the answer goes and what it runs, set once, before anything can
      * post it. The node is used only by a job somebody else is driving, but a
@@ -897,7 +920,7 @@ static void msd_job_run(MsdJob* j)
      * it — see MSD_COMMAND_PATIENCE_MS. Nothing below reaches it except a
      * device that is present, whose endpoint is well, on a controller that is
      * running, and which has still not spoken. */
-    const uint32_t patience = msd_patience_ms(j->data_len);
+    const uint32_t patience = msd_patience_ms(j->data_len + j->behind);
     uint64_t give_up_at = rdtsc() + cpu_ms_to_tsc(patience);
 
     while (!__atomic_load_n(&j->finished, __ATOMIC_ACQUIRE)) {
@@ -1879,7 +1902,7 @@ void xhci_msd_watchdog(void)
         bool here = msd_device_is_there(u);
         uint64_t since = __atomic_load_n(&u->watched_since, __ATOMIC_RELAXED);
         if (here && (int64_t)(rdtsc() - since) <
-                        (int64_t)cpu_ms_to_tsc(msd_patience_ms(j->data_len))) {
+                        (int64_t)cpu_ms_to_tsc(msd_patience_ms(j->data_len + j->behind))) {
             continue;
         }
         /* Claimed here, so a second pass on another core cannot give up on the
@@ -1907,7 +1930,8 @@ void xhci_msd_watchdog(void)
 
     kprintf("[USB disk %u] a read nobody was waiting on has been asking for "
             "more time for %u ms at stage %u — giving up on the command\n",
-            late_unit->number, msd_patience_ms(late_job->data_len),
+            late_unit->number,
+            msd_patience_ms(late_job->data_len + late_job->behind),
             late_job->phase);
     /* The transfer comes off the endpoint before anything else happens — see
      * the note on the same call in msd_job_run. It matters more here: this job

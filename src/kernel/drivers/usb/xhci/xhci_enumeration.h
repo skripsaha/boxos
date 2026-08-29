@@ -100,7 +100,15 @@ typedef enum {
  * parked in a state it can never leave holds a port hostage for the rest of
  * the boot. A failure here is a device you can unplug and plug back in. */
 
-#define XHCI_MAX_DEVICE_SLOTS 64
+/*
+ * There is no such number any more.
+ *
+ * A controller states how many devices it can address in HCSPARAMS1, and its
+ * records are sized by that — see xhci_controller_t::slots. A machine-wide 64
+ * was both a cap this kernel invented for controllers that can address 255 and
+ * an array a controller that can address four carried in full.
+ */
+int xhci_slots_attach(xhci_controller_t* ctrl);
 
 struct xhci_device_slot {
     /* Which controller handed out this slot.
