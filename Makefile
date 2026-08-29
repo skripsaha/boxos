@@ -286,6 +286,18 @@ endif
 
 USBRECOVER_MARK = $(BUILDDIR)/.usbrecover.$(if $(filter on,$(USBRECOVER)),on,off)
 
+# Run, once, the one control transfer no emulated device will ever fail to
+# answer: posted and not rung for, so xhci_ep_wait genuinely gives up. Proves
+# the transfer is taken back off the endpoint rather than merely forgotten —
+# see xhci_ctrl_giveup_proof. Off in every ordinary build.
+#
+# `make CTRLGIVEUP=on`
+ifeq ($(CTRLGIVEUP),on)
+CFLAGS += -DCONFIG_XHCI_CTRL_GIVEUP_PROOF=1
+endif
+
+CTRLGIVEUP_MARK = $(BUILDDIR)/.ctrlgiveup.$(if $(filter on,$(CTRLGIVEUP)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -538,12 +550,16 @@ $(USBRECOVER_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.usbrecover.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) | $(BUILDDIR)
+$(CTRLGIVEUP_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.ctrlgiveup.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

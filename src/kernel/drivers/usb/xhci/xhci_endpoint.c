@@ -414,6 +414,57 @@ void xhci_ep_complete(xhci_device_slot_t* slot, uint8_t dci,
     }
 }
 
+/*
+ * Is there any point going on waiting — asked of registers, not of a clock.
+ *
+ * The same three questions msd_job_run asks on the bulk path, in the same
+ * order and for the same reason: on USB, a device that is merely BUSY says
+ * nothing at all (it NAKs, which is not an error and which the controller
+ * retries by itself), while a device that has gone or a pipe that has broken
+ * says so. Silence is the one state no clock can tell from health, so the
+ * clock has to be the last thing asked rather than the first.
+ *
+ * Returns why the wait is hopeless, or NULL to keep waiting.
+ */
+static const char* ep_wait_is_hopeless(xhci_controller_t* ctrl,
+                                       xhci_device_slot_t* slot, uint8_t dci)
+{
+    /* The slot's tenancy. Set the moment a port event is drained — and this
+     * loop drains on every pass, so the window where the register below knows
+     * something this does not is a very narrow one. */
+    if (!xhci_slot_is_live(slot)) {
+        return "the device has gone";
+    }
+
+    /*
+     * And the port itself, for that window. A device behind a hub carries the
+     * ROOT port here, so a healthy reading describes the branch and says
+     * nothing about the device — which is why this may only ever END a wait,
+     * never justify prolonging one.
+     */
+    if (slot->port_num != 0 && xhci_port_says_gone(ctrl, slot->port_num)) {
+        return "nothing is attached to its port any more";
+    }
+
+    /*
+     * What the CONTROLLER says the pipe is doing. Halted is deliberately not
+     * here: a stall is how a device says no, it arrives as a Transfer Event of
+     * its own, and the loop above will see it as an answer — which it is.
+     */
+    uint8_t state = xhci_ep_context_state(ctrl, slot, dci);
+    if (state == XHCI_EP_STATE_ERROR) {
+        return "the pipe it is on has gone to Error";
+    }
+    if (state == XHCI_EP_STATE_DISABLED) {
+        return "the pipe it is on has been taken away";
+    }
+
+    if (ctrl->error_state) {
+        return "the controller has stopped, so nobody is left to answer";
+    }
+    return NULL;
+}
+
 int xhci_ep_wait(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                  uint8_t dci, uint32_t timeout_ms, uint32_t* out_residual)
 {
@@ -435,8 +486,44 @@ int xhci_ep_wait(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
         if (ep->xfer_state == XHCI_XFER_DONE) {
             break;
         }
-        if ((int64_t)(rdtsc() - deadline) >= 0) {
-            ep->xfer_state = XHCI_XFER_IDLE;
+
+        const char* hopeless = ep_wait_is_hopeless(ctrl, slot, dci);
+        if (!hopeless && (int64_t)(rdtsc() - deadline) >= 0) {
+            hopeless = "it has not answered in the time it was given";
+        }
+
+        if (hopeless) {
+            /*
+             * ‼ THE TRANSFER COMES BACK OFF THE ENDPOINT. GIVING UP IS NOT
+             * THE SAME AS WALKING AWAY.
+             *
+             * This used to set the state to IDLE and return, which says
+             * nothing to the controller: the TRB is still on the ring, the
+             * controller still owns it, and it may complete it whenever the
+             * device finally answers. Two things followed, and both are
+             * silent.
+             *
+             * The controller writes into the buffer the abandoned transfer
+             * named — and that buffer belongs to a caller who has been told
+             * the transfer failed and has moved on. The unit's bounce buffer
+             * is one of them, reused by the very next command.
+             *
+             * And the stale answer is taken as the answer to the NEXT
+             * transfer. xhci_ep_complete matches a completion to its TRB, but
+             * a control transfer deliberately sets xfer_trb_phys to zero —
+             * "the next completion on this endpoint is mine" — which turns
+             * that match off. So the next question asked down EP0 gets the
+             * previous question's answer, and believes it.
+             *
+             * xhci_ep_abandon is what says it out loud to the controller:
+             * Stop Endpoint, then the dequeue pointer moved to where software
+             * stands, and only then the endpoint called idle. It was written
+             * for the bulk path and has always handled DCI 1 — it simply was
+             * never called from here.
+             */
+            kprintf("[xHCI] slot %u endpoint %u: %s — taking the transfer "
+                    "back\n", slot->slot_id, dci, hopeless);
+            xhci_ep_abandon(ctrl, slot, dci);
             return -1;
         }
         cpu_pause();

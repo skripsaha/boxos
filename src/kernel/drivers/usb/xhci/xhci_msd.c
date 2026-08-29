@@ -1297,6 +1297,10 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     g_units   = u;
     spin_unlock(&g_units_lock);
 
+    /* A fact, not a moment: the first mass-storage device this kernel has
+     * configured. Nothing in a build without CTRLGIVEUP=on. */
+    xhci_ctrl_giveup_proof(ctrl, slot);
+
     /* How many logical units. A device that does not implement the request
      * stalls it, and a stall here means exactly one — which is every flash
      * drive ever made. */

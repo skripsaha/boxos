@@ -209,12 +209,12 @@ void xhci_free_ep0_ring(xhci_device_slot_t* slot) {
  * TRBs of both stages are written down and an answer says which one it is
  * answering.
  */
-int xhci_control_transfer(xhci_controller_t* ctrl,
-                          xhci_device_slot_t* slot,
-                          usb_setup_packet_t* setup,
-                          uint64_t data_buffer_phys,
-                          uint16_t data_length,
-                          bool data_in) {
+static int control_transfer_post(xhci_controller_t* ctrl,
+                                 xhci_device_slot_t* slot,
+                                 usb_setup_packet_t* setup,
+                                 uint64_t data_buffer_phys,
+                                 uint16_t data_length,
+                                 bool data_in) {
     if (!ctrl || !slot || !setup || !slot->ep0_ring) {
         return -1;
     }
@@ -288,12 +288,144 @@ int xhci_control_transfer(xhci_controller_t* ctrl,
         return -1;
     }
     slot->ctl_status_trb = status_phys;
+    return 0;
+}
+
+/*
+ * Put the stages on the ring, then tell the controller they are there.
+ *
+ * The two halves are separate only so that one caller can leave the second
+ * one out: the proof below posts a transfer and deliberately does not ring
+ * for it, which is the only way to make a control transfer that no answer can
+ * come back for on a machine whose emulated devices answer everything.
+ */
+int xhci_control_transfer(xhci_controller_t* ctrl,
+                          xhci_device_slot_t* slot,
+                          usb_setup_packet_t* setup,
+                          uint64_t data_buffer_phys,
+                          uint16_t data_length,
+                          bool data_in) {
+    if (control_transfer_post(ctrl, slot, setup, data_buffer_phys,
+                              data_length, data_in) < 0) {
+        return -1;
+    }
 
     __sync_synchronize();
     ctrl->doorbells->doorbells[slot->slot_id].doorbell = 1;
-
     return 0;
 }
+
+#if CONFIG_XHCI_CTRL_GIVEUP_PROOF
+/*
+ * ── the one proof that a given-up control transfer is TAKEN BACK ───────────
+ *
+ * xhci_ep_wait gives up when the device has gone, when the pipe has broken, or
+ * — last — when the time ran out. Under emulation none of those happen on the
+ * control pipe: the device answers every question immediately, so the give-up
+ * path is unreachable. Measured six ways before this was written: a zero
+ * budget (the answer arrives inside the first drain), the yank scenario, the
+ * throttled-medium scenario, the controller-recovery scenario, a hot-removed
+ * hub, and an ordinary boot.
+ *
+ * So it is run deliberately, once, at a moment defined by a FACT — the first
+ * mass-storage device this kernel configures — and not by a clock.
+ *
+ * The transfer is posted and the doorbell is NOT rung. That is a faithful
+ * "no answer came": the stages really are on the ring, the controller really
+ * will execute them the next time it is rung, and nothing about the wait is
+ * pretended.
+ *
+ * ‼ AND THE PROOF IS THE SECOND TRANSFER, not the first. The abandoned one
+ * asks for the DEVICE descriptor; the one after it asks for the
+ * CONFIGURATION descriptor, into the same buffer. If the give-up left the
+ * abandoned stages where they were, the controller executes them first when
+ * the next doorbell rings — and its event is accepted as the second
+ * transfer's answer, because a control transfer sets xfer_trb_phys to zero
+ * and that turns the TRB match off. The buffer then holds a descriptor of
+ * type 1 where the caller asked for type 2, and the caller cannot tell.
+ */
+void xhci_ctrl_giveup_proof(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
+{
+    static bool already = false;
+
+    if (already || !ctrl || !slot) {
+        return;
+    }
+    already = true;
+
+    /* ‼ Never silent. A proof that declines without saying so reads exactly
+     * like a proof that passed, and the first version of this one did that:
+     * it returned on a missing scratch buffer and the scenario saw nothing at
+     * all, which it would also have seen from a kernel where the give-up was
+     * broken. */
+    if (!slot->endpoints || !slot->descriptor_buffer_phys ||
+        !slot->descriptor_buffer_virt) {
+        kprintf("[xHCI PROOF] slot %u has no control scratch buffer "
+                "(phys=0x%llx) — the give-up proof did NOT run\n",
+                slot->slot_id,
+                (unsigned long long)slot->descriptor_buffer_phys);
+        return;
+    }
+
+    xhci_endpoint_t* ep0 = &slot->endpoints[1];
+    if (ep0->xfer_state == XHCI_XFER_IN_FLIGHT) {
+        kprintf("[xHCI PROOF] EP0 was busy — the give-up proof did not run\n");
+        return;
+    }
+
+    kprintf("[xHCI PROOF] a control transfer is posted and not rung for, so "
+            "no answer can come\n");
+
+    /*
+     * ‼ THE ABANDONED REQUEST IS ONE THE DEVICE WILL REFUSE, and that is the
+     * whole of what makes this provable rather than racy.
+     *
+     * The first version asked for the device descriptor and checked which
+     * descriptor landed in the buffer. That check could not fail: left in
+     * place, the controller runs BOTH transfers back to back the moment the
+     * next doorbell rings, so the right bytes arrive in the buffer anyway,
+     * just as the answer to the wrong question. Measured — it stayed green
+     * under the mutation, which is how it was caught.
+     *
+     * A descriptor type of 0xFF does not exist, so the device STALLS it, and a
+     * stall is carried in the EVENT rather than in the buffer. If the
+     * abandoned transfer is still on the ring, that stall is what comes back
+     * to the next caller — who asked a perfectly good question — and no timing
+     * can turn it into a success.
+     */
+    usb_setup_packet_t refused = {
+        .bmRequestType = 0x80, .bRequest = USB_REQ_GET_DESCRIPTOR,
+        .wValue = 0xFF00, .wIndex = 0, .wLength = 8
+    };
+
+    ep0->xfer_trb_phys = 0;
+    ep0->xfer_state    = XHCI_XFER_IN_FLIGHT;
+    if (control_transfer_post(ctrl, slot, &refused,
+                              slot->descriptor_buffer_phys, 8, true) < 0) {
+        ep0->xfer_state = XHCI_XFER_IDLE;
+        kprintf("[xHCI PROOF] it would not post — the proof did not run\n");
+        return;
+    }
+
+    int code = xhci_ep_wait(ctrl, slot, 1, XHCI_CTRL_GIVEUP_PROOF_MS, NULL);
+    kprintf("[xHCI PROOF] the wait ended with %d\n", code);
+
+    /* Now a question the device is glad to answer, down the same pipe. */
+    usb_setup_packet_t cfg = {
+        .bmRequestType = 0x80, .bRequest = USB_REQ_GET_DESCRIPTOR,
+        .wValue = 0x0200, .wIndex = 0, .wLength = 9
+    };
+    int rc = xhci_control_transfer_sync(ctrl, slot, &cfg,
+                                        slot->descriptor_buffer_phys, 9, true,
+                                        XHCI_CTRL_GIVEUP_PROOF_MS);
+
+    kprintf("[xHCI PROOF] the next control transfer asked something the device "
+            "answers and got %s\n",
+            (rc == TRB_COMPLETION_STALL) ? "the REFUSAL meant for the "
+                                           "abandoned one"
+                                         : "its own answer");
+}
+#endif /* CONFIG_XHCI_CTRL_GIVEUP_PROOF */
 
 void xhci_handle_transfer_event(xhci_controller_t* ctrl, xhci_trb_t* event) {
     if (!ctrl || !event) {
