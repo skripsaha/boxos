@@ -7,6 +7,7 @@
 #include "tme.h"
 #include "e820.h"
 #include "klib.h"
+#include "klib_logring.h"
 #include "boxos_memory.h"
 #include "cpuid.h"
 #include "boot_info.h"
@@ -452,6 +453,20 @@ error_t pmm_init(void) {
      * firmware may still walk into during SetVirtualAddressMap. See the note
      * on PmmHoldBootServicesMemory in pmm.h. */
     PmmHoldBootServicesMemory();
+
+    /* And the window the log is carried through. It is a FIXED physical range
+     * this kernel wrote into before pmm_init ran and will keep writing into
+     * for the life of the boot; handing it to the buddy would mean handing out
+     * the account of whatever goes wrong next. */
+    {
+        uintptr_t keep_phys = 0;
+        uint64_t  keep_len  = 0;
+        if (LogKeepWindow(&keep_phys, &keep_len)) {
+            buddy_reserve_range(&pmm_buddy, keep_phys, keep_phys + keep_len);
+            debug_printf("[PMM] carry-over log window held at 0x%lx (%lu bytes)\n",
+                         (unsigned long)keep_phys, (unsigned long)keep_len);
+        }
+    }
 
     /* Phase 2F — allocate the MCE poison-page bitmap. Sized to mem_end
      * (one bit per 4 KiB page). Failure is non-fatal: pmm_set_poisoned

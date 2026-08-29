@@ -1,5 +1,6 @@
 #include "video.h"
 #include "klib.h"
+#include "klib_logring.h"
 #include "serial.h"
 #include "gdt.h"
 #include "tss.h"
@@ -80,6 +81,11 @@ uint64_t g_entry_rflags = 0;
 
 void kernel_main(void)
 {
+    /* Before a single byte is said, because a byte said before this is a byte
+     * the next boot will not find. See klib_logring.h for what the window
+     * survives — a warm reset, not a power cut. */
+    LogKeepInit();
+
     VideoInit();
     serial_init();
 
@@ -99,6 +105,20 @@ void kernel_main(void)
             "they are off now, and stay off until this kernel says otherwise)\n",
             (unsigned long)g_entry_rflags,
             (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
+
+    /* Whether anything came through the last reset, said early so it is on
+     * the screen even when the machine does not get much further. */
+    if (LogRingIsKept()) {
+        uint64_t carried = LogKeepPreviousBytes();
+        if (carried) {
+            kprintf("[BOOT] the previous run left %lu byte(s) behind (boot %u) "
+                    "— `lastsaid` reads them\n",
+                    (unsigned long)carried, LogKeepPreviousBoot());
+        } else {
+            kprintf("[BOOT] nothing came through the last reset — a cold start, "
+                    "a first one, or firmware that scrubs memory\n");
+        }
+    }
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();

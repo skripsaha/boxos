@@ -446,7 +446,7 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
              me info say reboot bye defrag fsck ipc_test memtag hw \
-             timezone logsave
+             timezone logsave lastsaid
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -854,7 +854,8 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(UTILS_DIR)/ipc_test.elf "utility" \
 		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 		$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
-		$(UTILS_DIR)/logsave.elf "utility,system,log"
+		$(UTILS_DIR)/logsave.elf "utility,system,log" \
+		$(UTILS_DIR)/lastsaid.elf "utility,system,log"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

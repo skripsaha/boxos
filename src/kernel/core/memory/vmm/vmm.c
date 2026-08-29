@@ -2,6 +2,7 @@
 #include "pmm.h"
 #include "memtag.h"
 #include "klib.h"
+#include "klib_logring.h"
 #include "io.h"
 #include "atomics.h"
 #include "error.h"
