@@ -346,6 +346,31 @@ endif
 
 EARLYIRQ_MARK = $(BUILDDIR)/.earlyirq.$(if $(filter on,$(EARLYIRQ)),on,off)
 
+# Fail the FIRST mount of the volume, once, halfway through.
+#
+# tagfs_init brings up eleven things in order, and until this key existed no
+# emulator could reach the case where one of them refuses: QEMU's disk answers
+# every read. So the whole failure path — and everything that follows from it —
+# was unreachable from the desk, and it was on that path that the owner's board
+# lost its filesystem: a mount that failed left five subsystems standing,
+# nothing took them down, and every later mount died at TagFS_CowInit with
+# ERR_ALREADY_INITIALIZED, reported by a debug_printf that compiles to nothing.
+# The room seated the medium, the deed was described, "58 files" was printed,
+# and the shell answered `Unknown command` to every one of them.
+#
+# `make MOUNTFAIL=on` fails the first mount at the worst point there is, with
+# all of those subsystems up. The kernel MUST then say so out loud, clear the
+# ground, and mount successfully on the catch-up attempt storage_deck_init makes
+# straight afterwards.
+#
+# ‼ It is a REPRODUCTION, not a bug. Take tagfs_clear_the_ground out of the top
+# of tagfs_init and this key leaves the machine exactly as the board was.
+ifeq ($(MOUNTFAIL),on)
+CFLAGS += -DCONFIG_TAGFS_MOUNT_FAIL_ONCE=1
+endif
+
+MOUNTFAIL_MARK = $(BUILDDIR)/.mountfail.$(if $(filter on,$(MOUNTFAIL)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -610,12 +635,16 @@ $(EARLYIRQ_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.earlyirq.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) | $(BUILDDIR)
+$(MOUNTFAIL_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.mountfail.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

@@ -4,7 +4,10 @@
 #include "../tagfs.h"
 
 int      meta_pool_init(uint32_t first_block, uint32_t block_count);
-void     meta_pool_shutdown(void);
+
+/* Let the pool go. `write_back` false means exactly that and nothing else is
+ * written — see the note on file_table_shutdown, which had the same fault. */
+void     meta_pool_shutdown(bool write_back);
 
 int      meta_pool_read(uint32_t block, uint32_t offset, TagFSMetadata* out);
 int      meta_pool_write(const TagFSMetadata* meta, uint32_t* out_block, uint32_t* out_offset);

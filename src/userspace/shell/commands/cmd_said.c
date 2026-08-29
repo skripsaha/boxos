@@ -52,6 +52,7 @@ static int said_pour(const char *tag, const char *what, const char *name)
     }
 
     Current *out = NULL;
+    error_t  refused = OK;
     if (name) {
         size_t nlen = strlen(name);
         if (nlen + 6 > sizeof(s_target)) {
@@ -70,6 +71,7 @@ static int said_pour(const char *tag, const char *what, const char *name)
              * the file is the commonest reason anybody types this at all;
              * refusing to show the log because it cannot also store it would
              * be failing in exactly the case this was written for. */
+            refused = why;
             printf("%s could not be written (error %u) — printing it "
                    "instead\n", name, (unsigned)why);
         }
@@ -137,8 +139,27 @@ static int said_pour(const char *tag, const char *what, const char *name)
     if (name && out) {
         printf("%lu byte(s) of %s written to %s\n",
                (unsigned long)poured, what, name);
-    } else {
-        printf("\n-- %lu byte(s): %s --\n", (unsigned long)poured, what);
+        return 0;
+    }
+
+    printf("\n-- %lu byte(s): %s --\n", (unsigned long)poured, what);
+
+    /*
+     * ‼ SAID AGAIN, HERE, AT THE BOTTOM.
+     *
+     * The refusal is already printed above — and above is where the whole log
+     * then gets poured on top of it. On the board that is a thousand lines, so
+     * the one number that says WHY the file was not written scrolls off the top
+     * of the screen before the command has finished running, at exactly the
+     * moment somebody is standing there with a camera. Measured: the run
+     * happened, the reason went with it, and the next session had to guess.
+     *
+     * Two lines of output to make a fact reachable is not a cost worth
+     * thinking about.
+     */
+    if (name && refused != OK) {
+        printf("-- and %s was NOT written: error %u --\n",
+               name, (unsigned)refused);
     }
     return 0;
 }
