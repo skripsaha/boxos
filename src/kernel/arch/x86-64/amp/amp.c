@@ -342,6 +342,15 @@ void amp_boot_aps(void)
                                  ? (1u << 12)
                                  : 0u;
         memcpy(data_area + 20, &extra_cr4, 4);
+        // +24: extra EFER bits to OR in alongside LME, before CR0.PG=1.
+        // NXE (bit 11) when this machine has NX — the AP must agree with the
+        // page tables the BSP built, which carry bit 63 in their leaves once
+        // CpuTakeUpNoExecute succeeded. An AP that entered long mode with
+        // NXE=0 would take a #PF with RSVD set on the first NX page it read
+        // (Intel SDM Vol 3A §4.5). Asked here rather than hardcoded in the
+        // trampoline because WRMSR of NXE on a CPU without NX raises #GP.
+        uint32_t extra_efer = g_cpu_caps.has_nx ? (1u << 11) : 0u;
+        memcpy(data_area + 24, &extra_efer, 4);
 
         // Memory fence before SIPI
         mfence();

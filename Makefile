@@ -304,6 +304,26 @@ endif
 
 CTRLGIVEUP_MARK = $(BUILDDIR)/.ctrlgiveup.$(if $(filter on,$(CTRLGIVEUP)),on,off)
 
+# Boot the way both real boards booted: with IA32_EFER.NXE off.
+#
+# OVMF leaves NXE set, which is exactly why the emulator never showed this and
+# the desk did. `make NOEXEC=off` makes CpuTakeUpNoExecute decline — the same
+# state a firmware that leaves the bit clear hands the kernel — so the whole
+# chain downstream of it can be measured here instead of on a monitor with a
+# phone camera. A kernel built this way must still boot: bit 63 stays out of
+# every page table entry, the hardening is lost, nothing else is.
+#
+# ‼ It is a REPRODUCTION, not a bug: with the fix removed and this key on, the
+# machine dies inside SetVirtualAddressMap with err=0x9 exactly as the boards
+# did. That is what makes the noexec scenario an oracle rather than a claim.
+#
+# `make NOEXEC=off`
+ifeq ($(NOEXEC),off)
+CFLAGS += -DCONFIG_NO_EXECUTE_REFUSED=1
+endif
+
+NOEXEC_MARK = $(BUILDDIR)/.noexec.$(if $(filter off,$(NOEXEC)),off,on)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -560,12 +580,16 @@ $(CTRLGIVEUP_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.ctrlgiveup.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) | $(BUILDDIR)
+$(NOEXEC_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.noexec.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@

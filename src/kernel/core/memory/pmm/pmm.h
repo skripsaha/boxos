@@ -35,6 +35,33 @@ typedef enum {
 error_t pmm_init(void);
 void    pmm_free(void* addr, size_t pages);
 
+/*
+ * The memory UEFI used to boot us, held back until firmware has finished
+ * moving house.
+ *
+ * UEFI 2.10 §7.4 says EfiBootServicesCode and EfiBootServicesData become the
+ * OS's to use once ExitBootServices has returned, and TagBoot reports them to
+ * the kernel as ordinary usable RAM on that authority. The trouble is that
+ * SetVirtualAddressMap runs LATER — it is the one firmware call the OS makes
+ * while firmware is still relocating itself — and a long line of shipping
+ * firmwares reach into their boot-services memory while doing it. Linux
+ * carries the same workaround under the same names (efi_reserve_boot_services
+ * / efi_free_boot_services) and maps those regions for the duration.
+ *
+ * So: Hold before the buddy allocator can hand them out (from pmm_init, which
+ * is the only moment early enough), Release once SetVirtualAddressMap has
+ * returned. Between those two points the machine is short exactly the memory
+ * the firmware might still be standing on, which on a typical board is a few
+ * tens of megabytes for a few dozen milliseconds.
+ *
+ * Both are no-ops on a BIOS boot, where there is no EFI memory map to read,
+ * and Release is idempotent — it is called once from the SetVirtualAddressMap
+ * path and once as a backstop from kernel_main, because a boot that never
+ * reaches SVAM must still get its memory back.
+ */
+void    PmmHoldBootServicesMemory(void);
+void    PmmReleaseBootServicesMemory(void);
+
 size_t   pmm_total_pages(void);
 /* Largest page count a SINGLE pmm_alloc can serve (the buddy's max block).
  * A caller that wants one contiguous span should clamp to this instead of

@@ -89,6 +89,11 @@ extern uint64_t vmm_pte_addr_mask;
 extern uint64_t vmm_pte_addr_mask_with_keyid;
 extern uint8_t vmm_maxphyaddr;
 
+/* Flag bits this machine may legally put into a paging-structure entry.
+ * Bit 63 is in it only after vmm_note_no_execute(true) — see vmm.c. */
+extern uint64_t vmm_pte_flags_mask;
+void vmm_note_no_execute(bool usable);
+
 #define VMM_PML5_INDEX(addr)    (((addr) >> 48) & 0x1FF)
 #define VMM_PML4_INDEX(addr)    (((addr) >> 39) & 0x1FF)
 #define VMM_PDPT_INDEX(addr)    (((addr) >> 30) & 0x1FF)
@@ -620,7 +625,11 @@ static inline pte_t vmm_make_pte(uintptr_t phys_addr, uint64_t flags) {
     }
 
     uintptr_t masked_phys = phys_addr & vmm_get_addr_mask();
-    return masked_phys | (flags & VMM_PTE_FLAGS_MASK);
+    /* vmm_pte_flags_mask, not the constant: bit 63 is only in it once the
+     * kernel has taken no-execute up (CpuTakeUpNoExecute). Before that, and
+     * on a machine without NX, bit 63 is a RESERVED bit and an entry that
+     * carries it faults on first touch — Intel SDM Vol 3A §4.5. */
+    return masked_phys | (flags & vmm_pte_flags_mask);
 }
 
 /* TME-MK aware PTE composer. Use this when phys_with_keyid already has
@@ -634,7 +643,7 @@ static inline pte_t vmm_make_pte(uintptr_t phys_addr, uint64_t flags) {
  * and the call is identical to vmm_make_pte. Safe to use uniformly. */
 static inline pte_t vmm_make_pte_with_keyid(uintptr_t phys_with_keyid, uint64_t flags) {
     uintptr_t masked = phys_with_keyid & vmm_pte_addr_mask_with_keyid;
-    return masked | (flags & VMM_PTE_FLAGS_MASK);
+    return masked | (flags & vmm_pte_flags_mask);
 }
 
 // Pull Map: converts physical address to kernel-accessible virtual address.

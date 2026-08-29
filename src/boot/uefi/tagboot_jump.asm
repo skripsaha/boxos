@@ -11,8 +11,16 @@
 ; We trust those bits without re-checking — UEFI spec §2.3.4 mandates them
 ; for AMD64 firmware, and exposing them to a wrmsr here is dangerous because
 ; rdmsr clobbers rdx (which carries our kernel entry point). The kernel is
-; responsible for setting any further EFER bits it needs (NXE, SCE for
-; syscall, LMA is read-only) — bootloader assumes UEFI defaults.
+; responsible for setting any further EFER bits it needs — NXE in
+; CpuTakeUpNoExecute (called from kernel_main BEFORE vmm_init, so no page
+; table this kernel builds can carry bit 63 while that bit is still
+; reserved), SCE in per_core_setup_notify_msrs, LMA is read-only.
+;
+; That contract is only safe because the kernel now HONOURS it. It did not:
+; its NXE write sat seventy-four lines of kernel_main after efi_runtime_init
+; had already mapped EFI runtime data with bit 63 and called firmware
+; through those pages, and two real boards died there with err=0x9 = P|RSVD
+; while the BIOS path — where stage2 sets NXE — booted fine.
 ;
 ; All we need is to install our CR3, switch to the boot stack, and jump.
 ; This function never returns.

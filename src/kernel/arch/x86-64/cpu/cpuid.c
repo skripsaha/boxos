@@ -433,6 +433,79 @@ void cpu_log_identity(const char* prefix) {
     }
 }
 
+/* ===========================================================================
+ * Bit 63, taken up before it is written down
+ *
+ * See the long note on CpuTakeUpNoExecute in cpuid.h for why this exists and
+ * what it cost to find out. In short: bit 63 of a paging-structure entry is
+ * RESERVED until IA32_EFER.NXE is 1 (Intel SDM Vol 3A §4.5), so the kernel
+ * has to own that bit before it composes a single entry carrying it, and it
+ * cannot inherit that state from whoever loaded it.
+ * ======================================================================== */
+
+#define MSR_IA32_EFER               0xC0000080u
+#define EFER_NXE_BIT                (1ULL << 11)
+
+/* Written once, on the BSP, before any AP exists and before the first
+ * vmm_make_pte call. Read on every core thereafter. */
+static bool g_no_execute_taken_up = false;
+
+bool CpuNoExecuteTakenUp(void) {
+    return g_no_execute_taken_up;
+}
+
+bool CpuTakeUpNoExecute(void) {
+#ifdef CONFIG_NO_EXECUTE_REFUSED
+    /* `make NOEXEC=off` — boot the way both real boards booted, with NXE
+     * clear. Not a switch that disables a feature: a reproduction of the
+     * machine state that produced the panic, so the consequences can be
+     * measured here instead of on a monitor. See the note in the Makefile.
+     *
+     * ‼ It CLEARS the bit rather than merely declining to set it, and that
+     * distinction is the whole scenario. OVMF hands the kernel EFER.NXE
+     * already on — which is precisely why the emulator never showed this bug
+     * — so a version of this key that only skipped the WRMSR left bit 63
+     * legal and reproduced nothing. Measured: with that version the mutated
+     * kernel booted to a shell. */
+    {
+        uint64_t efer = cpu_rdmsr(MSR_IA32_EFER);
+        if (efer & EFER_NXE_BIT) cpu_wrmsr(MSR_IA32_EFER, efer & ~EFER_NXE_BIT);
+        kprintf("[CPU] no-execute refused by this build (EFER.NXE was %s, now "
+                "clear) — bit 63 stays out of every page table entry\n",
+                (efer & EFER_NXE_BIT) ? "on" : "off");
+    }
+    g_no_execute_taken_up = false;
+    return false;
+#else
+    if (!g_cpu_caps.has_nx) {
+        /* Not a failure and not silent. A CPU that does not enumerate NX —
+         * or a board whose firmware has "Execute Disable Bit" switched off,
+         * which is a real switch real operators turn — must be SAID, because
+         * from here on every mapping loses the hardening and the boot log is
+         * the only place that difference is visible. */
+        kprintf("[CPU] no NX on this machine (CPUID.80000001h:EDX[20]=0) — "
+                "bit 63 stays out of every page table entry\n");
+        g_no_execute_taken_up = false;
+        return false;
+    }
+
+    uint64_t efer = cpu_rdmsr(MSR_IA32_EFER);
+    bool     was_on = (efer & EFER_NXE_BIT) != 0;
+    if (!was_on) {
+        cpu_wrmsr(MSR_IA32_EFER, efer | EFER_NXE_BIT);
+    }
+    g_no_execute_taken_up = true;
+
+    /* Saying which of the two it was is the whole diagnostic value of this
+     * line: firmware that already had NXE on (OVMF does) hides the bug this
+     * function exists for, and firmware that did not (both boards BoxOS has
+     * run on) is where it bites. */
+    kprintf("[CPU] no-execute taken up (EFER.NXE was %s)\n",
+            was_on ? "already on" : "off — the loader left it off");
+    return true;
+#endif
+}
+
 void cpu_intersect_features_ap(void) {
     uint32_t eax, ebx, ecx, edx;
 

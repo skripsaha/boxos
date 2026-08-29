@@ -82,6 +82,20 @@ void kernel_main(void)
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
 
+    /* Bit 63 becomes a meaning here, and not one line later.
+     *
+     * Until IA32_EFER.NXE is 1 it is a RESERVED bit (Intel SDM Vol 3A §4.5):
+     * an entry carrying it is malformed, and the first access through it —
+     * read, write or fetch — is a #PF with RSVD set. So the kernel takes it
+     * up before it builds a single page table, and tells the VMM whether it
+     * may compose the bit at all. This used to be the loader's business on
+     * two paths out of three (stage2 set it, the AP trampoline set it, the
+     * UEFI loader deliberately did not) and the kernel's own write sat in
+     * per_core_setup_notify_msrs, seventy-four lines after efi_runtime_init
+     * had already mapped firmware data with bit 63 and called into firmware
+     * through it. Both real boards BoxOS has booted died there. */
+    vmm_note_no_execute(CpuTakeUpNoExecute());
+
     /* Log the BSP's identity + microcode revision once feature detection
      * is up. Doing it here (instead of inside cpu_detect_features) keeps
      * the helper purely functional; the operator-visible log lives with
@@ -336,6 +350,16 @@ void kernel_main(void)
     } else {
         debug_printf("[INIT] EFI runtime services not available\n");
     }
+
+    /* The backstop for the memory held across SetVirtualAddressMap.
+     *
+     * efi_runtime_init releases it the moment that call returns, which is
+     * the tight window we want. But every path that never reaches the call —
+     * a BIOS boot, a firmware with no runtime descriptors, a map that could
+     * not be walked — must give the memory back too, and none of them can be
+     * relied on to remember. Idempotent, and a no-op when nothing was
+     * held. */
+    PmmReleaseBootServicesMemory();
 
     // ACPI must init early so irqchip_init can parse MADT for APIC detection
     debug_printf("[INIT] ACPI Subsystem (early)...\n");

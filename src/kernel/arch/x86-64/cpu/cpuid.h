@@ -138,6 +138,45 @@ void cpu_detect_features(void);
  * big.LITTLE CPUs). */
 void cpu_intersect_features_ap(void);
 
+/*
+ * CpuTakeUpNoExecute — the kernel takes bit 63 up as its own, before it
+ * writes bit 63 into anything.
+ *
+ * Intel SDM Vol 3A §4.5: while IA32_EFER.NXE = 0, bit 63 of EVERY
+ * paging-structure entry is RESERVED. A page whose PTE carries it is not
+ * "non-executable" — it is malformed, and the first access of any kind
+ * through it raises #PF with the RSVD bit (3) set in the error code.
+ * Setting NXE turns the same bit into "no execute". So the bit does not
+ * mean anything until this has run, and everything that sets it must
+ * happen after.
+ *
+ * This is called on the BSP from kernel_main BEFORE vmm_init, which is
+ * before the first mapping this kernel makes. It used to be nobody's job
+ * on the BSP: stage2.asm set NXE for BIOS boots and the AP trampoline set
+ * it for every AP, but the UEFI loader deliberately did not (see
+ * tagboot_jump.asm) and the kernel's own write lived in
+ * per_core_setup_notify_msrs — seventy-four lines of kernel_main AFTER
+ * efi_runtime_init had already mapped EFI runtime data with bit 63 and
+ * handed those pages to firmware. On two different boards (AMI desktop,
+ * Insyde laptop) that was a kernel panic inside SetVirtualAddressMap with
+ * err=0x9 = P|RSVD. BIOS never reproduced it because stage2 had set NXE.
+ *
+ * Gated on CPUID.80000001H:EDX[20] (g_cpu_caps.has_nx): WRMSR of EFER.NXE
+ * on a CPU that does not enumerate NX raises #GP, and "Execute Disable Bit"
+ * is a switch real firmware exposes and real operators turn off.
+ *
+ * Returns true when bit 63 is usable from here on. When it returns false
+ * the VMM strips bit 63 from every entry it composes (vmm_make_pte), so a
+ * machine without NX loses the hardening and keeps booting rather than
+ * faulting on a reserved bit.
+ */
+bool CpuTakeUpNoExecute(void);
+
+/* Has bit 63 been taken up on this machine? Read by vmm_make_pte on every
+ * PTE composition, so it is a plain relaxed load of a bool that is written
+ * once on the BSP before any AP exists. */
+bool CpuNoExecuteTakenUp(void);
+
 /* IA32_UMWAIT_CONTROL programmer — Intel SDM Vol 4 §2.5.1 (MSR 0xE1).
  * Sets the OS-imposed maximum UMWAIT/TPAUSE residency in TSC quanta so
  * the wait loop top can re-poll within a bounded interval even if a
