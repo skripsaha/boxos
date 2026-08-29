@@ -157,12 +157,54 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
             bool socket_empty = xhci_port_socket_is_empty(ctrl, port);
             uint8_t other     = xhci_port_other_half(ctrl, port);
 
+            /*
+             * ‼ AND THE PORT GETS ITS ATTEMPTS BACK, WHICH IS WHAT THE MESSAGE
+             * THAT GIVES UP ON ONE HAS ALWAYS CLAIMED AND NEVER DID.
+             *
+             * xhci_enumerate_device stops trying a port after four goes and
+             * says "leaving the port alone until something is unplugged from
+             * it". Nothing implemented the second half: enum_attempts[port] was
+             * cleared in exactly two places, both of them a device reaching
+             * CONFIGURED. So a socket that met one device which would not come
+             * up was dead for the rest of the boot — and stayed dead when the
+             * bad device was pulled out and a good one pushed in, because the
+             * counter had never been about the device at all.
+             *
+             * On a board being replugged, that is sockets going out one at a
+             * time until the flash drive is put into one of them and nothing
+             * happens. It is cleared here, where the fact that settles it
+             * arrives: whatever this counter was counting has gone.
+             *
+             * Before the slot is looked at, because the worst case has no slot
+             * — a port whose four attempts all failed holds no device record,
+             * so a teardown-driven reset could never reach it.
+             */
+            if (ctrl->enum_attempts[port] > XHCI_ENUM_ATTEMPTS) {
+                kprintf("[xHCI %s] port %u: it had been given up on, and what "
+                        "was in it has gone — it will be tried again\n",
+                        ctrl->name, port);
+            }
+            ctrl->enum_attempts[port] = 0;
+
             xhci_device_slot_t* slot = xhci_get_device_slot_by_port(ctrl, port);
             if (slot) {
                 ev.vendor_id  = slot->device_desc.idVendor;
                 ev.product_id = slot->device_desc.idProduct;
                 ev.speed      = slot->speed;
-                if (socket_empty) {
+
+                /* A device that never got as far as saying who it is has no
+                 * numbers to print, and `0000:0000` is not a device — it is
+                 * this driver reading a descriptor that never arrived. */
+                bool named = slot->device_desc.idVendor != 0 ||
+                             slot->device_desc.idProduct != 0;
+
+                if (!named) {
+                    kprintf("[xHCI] port %u: whatever was there has gone "
+                            "before it said who it is — %s\n", port,
+                            socket_empty ? "the socket is empty"
+                                         : "the other half of the socket has "
+                                           "something in it");
+                } else if (socket_empty) {
                     kprintf("[xHCI] port %u: %04x:%04x unplugged — the socket "
                             "is empty\n",
                             port, slot->device_desc.idVendor,
