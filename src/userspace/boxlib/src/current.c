@@ -21,7 +21,10 @@
 /* The hardware deck's log-ring door. Named here the way debug.c names
  * HW_DEBUG_PRINT next to it: userspace does not include kernel headers, and
  * the opcode's home is src/kernel/core/decks/hardware/hardware_deck.h. */
-#define HW_LOG_READ  0x83
+#define HW_LOG_READ      0x83
+/* The account of the run BEFORE this one, carried through a warm reset. Same
+ * wire shape, so one reader here serves both banks — see klib_logring.h. */
+#define HW_LOG_PREVIOUS  0x84
 
 /* --------------------------------------------------------------------------
  * Backend selection + handle layout
@@ -58,6 +61,7 @@ struct Current {
     uint64_t       log_pos;     /* ring position this reader is at next     */
     uint64_t       log_end;     /* what the kernel had said when we opened  */
     uint64_t       log_lost;    /* bytes the ring dropped under this reader */
+    uint16_t       log_op;      /* which bank: HW_LOG_READ or HW_LOG_PREVIOUS */
 };
 
 #define STREAM_FRAMES_DEFAULT  256u
@@ -88,7 +92,7 @@ static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
 
     if (want > CUR_LOG_CHUNK) want = CUR_LOG_CHUNK;
 
-    int rc = MfCall1(DECK_HARDWARE, HW_LOG_READ,
+    int rc = MfCall1(DECK_HARDWARE, c->log_op,
                      params, sizeof(params),
                      NULL, 0,
                      c->log_buf, CUR_LOG_HEADER + want,
@@ -121,6 +125,9 @@ static CurrentBackend ResolveBackend(const char *tag, const char **name_out)
     if (strcmp(tag, "keyboard") == 0)  return CurKeyboard;
     if (strcmp(tag, "log:serial") == 0) return CurLogSerial;
     if (strcmp(tag, "log:file") == 0)   return CurLogFile;
+    /* Same backend, different bank. Resolving to one kind keeps every switch
+     * in this file honest about what it handles; which bank is a field. */
+    if (strcmp(tag, "log:previous") == 0) return CurLogFile;
     if (strncmp(tag, "file:", 5) == 0) { *name_out = tag + 5; return CurFile; }
     return CurStream;
 }
@@ -188,6 +195,11 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
          * with that reason, instead of succeeding onto an empty channel that
          * reads exactly like a machine which never said anything. */
         if (role != CURRENT_READ) { free(c); CUR_FAIL(ERR_INVALID_ARGUMENT); }
+
+        /* `log:file` is what this boot has said so far; `log:previous` is what
+         * the boot before it left in the carry-over window. */
+        c->log_op = (strcmp(tag, "log:previous") == 0) ? HW_LOG_PREVIOUS
+                                                       : HW_LOG_READ;
 
         c->log_buf = (uint8_t *)malloc(CUR_LOG_HEADER + CUR_LOG_CHUNK);
         if (!c->log_buf) { free(c); CUR_FAIL(ERR_NO_MEMORY); }

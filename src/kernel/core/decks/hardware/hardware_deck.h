@@ -64,6 +64,10 @@
 #define HW_SYSTEM_SHUTDOWN      0x81
 #define HW_DEBUG_PRINT          0x82
 #define HW_LOG_READ             0x83
+/* The account of the run BEFORE this one, carried through a warm reset in a
+ * fixed physical window (klib_logring.h). Same wire shape as HW_LOG_READ so
+ * one reader in userspace serves both. */
+#define HW_LOG_PREVIOUS         0x84
 
 /*
  * ‼ A RETIRED OPCODE IS NEVER REISSUED.

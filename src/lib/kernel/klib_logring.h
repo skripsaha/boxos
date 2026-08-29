@@ -87,10 +87,76 @@ void LogRingPut(char c);
 uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
                      uint64_t *out_oldest, uint64_t *out_written);
 
+/* ==========================================================================
+ * The carry-over: what the machine said LAST time, read after a reset.
+ *
+ * The ring above dies with the boot that filled it. That is the wrong
+ * property for the failures worth catching, and it was measured the hard way:
+ * a board wedged itself with a storming interrupt and an exhausted host
+ * controller, `logsave` could not run because the volume was exactly what had
+ * failed, and the entire account of it was four photographs of a scrolling
+ * screen.
+ *
+ * So every byte the ring keeps is ALSO written into a fixed physical window
+ * that this kernel does not clear at boot. Two banks: the boot that is running
+ * writes one, the boot before it wrote the other, and neither can erase the
+ * other's. On the next start the header says which was which.
+ *
+ * ‼ WHAT THIS SURVIVES, said plainly so nobody trusts it further than it goes:
+ *   - a warm reset — the RESET button, a kernel-issued reboot, a triple fault.
+ *     DRAM keeps its contents; the firmware's memory training on a warm start
+ *     usually does not rewrite it.
+ *   - it does NOT survive removing power. Holding the power button for four
+ *     seconds is a hardware override that cuts the rails, and RAM goes with
+ *     them. On a wedged machine, press RESET, not power.
+ *   - it does NOT survive firmware that retrains and scrubs memory on every
+ *     start. That is why the header carries a magic and a version, and why a
+ *     window that does not check out is reported as absent rather than
+ *     presented as a log.
+ *
+ * There is no checksum over the data on purpose. A machine that dies mid-write
+ * leaves a torn tail, and a torn tail is worth reading; refusing the whole
+ * account because its last line is half-written would throw away exactly the
+ * evidence the crash exists to provide.
+ * ========================================================================== */
+
+/* Called as the first act of kernel_main, before anything is said, because a
+ * byte said before it is a byte the next boot will not see. Validates the
+ * window against the E820 map at its fixed low address (the kernel's own
+ * memory map is not parsed yet, and a blind store into a machine with less RAM
+ * than the window needs would be a store into nothing, or into MMIO). */
+void LogKeepInit(void);
+
+/* Where the window is, so pmm_init can hold it out of the allocator. Returns
+ * false when there is no window — no ring in this build, or the machine could
+ * not offer the memory. */
+bool LogKeepWindow(uintptr_t *out_phys, uint64_t *out_bytes);
+
+/* How many bytes the previous boot said, and which boot it was. Zero bytes
+ * means there is nothing to read: a first start, a cold one, or firmware that
+ * scrubbed the window. */
+uint64_t LogKeepPreviousBytes(void);
+uint32_t LogKeepPreviousBoot(void);
+
+/* Same shape as LogRingRead, over the previous boot's bank. Positions count
+ * from that boot's first byte; a reader that asks from before the oldest byte
+ * still held is moved forward and told where to. */
+uint64_t LogKeepPreviousRead(uint64_t from, void *dst, uint64_t max,
+                             uint64_t *out_oldest, uint64_t *out_written);
+
 #else
 
 static inline void LogRingLockInit(void) { }
 static inline void LogRingPut(char c)    { (void)c; }
+static inline void LogKeepInit(void)     { }
+static inline bool LogKeepWindow(uintptr_t *p, uint64_t *b)
+{ (void)p; (void)b; return false; }
+static inline uint64_t LogKeepPreviousBytes(void) { return 0; }
+static inline uint32_t LogKeepPreviousBoot(void)  { return 0; }
+static inline uint64_t LogKeepPreviousRead(uint64_t from, void *dst,
+                                           uint64_t max, uint64_t *o,
+                                           uint64_t *w)
+{ (void)from; (void)dst; (void)max; if (o) *o = 0; if (w) *w = 0; return 0; }
 
 /* Declared in both builds so the door that offers the log carries no #ifdef
  * of its own: it asks LogRingIsKept() and refuses, which is the same answer

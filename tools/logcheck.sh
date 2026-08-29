@@ -1084,6 +1084,92 @@ run_earlyirq() {
     make >"$SCRATCH/build.log" 2>&1
 }
 
+# ── lastsaid: the account survives the reset that ended the run ─────────────
+#
+# `logsave` writes THIS boot's log to the volume, and that is the right tool
+# right up to the moment it is needed most. A board wedged itself — a storming
+# interrupt and a host controller out of slots — and the volume was exactly
+# what had stopped answering. The only account of it was four photographs.
+#
+# So the kernel carries its log through a warm reset in a fixed window it does
+# not clear at boot, and `lastsaid` reads it. Both tools exist; neither
+# replaces the other.
+#
+# ‼ What is asked here is the WHOLE claim: a cold start must say nothing came
+# through (so an empty window is never dressed up as a log), a warm reset must
+# carry the bytes, and the count the kernel announces must be the count the
+# tool pours. QEMU's system_reset is a warm reset — it resets devices and CPU
+# and leaves guest RAM alone — which is the same thing the RESET button on a
+# case does, and NOT what holding the power button does.
+run_lastsaid() {
+    echo "== lastsaid: what the machine said before the reset =="
+
+    make PRINTTOFILE=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (PRINTTOFILE=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "PRINTTOFILE=on build"; return
+    fi
+
+    make run-stop >/dev/null 2>&1
+    make run-bg PRINTTOFILE=on >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+
+    grep -q "nothing came through the last reset" build/serial.log
+    chk $? "a cold start says nothing came through"
+
+    # Warm reset: devices and CPU reset, guest RAM untouched.
+    ./tools/qemu-input.sh raw "system_reset" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 45 ]; do
+        [ "$(grep -c 'BoxOS Shell' build/serial.log 2>/dev/null)" = "2" ] && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 4
+
+    grep -qE "the previous run left [0-9]+ byte\(s\) behind" build/serial.log
+    chk $? "and the run after a warm reset finds what the one before it said"
+
+    local announced
+    announced=$(grep -oE "the previous run left [0-9]+ byte" build/serial.log \
+                | tail -1 | grep -oE "[0-9]+")
+    [ -n "$announced" ] && [ "$announced" -gt 0 ]
+    chk $? "and it is not an empty window dressed up as a log ($announced bytes)"
+
+    ./tools/qemu-input.sh type "lastsaid" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 6
+
+    grep -qE "^-- [0-9]+ byte\(s\) from the previous run --" build/serial.log
+    chk $? "lastsaid prints it, which is what a machine with no volume needs"
+
+    local poured
+    poured=$(grep -oE "^-- [0-9]+ byte" build/serial.log | tail -1 | grep -oE "[0-9]+")
+    [ -n "$poured" ] && [ "$poured" = "$announced" ]
+    chk $? "and pours exactly what the kernel announced ($poured of $announced)"
+
+    # Both tools, still. The point was never to replace one with the other.
+    ./tools/qemu-input.sh type "lastsaid prev.log" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 6
+    grep -qE "byte\(s\) of the previous run written to prev.log" build/serial.log
+    chk $? "and writes a file when it is given a name"
+
+    ./tools/qemu-input.sh type "logsave now.log" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 6
+    grep -qE "byte\(s\) written to now.log" build/serial.log
+    chk $? "and logsave still writes this boot's log, untouched"
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.lastsaid.log"
+    make >"$SCRATCH/build.log" 2>&1
+}
+
 run_logsave() {
     echo "== logsave: what the kernel said, written down where it can be read =="
 
@@ -2143,9 +2229,10 @@ case "${1:-both}" in
     isoch)    run_isoch ;;
     noexec)   run_noexec ;;
     earlyirq) run_earlyirq ;;
+    lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

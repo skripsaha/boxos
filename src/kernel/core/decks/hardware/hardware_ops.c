@@ -1137,14 +1137,15 @@ static int HwDebugPrint(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 #define HW_LOG_READ_HEADER  24u
 #define HW_LOG_READ_CHUNK   4096u
 
-static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                     const OpContext *ctx)
-{
-    (void)crate_count;
+/* One reader for both banks: the log this boot is still writing, and the one
+ * the boot before it left behind. They differ only in which function supplies
+ * the bytes, and a second copy of the crate arithmetic would be a second place
+ * for the header offsets to drift. */
+typedef uint64_t (*LogSource)(uint64_t, void *, uint64_t, uint64_t *, uint64_t *);
 
-    /* A kernel built without the ring says so, rather than answering with an
-     * empty log that reads exactly like a machine that never spoke. */
-    if (!LogRingIsKept())                  return ERR_UNSUPPORTED;
+static int HwLogReadFrom(LogSource source, const ManifestOp *op, Crate *crates,
+                         const OpContext *ctx)
+{
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     if (op->param_size < 8)                return ERR_INVALID_ARGUMENT;
 
@@ -1163,8 +1164,8 @@ static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (!kp) return ERR_INVALID_ADDRESS;
 
     uint64_t oldest = 0, written = 0;
-    uint64_t copied = LogRingRead(from, kp + HW_LOG_READ_HEADER, room,
-                                  &oldest, &written);
+    uint64_t copied = source(from, kp + HW_LOG_READ_HEADER, room,
+                             &oldest, &written);
 
     memcpy(kp,      &oldest,  sizeof(uint64_t));
     memcpy(kp + 8,  &written, sizeof(uint64_t));
@@ -1173,6 +1174,29 @@ static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     int crc = crate_out_commit(out, ctx, kp, HW_LOG_READ_HEADER + copied);
     crate_buf_free(kp);
     return (crc == OK) ? OK : ERR_INVALID_ADDRESS;
+}
+
+/* What the run before this one said. Refused by a kernel with no ring, the
+ * same as HW_LOG_READ; an empty answer from a kernel that HAS one means
+ * nothing came through the last reset, which is a different fact and one the
+ * caller is left to report. */
+static int HwLogPrevious(const ManifestOp *op, Crate *crates,
+                         uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!LogRingIsKept()) return ERR_UNSUPPORTED;
+    return HwLogReadFrom(LogKeepPreviousRead, op, crates, ctx);
+}
+
+static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                     const OpContext *ctx)
+{
+    (void)crate_count;
+
+    /* A kernel built without the ring says so, rather than answering with an
+     * empty log that reads exactly like a machine that never spoke. */
+    if (!LogRingIsKept()) return ERR_UNSUPPORTED;
+    return HwLogReadFrom(LogRingRead, op, crates, ctx);
 }
 
 /* =========================================================================
@@ -1234,6 +1258,7 @@ error_t HardwareDeckRegister(void)
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},
         { HW_DEBUG_PRINT,        HwDebugPrint,       OP_AUTH_NONE,   "hw.debug.print"    },
         { HW_LOG_READ,           HwLogRead,          OP_AUTH_UTILITY,"hw.log.read"       },
+        { HW_LOG_PREVIOUS,       HwLogPrevious,      OP_AUTH_UTILITY,"hw.log.previous"   },
         /* USB: hardware control, system+. Nothing here can leave a controller
          * halfway through anything — see the note above HwUsbReset for the two
          * that could and are gone. */
