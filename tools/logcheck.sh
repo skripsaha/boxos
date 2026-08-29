@@ -647,6 +647,16 @@ run_healthy() {
     # Asked instead, the channel says eight and keeps it.
     grep -q "this medium takes 8 sector(s) at a time, so neighbouring blocks are read 1 at a time" "$L"
     chk $? "the legacy channel keeps the width its DMA path works at"
+
+    # (12) THE TWO ENDPOINT-CONTEXT FIELDS NO BOOT EVER COMPUTES.
+    #
+    # Nothing in this driver prepares an isochronous endpoint, so the
+    # isochronous half of the interval and error-count fields is unreachable —
+    # it can be neither wrong in a way a running kernel shows nor right in a
+    # way anybody can check. It is checked against the specification's own
+    # table instead, where being unreachable does not matter.
+    grep -q "endpoint-context self-test 15/15" "$L"
+    chk $? "the endpoint-context fields agree with xHCI Table 6-45"
 }
 
 # ── a volume whose metadata will not read ────────────────────────────────
@@ -1796,6 +1806,46 @@ run_ctrlgiveup() {
     typed_ok "$L";              chk $? "and still answers a keystroke"
 }
 
+# ── a device this kernel has no use for, and says so ───────────────────────
+#
+# enum_pick_visit answers bulk and interrupt and lets everything else fall
+# through its default, so a headset or a camera used to be addressed,
+# configured and settled exactly like a device with nothing on it. "The machine
+# saw my microphone and did nothing" is a different fault from "the machine did
+# not see my microphone", and only one of them was readable off a screen.
+run_isoch() {
+    echo "== isoch: a device whose useful half this kernel does not configure =="
+    build
+    make run-stop >/dev/null 2>&1
+    make run-bg USB=on ISOCH=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 45 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    ./tools/qemu-input.sh type "help" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 3
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.isoch.log"
+    local L="$SCRATCH/serial.isoch.log"
+
+    # The device got as far as being configured at all.
+    grep -qE "port [0-9]+: .*device 46f4:0002 class 01/01/00 configured, no driver claims it" "$L"
+    chk $? "the audio device was addressed, configured and settled"
+
+    # ‼ AND THE PART THIS KERNEL DROPS IS NAMED, with a count that came from
+    # the descriptor rather than from a guess.
+    grep -qE "port [0-9]+: it has [1-9][0-9]* isochronous endpoint\(s\), and this kernel configures none" "$L"
+    chk $? "and the isochronous endpoints it has are named, not dropped in silence"
+
+    # A device nobody drives must not cost the machine anything.
+    grep -q "BoxOS Shell" "$L"; chk $? "the machine still reaches a shell"
+    typed_ok "$L";              chk $? "and still answers a keystroke"
+    grep -q "endpoint-context self-test 15/15" "$L"
+    chk $? "and the endpoint-context fields still agree with the specification"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -1815,9 +1865,10 @@ case "${1:-both}" in
     usbrecover) run_usbrecover ;;
     seal)     run_seal ;;
     ctrlgiveup) run_ctrlgiveup ;;
+    isoch)    run_isoch ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

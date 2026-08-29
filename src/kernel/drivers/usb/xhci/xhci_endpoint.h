@@ -113,6 +113,11 @@ void xhci_ep_table_free(xhci_device_slot_t* slot);
  * hardware asked for one. */
 uint32_t xhci_input_ctx_pages(xhci_controller_t* ctrl);
 
+/* Checks the two endpoint-context fields whose isochronous half no boot ever
+ * computes, against xHCI 1.2 Table 6-45 and Section 6.2.3.5. Says what it
+ * found; run once when the first controller comes up. */
+void xhci_ep_context_self_test(void);
+
 int  xhci_ep_prepare(xhci_device_slot_t* slot, uint8_t dci, uint8_t type,
                      const usb_endpoint_info_t* info, uint32_t buffer_bytes);
 

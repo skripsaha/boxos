@@ -160,6 +160,30 @@ static uint8_t ep_interval_for(uint8_t speed, uint8_t type, uint8_t bInterval)
     }
 
     if (speed == XHCI_PORT_SPEED_FULL || speed == XHCI_PORT_SPEED_LOW) {
+        /*
+         * ‼ AT FULL SPEED THE TWO PERIODIC KINDS STATE bInterval DIFFERENTLY,
+         * and this branch used to answer as though they did not.
+         *
+         * USB 2.0 §9.6.6: a full/low-speed INTERRUPT endpoint states its
+         * period directly, in frames, 1..255 — so its xHCI Interval is
+         * log2(frames) + 3 (xHCI 1.2 Table 6-45). A full-speed ISOCHRONOUS
+         * endpoint states an EXPONENT, 1..16, for a period of 2^(bInterval-1)
+         * frames — so its Interval is (bInterval - 1) + 3.
+         *
+         * Read as frames, an isochronous endpoint asking for the common
+         * bInterval of 1 comes out the same by luck, and one asking for 4 —
+         * every eighth frame — is serviced every fourth instead: twice the
+         * rate the device asked for, which on a periodic endpoint is missed
+         * data rather than an error anybody reports.
+         */
+        if (type == XHCI_EP_TYPE_ISOCH_IN || type == XHCI_EP_TYPE_ISOCH_OUT) {
+            uint8_t exponent = bInterval ? bInterval : 1;
+            if (exponent > 16) {
+                exponent = 16;
+            }
+            return (uint8_t)(exponent - 1 + 3);
+        }
+
         uint8_t frames = bInterval ? bInterval : 1;
         uint8_t log2 = 0;
         while ((1u << (log2 + 1)) <= frames && log2 < 10) {
@@ -237,7 +261,17 @@ static void ep_write_context(xhci_endpoint_t* ep, uint8_t speed,
      * asking for two or three transactions per microframe gets one, and drops
      * what it could not send.
      */
-    ctx->dwords[1] = (3u << 1) | ((uint32_t)ep->type << 3) |
+    /*
+     * CErr counts the consecutive bus errors the controller may absorb before
+     * halting the endpoint, and xHCI 1.2 §6.2.3.5 requires it to be ZERO for
+     * an isochronous one: a periodic transfer that missed its interval cannot
+     * be retried, because the interval it belonged to has gone. Three is right
+     * for everything else.
+     */
+    uint32_t cerr = (ep->type == XHCI_EP_TYPE_ISOCH_IN ||
+                     ep->type == XHCI_EP_TYPE_ISOCH_OUT) ? 0u : 3u;
+
+    ctx->dwords[1] = (cerr << 1) | ((uint32_t)ep->type << 3) |
                      ((uint32_t)ep->max_burst << 8) |
                      ((uint32_t)ep->max_packet << 16);
 
@@ -248,6 +282,92 @@ static void ep_write_context(xhci_endpoint_t* ep, uint8_t speed,
 
     /* dword4: Average TRB Length [15:0], Max ESIT Payload Lo [31:16]. */
     ctx->dwords[4] = (uint32_t)ep->max_packet | ((esit & 0xFFFFu) << 16);
+}
+
+/*
+ * The two fields above, checked against the specification's own table.
+ *
+ * ‼ THIS EXISTS BECAUSE THE ISOCHRONOUS HALF OF BOTH IS UNREACHABLE. Nothing
+ * in this driver prepares an isochronous endpoint — enum_pick_visit answers
+ * bulk and interrupt and lets everything else fall through — so no boot, on
+ * any machine, executes the isochronous branches. A value that is never
+ * computed cannot be wrong in a way a running kernel would show, and it cannot
+ * be right in a way anybody could check either. So it is checked here, against
+ * xHCI 1.2 Table 6-45 and §6.2.3.5, where being unreachable does not matter.
+ *
+ * Costs a dozen comparisons once per boot and says what it found.
+ */
+void xhci_ep_context_self_test(void)
+{
+    static const struct {
+        uint8_t speed, type, bInterval, want;
+    } cases[] = {
+        /* Full/low-speed INTERRUPT states frames: Interval = log2(frames) + 3 */
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_INTERRUPT_IN,   1,  3 },
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_INTERRUPT_IN,   8,  6 },
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_INTERRUPT_IN, 255, 10 },
+        { XHCI_PORT_SPEED_LOW,   XHCI_EP_TYPE_INTERRUPT_IN,  16,  7 },
+        /* Full-speed ISOCHRONOUS states an exponent: Interval = bInterval + 2 */
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_ISOCH_IN,       1,  3 },
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_ISOCH_OUT,      4,  6 },
+        { XHCI_PORT_SPEED_FULL,  XHCI_EP_TYPE_ISOCH_IN,      16, 18 },
+        /* High and SuperSpeed: the descriptor's exponent, less one */
+        { XHCI_PORT_SPEED_HIGH,  XHCI_EP_TYPE_INTERRUPT_IN,   4,  3 },
+        { XHCI_PORT_SPEED_HIGH,  XHCI_EP_TYPE_ISOCH_IN,       1,  0 },
+        { XHCI_PORT_SPEED_SUPER, XHCI_EP_TYPE_ISOCH_OUT,     16, 15 },
+        /* Not periodic at all: the field is reserved. */
+        { XHCI_PORT_SPEED_SUPER, XHCI_EP_TYPE_BULK_IN,        0,  0 },
+    };
+
+    unsigned pass = 0, total = 0;
+
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        total++;
+        uint8_t got = ep_interval_for(cases[i].speed, cases[i].type,
+                                      cases[i].bInterval);
+        if (got == cases[i].want) {
+            pass++;
+        } else {
+            kprintf("[xHCI] endpoint-context self-test: speed %u type %u "
+                    "bInterval %u gave interval %u, the specification says "
+                    "%u\n", cases[i].speed, cases[i].type, cases[i].bInterval,
+                    got, cases[i].want);
+        }
+    }
+
+    /* And the error count, which the specification pins to zero for the one
+     * kind of endpoint that cannot retry. */
+    static const struct { uint8_t type, want; } cerr_cases[] = {
+        { XHCI_EP_TYPE_ISOCH_IN,     0 },
+        { XHCI_EP_TYPE_ISOCH_OUT,    0 },
+        { XHCI_EP_TYPE_BULK_IN,      3 },
+        { XHCI_EP_TYPE_INTERRUPT_IN, 3 },
+    };
+
+    for (unsigned i = 0; i < sizeof(cerr_cases) / sizeof(cerr_cases[0]); i++) {
+        total++;
+        xhci_endpoint_t probe;
+        xhci_endpoint_context_t ctx;
+        xhci_ring_t fake_ring;
+        memset(&fake_ring, 0, sizeof(fake_ring));
+        memset(&probe, 0, sizeof(probe));
+        memset(&ctx, 0, sizeof(ctx));
+        probe.type       = cerr_cases[i].type;
+        probe.max_packet = 64;
+        probe.ring       = &fake_ring;
+
+        ep_write_context(&probe, XHCI_PORT_SPEED_HIGH, &ctx);
+        uint8_t got = (uint8_t)((ctx.dwords[1] >> 1) & 0x3u);
+        if (got == cerr_cases[i].want) {
+            pass++;
+        } else {
+            kprintf("[xHCI] endpoint-context self-test: type %u gave CErr %u, "
+                    "the specification says %u\n",
+                    cerr_cases[i].type, got, cerr_cases[i].want);
+        }
+    }
+
+    kprintf("[xHCI] endpoint-context self-test %u/%u\n", pass, total);
 }
 
 int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)

@@ -1095,8 +1095,32 @@ static void enum_free_input_ctx(xhci_controller_t* ctrl, struct xhci_device_slot
 /* A device this kernel has no driver for is still a device. It is addressed,
  * configured and left alone, with its slot intact — which is both the honest
  * outcome and the ground a class driver stands on when one arrives. */
-static void enum_settle_unclaimed(struct xhci_device_slot* slot)
+static void enum_settle_unclaimed(struct xhci_device_slot* slot,
+                                  const void* cfg, uint16_t cfg_len)
 {
+    /*
+     * ‼ AND IF IT HAD ISOCHRONOUS ENDPOINTS, SAY SO RATHER THAN DROPPING THEM
+     * IN SILENCE.
+     *
+     * enum_pick_visit answers three kinds of endpoint and lets everything else
+     * fall through its default, so a headset, a microphone or a camera is
+     * addressed, configured and settled exactly like a device with nothing on
+     * it at all. Nothing anywhere said that the part of it that matters had
+     * been ignored — and "the machine saw my microphone and did nothing" is a
+     * different fault from "the machine did not see my microphone", which is
+     * the whole reason this line exists.
+     *
+     * It is a statement of what is missing, not a promise: this kernel
+     * configures no isochronous endpoint, because it has nothing that would
+     * read one. When it does, this line is where the work starts.
+     */
+    uint8_t isoch = usb_count_isoch_endpoints(cfg, cfg_len);
+    if (isoch != 0) {
+        kprintf("[xHCI] port %u: it has %u isochronous endpoint(s), and this "
+                "kernel configures none — that part of it is unused\n",
+                slot->port_num, isoch);
+    }
+
     kprintf("[xHCI] port %u: %s-speed device %04x:%04x class %02x/%02x/%02x "
             "configured, no driver claims it\n",
             slot->port_num, speed_name(slot->speed),
@@ -1484,7 +1508,7 @@ static void enum_bind_driver(xhci_controller_t* ctrl, struct xhci_device_slot* s
         return;
     }
 
-    enum_settle_unclaimed(slot);
+    enum_settle_unclaimed(slot, cfg, len);
 }
 
 /* The device is configured and the controller knows its endpoints. Whoever

@@ -213,6 +213,12 @@ endif
 # hot-plugged onto it with bus=xhci2.0.
 XHCI2 ?= off
 
+# An isochronous device on the bus. This kernel configures no isochronous
+# endpoint — it has nothing that would read one — and the point of being able
+# to attach one is to prove that it SAYS so instead of dropping that half of
+# the device in silence. `make run-bg USB=on ISOCH=on`
+ISOCH ?= off
+
 # HOW MANY ROOT PORTS the emulated controller has.
 #
 # MaxPorts in HCSPARAMS1 is an eight-bit field, so a controller may report up
@@ -1135,6 +1141,7 @@ run-bg: $(IMAGE)
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
 		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1$(XHCI_PORT_ARGS) -device usb-kbd$(comma)bus=xhci1.0) \
 		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2) \
+		$(if $(filter on,$(ISOCH)),-audiodev none$(comma)id=isoa -device usb-audio$(comma)audiodev=isoa) \
 		-pidfile $(BUILDDIR)/qemu.pid \
 		-daemonize
 	@i=0; while [ ! -S $(BUILDDIR)/qemu.mon ] && [ $$i -lt 50 ]; do sleep 0.1; i=$$((i+1)); done

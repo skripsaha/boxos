@@ -151,6 +151,10 @@ typedef bool (*usb_endpoint_visitor)(void* ctx, const usb_endpoint_info_t* ep);
  *
  * Returns false when no interface matches.
  */
+/* How many isochronous endpoints the whole configuration carries — see the
+ * note in the implementation for why usb_walk_interface cannot answer this. */
+uint8_t usb_count_isoch_endpoints(const void* cfg, uint16_t len);
+
 bool usb_walk_interface(const void* cfg, uint16_t len,
                         uint8_t klass, uint8_t subclass, uint8_t proto,
                         uint8_t* out_iface_num,

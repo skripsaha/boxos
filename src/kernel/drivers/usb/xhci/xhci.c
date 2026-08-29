@@ -6,6 +6,7 @@
 #include "xhci_command.h"
 #include "xhci_enumeration.h"
 #include "xhci_port.h"
+#include "xhci_endpoint.h"
 #include "xhci_caps.h"
 #include "pci.h"
 #include "pmm.h"
@@ -1105,6 +1106,7 @@ cleanup_resources:
 int xhci_init(void)
 {
     xhci_enumeration_init();
+    xhci_ep_context_self_test();
 
     for (uint32_t index = 0; index < XHCI_MAX_CONTROLLERS; index++) {
         pci_device_t dev;

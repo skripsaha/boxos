@@ -93,6 +93,39 @@ static const uint8_t* desc_walk_next(desc_walk_t* w, uint8_t* type, uint8_t* dle
     return here;
 }
 
+/*
+ * How many isochronous endpoints this configuration has, across ALL of its
+ * interfaces.
+ *
+ * usb_walk_interface answers about ONE interface — the first that matches a
+ * class triple — which is the right question for finding the endpoints a
+ * driver needs and the wrong one for finding out what a device has and this
+ * kernel does not use. An audio device keeps its isochronous endpoints on a
+ * streaming interface nobody here walks, so from every existing caller's point
+ * of view they do not exist.
+ */
+uint8_t usb_count_isoch_endpoints(const void* data, uint16_t len)
+{
+    desc_walk_t w;
+    if (!desc_walk_begin(&w, data, len)) {
+        return 0;
+    }
+
+    uint8_t seen = 0;
+    const uint8_t* d;
+    uint8_t type, dlen;
+    while ((d = desc_walk_next(&w, &type, &dlen)) != NULL) {
+        if (type != USB_DESC_ENDPOINT || dlen < sizeof(usb_endpoint_desc_t)) {
+            continue;
+        }
+        const usb_endpoint_desc_t* ep = (const usb_endpoint_desc_t*)d;
+        if ((ep->bmAttributes & 0x03u) == USB_EP_XFER_ISOCH && seen < 255) {
+            seen++;
+        }
+    }
+    return seen;
+}
+
 void usb_config_first_interface(const void* data, uint16_t len,
                                 uint8_t* out_class, uint8_t* out_subclass,
                                 uint8_t* out_protocol)
