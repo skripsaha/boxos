@@ -16,6 +16,7 @@
 #include "fpu.h"
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
+#include "tagfs.h"
 
 // BSP idle process (static, PID 0)
 static process_t g_idle_process;
@@ -191,6 +192,14 @@ void cpu_idle(void) {
      * it happens here and not where the arrival was noticed. One load of a flag
      * when nothing has arrived. */
     BoardroomAttendIfPending();
+
+    /* And a volume that was shut when its medium left and could not be let go
+     * of, because somebody was still inside it. Finishing that means giving
+     * memory back and mounting again, neither of which can happen where the
+     * departure was noticed — that is an interrupt handler or this loop itself,
+     * and the caller still inside may be waiting for a transfer this loop is
+     * the one to finish. One atomic load when there is nothing to do. */
+    TagFSServiceIfPending();
 
     if (g_cpu_caps.has_monitor) {
         /* MWAIT idle. Arm MONITOR on a per-core stack address (each idle

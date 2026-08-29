@@ -25,6 +25,7 @@
 #include "../../kernel/drivers/timer/rtc.h"
 #include "../../lib/kernel/crypto.h"
 #include "logbook.h"
+#include "cpu_calibrate.h"
 
 static void tagfs_auto_snapshot_before_write(uint32_t file_id) {
     if (file_id == 0)
@@ -54,9 +55,160 @@ WellKnownTags *tagfs_get_well_known_tags(void) { return &g_well_known; }
 #define g_wk (*tagfs_get_well_known_tags())
 
 // ----------------------------------------------------------------------------
+// The door — who is inside the mounted volume, and which mounting it is
+// ----------------------------------------------------------------------------
+
+/*
+ * ‼ A VOLUME WAS TAKEN DOWN WHILE OTHER CORES WERE STANDING INSIDE IT.
+ *
+ * A medium that leaves and comes back is re-read rather than carried on from,
+ * and that road is: take the volume down, give its memory back, mount again
+ * (TagFSVolumeReturned). Nothing in it ever asked whether anybody was in
+ * there. On another core there could be a read walking a file's extents, a
+ * query walking the tag index, a process being asked whether it carries a tag
+ * — every one of them holding a pointer into exactly what tagfs_clear_the_ground
+ * is about to hand back to the allocator: the registry, the tag index, the
+ * block bitmap, the free list, the file table, the metadata pool.
+ *
+ * ‼ THE ONE-WAY LATCH DOES NOT COVER IT. g_medium_left makes every read and
+ * every write refuse, which is what stops work that has not started. It does
+ * nothing about a caller who is already inside a call and already holding
+ * those pointers.
+ *
+ * So: the same arrangement the xHCI slots use, for the same reason and in the
+ * same words. A caller says it is coming in and says when it leaves; the door
+ * is shut before anything is taken down; and the memory goes back only once
+ * the last caller is out. A take-down that finds somebody inside takes NOTHING
+ * away and comes back for it later (TagFSServiceIfPending) — waiting on the
+ * spot is not allowed, because the spot is the guide loop, and the guide loop
+ * is where the transfer that the caller inside is waiting for gets finished.
+ *
+ * ‼ AND THE MOUNTING IS STAMPED, BECAUSE A FILE HANDLE OUTLIVES A MOUNT.
+ * A TagFSFileHandle carries its own copy of the file's extents. Across a
+ * re-read those block numbers describe whatever the volume keeps there NOW,
+ * and following them is not a failure, it is a read of somebody else's file.
+ * A handle from a previous mounting is refused instead.
+ */
+typedef enum {
+    VOLUME_DOWN = 0,    /* nothing is mounted */
+    VOLUME_UP,          /* mounted, and callers may come in */
+    VOLUME_LEAVING      /* mounted and going: nobody new in, nothing freed yet */
+} VolumeDoor;
+
+static volatile uint8_t  g_door        = VOLUME_DOWN;
+static volatile uint32_t g_inside      = 0;
+static volatile uint32_t g_mount_epoch = 0;
+
+/* A volume that was shut but not yet let go of, because somebody was inside.
+ * Raised where the departure is noticed, lowered by the pass that finishes it
+ * (TagFSServiceIfPending) — the same arrangement the retiring xHCI slots use,
+ * and for the same reason: the place that notices cannot wait. */
+static volatile uint32_t g_abandon_pending = 0;
+static bool              g_leaving_said    = false;
+
+/*
+ * ‼ ONE CORE AT A TIME MOUNTS OR UNMOUNTS, AND THE REST GO AWAY.
+ *
+ * Attending to a medium used to reach this file down one road only — the
+ * Boardroom being called to order, which is already one-at-a-time — so nothing
+ * here needed a flag of its own. The service pass is a SECOND road, taken by
+ * the idle loop and by every K-Core, and without this two of them can be
+ * inside tagfs_init at the same moment: two mounts of one volume, each
+ * allocating what the other is about to overwrite.
+ *
+ * Whoever gets here first does the work; the others have nothing to add, so
+ * they leave rather than queue up behind it — the same arrangement the hubs
+ * and the slot service use.
+ */
+static volatile uint32_t g_attending = 0;
+
+static bool attending_take(void)
+{
+    return __atomic_exchange_n(&g_attending, 1u, __ATOMIC_ACQUIRE) == 0;
+}
+
+static void attending_done(void)
+{
+    __atomic_store_n(&g_attending, 0u, __ATOMIC_RELEASE);
+}
+
+bool tagfs_enter(void)
+{
+    /*
+     * Counted first, then checked.
+     *
+     * The other order leaves a window: a take-down that lands between the
+     * check and the count sees an empty volume and gives its memory back
+     * underneath a caller who has just satisfied himself it was there.
+     * Counting first closes it — either the take-down sees this caller, or
+     * this caller sees the take-down. One of the two always happens.
+     */
+    __atomic_fetch_add(&g_inside, 1, __ATOMIC_ACQ_REL);
+    if (__atomic_load_n(&g_door, __ATOMIC_ACQUIRE) != VOLUME_UP) {
+        __atomic_fetch_sub(&g_inside, 1, __ATOMIC_ACQ_REL);
+        return false;
+    }
+    return true;
+}
+
+void tagfs_leave(void)
+{
+    __atomic_fetch_sub(&g_inside, 1, __ATOMIC_ACQ_REL);
+}
+
+uint32_t tagfs_mount_epoch(void)
+{
+    return __atomic_load_n(&g_mount_epoch, __ATOMIC_ACQUIRE);
+}
+
+bool tagfs_handle_is_of_this_mount(const TagFSFileHandle *handle)
+{
+    return handle && handle->mount_epoch == tagfs_mount_epoch();
+}
+
+/* Said rather than returned, because every caller of a read is written to
+ * treat a refusal as an I/O failure and would otherwise report the medium as
+ * broken. What happened is that the volume was read again. */
+static bool handle_belongs_here(const TagFSFileHandle *handle, const char *what)
+{
+    if (tagfs_handle_is_of_this_mount(handle)) {
+        return true;
+    }
+    if (!handle) {
+        return false;               /* not a stale handle — no handle at all */
+    }
+    kprintf("[TagFS] %s refused: file %u was opened on an earlier mounting of "
+            "this volume, and the volume has been read again since\n",
+            what, handle ? handle->file_id : 0);
+    return false;
+}
+
+// ----------------------------------------------------------------------------
 // Open File Table — per-file write serialization
 // ----------------------------------------------------------------------------
 
+/*
+ * ‼ THIS TABLE BELONGS TO THE MACHINE, NOT TO THE VOLUME.
+ *
+ * It used to be emptied by every tagfs_init — the lock re-initialised and the
+ * buckets memset — which is three separate wrongs on a re-mount:
+ *
+ *   a lock another core is holding is re-initialised to "free", so the mutual
+ *   exclusion it was providing is simply lost, silently;
+ *
+ *   every OpenFileEntry in it is dropped on the floor: they are kmalloc'd,
+ *   the handles that own them still point at them, and nothing frees them;
+ *
+ *   and — the one that corrupts a file rather than losing memory — the next
+ *   ofe_acquire for a file that already had an entry makes a SECOND one. The
+ *   whole purpose of this table is that two writers to one file take the same
+ *   write_lock. Two entries means two locks, which means no serialisation at
+ *   all, and ofe_release survives it (it kfree's an entry it cannot find in
+ *   the bucket), so there is not even a symptom.
+ *
+ * A mount brings up what is on the medium. Who has a file open is a fact about
+ * this machine, and it is left alone.
+ */
 static OpenFileEntry *g_open_files[OPEN_FILE_BUCKETS];
 static spinlock_t g_open_table_lock;
 
@@ -147,6 +299,151 @@ static void ofe_release(OpenFileEntry *ofe)
 // ----------------------------------------------------------------------------
 // Bitmap bit helpers
 // ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// HOLDGROUND=on — a caller who is inside the volume when its medium leaves
+// ----------------------------------------------------------------------------
+
+/*
+ * ‼ A REPRODUCTION, NOT A FEATURE. Compiled in by `make HOLDGROUND=on` and by
+ * nothing else.
+ *
+ * The window this whole barrier exists for is microseconds wide and QEMU never
+ * lands in it: on a desk the volume comes back while the machine is idle, so
+ * there is nobody inside to be protected and every check about the barrier
+ * would be green by construction. This puts somebody there — at the exact
+ * moment the medium is noticed gone, one caller steps into the volume and
+ * stays for two seconds, which is the situation a re-mount has to survive.
+ *
+ * It also holds a file open ACROSS the departure, which is the other half:
+ * a handle carries its own copy of the file's extents, and the table of open
+ * files used to be emptied out from under it by the next mount.
+ *
+ * Three facts come out of it, and each is the failure of a different line:
+ *
+ *   the take-down says it is waiting and then that the last caller is out
+ *          — take the "somebody is inside" refusal out of tagfs_abandon;
+ *   a read through the old handle is refused by name
+ *          — take the mounting stamp off the handle;
+ *   the entry that the old handle owns is STILL IN the open-file table
+ *          — put the memset back into tagfs_init.
+ */
+#if CONFIG_TAGFS_HOLD_GROUND
+
+#define TAGFS_HOLD_GROUND_MS 2000u
+
+static bool             g_hold_inside  = false;
+static uint64_t         g_hold_until   = 0;
+static TagFSFileHandle *g_hold_handle  = NULL;
+
+/* Is the entry this handle owns still the one the table hands out for its
+ * file? A second entry for one file is two write locks for one file, which is
+ * no serialisation at all — and it leaves no trace of its own, because
+ * ofe_release frees an entry it cannot find in the bucket without complaining. */
+static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out_refs)
+{
+    if (!handle || !handle->ofe) {
+        return false;
+    }
+    bool found = false;
+    spin_lock(&g_open_table_lock);
+    for (OpenFileEntry *e = g_open_files[ofe_hash(handle->ofe->file_id)]; e; e = e->next) {
+        if (e == handle->ofe) {
+            found = true;
+            if (out_refs) *out_refs = e->ref_count;
+            break;
+        }
+    }
+    spin_unlock(&g_open_table_lock);
+    return found;
+}
+
+/* A file is held open from the moment the volume is first mounted, so that it
+ * is a handle from the PREVIOUS mounting when the volume comes back. */
+static void TagFSHoldGroundOpenFile(void)
+{
+    if (g_hold_handle) {
+        return;
+    }
+    uint32_t ids[8];
+    int n = tagfs_list_all_files(ids, 8);
+    if (n <= 0) {
+        kprintf("[TagFS HOLDGROUND] this volume has no file to hold open\n");
+        return;
+    }
+    g_hold_handle = tagfs_open(ids[0], 0);
+    kprintf("[TagFS HOLDGROUND] holding file %u open across whatever happens "
+            "to the medium\n", ids[0]);
+}
+
+/* And a caller inside the volume at the moment its medium is noticed gone. */
+static void TagFSHoldGroundTake(void)
+{
+    if (g_hold_inside) {
+        return;
+    }
+    if (!tagfs_enter()) {
+        return;                     /* already shut — nothing to demonstrate */
+    }
+    g_hold_inside = true;
+    g_hold_until  = rdtsc() + cpu_ms_to_tsc(TAGFS_HOLD_GROUND_MS);
+    kprintf("[TagFS HOLDGROUND] a caller was inside the volume when its medium "
+            "left, and does not step out until the volume is back and at "
+            "least %u ms have passed\n", TAGFS_HOLD_GROUND_MS);
+}
+
+/* Reached only once a return is waiting to be finished, which is what makes
+ * this deterministic: the caller is inside when the volume comes back, every
+ * time, rather than whenever a clock happens to land. */
+static void TagFSHoldGroundRelease(void)
+{
+    if (!g_hold_inside || (int64_t)(rdtsc() - g_hold_until) < 0) {
+        return;
+    }
+    g_hold_inside = false;
+    tagfs_leave();
+    kprintf("[TagFS HOLDGROUND] the caller has stepped out of the old volume\n");
+}
+
+/* And what the volume looks like to what was held across it. */
+static void TagFSHoldGroundAfterReturn(void)
+{
+    if (!g_hold_handle || !g_state.initialized) {
+        return;
+    }
+
+    uint8_t probe[16];
+    int rc = tagfs_read(g_hold_handle, probe, sizeof(probe));
+    kprintf("[TagFS HOLDGROUND] a read through the handle from before returned "
+            "%d\n", rc);
+
+    uint32_t refs = 0;
+    bool listed = hold_entry_still_listed(g_hold_handle, &refs);
+    kprintf("[TagFS HOLDGROUND] the open-file entry that handle owns is %s the "
+            "table, with %u reference(s)\n",
+            listed ? "still in" : "NO LONGER in", refs);
+
+    TagFSFileHandle *again = tagfs_open(g_hold_handle->file_id, 0);
+    if (again) {
+        refs = 0;
+        listed = hold_entry_still_listed(g_hold_handle, &refs);
+        kprintf("[TagFS HOLDGROUND] opening the same file again %s the same "
+                "entry, now with %u reference(s)\n",
+                (again->ofe == g_hold_handle->ofe) ? "found" : "made a SECOND",
+                refs);
+        tagfs_close(again);
+    }
+
+    tagfs_close(g_hold_handle);
+    g_hold_handle = NULL;
+}
+
+#else
+#define TagFSHoldGroundOpenFile()    ((void)0)
+#define TagFSHoldGroundTake()        ((void)0)
+#define TagFSHoldGroundRelease()     ((void)0)
+#define TagFSHoldGroundAfterReturn() ((void)0)
+#endif  /* CONFIG_TAGFS_HOLD_GROUND */
 
 static inline void bitmap_set_bit(uint8_t *bitmap, uint32_t bit)
 {
@@ -639,7 +936,7 @@ static bool volume_medium_gone(void)
  *
  * Returns true when the volume was taken back up.
  */
-static void tagfs_abandon(void);
+static bool tagfs_abandon(void);
 
 /* Everything a mount brought up, put back down — including a mount that only
  * got halfway. See the note on the definition; it is the piece whose absence
@@ -686,7 +983,12 @@ static bool TagFSVolumeReturned(void)
                 "again, because everything held about it is from before it "
                 "left\n", seat, BoardroomSeatName(seat));
 
-        tagfs_abandon();
+        if (!tagfs_abandon()) {
+            /* Somebody is still inside the volume that left. Nothing of it is
+             * let go while they are, and nothing is mounted on top of it: the
+             * service pass finishes both, in that order. */
+            return false;
+        }
 
         if (tagfs_init() == OK) {
             /* Said on every road to a mounted volume, because the per-process
@@ -742,7 +1044,9 @@ void TagFSNoteMediumGone(void)
     if (!g_state.initialized) {
         return;
     }
-    (void)volume_medium_gone();
+    if (volume_medium_gone()) {
+        TagFSHoldGroundTake();      /* nothing at all unless HOLDGROUND=on */
+    }
 }
 
 /*
@@ -798,12 +1102,9 @@ void TagFSWatchSeats(void)
     }
 }
 
-void TagFSAttendArrival(void)
+/* The body. Whoever calls it holds the one-at-a-time flag above. */
+static void attend_arrival(void)
 {
-    if (__atomic_load_n(&g_boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
-        return;
-    }
-
     if (g_state.initialized) {
         TagFSVolumeReturned();
         return;
@@ -820,6 +1121,18 @@ void TagFSAttendArrival(void)
                 "had none — mounted from seat %u\n", g_tagfs_seat);
         TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
     }
+}
+
+void TagFSAttendArrival(void)
+{
+    if (__atomic_load_n(&g_boot_mount_settled, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+    if (!attending_take()) {
+        return;                 /* somebody is already at it */
+    }
+    attend_arrival();
+    attending_done();
 }
 
 static uint64_t block_to_vlba(uint32_t block);
@@ -1535,9 +1848,21 @@ error_t tagfs_init(void) {
      * Must run before any disk I/O so g_tagfs_drive is correct. */
     TagFSProbeDrive();
 
-    spinlock_init(&g_state.lock);
-    spinlock_init(&g_open_table_lock);
-    memset(g_open_files, 0, sizeof(g_open_files));
+    /*
+     * ‼ THREE LINES USED TO STAND HERE, AND THEY BELONGED TO THE MACHINE.
+     *
+     *     spinlock_init(&g_state.lock);
+     *     spinlock_init(&g_open_table_lock);
+     *     memset(g_open_files, 0, sizeof(g_open_files));
+     *
+     * They are correct exactly once, at the first mount, and they are what
+     * static storage already guarantees — spinlock_init writes two zeros into
+     * something that starts as zeros. On the SECOND mount, which is what a
+     * medium leaving and coming back produces, they are three bugs: a lock
+     * another core is holding is declared free, and the open-file table is
+     * emptied under the handles that own its entries. See the note over the
+     * table itself; the write serialisation it exists to provide is what goes.
+     */
 
     // Initialize read-ahead cache FIRST — read_block uses it before the rest of init
     ReadAheadInit();
@@ -1938,6 +2263,21 @@ error_t tagfs_init(void) {
 
     g_state.initialized = true;
 
+    /*
+     * ‼ AND THE DOOR IS OPEN, WHICH IS A DIFFERENT SENTENCE.
+     *
+     * `initialized` says the memory is up. The door says callers may come in,
+     * and it is what a take-down shuts before anything is handed back. They
+     * are separate because there is a state between them: mounted, going, and
+     * not yet freed because somebody is still inside.
+     *
+     * The stamp goes up first. Anything remembered from the last mounting —
+     * an open handle, an async read in flight — is answered "that was a
+     * different volume" from the instant the first caller can be let in.
+     */
+    __atomic_add_fetch(&g_mount_epoch, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_door, VOLUME_UP, __ATOMIC_RELEASE);
+
     // Data-block integrity map (verify-on-read). After initialized=true so the
     // lazy first-mount allocation can use the block allocator.
     if (IntegrityInit() != OK)
@@ -1962,6 +2302,8 @@ error_t tagfs_init(void) {
      */
     kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
             g_tagfs_seat, (unsigned long long)g_state.ledger.total_files);
+
+    TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
     return 0;
 }
 
@@ -1969,11 +2311,18 @@ error_t tagfs_init(void) {
 // tagfs_sync / tagfs_shutdown
 // ----------------------------------------------------------------------------
 
+static void tagfs_sync_inside(void);
+
 void tagfs_sync(void)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return;
+    tagfs_sync_inside();
+    tagfs_leave();
+}
 
+static void tagfs_sync_inside(void)
+{
     tag_registry_flush(g_state.registry);
     file_table_flush();
     meta_pool_flush();
@@ -2083,43 +2432,129 @@ static void tagfs_clear_the_ground(void)
 }
 
 /*
- * Taking the volume down, with or without writing anything back.
+ * The medium went away underneath this volume. Let go of everything held about
+ * it WITHOUT WRITING A BYTE, so that whatever comes back is read rather than
+ * assumed: what is in memory describes the volume as it was before it left,
+ * and the medium under the head may not even be the same one.
  *
- * write_back is the ordinary case: the machine is stopping and what is in
- * memory belongs on the medium. It is exactly wrong in the other one — a
- * medium that went away and came back. Everything held here was read before
- * the departure, and writing it back would put a picture of the volume as it
- * was over whatever the volume actually is now. A volume that left is re-read,
- * not re-asserted.
+ * ‼ IN TWO STEPS, BECAUSE SOMEBODY MAY BE INSIDE.
+ *
+ * First the door is shut, which stops anybody new. Then, only if the volume is
+ * empty of callers, the ground is cleared. It is NOT waited for here: this
+ * runs where the departure was noticed, which is the guide loop or the idle
+ * loop, and the caller still inside may be waiting for a transfer that the
+ * very same loop is the one to finish — waiting here would be waiting for
+ * ourselves. Returns false when it has not been done, and TagFSServiceIfPending
+ * comes back for it.
  */
-static void tagfs_teardown(bool write_back)
+static bool tagfs_abandon(void)
 {
-    if (!g_state.initialized)
-        return;
+    if (!g_state.initialized) {
+        return true;                        /* nothing to let go of */
+    }
 
-    if (write_back) {
-        tagfs_sync();
+    /* Shut before counting, and only once: a second pass through here must not
+     * announce a departure that is already under way. */
+    if (__atomic_exchange_n(&g_door, (uint8_t)VOLUME_LEAVING,
+                            __ATOMIC_ACQ_REL) == VOLUME_UP) {
+        __atomic_store_n(&g_abandon_pending, 1u, __ATOMIC_RELEASE);
+    }
+
+    uint32_t inside = __atomic_load_n(&g_inside, __ATOMIC_ACQUIRE);
+    if (inside != 0) {
+        /*
+         * Said once per departure, not once per attempt — the service pass
+         * asks again every time round the loop, and a line per iteration is a
+         * log nobody can read.
+         */
+        if (!g_leaving_said) {
+            g_leaving_said = true;
+            kprintf("[TagFS] the volume is on its way out and %u caller(s) are "
+                    "still inside it — nothing of it is let go until they are "
+                    "out\n", inside);
+        }
+        return false;
     }
 
     tagfs_clear_the_ground();
-    debug_printf("[TagFS] Shutdown complete\n");
-}
-void tagfs_shutdown(void)
-{
-    tagfs_teardown(true);
-}
 
-/*
- * The medium went away underneath this volume. Let go of everything held about
- * it without writing a byte, so that whatever comes back is read rather than
- * assumed.
- */
-static void tagfs_abandon(void)
-{
-    tagfs_teardown(false);
+    __atomic_store_n(&g_door, (uint8_t)VOLUME_DOWN, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_abandon_pending, 0u, __ATOMIC_RELEASE);
+    if (g_leaving_said) {
+        g_leaving_said = false;
+        kprintf("[TagFS] the last caller is out and the old volume has been let "
+                "go of\n");
+    }
+
     g_medium_left   = false;
     g_tagfs_seat    = BOARDROOM_NO_SEAT;
     g_tagfs_seating = 0;
+    return true;
+}
+
+/*
+ * ‼ THE MACHINE IS STOPPING, AND THAT IS A DIFFERENT THING ENTIRELY.
+ *
+ * What has to happen is that memory reaches the medium; what must NOT happen
+ * is that memory somebody is still reading is handed back to an allocator no
+ * one will ever ask again. So this writes everything back through the ordinary
+ * door — with the volume still up, so the flushes below it are allowed to work
+ * — and then shuts the door and stops. Nothing is freed.
+ *
+ * Freeing at a halt was never for the machine's benefit; it was tidiness, and
+ * it is the one road on which the take-down cannot wait for anybody.
+ */
+void tagfs_shutdown(void)
+{
+    if (!g_state.initialized) {
+        return;
+    }
+
+    tagfs_sync();
+
+    __atomic_store_n(&g_door, (uint8_t)VOLUME_LEAVING, __ATOMIC_RELEASE);
+    debug_printf("[TagFS] Shutdown complete\n");
+}
+
+/*
+ * The ground could not be cleared when the medium left, because somebody was
+ * standing on it. Finish it here, and then let the ordinary road take the
+ * volume back up.
+ *
+ * Called from the guide loop and from the idle loop — the two places in this
+ * kernel that are allowed to wait and are reached often — and it is one atomic
+ * load when there is nothing to do, which is every iteration but a handful in
+ * the life of a machine.
+ */
+void TagFSServiceIfPending(void)
+{
+    if (__atomic_load_n(&g_abandon_pending, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+
+    TagFSHoldGroundRelease();       /* nothing at all unless HOLDGROUND=on */
+
+    if (__atomic_load_n(&g_inside, __ATOMIC_ACQUIRE) != 0) {
+        return;                     /* still somebody in there */
+    }
+
+    /* Under the same flag as the other road, and for its whole length: this
+     * one clears the ground and then mounts, and a second core arriving in
+     * between would mount on top of it. */
+    if (!attending_take()) {
+        return;
+    }
+
+    if (tagfs_abandon()) {
+        /* And now it is an ordinary arrival: nothing is mounted, and there may
+         * be a medium in the room carrying the volume this machine had. That
+         * road already knows how to check it is the same volume and to say
+         * what it did, so it is not written a second time here. */
+        attend_arrival();
+        TagFSHoldGroundAfterReturn();   /* nothing at all unless HOLDGROUND=on */
+    }
+
+    attending_done();
 }
 
 
@@ -2127,9 +2562,19 @@ static void tagfs_abandon(void)
 // Test runner interface (called from userspace via System Deck)
 // ----------------------------------------------------------------------------
 
-error_t TagFS_RunTests(void) {
-    if (!g_state.initialized)
+static error_t TagFS_RunTests_inside(void);
+
+error_t TagFS_RunTests(void)
+{
+    if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = TagFS_RunTests_inside();
+    tagfs_leave();
+    return rc;
+}
+
+static error_t TagFS_RunTests_inside(void)
+{
     
     TestStats stats;
     error_t result = TagFS_RunAllTests(&stats);
@@ -2148,11 +2593,22 @@ error_t TagFS_RunTests(void) {
 // tagfs_create_file
 // ----------------------------------------------------------------------------
 
+static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
+                                    uint32_t *out_file_id);
+
 int tagfs_create_file(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
                       uint32_t *out_file_id)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_create_file_inside(filename, tag_ids, tag_count, out_file_id);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_ids, uint16_t tag_count,
+                                    uint32_t *out_file_id)
+{
     if (!filename || !out_file_id)
         return -1;
 
@@ -2317,11 +2773,19 @@ static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count);
 // tagfs_delete_file
 // ----------------------------------------------------------------------------
 
+static int tagfs_delete_file_inside(uint32_t file_id);
+
 int tagfs_delete_file(uint32_t file_id)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_delete_file_inside(file_id);
+    tagfs_leave();
+    return rc;
+}
 
+static int tagfs_delete_file_inside(uint32_t file_id)
+{
     spin_lock(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
@@ -2374,10 +2838,19 @@ int tagfs_delete_file(uint32_t file_id)
 // tagfs_rename_file
 // ----------------------------------------------------------------------------
 
+static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename);
+
 int tagfs_rename_file(uint32_t file_id, const char *new_filename)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_rename_file_inside(file_id, new_filename);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
+{
     if (!new_filename)
         return -1;
 
@@ -2434,11 +2907,19 @@ int tagfs_rename_file(uint32_t file_id, const char *new_filename)
 // Tag operations
 // ----------------------------------------------------------------------------
 
+static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id);
+
 int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_add_tag_inside(file_id, tag_id);
+    tagfs_leave();
+    return rc;
+}
 
+static int tagfs_add_tag_inside(uint32_t file_id, uint16_t tag_id)
+{
     spin_lock(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
@@ -2502,11 +2983,19 @@ int tagfs_add_tag(uint32_t file_id, uint16_t tag_id)
     return 0;
 }
 
+static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id);
+
 int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_remove_tag_inside(file_id, tag_id);
+    tagfs_leave();
+    return rc;
+}
 
+static int tagfs_remove_tag_inside(uint32_t file_id, uint16_t tag_id)
+{
     spin_lock(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
@@ -2561,11 +3050,19 @@ int tagfs_remove_tag(uint32_t file_id, uint16_t tag_id)
     return 0;
 }
 
+static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id);
+
 bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return false;
+    bool rc = tagfs_has_tag_inside(file_id, tag_id);
+    tagfs_leave();
+    return rc;
+}
 
+static bool tagfs_has_tag_inside(uint32_t file_id, uint16_t tag_id)
+{
     TagBitmapIndex *idx = g_state.bitmap_index;
     if (!idx)
         return false;
@@ -2590,10 +3087,19 @@ bool tagfs_has_tag(uint32_t file_id, uint16_t tag_id)
     return result;
 }
 
+static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const char *value);
+
 int tagfs_add_tag_string(uint32_t file_id, const char *key, const char *value)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_add_tag_string_inside(file_id, key, value);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_add_tag_string_inside(uint32_t file_id, const char *key, const char *value)
+{
     if (!key)
         return -1;
     uint16_t tag_id = tag_registry_intern(g_state.registry, key, value);
@@ -2607,10 +3113,19 @@ int tagfs_add_tag_string(uint32_t file_id, const char *key, const char *value)
     return tagfs_add_tag(file_id, tag_id);
 }
 
+static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key);
+
 int tagfs_remove_tag_string(uint32_t file_id, const char *key)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_remove_tag_string_inside(file_id, key);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_remove_tag_string_inside(uint32_t file_id, const char *key)
+{
     if (!key)
         return -1;
     /* Remove by key. The registry keys tags by (key,value), so a key-only
@@ -2639,10 +3154,19 @@ int tagfs_remove_tag_string(uint32_t file_id, const char *key)
     return removed > 0 ? 0 : -1;
 }
 
+static bool tagfs_has_tag_string_inside(uint32_t file_id, const char *key, const char *value);
+
 bool tagfs_has_tag_string(uint32_t file_id, const char *key, const char *value)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return false;
+    bool rc = tagfs_has_tag_string_inside(file_id, key, value);
+    tagfs_leave();
+    return rc;
+}
+
+static bool tagfs_has_tag_string_inside(uint32_t file_id, const char *key, const char *value)
+{
     if (!key)
         return false;
     uint16_t tag_id = tag_registry_lookup(g_state.registry, key, value);
@@ -2655,11 +3179,22 @@ bool tagfs_has_tag_string(uint32_t file_id, const char *key, const char *value)
 // Query
 // ----------------------------------------------------------------------------
 
+static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
+                                    uint32_t *out_file_ids, uint32_t max_results);
+
 int tagfs_query_files(const char *query_strings[], uint32_t count,
                       uint32_t *out_file_ids, uint32_t max_results)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return 0;
+    int rc = tagfs_query_files_inside(query_strings, count, out_file_ids, max_results);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
+                                    uint32_t *out_file_ids, uint32_t max_results)
+{
     if (!query_strings || count == 0 || !out_file_ids || max_results == 0)
         return 0;
 
@@ -2773,10 +3308,19 @@ int tagfs_query_files(const char *query_strings[], uint32_t count,
     return result;
 }
 
+static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_results);
+
 int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return 0;
+    int rc = tagfs_list_all_files_inside(out_file_ids, max_results);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_results)
+{
     if (!out_file_ids || max_results == 0)
         return 0;
 
@@ -2811,11 +3355,19 @@ int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
 // File I/O (open / close / read / write)
 // ----------------------------------------------------------------------------
 
+static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags);
+
 TagFSFileHandle *tagfs_open(uint32_t file_id, uint32_t flags)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return NULL;
+    TagFSFileHandle *rc = tagfs_open_inside(file_id, flags);
+    tagfs_leave();
+    return rc;
+}
 
+static TagFSFileHandle *tagfs_open_inside(uint32_t file_id, uint32_t flags)
+{
     uint32_t meta_block, meta_offset;
     if (file_table_lookup(file_id, &meta_block, &meta_offset) != 0)
     {
@@ -2835,6 +3387,10 @@ TagFSFileHandle *tagfs_open(uint32_t file_id, uint32_t flags)
     handle->file_id = file_id;
     handle->flags = flags;
     handle->offset = 0;
+    /* Which mounting of the volume these extents were copied out of. A handle
+     * is refused after the volume has been read again, because the blocks it
+     * names then belong to whatever the volume keeps there now. */
+    handle->mount_epoch = tagfs_mount_epoch();
     handle->file_size = 0;
     handle->extents = NULL;
     handle->extent_count = 0;
@@ -2875,11 +3431,24 @@ void tagfs_close(TagFSFileHandle *handle)
     debug_printf("[TagFS] close: handle freed\n");
 }
 
+static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size);
+
 int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
 {
-    if (!handle || !buffer || size == 0)
+    if (!tagfs_enter())
         return -1;
-    if (!g_state.initialized)
+    if (!handle_belongs_here(handle, "read")) {
+        tagfs_leave();
+        return -1;
+    }
+    int rc = tagfs_read_inside(handle, buffer, size);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_read_inside(TagFSFileHandle *handle, void *buffer, uint64_t size)
+{
+    if (!handle || !buffer || size == 0)
         return -1;
 
     if (handle->offset >= handle->file_size)
@@ -2997,11 +3566,24 @@ int tagfs_read(TagFSFileHandle *handle, void *buffer, uint64_t size)
     return (int)bytes_read;
 }
 
+static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint64_t size);
+
 int tagfs_write(TagFSFileHandle *handle, const void *buffer, uint64_t size)
 {
-    if (!handle || !buffer || size == 0)
+    if (!tagfs_enter())
         return -1;
-    if (!g_state.initialized)
+    if (!handle_belongs_here(handle, "write")) {
+        tagfs_leave();
+        return -1;
+    }
+    int rc = tagfs_write_inside(handle, buffer, size);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint64_t size)
+{
+    if (!handle || !buffer || size == 0)
         return -1;
     if (!(handle->flags & TAGFS_HANDLE_WRITE))
         return -1;
@@ -3408,10 +3990,19 @@ static int tagfs_truncate_locked(uint32_t file_id, uint64_t new_size)
     return 0;
 }
 
+static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size);
+
 int tagfs_truncate_file(uint32_t file_id, uint64_t new_size)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -ERR_INVALID_OPERATION;
+    int rc = tagfs_truncate_file_inside(file_id, new_size);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
+{
     if (file_id == 0)
         return -ERR_INVALID_ARGUMENT;
 
@@ -3501,10 +4092,19 @@ int tagfs_alloc_blocks_internal(uint32_t count, uint32_t *out_start_block)
 }
 
 // Public version - acquires g_state.lock
+static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block);
+
 int tagfs_alloc_blocks(uint32_t count, uint32_t *out_start_block)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_alloc_blocks_inside(count, out_start_block);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_alloc_blocks_inside(uint32_t count, uint32_t *out_start_block)
+{
     if (count == 0 || !out_start_block)
         return -1;
 
@@ -3629,10 +4229,19 @@ static void tagfs_free_blocks_internal(uint32_t start_block, uint32_t count)
 }
 
 // Public version - acquires g_state.lock
+static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count);
+
 int tagfs_free_blocks(uint32_t start_block, uint32_t count)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_free_blocks_inside(start_block, count);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_free_blocks_inside(uint32_t start_block, uint32_t count)
+{
     if (count == 0)
         return 0;
 
@@ -3646,10 +4255,19 @@ int tagfs_free_blocks(uint32_t start_block, uint32_t count)
 // Helpers
 // ----------------------------------------------------------------------------
 
+static int tagfs_get_metadata_inside(uint32_t file_id, TagFSMetadata *out);
+
 int tagfs_get_metadata(uint32_t file_id, TagFSMetadata *out)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_get_metadata_inside(file_id, out);
+    tagfs_leave();
+    return rc;
+}
+
+static int tagfs_get_metadata_inside(uint32_t file_id, TagFSMetadata *out)
+{
     if (!out)
         return -1;
 
@@ -3669,6 +4287,134 @@ int tagfs_get_metadata(uint32_t file_id, TagFSMetadata *out)
 TagFSState *tagfs_get_state(void)
 {
     return &g_state;
+}
+
+// ----------------------------------------------------------------------------
+// Tags by name — without handing the registry out
+// ----------------------------------------------------------------------------
+
+/*
+ * ‼ THE REGISTRY USED TO LEAVE THE FILESYSTEM, AND IT IS FREED ON A RE-MOUNT.
+ *
+ * Seven files outside TagFS reached tagfs_get_state()->registry, checked it
+ * for NULL, and then used it: Touch resolving an occurrence, Bay and Brook
+ * naming a channel, a process being asked whether it carries a tag, a cabin
+ * being given its tags, use-context, autostart. Between that check and the use
+ * of it, a volume whose medium had left could be dropped and its registry
+ * handed back to the allocator. Touch resolves a tag on every publish, so this
+ * was not a corner of the machine — it was its busiest road.
+ *
+ * All of them wanted one of four things, and all four are here now, each
+ * taking the door for the length of the answer. What leaves TagFS is an id, or
+ * a copy of a name in the caller's own buffer. The pointer does not.
+ */
+static uint16_t tag_id_for(const char *tag, bool make_it)
+{
+    if (!tag || tag[0] == '\0') {
+        return TAGFS_INVALID_TAG_ID;
+    }
+    if (!tagfs_enter()) {
+        return TAGFS_INVALID_TAG_ID;
+    }
+
+    uint16_t id = TAGFS_INVALID_TAG_ID;
+    if (g_state.registry) {
+        char key[256], value[256];
+        tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
+        const char *v = (value[0] != '\0') ? value : NULL;
+        id = make_it ? tag_registry_intern(g_state.registry, key, v)
+                     : tag_registry_lookup(g_state.registry, key, v);
+    }
+
+    tagfs_leave();
+    return id;
+}
+
+/* The id this volume has for a tag, or TAGFS_INVALID_TAG_ID when it has none
+ * — including when there is no volume at all. */
+uint16_t tagfs_tag_lookup(const char *tag)
+{
+    return tag_id_for(tag, false);
+}
+
+/* The same, and the volume issues an id if it does not have one yet. */
+uint16_t tagfs_tag_intern(const char *tag)
+{
+    return tag_id_for(tag, true);
+}
+
+static bool tag_name_of(uint16_t tag_id, char *out, size_t out_size, bool with_value)
+{
+    if (!out || out_size == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (!tagfs_enter()) {
+        return false;
+    }
+
+    bool said = false;
+    if (g_state.registry) {
+        const char *key = tag_registry_key(g_state.registry, tag_id);
+        if (key) {
+            if (with_value) {
+                tagfs_format_tag(out, out_size, key,
+                                 tag_registry_value(g_state.registry, tag_id));
+            } else {
+                ksnprintf(out, out_size, "%s", key);
+            }
+            said = true;
+        }
+    }
+
+    tagfs_leave();
+    return said;
+}
+
+/* The key of a tag id — "app" out of "app:editor". */
+bool tagfs_tag_key(uint16_t tag_id, char *out, size_t out_size)
+{
+    return tag_name_of(tag_id, out, out_size, false);
+}
+
+/* And the whole of it — "app:editor". */
+bool tagfs_tag_text(uint16_t tag_id, char *out, size_t out_size)
+{
+    return tag_name_of(tag_id, out, out_size, true);
+}
+
+/*
+ * Key, value and whether the volume calls the tag its own, in one answer.
+ *
+ * For the one caller that has to serialise a tag rather than read it: three
+ * separate questions would be three separate doors, and the answer to the
+ * second could come from a different volume than the answer to the first.
+ */
+bool tagfs_tag_parts(uint16_t tag_id, char *key, size_t key_size,
+                     char *value, size_t value_size, bool *is_system)
+{
+    if (key && key_size)     key[0] = '\0';
+    if (value && value_size) value[0] = '\0';
+    if (is_system)           *is_system = false;
+
+    if (!tagfs_enter()) {
+        return false;
+    }
+
+    bool said = false;
+    if (g_state.registry) {
+        const char *k = tag_registry_key(g_state.registry, tag_id);
+        if (k) {
+            const char *v = tag_registry_value(g_state.registry, tag_id);
+            if (key && key_size)     ksnprintf(key, key_size, "%s", k);
+            if (value && value_size && v) ksnprintf(value, value_size, "%s", v);
+            if (is_system) *is_system = tag_registry_is_system(g_state.registry, tag_id);
+            said = true;
+        }
+    }
+
+    tagfs_leave();
+    return said;
 }
 
 void tagfs_format_tag(char *dest, size_t dest_size, const char *key, const char *value)
@@ -3717,11 +4463,19 @@ int tagfs_parse_tag(const char *tag_string, char *key, size_t key_size,
 // Defrag
 // ----------------------------------------------------------------------------
 
+static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block);
+
 int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return -1;
+    int rc = tagfs_defrag_file_inside(file_id, target_block);
+    tagfs_leave();
+    return rc;
+}
 
+static int tagfs_defrag_file_inside(uint32_t file_id, uint32_t target_block)
+{
     spin_lock(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
@@ -3863,11 +4617,19 @@ int tagfs_defrag_file(uint32_t file_id, uint32_t target_block)
     return 0;
 }
 
+static uint32_t tagfs_get_fragmentation_score_inside(void);
+
 uint32_t tagfs_get_fragmentation_score(void)
 {
-    if (!g_state.initialized)
+    if (!tagfs_enter())
         return 0;
+    uint32_t rc = tagfs_get_fragmentation_score_inside();
+    tagfs_leave();
+    return rc;
+}
 
+static uint32_t tagfs_get_fragmentation_score_inside(void)
+{
     uint32_t score = 0;
     uint32_t max_id = g_state.ledger.next_file_id;
 

@@ -569,6 +569,27 @@ static void wjob_pump(void *job_)
 {
     WriteJob *j = (WriteJob *)job_;
 
+    /*
+     * ‼ IS THIS STILL THE VOLUME THIS WRITE WAS AIMED AT?
+     *
+     * A job lives across yields, and what it carries is a handle holding its
+     * own copy of the file's extents — disk block numbers. If the medium left
+     * and came back in between, the volume has been read again and those
+     * numbers now name whatever it keeps there today. Carrying on would not
+     * fail: it would write this file's bytes into another file's blocks.
+     *
+     * Asked once per pump rather than once per state, because a re-mount
+     * cannot happen inside the loop below: it is finished by the same guide
+     * loop that is running this.
+     */
+    if (!tagfs_handle_is_of_this_mount(j->handle)) {
+        kprintf("[Storage] a write to file %u was aimed at an earlier mounting "
+                "of this volume — it is refused rather than written somewhere "
+                "else\n", j->file_id);
+        wjob_finalize(j, ERR_IO);
+        return;
+    }
+
     for (;;) {
         WriteJobState s = (WriteJobState)atomic_load_u32((volatile uint32_t *)&j->state);
         switch (s) {

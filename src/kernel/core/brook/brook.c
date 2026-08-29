@@ -146,17 +146,7 @@ void BrookInit(void)
 static uint16_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 {
     if (!tag || tag[0] == '\0') return TAGFS_INVALID_TAG_ID;
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) return TAGFS_INVALID_TAG_ID;
-
-    char key[256], value[256];
-    tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
-    const char *v = (value[0] != '\0') ? value : NULL;
-
-    uint16_t id = tag_registry_lookup(fs->registry, key, v);
-    if (id != TAGFS_INVALID_TAG_ID) return id;
-    if (!intern_if_missing) return TAGFS_INVALID_TAG_ID;
-    return tag_registry_intern(fs->registry, key, v);
+    return intern_if_missing ? tagfs_tag_intern(tag) : tagfs_tag_lookup(tag);
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -758,26 +748,17 @@ error_t BrookOpenInternal(struct process_t *proc,
             /* MemTag integration: tag header + each slot chunk with the
              * Brook's key:value AND "purpose:brook" + "purpose:stream"
              * so the streaming buffers are queryable via tag algebra. */
-            TagFSState *brook_fs = tagfs_get_state();
-            if (brook_fs && brook_fs->registry) {
-                const char *bk = tag_registry_key(brook_fs->registry, tag_id);
-                const char *bv = tag_registry_value(brook_fs->registry, tag_id);
-                char tag_buf[128];
-                if (bk) {
-                    if (bv && bv[0])
-                        ksnprintf(tag_buf, sizeof(tag_buf), "%s:%s", bk, bv);
-                    else
-                        ksnprintf(tag_buf, sizeof(tag_buf), "%s", bk);
-                    MemTagApplyByPhys(fresh->header_phys, 1, tag_buf);
-                    MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook");
-                    MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook-header");
-                    size_t pages_per_chunk =
-                        (cs == BROOK_HUGE_SIZE) ? BROOK_HUGE_PAGES : 1;
-                    for (uint32_t ci = 0; ci < cc; ci++) {
-                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_buf);
-                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:brook");
-                        MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:stream");
-                    }
+            char tag_buf[128];
+            if (tagfs_tag_text(tag_id, tag_buf, sizeof(tag_buf))) {
+                MemTagApplyByPhys(fresh->header_phys, 1, tag_buf);
+                MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook");
+                MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook-header");
+                size_t pages_per_chunk =
+                    (cs == BROOK_HUGE_SIZE) ? BROOK_HUGE_PAGES : 1;
+                for (uint32_t ci = 0; ci < cc; ci++) {
+                    MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, tag_buf);
+                    MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:brook");
+                    MemTagApplyByPhys((uintptr_t)chunks[ci], pages_per_chunk, "purpose:stream");
                 }
             }
         }

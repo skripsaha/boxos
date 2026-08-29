@@ -13,8 +13,8 @@ int  file_table_init(uint32_t first_block, uint32_t block_count);
  * medium that went away, or a mount that failed halfway and is being taken
  * apart — where what is held in memory describes a volume that may no longer
  * be the one under the head. This used to flush unconditionally, so
- * tagfs_teardown(false), whose whole contract is "without writing a byte",
- * wrote two of them through here and through the metadata pool.
+ * tagfs_abandon(), whose whole contract is "without writing a byte", wrote
+ * two of them through here and through the metadata pool.
  */
 void file_table_shutdown(bool write_back);
 

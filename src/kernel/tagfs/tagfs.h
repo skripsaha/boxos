@@ -264,6 +264,15 @@ typedef struct {
     FileExtent* extents;
     uint16_t    extent_count;
     OpenFileEntry* ofe;   // back-pointer to open file entry (for locking)
+
+    /* Which mounting of the volume the extents above were copied out of.
+     *
+     * A medium that leaves and comes back is READ AGAIN, so the block numbers
+     * a handle is carrying describe the volume as it was before it left. On
+     * the volume as it is now they are somebody else's blocks, and following
+     * them is not a failed read — it is a successful read of the wrong file.
+     * See tagfs_mount_epoch(). */
+    uint32_t    mount_epoch;
 } TagFSFileHandle;
 
 typedef struct {
@@ -400,6 +409,40 @@ int      meta_pool_flush(void);
 
 error_t  tagfs_init(void);
 uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
+
+/*
+ * ‼ THE DOOR. Step inside the mounted volume before touching anything it
+ * brought up, and step out afterwards.
+ *
+ * A volume can be taken down under a running machine — its medium leaves, and
+ * what is held about it is dropped and read again — and everything the mount
+ * allocated goes back to the allocator at that moment: the tag registry, the
+ * tag index, the block bitmap, the free list, the file table, the metadata
+ * pool. Nothing is freed while a caller is inside, and no caller gets in once
+ * the volume is on its way out. False means there is no volume to be inside;
+ * every caller that gets true MUST leave.
+ *
+ * Every tagfs_* operation below takes this door itself. It is public because
+ * one thing more is reachable from outside — a caller that wants to hold
+ * something of the volume's across several calls.
+ */
+bool     tagfs_enter(void);
+void     tagfs_leave(void);
+
+/*
+ * Which mounting of a volume this is. Bumped every time one is taken up, so
+ * anything remembered across a re-read — a file handle, an async read in
+ * flight — can be told that what it remembers is from a different volume.
+ */
+uint32_t tagfs_mount_epoch(void);
+bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
+
+/*
+ * A volume that has been taken down leaves its memory alone until the last
+ * caller is out. This is where that is finished: called from the guide loop
+ * and the idle loop, one atomic load when there is nothing to do.
+ */
+void     TagFSServiceIfPending(void);
 
 /*
  * Where this volume's ground begins on that medium, in the medium's own
@@ -551,6 +594,23 @@ int      tagfs_context_get_tags(uint32_t pid, const char* tags[], uint32_t max_t
 void tagfs_format_tag(char* dest, size_t dest_size, const char* key, const char* value);
 int  tagfs_parse_tag(const char* tag_string, char* key, size_t key_size,
                      char* value, size_t value_size);
+
+/*
+ * Tags by name, for everything outside TagFS.
+ *
+ * The registry is the volume's, it is freed when the volume is read again, and
+ * it used to be handed out as a pointer to seven other files. These are what
+ * those files actually wanted: an id for a name, a name for an id, and a copy
+ * of the name rather than a pointer into the volume. Each takes the door for
+ * the length of its answer, so none of them can be holding the registry when
+ * it goes. TAGFS_INVALID_TAG_ID / false is the answer when there is no volume.
+ */
+uint16_t tagfs_tag_lookup(const char* tag);
+uint16_t tagfs_tag_intern(const char* tag);
+bool     tagfs_tag_key (uint16_t tag_id, char* out, size_t out_size);
+bool     tagfs_tag_text(uint16_t tag_id, char* out, size_t out_size);
+bool     tagfs_tag_parts(uint16_t tag_id, char* key, size_t key_size,
+                         char* value, size_t value_size, bool* is_system);
 
 // Snapshots: see the CoW snapshot API (TagFS_Snapshot*) in tagfs/cow/cow.h.
 // The former in-memory-only tagfs_snapshot_* API (snapshot.c) was unused and

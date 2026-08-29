@@ -281,6 +281,14 @@ static void obj_read_pump(void *ctx_)
 
 static void obj_read_step(ObjReadAsyncCtx *ctx)
 {
+    /* The same question the write pump asks, for the same reason: this read
+     * carries a handle full of block numbers from the mounting it started in,
+     * and a volume that left and came back has been read again since. */
+    if (!tagfs_handle_is_of_this_mount(ctx->handle)) {
+        obj_read_finish(ctx, ERR_IO, /*partial_ok=*/false);
+        return;
+    }
+
     uint64_t file_pos = ctx->start_offset + ctx->bytes_done;
 
     /* Locate extent containing file_pos. */
@@ -667,11 +675,11 @@ static int ObjDelete(const ManifestOp *op,
     uint32_t file_id = param_u32(op, 0);
 
     TagFSMetadata md;
-    TagFSState   *state = tagfs_get_state();
     if (tagfs_get_metadata(file_id, &md) == 0 && (md.flags & TAGFS_FILE_ACTIVE)) {
         for (uint16_t i = 0; i < md.tag_count; i++) {
-            const char *key = state ? tag_registry_key(state->registry, md.tag_ids[i]) : NULL;
-            if (key && (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)) {
+            char key[128];
+            if (!tagfs_tag_key(md.tag_ids[i], key, sizeof(key))) continue;
+            if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0) {
                 tagfs_metadata_free(&md);
                 return ERR_PERMISSION_DENIED;
             }
@@ -712,13 +720,13 @@ static int ObjTruncate(const ManifestOp *op,
     uint64_t new_size = param_u64(op, 4);
 
     TagFSMetadata md;
-    TagFSState   *state    = tagfs_get_state();
     uint64_t      old_size = 0;
     bool          have_md  = false;
     if (tagfs_get_metadata(file_id, &md) == 0) {
         for (uint16_t i = 0; i < md.tag_count; i++) {
-            const char *key = state ? tag_registry_key(state->registry, md.tag_ids[i]) : NULL;
-            if (key && (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0)) {
+            char key[128];
+            if (!tagfs_tag_key(md.tag_ids[i], key, sizeof(key))) continue;
+            if (strcmp(key, "system") == 0 || strcmp(key, "boot") == 0) {
                 tagfs_metadata_free(&md);
                 return ERR_PERMISSION_DENIED;
             }
@@ -830,14 +838,15 @@ static int ObjGetInfo(const ManifestOp *op,
     }
 
     /* Compute required size up front so we can fail fast on too-small crate. */
-    TagFSState *state = tagfs_get_state();
     uint64_t need = 4u + 4u + 8u + 2u + 2u + filename_len;
     for (uint16_t i = 0; i < md.tag_count; i++) {
-        const char *k = state ? tag_registry_key  (state->registry, md.tag_ids[i]) : NULL;
-        const char *v = state ? tag_registry_value(state->registry, md.tag_ids[i]) : NULL;
-        uint16_t kl = k ? (uint16_t)strlen(k) : 0;
-        uint16_t vl = v ? (uint16_t)strlen(v) : 0;
-        need += 2u + 2u + 1u + kl + vl;   /* +1: per-tag type byte */
+        /* A tag the volume no longer knows still takes its place in the list:
+         * the count in the header says how many records follow, so skipping
+         * one would leave the reader parsing the next tag's bytes as this
+         * one's. tagfs_tag_parts empties both buffers when it answers no. */
+        char k[128], v[128];
+        (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), NULL);
+        need += 2u + 2u + 1u + strlen(k) + strlen(v);   /* +1: per-tag type byte */
     }
 
     if (need > out->capacity) {
@@ -856,17 +865,27 @@ static int ObjGetInfo(const ManifestOp *op,
     memcpy(kp + pos, &filename_len, 2); pos += 2;
     if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
 
+    uint16_t written = 0;
     for (uint16_t i = 0; i < md.tag_count; i++) {
-        const char *k = state ? tag_registry_key  (state->registry, md.tag_ids[i]) : NULL;
-        const char *v = state ? tag_registry_value(state->registry, md.tag_ids[i]) : NULL;
-        uint16_t kl = k ? (uint16_t)strlen(k) : 0;
-        uint16_t vl = v ? (uint16_t)strlen(v) : 0;
+        char k[128], v[128];
+        bool is_system = false;
+        (void)tagfs_tag_parts(md.tag_ids[i], k, sizeof(k), v, sizeof(v), &is_system);
+        uint16_t kl = (uint16_t)strlen(k);
+        uint16_t vl = (uint16_t)strlen(v);
+        /* The two passes read the registry twice, and a volume that changed
+         * in between could make the second one longer than the first measured.
+         * Stopping here is what keeps this inside the buffer; the count is
+         * corrected below so the reader is told how many records there are
+         * rather than how many were hoped for. */
+        if (pos + 5u + kl + vl > need) break;
         memcpy(kp + pos, &kl, 2); pos += 2;
         memcpy(kp + pos, &vl, 2); pos += 2;
-        kp[pos++] = (state && tag_registry_is_system(state->registry, md.tag_ids[i])) ? 1 : 0;
+        kp[pos++] = is_system ? 1 : 0;
         if (kl) { memcpy(kp + pos, k, kl); pos += kl; }
         if (vl) { memcpy(kp + pos, v, vl); pos += vl; }
+        written++;
     }
+    memcpy(kp + 16, &written, 2);       /* tag_count: what was actually written */
 
     int crc = crate_out_commit(out, ctx, kp, pos);
     crate_buf_free(kp);
@@ -1081,18 +1100,14 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     }
 
     /* Intern tags into the registry. */
-    TagFSState *tfs_state = tagfs_get_state();
     uint16_t tag_id_buf[16];
     uint16_t intern_count = 0;
-    if (tfs_state && tfs_state->registry) {
-        for (int i = 0; i < tag_count && intern_count < 16; i++) {
-            char k[64], v[64];
-            if (tagfs_parse_tag(tag_ptrs[i], k, sizeof(k), v, sizeof(v)) != 0) continue;
-            uint16_t tid = tag_registry_intern(tfs_state->registry, k,
-                                               v[0] ? v : NULL);
-            if (tid != TAGFS_INVALID_TAG_ID) {
-                tag_id_buf[intern_count++] = tid;
-            }
+    for (int i = 0; i < tag_count && intern_count < 16; i++) {
+        char k[64], v[64];
+        if (tagfs_parse_tag(tag_ptrs[i], k, sizeof(k), v, sizeof(v)) != 0) continue;
+        uint16_t tid = tagfs_tag_intern(tag_ptrs[i]);
+        if (tid != TAGFS_INVALID_TAG_ID) {
+            tag_id_buf[intern_count++] = tid;
         }
     }
 

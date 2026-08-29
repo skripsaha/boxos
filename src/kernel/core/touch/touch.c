@@ -137,9 +137,6 @@ void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
     TouchLogbookLookup(tag, out_full, out_bare);
     if (*out_bare != TOUCH_TAG_INVALID) return;
 
-    TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) return;
-
     char key[256], value[256];
     tagfs_parse_tag(tag, key, sizeof(key), value, sizeof(value));
 
@@ -147,15 +144,16 @@ void TouchTagResolve(const char *tag, TouchTag *out_full, TouchTag *out_bare)
     bool is_wildcard = has_value && value[0] == '.' && value[1] == '.' &&
                                     value[2] == '.' && value[3] == '\0';
 
-    *out_bare = tag_registry_lookup(fs->registry, key, NULL);
-    if (*out_bare == TAGFS_INVALID_TAG_ID)
-        *out_bare = tag_registry_intern(fs->registry, key, NULL);
+    /* Asked of TagFS by name rather than through a pointer to its registry:
+     * this runs on every publish, and the volume can be dropped and read again
+     * underneath it. */
+    *out_bare = tagfs_tag_intern(key);
     if (*out_bare == TAGFS_INVALID_TAG_ID) *out_bare = TOUCH_TAG_INVALID;
 
     if (has_value && !is_wildcard) {
-        *out_full = tag_registry_lookup(fs->registry, key, value);
-        if (*out_full == TAGFS_INVALID_TAG_ID)
-            *out_full = tag_registry_intern(fs->registry, key, value);
+        char full[512];
+        tagfs_format_tag(full, sizeof(full), key, value);
+        *out_full = tagfs_tag_intern(full);
         if (*out_full == TAGFS_INVALID_TAG_ID) *out_full = TOUCH_TAG_INVALID;
     }
 }

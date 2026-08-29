@@ -40,8 +40,11 @@ error_t UseContextSet(const char *tags[], uint32_t count) {
         return ERR_INVALID_ARGUMENT;
     }
 
+    /* Is there a volume at all? A tag id is the volume's to issue, and this
+     * used to be asked by looking at its registry pointer — the one thing a
+     * re-mount frees. The flag beside it says the same and outlives it. */
     TagFSState *fs = tagfs_get_state();
-    if (!fs || !fs->registry) {
+    if (!fs || !fs->initialized) {
         return ERR_NOT_INITIALIZED;
     }
 
@@ -55,10 +58,7 @@ error_t UseContextSet(const char *tags[], uint32_t count) {
             continue;
         }
 
-        char key[256], value[256];
-        tagfs_parse_tag(tags[i], key, sizeof(key), value, sizeof(value));
-
-        uint16_t tid = tag_registry_intern(fs->registry, key, value[0] ? value : NULL);
+        uint16_t tid = tagfs_tag_intern(tags[i]);
         if (tid != TAGFS_INVALID_TAG_ID) {
             resolved_tags[resolved_count++] = tid;
         }
