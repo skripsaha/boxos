@@ -323,6 +323,144 @@ static EfiMemoryDescriptor *efi_find_descriptor(uint8_t *map, uint32_t map_size,
 }
 
 /* =========================================================================
+ * EFI_MEMORY_ATTRIBUTES_TABLE (UEFI 2.10 §4.6.4)
+ *
+ * Firmware that publishes this table is saying how tightly its own runtime
+ * regions may be mapped: EFI_MEMORY_RO on the pages it keeps code in,
+ * EFI_MEMORY_XP on the pages it keeps data in, split to page granularity.
+ * Without it there is nothing to go on, and a runtime code region has to stay
+ * both writable and executable for the life of the machine — the one
+ * combination nobody wants for resident code.
+ *
+ * Applied only AFTER SetVirtualAddressMap, and that timing is the point: the
+ * firmware patches its own code during that call, so the write permission it
+ * needs there is exactly the write permission it must not keep afterwards.
+ * Linux applies it at the same moment and for the same reason
+ * (efi_memattr_apply_permissions, from efi_runtime_update_mappings).
+ *
+ * ‼ Cacheability does NOT come from these entries. Their Attribute field
+ * carries RO/XP and typically no memory type at all, so deriving one from it
+ * would quietly turn write-back firmware data into uncacheable. The type
+ * keeps coming from the descriptor in the real memory map covering the same
+ * address — which is also the descriptor that has to agree with this entry
+ * before it is honoured.
+ *
+ * An entry that does not check out is SKIPPED, not fatal, and the region it
+ * describes simply keeps the looser permissions it already had — exactly the
+ * state a machine whose firmware publishes no table lives in. Skipping is
+ * counted and said out loud.
+ * ========================================================================= */
+
+const EfiGuid EFI_MEMORY_ATTRIBUTES_TABLE_GUID = {
+    0xdcfa911d, 0x26eb, 0x469f,
+    {0xa2, 0x20, 0x38, 0xb7, 0xdc, 0x46, 0x12, 0x20}
+};
+
+/* Version 1 is the original; version 2 adds only a flags bit describing
+ * forward-edge control-flow guard in runtime code, which changes nothing
+ * about how the descriptors are read. Anything higher is a table this kernel
+ * has not been taught. */
+#define EFI_MEMORY_ATTRIBUTES_TABLE_MAX_VERSION 2u
+/* Ludicrously higher than any real board publishes; the bound exists so a
+ * corrupted count cannot walk this kernel across all of memory. Linux picks
+ * the same number for the same reason. */
+#define EFI_MEMORY_ATTRIBUTES_MAX_ENTRIES       65536u
+
+typedef struct {
+    uint32_t version;
+    uint32_t number_of_entries;
+    uint32_t descriptor_size;
+    uint32_t flags;
+} EfiMemoryAttributesTable;
+
+static void efi_apply_memory_attributes(vmm_context_t *kctx, uint8_t *map,
+                                        uint32_t map_size, uint32_t desc_size)
+{
+    void *raw = efi_find_configuration_table(&EFI_MEMORY_ATTRIBUTES_TABLE_GUID);
+    if (!raw) {
+        kprintf("[EFI] firmware publishes no memory-attributes table — "
+                "runtime code keeps write permission\n");
+        return;
+    }
+
+    EfiMemoryAttributesTable *t =
+        (EfiMemoryAttributesTable *)vmm_phys_to_virt((uintptr_t)raw);
+    if (!t) return;
+
+    /* A descriptor SMALLER than EfiMemoryDescriptor cannot be read at all; a
+     * descriptor LARGER than the memory map's makes no sense and is the shape
+     * a corrupted table takes. Both are Linux's checks. */
+    if (t->version == 0 || t->version > EFI_MEMORY_ATTRIBUTES_TABLE_MAX_VERSION ||
+        t->descriptor_size < sizeof(EfiMemoryDescriptor) ||
+        t->descriptor_size > desc_size ||
+        t->number_of_entries == 0 ||
+        t->number_of_entries > EFI_MEMORY_ATTRIBUTES_MAX_ENTRIES) {
+        kprintf("[EFI] memory-attributes table not understood "
+                "(version=%u desc=%u entries=%u) — ignored\n",
+                t->version, t->descriptor_size, t->number_of_entries);
+        return;
+    }
+
+    uint8_t *first = (uint8_t *)t + sizeof(EfiMemoryAttributesTable);
+    uint32_t tightened = 0, skipped = 0;
+
+    for (uint32_t i = 0; i < t->number_of_entries; i++) {
+        EfiMemoryDescriptor *d =
+            (EfiMemoryDescriptor *)(first + (size_t)i * t->descriptor_size);
+
+        uint64_t phys = d->physical_start;
+        uint64_t span = d->number_of_pages * EFI_PAGE_SIZE;
+
+        if ((d->type != EFI_RUNTIME_SERVICES_CODE &&
+             d->type != EFI_RUNTIME_SERVICES_DATA) ||
+            d->number_of_pages == 0 ||
+            (phys & (EFI_PAGE_SIZE - 1)) != 0) {
+            skipped++;
+            continue;
+        }
+
+        /* The entry has to name memory this kernel actually mapped, of the
+         * same type, and one memory-map descriptor has to cover it WHOLE —
+         * a permission applied across a boundary would land on a region
+         * nobody described. */
+        EfiMemoryDescriptor *cover =
+            efi_find_descriptor(map, map_size, desc_size, phys);
+        if (!cover ||
+            !(cover->attribute & EFI_MEMORY_RUNTIME) ||
+            cover->type != d->type ||
+            cover->physical_start + efi_pages_to_bytes(cover->number_of_pages)
+                < phys + span) {
+            skipped++;
+            continue;
+        }
+
+        uint64_t flags = VMM_FLAG_PRESENT | efi_rt_cache_flags(cover->attribute);
+        if (!(d->attribute & EFI_MEMORY_RO)) flags |= VMM_FLAG_WRITABLE;
+        if (d->attribute & EFI_MEMORY_XP)    flags |= VMM_FLAG_NO_EXECUTE;
+
+        /* Both windows onto the same pages: the canonical runtime VA the
+         * firmware uses from here on, and the identity alias kept as a safety
+         * net. Leaving either one writable makes the other's read-only an
+         * ornament. */
+        bool a = vmm_protect(kctx, EFI_RT_VA_BASE + (uintptr_t)phys,
+                             (size_t)span, flags);
+        bool b = vmm_protect(kctx, (uintptr_t)phys, (size_t)span, flags);
+        if (a && b) {
+            tightened++;
+        } else {
+            skipped++;
+            kprintf("[EFI] could not tighten runtime region 0x%lx "
+                    "(%lu page(s))\n",
+                    (unsigned long)phys, (unsigned long)d->number_of_pages);
+        }
+    }
+
+    kprintf("[EFI] memory attributes: %u runtime region(s) tightened to what "
+            "the firmware declared, %u left as they were\n",
+            tightened, skipped);
+}
+
+/* =========================================================================
  * Initialisation
  * ========================================================================= */
 
@@ -563,6 +701,12 @@ bool efi_runtime_init(void)
     efi_boot_services_alias(map, bi->efi_mmap_size, desc_size, kctx, false);
     PmmReleaseBootServicesMemory();
 
+    /* And now — only now — the runtime regions can be tightened to what the
+     * firmware itself declared. Before this call it was patching its own code
+     * and needed the write permission it is about to lose. */
+    if (!EFI_IS_ERROR(s))
+        efi_apply_memory_attributes(kctx, map, bi->efi_mmap_size, desc_size);
+
     if (EFI_IS_ERROR(s)) {
         debug_printf("[EFI] SetVirtualAddressMap failed: 0x%lx\n",
                      (unsigned long)s);
@@ -620,6 +764,44 @@ bool efi_runtime_init(void)
 
     if (!g_rt_lock_init) { spinlock_init(&g_rt_lock); g_rt_lock_init = true; }
     g_rt_available = true;
+
+    /*
+     * And then it USES the thing, once, before anything depends on it.
+     *
+     * Everything above this line is arrangement: pages mapped, a pointer
+     * rebased, permissions tightened to what the firmware asked for. None of
+     * it is evidence. GetTime is the cheapest runtime service there is — it
+     * reads the RTC and returns — and dispatching it here puts the whole new
+     * arrangement under load at the one moment the machine can still say
+     * something useful about it: through the rebased pointer, into the
+     * relocated code, off the read-only pages.
+     *
+     * If SVAM rebased us wrong, or the attributes table tightened something
+     * the firmware still writes, this is where it shows — with a year on the
+     * screen, rather than three subsystems later at shutdown with no clue
+     * which arrangement was to blame.
+     *
+     * A refusal is not a failure. UEFI 2.10 §8.1: a platform may publish an
+     * EFI_RT_PROPERTIES_TABLE saying a service is unsupported at runtime, and
+     * must still provide a callable implementation that returns
+     * EFI_UNSUPPORTED. So the interesting outcome is not the status — it is
+     * that the call RETURNED.
+     */
+    {
+        EfiTime t;
+        memset(&t, 0, sizeof(t));
+        EfiStatus gs = efi_get_time(&t, NULL);
+        if (!EFI_IS_ERROR(gs)) {
+            kprintf("[EFI] runtime services answer: firmware clock reads "
+                    "%04u-%02u-%02u %02u:%02u:%02u\n",
+                    t.year, t.month, t.day, t.hour, t.minute, t.second);
+        } else {
+            kprintf("[EFI] runtime services answer: GetTime returned 0x%lx "
+                    "(the call came back, which is the part that was in "
+                    "question)\n", (unsigned long)gs);
+        }
+    }
+
     return true;
 }
 
