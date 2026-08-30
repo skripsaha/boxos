@@ -300,9 +300,14 @@ void guide(void)
             pockets_processed++;
         }
 
-        if (process_get_state(proc) == PROC_WAITING) {
-            process_set_state(proc, PROC_WORKING);
-        }
+        /* Nothing is un-parked here, and that is the point. A strand left
+         * this loop PROC_WAITING for exactly one reason — a handler parked it
+         * and owes it a Result — so waking it would be waking it on behalf of
+         * an event that has not happened. The line that used to stand here
+         * could not tell that park apart from the caller's own "being served"
+         * mark, because both were spelled PROC_WAITING; sync_syscall_dispatch
+         * no longer writes that mark, so there is nothing left to restore.
+         * See the comment at its call site in idt.c. */
     }
 
     if (pockets_processed > 0) {

@@ -1289,7 +1289,27 @@ static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
 {
     context_save_from_frame(proc, frame);
     ready_queue_push(&g_ready_queue, proc);
-    process_set_state(proc, PROC_WAITING);
+    /* Being served is a state of the counter, not of the passenger, and it
+     * used to be written here as PROC_WAITING — "queued for the guide, not
+     * for the scheduler". It established nothing: this core arrives with IF
+     * clear (SFMASK carries IF for SYSCALL; vector 0x80 is an interrupt gate;
+     * spin_lock saves and restores RFLAGS rather than enabling), there is no
+     * second core on this path, and the strand is running, so no scheduler
+     * pass can observe the mark between here and guide()'s return.
+     *
+     * What it did do was destroy every park a handler took. A handler that
+     * parks — addr_park, touch_await, ObjRead, ObjWriteAsync — writes the same
+     * PROC_WAITING to mean the opposite thing: "woken by event, not by the
+     * next pass". Arriving already marked, its write was a no-op (old == new,
+     * so no sched_dequeue), and guide()'s matching restore then read the mark
+     * as its own and enqueued the strand it was supposed to leave asleep. A
+     * 300 ms sleep cost 279 ms of processor time, the machine never reached
+     * idle, and every wake gated on PROC_WAITING — touch_interrupt_deliver,
+     * touch_queue_fire_wake, both arms of sync_ops — was skipped, because the
+     * state those paths look for no longer existed on a single core.
+     *
+     * PROC_WAITING now has exactly one writer's intent in the kernel: a
+     * handler put this strand to sleep. Do not mark anything here again. */
     guide();
     /* P5b: single-core never runs kcore_run_loop, so the strand reaper +
      * deferred cleanup must be driven from here (throttled). Without it,
