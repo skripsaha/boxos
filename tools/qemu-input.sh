@@ -86,20 +86,81 @@ char_to_qcode() {
     esac
 }
 
-cmd_type() {
-    local s=$1
-    local i len qcode batch=""
-    len=${#s}
-    [ "$len" -eq 0 ] && return 0
+# Push a string as keystrokes, paced.
+#
+# The whole string used to go to the monitor as one batch, and that is how a
+# command arrived at the guest as "touch_s" instead of "touch_stress": a
+# keyboard has a queue, the guest empties it only when it is scheduled to, and
+# UEFI STRICT 1c — the slowest configuration there is — could not keep up.
+# The keys that did not fit were dropped without a word, the shell ran a
+# truncated command or none, and the matrix reported a kernel failure for a
+# test that never started. A harness that manufactures failures is worse than
+# no harness.
+#
+# QI_CHUNK keys per batch, QI_GAP seconds between batches. Both are cheap: a
+# twelve-character command costs three batches and a tenth of a second.
+QI_CHUNK=${QI_CHUNK:-4}
+QI_GAP=${QI_GAP:-0.05}
+
+type_push() {
+    local str=$1
+    local i len qcode c batch="" n=0
+    len=${#str}
     for (( i=0; i<len; i++ )); do
-        local c=${s:i:1}
+        c=${str:i:1}
         if ! qcode=$(char_to_qcode "$c"); then
             die "unsupported char '$c' (0x$(printf '%02x' "'$c")) at pos $i"
         fi
         batch+="sendkey ${qcode}
 "
+        n=$((n+1))
+        if [ "$n" -ge "$QI_CHUNK" ]; then
+            printf '%s' "$batch" | mon_send >/dev/null
+            batch=""; n=0
+            sleep "$QI_GAP"
+        fi
     done
-    printf '%s' "$batch" | mon_send >/dev/null
+    if [ -n "$batch" ]; then
+        printf '%s' "$batch" | mon_send >/dev/null
+    fi
+}
+
+# How many leading characters of `want` the guest echoed into `text`.
+type_landed() {
+    local text=$1 want=$2
+    local i
+    for (( i=${#want}; i>0; i-- )); do
+        case "$text" in *"${want:0:i}") printf '%s' "$i"; return 0 ;; esac
+    done
+    printf '0'
+}
+
+cmd_type() {
+    local s=$1
+    local len=${#s}
+    [ "$len" -eq 0 ] && return 0
+
+    # Pacing alone makes the drop rare; it does not make it impossible, and a
+    # rare silent drop is the expensive kind. The shell echoes what it took, so
+    # read that back and say what happened. Measured from the log's length
+    # BEFORE typing, so the same command typed twice cannot answer for itself.
+    local before=0
+    if [ -f "$LOG" ]; then before=$(wc -c < "$LOG" | tr -d ' '); fi
+
+    type_push "$s"
+
+    [ -f "$LOG" ] || return 0
+
+    local attempt got=0 echoed
+    for attempt in 1 2 3; do
+        sleep 0.2
+        echoed=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null | tr -d '\r')
+        got=$(type_landed "$echoed" "$s")
+        [ "$got" -ge "$len" ] && return 0
+        type_push "${s:got}"     # only the tail that never arrived
+    done
+
+    die "type: guest echoed $got of $len characters of \"$s\" — keystrokes are being dropped"
 }
 
 cmd_key() {
