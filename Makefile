@@ -390,6 +390,24 @@ endif
 
 HOLDGROUND_MARK = $(BUILDDIR)/.holdground.$(if $(filter on,$(HOLDGROUND)),on,off)
 
+# ── RETURNFAIL=on ──────────────────────────────────────────────────────────
+#
+# Mounting is driven by ARRIVALS, and a medium that is already seated does not
+# arrive twice. So a mount that begins on a volume's RETURN and fails leaves
+# the machine with no filesystem and nothing that would ever ask again — the
+# stick sitting in its socket, answering, ignored for the rest of the boot.
+#
+# Measured on the owner's board 2026-08-30: three returns of fifty-five failed,
+# and all three came back ONLY because the hand at the machine kept replugging.
+#
+# This key fails the first RE-mount once, with the medium left exactly where it
+# is, so the only road back is the machine asking again by itself.
+ifeq ($(RETURNFAIL),on)
+CFLAGS += -DCONFIG_TAGFS_RETURN_FAIL_ONCE=1
+endif
+
+RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off)
+
 # The handoff address the image build chose, handed to the C side so the two
 # headers that name it can _Static_assert against it. Unconditional on
 # purpose: it first went in under `ifeq ($(DEBUG),on)`, where DEBUG defaults
@@ -662,12 +680,16 @@ $(HOLDGROUND_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.holdground.*
 	@touch $@
 
-$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) | $(BUILDDIR)
+$(RETURNFAIL_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.returnfail.*
+	@touch $@
+
+$(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -Os -c $< -o $@
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) | $(BUILDDIR)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) | $(BUILDDIR)
 	@echo "Compiling $<..."
 	@mkdir -p $(@D)
 	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
