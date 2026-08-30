@@ -1638,16 +1638,20 @@ the rename stops the build rather than quietly restoring the old dodge.
   spare core a strand runs 50 ms without one context switch, and on sixteen
   cores the answer never moved. The stamp that works is the one that exists
   only while the strand holds the core.
-- `!` **A strand blocked in a timed park is still given the core, and `clock()`
-  reports that faithfully.** Across a 300 ms `sleep_for` on a one-core boot the
-  strand is credited ~260 ms of processor time. This is a BoxOS defect, not a
-  property of `clock()`: the wait underneath a timed park is a poll rather than
-  an event, so a sleeping strand keeps its share of the core. It is recorded
-  here because a reader will otherwise conclude `clock()` is wall time — it is
-  not; the same strand reads far below wall time when it competes with others,
-  and reads near zero at process start while the machine's uptime is large.
-  phase210 prints both numbers on every run so the day the park becomes an event
-  is visible in the log. Fixing it belongs to the scheduler.
+- `?` **A strand blocked in a timed park is charged almost nothing, and that
+  used not to be true.** Across a 300 ms `sleep_for` on a one-core boot the
+  strand is now credited about 0.6 ms of processor time; it was credited 279 ms.
+  The defect was in the kernel and `clock()` had been reporting it faithfully:
+  a syscall marked its caller `PROC_WAITING` to mean "queued for the guide",
+  the guide cleared that mark on the way out, and a handler that had genuinely
+  parked the strand wrote the same `PROC_WAITING` to mean "wake me on an event"
+  — so the clearing woke every sleeper. One field, two meanings. The syscall
+  path no longer writes the mark, so `PROC_WAITING` has a single meaning and the
+  park survives. This entry stays because a reader will otherwise conclude
+  `clock()` is wall time — it is not; the same strand reads far below wall time
+  when it competes with others, and reads near zero at process start while the
+  machine's uptime is large. phase210 asserts the sleep costs under a quarter of
+  its wall clock, which the defect could not have passed.
 - `?` `clock()` is **per strand**, not per program. C defines it as the
   processor time used by "the program"; a BoxOS strand is its own schedulable
   entity with its own accounting, so a multi-strand program's strands each
