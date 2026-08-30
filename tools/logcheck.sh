@@ -1854,6 +1854,134 @@ run_holdground() {
     chk $? "the machine still has a shell"
 }
 
+# ── returnfail: a mount that did not finish is asked again by the machine ──
+#
+# Mounting is driven by ARRIVALS. A medium that is already seated does not
+# arrive twice, so a mount that begins on a volume's RETURN and fails used to
+# leave the machine with no filesystem and nothing that would ever ask again —
+# the stick in its socket, answering, ignored for the rest of the boot.
+#
+# ‼ MEASURED ON THE OWNER'S BOARD, 2026-08-30, BEFORE THIS EXISTED: three
+# returns out of fifty-five failed their mount, and all three recovered ONLY
+# because the hand at the machine kept replugging. A read that fails on a
+# medium which STAYS PUT had no way back at all.
+#
+# `make RETURNFAIL=on` fails the first re-mount once, with the medium left
+# exactly where it is. The stick is plugged in ONCE here — that single arrival
+# is spent on the attempt that fails — so every line after it is the machine
+# asking again by itself.
+#
+# ‼ THE MUTATION IT EXISTS FOR: take mount_owed() out of the return road in
+# TagFSVolumeReturned. The "asking again" line never appears, no second
+# `is MOUNTED` follows, and the machine sits volumeless with its stick in.
+run_returnfail() {
+    echo "== returnfail: a mount that did not finish is asked again =="
+
+    latearrival_on
+    make RETURNFAIL=on >"$SCRATCH/build.log" 2>&1
+    if [ $? -ne 0 ]; then
+        echo "BUILD FAILED (RETURNFAIL=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        latearrival_off; bad "RETURNFAIL=on build"; return
+    fi
+    cp build/boxos.img "$SCRATCH/stick.img"
+
+    make run-stop >/dev/null 2>&1
+    make run-bg RETURNFAIL=on USB=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+
+    # First arrival — the mount that succeeds, and the one the stamp counts.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        grep -q "hands over" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    local FIRST_LINES
+    FIRST_LINES=$(wc -l < build/serial.log)
+
+    # Pulled out.
+    ./tools/qemu-input.sh raw "device_del usbstick" >/dev/null 2>&1
+    i=0
+    while [ $i -lt 20 ]; do
+        grep -q "the medium the volume lives on has left" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+
+    # And pushed back in ONCE. That single arrival is spent on the re-mount
+    # this build is told to fail; nothing is plugged in after it.
+    ./tools/qemu-input.sh raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh raw "device_add usb-storage,drive=stick,id=usbstick" >/dev/null 2>&1
+
+    # Waited on the machine's own words, not a clock: the retry is spaced by
+    # TAGFS_MOUNT_RETRY_MS and gets eight attempts, so a pass costs a second.
+    i=0
+    while [ $i -lt 60 ]; do
+        tail -n +$((FIRST_LINES + 1)) build/serial.log 2>/dev/null | \
+            grep -q "asking again for the volume nobody has mounted" && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 4
+
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.returnfail.log"
+    latearrival_off
+    L="$SCRATCH/serial.returnfail.log"
+    tail -n +$((FIRST_LINES + 1)) "$L" > "$SCRATCH/serial.returnfail.second.log"
+    local S="$SCRATCH/serial.returnfail.second.log"
+
+    # ── the situation was reached ───────────────────────────────────────────
+    grep -q "a medium arrived carrying a volume, and this machine had none" "$L"
+    chk $? "the stick was mounted on its first arrival"
+    grep -q "the medium the volume lives on has left" "$S"
+    chk $? "and the medium then left"
+    grep -q "this volume is NOT mounted: RETURNFAIL=on asked this re-mount to fail" "$S"
+    chk $? "the re-mount failed where it was told to, and said so out loud"
+    grep -q "the volume came back and would not mount" "$S"
+    chk $? "and the return road carried the refusal up"
+
+    # ‼ ONE arrival, and it was spent. Everything after is the machine itself.
+    local arrivals
+    arrivals=$(grep -c "arrived after the room was called to order" "$S")
+    [ "$arrivals" = 1 ]
+    chk $? "the stick was plugged in exactly once after the pull ($arrivals)"
+
+    # ── ‼ THE MACHINE ASKED AGAIN BY ITSELF ────────────────────────────────
+    grep -q "asking again for the volume nobody has mounted" "$S"
+    chk $? "the machine asked again for the volume nobody had mounted"
+
+    grep -q "\[TagFS\] the volume on seat .* is MOUNTED" "$S"
+    chk $? "and the volume came up"
+
+    # In that order: the refusal, then the asking, then the mount.
+    local FAIL_AT ASK_AT UP_AT
+    FAIL_AT=$(grep -n "came back and would not mount" "$S" | head -1 | cut -d: -f1)
+    ASK_AT=$(grep -n  "asking again for the volume" "$S" | head -1 | cut -d: -f1)
+    UP_AT=$(grep -n   "is MOUNTED" "$S" | tail -1 | cut -d: -f1)
+    [ -n "$FAIL_AT" ] && [ -n "$ASK_AT" ] && [ -n "$UP_AT" ] && \
+        [ "$FAIL_AT" -lt "$ASK_AT" ] && [ "$ASK_AT" -lt "$UP_AT" ]
+    chk $? "refused, then asked again, then mounted — in that order (${FAIL_AT:-?}, ${ASK_AT:-?}, ${UP_AT:-?})"
+
+    # It did not spend its whole budget: one attempt is what a healthy medium
+    # costs. A pass that needed eight would mean the spacing is wrong.
+    grep -q "asking again for the volume nobody has mounted (attempt 1 of" "$S"
+    chk $? "and it came up on the first asking, not by grinding through the budget"
+
+    ! grep -q "stops asking and waits for a medium to arrive" "$S"
+    chk $? "the machine never had to give up"
+
+    grep -q "BoxOS Shell" "$L"; chk $? "the machine still has a shell"
+}
+
 run_stillthere() {
     echo "== stillthere: the read was slow, and the device never went anywhere =="
 
@@ -2557,6 +2685,7 @@ case "${1:-both}" in
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
     holdground) run_holdground ;;
+    returnfail) run_returnfail ;;
     seal)     run_seal ;;
     ctrlgiveup) run_ctrlgiveup ;;
     isoch)    run_isoch ;;
@@ -2564,8 +2693,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

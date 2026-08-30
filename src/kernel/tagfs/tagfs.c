@@ -107,6 +107,36 @@ static volatile uint32_t g_abandon_pending = 0;
 static bool              g_leaving_said    = false;
 
 /*
+ * ‼ A MOUNT THAT DID NOT FINISH, AND NOTHING THAT WOULD EVER ASK AGAIN.
+ *
+ * Mounting is driven by ARRIVALS: a medium is seated, `seat:taken` is
+ * published, and this file takes the volume up. That is the only thing that
+ * ever asks. So a mount that begins and fails leaves the machine with no
+ * filesystem until the NEXT arrival — and if the medium is sitting in its
+ * socket, answering, there will not be one. The stick is right there and the
+ * machine will not look at it again for the rest of the boot.
+ *
+ * Measured on the owner's board, 2026-08-30: three returns out of fifty-five
+ * failed their mount, and all three recovered ONLY because the hand at the
+ * machine kept replugging. Each of those failures was the medium leaving again
+ * mid-read, which does produce another arrival — but a read that fails for any
+ * other reason, on a medium that stays put, does not.
+ *
+ * So the mount is asked again. Not on a clock deciding anything: the medium is
+ * in the room (the room says so), the volume is ours (its deed says so), and
+ * the read failed (the medium says so). Asking again is the only answer to a
+ * question whose answer changed under us, and it is spaced because nothing
+ * about the hardware can change faster than that. It is bounded, and when the
+ * budget is out it SAYS SO and stops — an arrival still gets the ordinary road.
+ */
+#define TAGFS_MOUNT_RETRY_MS    750u
+#define TAGFS_MOUNT_RETRY_TRIES 8u
+
+static volatile uint32_t g_mount_owed  = 0;
+static uint64_t          g_mount_due   = 0;
+static uint32_t          g_mount_tries = 0;
+
+/*
  * ‼ ONE CORE AT A TIME MOUNTS OR UNMOUNTS, AND THE REST GO AWAY.
  *
  * Attending to a medium used to reach this file down one road only — the
@@ -159,6 +189,22 @@ void tagfs_leave(void)
 uint32_t tagfs_mount_epoch(void)
 {
     return __atomic_load_n(&g_mount_epoch, __ATOMIC_ACQUIRE);
+}
+
+/* This machine believes there is a volume in the room and has not got it up.
+ * Ask again in a moment; see the note over TAGFS_MOUNT_RETRY_MS. */
+static void mount_owed(void)
+{
+    g_mount_due = rdtsc() + cpu_ms_to_tsc(TAGFS_MOUNT_RETRY_MS);
+    __atomic_store_n(&g_mount_owed, 1u, __ATOMIC_RELEASE);
+}
+
+
+/* It is up — by this road or any other — so nothing is owed. */
+static void mount_settled(void)
+{
+    g_mount_tries = 0;
+    __atomic_store_n(&g_mount_owed, 0u, __ATOMIC_RELEASE);
 }
 
 bool tagfs_handle_is_of_this_mount(const TagFSFileHandle *handle)
@@ -912,6 +958,42 @@ static bool volume_medium_gone(void)
 }
 
 /*
+ * ‼ AND ONLY WHEN THERE IS SOMETHING TO ASK FOR.
+ *
+ * "A medium is seated" is the wrong question: a machine whose disk carries no
+ * BoxOS volume at all has one seated too, and asking it eight times says
+ * nothing except eight surveys and nine lines of log on every boot without a
+ * filesystem.
+ *
+ * The right one is the seat itself. TagFSProbeDrive leaves g_tagfs_seat set
+ * only when a medium in the room answered with THIS machine's volume; a mount
+ * that fails past that point failed on a volume that is there, and that is the
+ * only failure worth asking about again. A mount that fails because the medium
+ * has gone leaves no seat, and its return will arrive on its own.
+ */
+static void mount_owed_if_the_volume_is_there(void)
+{
+    if (g_tagfs_seat != BOARDROOM_NO_SEAT) {
+        mount_owed();
+    }
+}
+
+/*
+ * Is the same occupant still in that seat?
+ *
+ * Not "is the seat occupied": a stick pulled out and a different one pushed in
+ * leaves the seat number unchanged, and the taking stamp is the only thing
+ * that tells the two apart. The same question volume_medium_gone() asks of the
+ * mounted volume, asked here of a seat nothing is mounted from yet.
+ */
+static bool medium_still_seated(uint8_t seat, uint32_t seating)
+{
+    return BoardroomSeatOccupied(seat) &&
+           BoardroomSeatSeating(seat) == seating;
+}
+
+
+/*
  * And what happens when it comes back.
  *
  * The latch above is one-way on purpose: while the medium is out of the
@@ -969,6 +1051,19 @@ static bool TagFSVolumeReturned(void)
         }
 
         /*
+         * ‼ WHICH OCCUPANT OF THAT SEAT THIS IS, REMEMBERED BEFORE ANYTHING IS
+         * TAKEN DOWN.
+         *
+         * Recognising the volume took reads, and a hand can pull the medium
+         * out again while they happen. Everything below either throws away a
+         * mount or reads a medium, and doing either on behalf of something
+         * that has already left is how a departure gets reported as a
+         * filesystem that would not mount. Measured on the board: three of
+         * fifty-five, every one of them a second pull mid-read.
+         */
+        uint32_t seating = BoardroomSeatSeating(seat);
+
+        /*
          * Read again rather than carried on from.
          *
          * Everything held in memory about this volume was read before the
@@ -982,6 +1077,13 @@ static bool TagFSVolumeReturned(void)
         kprintf("[TagFS] the volume is back, in seat %u: %s — reading it "
                 "again, because everything held about it is from before it "
                 "left\n", seat, BoardroomSeatName(seat));
+
+        if (!medium_still_seated(seat, seating)) {
+            kprintf("[TagFS] the medium carrying this volume left again before "
+                    "it could be read — nothing has been taken down, and its "
+                    "next arrival is met the same way\n");
+            return false;
+        }
 
         if (!tagfs_abandon()) {
             /* Somebody is still inside the volume that left. Nothing of it is
@@ -997,10 +1099,28 @@ static bool TagFSVolumeReturned(void)
              * Idempotent, so a machine whose processes already have theirs
              * keeps them; the asymmetry was the whole of the risk. */
             tagfs_context_init();
+            mount_settled();
             return true;
         }
 
+        /*
+         * Two different facts, and they used to print the same sentence.
+         *
+         * A medium that left again while it was being read is not a volume
+         * that would not mount: nothing is wrong with it, and its return will
+         * be announced like any other. A medium that is STILL THERE and would
+         * not give up its volume is the other one, and nothing will ask again
+         * unless this does.
+         */
+        if (!medium_still_seated(seat, seating)) {
+            kprintf("[TagFS] the medium left again while its volume was being "
+                    "read — nothing is mounted, and its next arrival is met "
+                    "the same way\n");
+            return false;
+        }
+
         kprintf("[TagFS] the volume came back and would not mount\n");
+        mount_owed_if_the_volume_is_there();
         return false;
     }
 
@@ -1112,7 +1232,12 @@ static void attend_arrival(void)
 
     /* Never mounted. tagfs_init only marks itself done at the very end, so a
      * first attempt that found nothing left everything exactly as it was. */
-    if (tagfs_init() == OK) {
+    if (tagfs_init() != OK) {
+        mount_owed_if_the_volume_is_there();
+        return;
+    }
+
+    {
         /* The boot path did this after its own mount and this path did not,
          * so a volume that arrived late came up without the per-process
          * contexts every storage op looks for. */
@@ -1120,6 +1245,7 @@ static void attend_arrival(void)
         kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
                 "had none — mounted from seat %u\n", g_tagfs_seat);
         TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
+        mount_settled();
     }
 }
 
@@ -2002,6 +2128,31 @@ error_t tagfs_init(void) {
     }
 #endif
 
+    /*
+     * ‼ AND THE SAME FAILURE ON A RE-MOUNT, WHICH IS A DIFFERENT MACHINE.
+     *
+     * MOUNTFAIL fails the BOOT mount, and the boot road has a catch-up attempt
+     * built into it (storage_deck_init makes one straight afterwards). A mount
+     * that fails on a RETURN has no such thing: mounting is driven by
+     * arrivals, and a medium that is already seated does not arrive again. So
+     * `make RETURNFAIL=on` fails the first re-mount once, ONCE, with the
+     * medium left exactly where it is — and the only way back from there is
+     * the machine asking again by itself.
+     *
+     * Not the first mount: the stamp counts the ones that finished, so this
+     * trips on the first mount after a volume has already been up.
+     */
+#if CONFIG_TAGFS_RETURN_FAIL_ONCE
+    {
+        static bool tripped = false;
+        if (!tripped && tagfs_mount_epoch() >= 1) {
+            tripped = true;
+            return mount_refused("RETURNFAIL=on asked this re-mount to fail",
+                                 ERR_TAGFS_CORRUPTED);
+        }
+    }
+#endif
+
     // --- Tag Registry ---
     g_state.registry = kmalloc(sizeof(TagRegistry));
     if (!g_state.registry) {
@@ -2517,17 +2668,65 @@ void tagfs_shutdown(void)
 }
 
 /*
+ * A mount this machine owes itself.
+ *
+ * Reached only when a mount was attempted and did not finish while a medium
+ * sat in the room; see the note over TAGFS_MOUNT_RETRY_MS for why nothing else
+ * would ever ask. One atomic load when there is nothing owed.
+ */
+static void tagfs_ask_for_the_mount_again(void)
+{
+    if (__atomic_load_n(&g_mount_owed, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
+
+    if (g_state.initialized) {
+        mount_settled();                /* somebody got there first */
+        return;
+    }
+
+    if ((int64_t)(rdtsc() - g_mount_due) < 0) {
+        return;                         /* not yet; the hardware needs a moment */
+    }
+
+    if (g_mount_tries >= TAGFS_MOUNT_RETRY_TRIES) {
+        kprintf("[TagFS] the volume in this room would not mount in %u "
+                "attempts — the machine stops asking and waits for a medium to "
+                "arrive\n", TAGFS_MOUNT_RETRY_TRIES);
+        mount_settled();
+        return;
+    }
+
+    if (!attending_take()) {
+        return;                 /* somebody is already at it; no try is spent */
+    }
+
+    g_mount_tries++;
+    kprintf("[TagFS] asking again for the volume nobody has mounted (attempt "
+            "%u of %u)\n", g_mount_tries, TAGFS_MOUNT_RETRY_TRIES);
+    attend_arrival();
+
+    if (!g_state.initialized) {
+        g_mount_due = rdtsc() + cpu_ms_to_tsc(TAGFS_MOUNT_RETRY_MS);
+    }
+
+    attending_done();
+}
+
+/*
  * The ground could not be cleared when the medium left, because somebody was
  * standing on it. Finish it here, and then let the ordinary road take the
  * volume back up.
  *
  * Called from the guide loop and from the idle loop — the two places in this
  * kernel that are allowed to wait and are reached often — and it is one atomic
- * load when there is nothing to do, which is every iteration but a handful in
- * the life of a machine.
+ * load per half when there is nothing to do, which is every iteration but a
+ * handful in the life of a machine.
  */
 void TagFSServiceIfPending(void)
 {
+    tagfs_ask_for_the_mount_again();
+
     if (__atomic_load_n(&g_abandon_pending, __ATOMIC_ACQUIRE) == 0) {
         return;
     }
