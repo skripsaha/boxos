@@ -263,6 +263,14 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
         }
     }
 
+    /* This sleep's number, claimed before anything is armed for it — the wake
+     * the tick fires reschedules only while the strand is still in THIS park.
+     * An await that ends early (the ring re-check below, or an event) leaves
+     * its wake armed, and without the number that wake would land on whatever
+     * park came next. See process_t.park_seq. */
+    uint32_t park_seq = __atomic_add_fetch(&ctx->proc->park_seq, 1,
+                                           __ATOMIC_ACQ_REL);
+
     if (timeout_ms > 0) {
         uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
                          / 1000ULL;
@@ -273,7 +281,7 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
          * deferred SyncTimeoutDeliver's seq-gated claim always fails for it —
          * only the in-IRQ reschedule (PROC_WORKING) applies. The await's own
          * ring path then reports count=0 on the timeout. */
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at, 0);
+        TouchQueueWakeAfter(ctx->proc->pid, fire_at, 0, park_seq);
     }
 
     process_set_state(ctx->proc, PROC_WAITING);

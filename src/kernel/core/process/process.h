@@ -270,6 +270,25 @@ typedef struct process_t
      * not in any bucket chain. */
     AddrWaitEntry     addr_wait_entry;
 
+    /* Which sleep a wake belongs to.
+     *
+     * Every timed wait — addr_park and touch_await alike — arms a wake in the
+     * touch queue and then parks. A wait that ends EARLY leaves its wake
+     * armed: taking it back would mean walking the queue under the tick's
+     * lock, and it was believed harmless because the Result the wake carries
+     * is already refused when it no longer belongs to anyone. It was not
+     * harmless. The reschedule half of that same wake consulted nothing, so a
+     * wake owed to a finished sleep pulled the strand out of the NEXT one —
+     * awake, with no Result coming, spinning out the rest of a timeout that
+     * was never its own. Measured: a 300 ms sleep cost 250 ms of processor
+     * time whenever an earlier wait had left a wake behind.
+     *
+     * Bumped once on entry to every timed park; the wake carries the value it
+     * was armed with; the reschedule happens only when the two still agree.
+     * A stale wake then finds a strand that has moved on and does nothing,
+     * which costs one comparison in the tick and needs no cancellation. */
+    uint32_t          park_seq;
+
     /* Nameplate — where this image's "address -> name" table is mapped, found
      * by the loader (nameplate_locate) at the one moment the whole file is in
      * kernel memory. 0 when the image carries none. Read only by the

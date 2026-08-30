@@ -146,13 +146,20 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * now a dormant backstop). Early wake takes the K-Core delivery path through
      * addr_wake (see SysAddrWake); the seq-gated claim arbitrates which one
      * delivers and stops a stale timeout from hitting a later re-park. */
+    /* Claim this sleep's number before arming anything for it. Every wake in
+     * the queue carries the number of the sleep it was armed for, and the
+     * tick reschedules only while the two agree — so the wake left behind by
+     * a wait that ended early cannot reach the park that follows it. */
+    uint32_t park_seq = __atomic_add_fetch(&ctx->proc->park_seq, 1,
+                                           __ATOMIC_ACQ_REL);
+
     if (timeout_ms > 0) {
         uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
                          / 1000ULL;
         if (delay == 0) delay = 1;
         uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                            + delay;
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at, wait_seq);
+        TouchQueueWakeAfter(ctx->proc->pid, fire_at, wait_seq, park_seq);
     }
 
     /* Step 5: park (identical to SysTouchAwait line 275). */

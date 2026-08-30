@@ -28,6 +28,7 @@ typedef struct TouchQueueNode {
     uint32_t source_pid;
     uint32_t target_pid;
     uint32_t wait_seq;  /* WAKE only: addr_wait_entry->seq this timeout was armed for */
+    uint32_t park_seq;  /* WAKE only: target's park_seq at arm time — which sleep this is for */
     uint16_t tag_id;
     uint16_t flags;
     uint32_t plen;
@@ -54,6 +55,7 @@ static TouchQueueNode *touch_queue_alloc_node(const void *payload, uint32_t plen
     n->source_pid = 0;
     n->target_pid = 0;
     n->wait_seq   = 0;
+    n->park_seq   = 0;
     n->tag_id     = 0;
     n->flags      = 0;
     n->plen       = 0;
@@ -97,7 +99,7 @@ void TouchQueueEnqueue(uint16_t tag_id, const void *payload, uint32_t plen,
 }
 
 void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
-                         uint32_t wait_seq)
+                         uint32_t wait_seq, uint32_t park_seq)
 {
     TouchQueueNode *n = touch_queue_alloc_node(NULL, 0);
     if (!n) return;
@@ -105,6 +107,7 @@ void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
     n->target_pid = target_pid;
     n->fire_tick  = after_ticks;
     n->wait_seq   = wait_seq;
+    n->park_seq   = park_seq;
     touch_queue_link(n);
 }
 
@@ -125,12 +128,23 @@ void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
  *      VMM — MUST be off the IRQ path: VMM work in the timer IRQ starved cores
  *      of TLB-shootdown ACKs under 16-core load → shootdown-timeout panic). On
  *      an irq_defer overflow the post is dropped and the boxlib +100 backstop
- *      covers the missed Result; the reschedule in (1) already happened. */
-static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq)
+ *      covers the missed Result; the reschedule in (1) already happened.
+ *
+ * Both parts ask the same question first — is this wake still owed? — and for
+ * a long time only part 2 did. A wait that ends early leaves its wake armed;
+ * part 2 refused such a wake because entry->seq had moved on, while part 1
+ * rescheduled unconditionally and so pulled the strand out of whatever park
+ * came NEXT. Nothing was then owed it, so it sat in its userspace wait until
+ * its own deadline arrived: a 300 ms sleep measured 250 ms of processor time,
+ * on every core count, whenever any earlier wait had left a wake behind.
+ * park_seq is that question for part 1. */
+static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq,
+                                  uint32_t park_seq)
 {
     process_t *target = process_find_ref(target_pid);
     if (!target) return;
-    if (!target->destroying && process_get_state(target) == PROC_WAITING) {
+    if (!target->destroying && process_get_state(target) == PROC_WAITING &&
+        __atomic_load_n(&target->park_seq, __ATOMIC_ACQUIRE) == park_seq) {
         process_set_state(target, PROC_WORKING);
         if (g_amp.total_cores > 1) {
             uint8_t core = target->home_core;
@@ -175,7 +189,7 @@ void TouchQueueTick(uint64_t now)
         fire_list = n->next;
 
         if (n->kind == TQ_KIND_WAKE) {
-            touch_queue_fire_wake(n->target_pid, n->wait_seq);
+            touch_queue_fire_wake(n->target_pid, n->wait_seq, n->park_seq);
         } else {
             TouchPublishId(n->tag_id, n->payload, n->plen,
                            n->source_pid, n->flags);
