@@ -62,11 +62,11 @@
 // on a machine with a spare core a strand can run for 50 ms without a single
 // context switch, and the answer then never moved at all.
 //
-// ‼ One thing this number reports faithfully is a BoxOS defect, not a property
-// of clock(): a strand blocked in a timed park is still given the core, so a
-// 300 ms sleep is credited roughly 260 ms of processor time. The wait underneath
-// is a poll rather than an event. CONFORMANCE records it; phase210 prints the
-// two numbers on every run so the day it is fixed is visible in the log.
+// This number once reported a kernel defect faithfully: a strand blocked in a
+// timed park was still given the core, so a 300 ms sleep was credited 279 ms of
+// processor time. The park was undone by the syscall that took it — one state
+// value, PROC_WAITING, was carrying two opposite meanings — and the sleep now
+// costs about 0.6 ms. phase210 asserts the ratio so it cannot come back.
 #define CLOCKS_PER_SEC 1000000
 
 // The one time base [time.h] requires. TIME_UTC's epoch here is the Unix epoch.

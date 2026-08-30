@@ -48001,14 +48001,29 @@ void Phase210()
     Check(c0 > g_clock_at_entry,
           "phase210 and it has advanced since, by the work this suite did");
 
-    // Sleeping is NOT used as a discriminator here, and the reason is a BoxOS
-    // defect rather than a property of clock(). A strand blocked in a timed
-    // park still gets the core: measured across a 300 ms sleep on a one-core
-    // boot, this strand was credited ~256 ms of processor time, because the
-    // wait it is doing is a poll and not an event. clock() is reporting that
-    // faithfully — it is the sleep that is wrong, and it belongs to the
-    // scheduler, not here. The numbers are printed so the day it is fixed is
-    // visible in the log.
+    // Sleeping IS the discriminator, and it is the sharpest one there is: a
+    // strand that sleeps 300 ms must be charged almost nothing, because it
+    // held the core for almost none of it. Nothing else separates processor
+    // time from wall time so completely — a wrong clock() and a wrong sleep
+    // both show up right here.
+    //
+    // It could not always be asserted. A syscall used to mark its caller
+    // PROC_WAITING to mean "queued for the guide", the guide cleared that mark
+    // on the way out, and a handler that had genuinely parked the strand wrote
+    // the same PROC_WAITING to mean the opposite — so the clearing woke the
+    // sleeper. On a single core that made every wait a poll: this sleep cost
+    // 279 ms of processor time out of 300, and the machine never once reached
+    // idle. The kernel no longer writes that mark (idt.c sync_syscall_dispatch),
+    // and the same sleep now costs about 0.6 ms.
+    //
+    // The bound is a quarter of the wall clock, and it is set from measurement
+    // rather than taste. Six runs across BIOS/UEFI x 1c/16c gave 0.56-1.75 ms
+    // on one core and 2.0-12.2 ms on sixteen — the larger figure being the
+    // multi-core residue, where the caller keeps running until its own core's
+    // next tick after a K-Core parks it, a few ticks at 250 Hz. A quarter of
+    // 300 ms is 75 ms: six times the worst of those, and a fifth of what the
+    // defect produced. There is no reading of this test that is close to the
+    // line.
     {
         const std::clock_t c1 = std::clock();
         const auto         w1 = std::chrono::steady_clock::now();
@@ -48020,11 +48035,13 @@ void Phase210()
             std::chrono::duration_cast<std::chrono::microseconds>(w2 - w1).count();
         const long long cpu_us = static_cast<long long>(c2 - c1);
         printf("[CXX] note phase210: across a 300 ms sleep, wall=%lld us cpu=%lld us "
-               "(a parked strand should spend far less than it does — see CONFORMANCE)\n",
+               "(a parked strand gives the core back)\n",
                wall_us, cpu_us);
         Check(wall_us >= 250000, "phase210 the sleep really slept");
         Check(cpu_us <= wall_us + 20000,
               "phase210 a strand cannot be credited more processor time than wall time");
+        Check(cpu_us * 4 < wall_us,
+              "phase210 a sleeping strand is not charged for the core it gave up");
     }
 
     printf("[CXX] PASS phase210: <ctime> — the name is free, and clock() means what C says\n");
