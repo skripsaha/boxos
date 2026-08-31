@@ -13,6 +13,7 @@
 #include "ktypes.h"
 #include "kernel_config.h"
 #include "amp.h"
+#include "irq_defer.h"   /* the deferred work an idle core is the last place to run */
 #include "fpu.h"
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
@@ -139,6 +140,29 @@ void cpu_idle(void) {
     /* Nightwatch: this core has nothing to run. Also its re-check point — an
      * idle core wakes on every tick, so no timer of its own is needed. */
     nightwatch_core_idle(amp_get_core_index());
+
+    /* Work an interrupt stowed away for later, when this core is the last
+     * place left that can run it.
+     *
+     * On a single core the timer tick drains irq_defer only when it
+     * interrupted USER mode (idt.c gates on the interrupted CS), because the
+     * deferred handlers take heap, TagFS and process locks and the tick may
+     * have landed inside a syscall already holding one. Interrupting the idle
+     * loop is the one ring-0 case where that cannot be true — nothing here
+     * holds a lock — and until now nothing pumped from it. The comment in
+     * touch_queue.c has said "idle context never pumps" for as long as the
+     * gate has existed; it was harmless only because no core ever reached
+     * idle, every wait being a spin. With waits that actually park, a
+     * keystroke would sit in the deferred ring with nobody to deliver it, and
+     * a machine that has just learned to sleep would be deaf.
+     *
+     * Multi-core is already served: K-Cores pump their own rings in
+     * kcore_run_loop, and this loop is not where those cores are.
+     *
+     * Work posted between this drain and the MWAIT below waits for the next
+     * tick — a few milliseconds at 250 Hz, and never longer, because the tick
+     * arrives regardless of what this core is doing. */
+    irq_defer_pump(amp_get_core_index());
 
     /* Periodic TSC recalibration. Runs out of IRQ context so the
      * 20ms HPET measurement window inside is harmless to interrupt

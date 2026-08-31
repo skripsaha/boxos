@@ -354,8 +354,27 @@ void kcore_run_loop(void)
          * CLI so the mark is never held across the sleep decision. */
         nightwatch_core_idle(my_idx);
 
+        /* Deferred work is re-checked here for the same reason as the two
+         * above, and it was the one thing this gate did not ask about.
+         *
+         * A device interrupt that lands between the pump at the top of this
+         * loop and the CLI below hands its bottom half to irq_defer and
+         * returns — leaving nothing in the pocket queue and nothing in the
+         * storage queue, which is all this gate used to look at. The K-Core
+         * then slept on a ring holding work, and with its LAPIC timer masked
+         * there is no periodic wake to save it: the item waited for an
+         * unrelated interrupt that might never come. Measured — a program
+         * being read off a stick throttled to 512 bytes a second sat in
+         * PROC_WAITING for 248 seconds with every core idle, and Nightwatch
+         * named it: "ring holds head=0 tail=1, yet this process still waits".
+         *
+         * It stayed hidden while a waiting shell spun: the constant syscall
+         * traffic woke these cores often enough that the drain always came
+         * round. Waits that actually sleep took that away, which is the right
+         * trade and the reason this line has to exist now. */
         __asm__ volatile("cli");
-        if (kcore_queue_depth(my_idx) != 0 || StorageCompletionPending(my_idx)) {
+        if (kcore_queue_depth(my_idx) != 0 || StorageCompletionPending(my_idx) ||
+            irq_defer_pending(my_idx) != 0) {
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
             __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */
