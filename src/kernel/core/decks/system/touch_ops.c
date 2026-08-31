@@ -315,10 +315,8 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * the publisher sees our PROC_WAITING and wakes us (it wins). No
      * permanently lost wakeup.
      *
-     * ERR_WOULD_BLOCK is returned in both branches; if state was
-     * undone, guide.c pushes a Result that result_pop_non_ipc filters
-     * on error_code == 9 (see result.c:151), so the orphan never
-     * surfaces as a stale reply to a subsequent ManifestSubmitFull. */
+     * ERR_WOULD_BLOCK is returned in both branches, and nothing is pushed
+     * for it — see the note below on why. */
     if (ctx->proc->touch_ring_phys) {
         TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
         if (rr) {
@@ -330,6 +328,18 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
         }
     }
 
+    /* Answer nothing. This used to fall through without the flag, so the guide
+     * pushed the transient ERR_WOULD_BLOCK ack as a reply — into the caller's
+     * ResultRing, where KResultPush's last step reads "target is PROC_WAITING"
+     * and makes it PROC_WORKING again. The park above was undone by its own
+     * acknowledgement, every time, and the strand went back to spinning out its
+     * wait in userspace. Nobody noticed because the ack is filtered on
+     * error_code == 9 at the consumer: it was invisible as a reply and
+     * load-bearing as a wake. addr_park has always set this flag, which is why
+     * its park is the one that holds. The op stages no crates (touch.c submits
+     * it with none), so the flag carries only its other meaning here — the
+     * handler owns the completion, and the completion is the event itself. */
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
     return ERR_WOULD_BLOCK;
 }
 
