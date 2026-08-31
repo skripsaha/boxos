@@ -20,6 +20,7 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
+#include "nightwatch.h"   /* a core mid-delivery is not an idle core */
 #include "result.h"
 #include "kresult.h"
 #include "atomics.h"
@@ -211,6 +212,17 @@ void KResultPushStats(uint64_t out[10])
 
 bool KResultPush(process_t *target, const Result *r)
 {
+    /* Delivering is work, and a core doing it is not a core with nothing to
+     * do. The mark matters because this runs from interrupt context as well
+     * as from a K-Core, and an interrupt does not otherwise disturb the idle
+     * mark — so Nightwatch could look during the gap between reserving a slot
+     * (step 3) and publishing it (step 8), read a ring that is not empty and
+     * an owner not yet woken, and call a delivery in progress an undelivered
+     * result. It said so once, out loud, the first hour this machine was able
+     * to reach idle at all. One byte store, on the same path that already
+     * pays for a page walk. */
+    nightwatch_core_busy(amp_get_core_index());
+
     if (!target || !r) {
         __atomic_add_fetch(&g_krp_null_args, 1, __ATOMIC_RELAXED);
         return false;
