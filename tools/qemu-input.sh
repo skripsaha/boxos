@@ -99,8 +99,8 @@ char_to_qcode() {
 #
 # QI_CHUNK keys per batch, QI_GAP seconds between batches. Both are cheap: a
 # twelve-character command costs three batches and a tenth of a second.
-QI_CHUNK=${QI_CHUNK:-4}
-QI_GAP=${QI_GAP:-0.05}
+QI_CHUNK=${QI_CHUNK:-1}
+QI_GAP=${QI_GAP:-0.03}
 
 type_push() {
     local str=$1
@@ -151,15 +151,35 @@ cmd_type() {
 
     [ -f "$LOG" ] || return 0
 
-    local attempt got=0 echoed
-    for attempt in 1 2 3; do
-        sleep 0.2
+    # Slow and lost look identical in one sample and not in three. Watch the
+    # echo GROW: while it is still growing the guest is merely behind, and the
+    # only right thing is to keep waiting. When it has not moved across three
+    # consecutive looks it is not behind, it is short — and only then is the
+    # missing tail sent again, once. That distinction is what the first version
+    # of this check lacked, and lacking it turned "help" into "helpelp" on a
+    # machine busy verifying a volume seal.
+    local attempt got=0 last=-1 still=0 echoed retried=0
+    for attempt in $(seq 1 30); do
+        sleep 0.1
         echoed=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null | tr -d '\r')
         got=$(type_landed "$echoed" "$s")
         [ "$got" -ge "$len" ] && return 0
-        type_push "${s:got}"     # only the tail that never arrived
+        if [ "$got" -eq "$last" ]; then still=$((still+1)); else still=0; fi
+        last=$got
+        if [ "$still" -ge 3 ] && [ "$retried" -eq 0 ]; then
+            retried=1; still=0
+            type_push "${s:got}"
+        fi
     done
 
+    # Nothing is retyped, and that is deliberate. The first version of this
+    # check sent the tail again, which is the obvious repair and the wrong one:
+    # a slow echo is indistinguishable from a lost one, and on a machine busy
+    # verifying a volume seal the echo IS slow — so "help" arrived as "helpelp",
+    # the shell rejected it, and two logcheck scenarios reported a kernel that
+    # would not answer the keyboard. A harness may fail to deliver; it may not
+    # deliver something other than what it was asked to. The pacing above is
+    # the cure; this is only the witness.
     die "type: guest echoed $got of $len characters of \"$s\" — keystrokes are being dropped"
 }
 
