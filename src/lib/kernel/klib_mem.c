@@ -349,6 +349,14 @@ void *kmalloc(size_t size)
     if (!guard)
         return NULL;
 
+    /* A pool block must never live on a page the slab registry claims —
+     * that is two allocators owning one page. Catch the cohabitation at
+     * birth, where the culprit is on the stack, not at the eventual free. */
+    if (slab_owns((uint8_t *)guard + sizeof(heap_guard_t)))
+        panic("[HEAP] kmalloc(%zu) pool block %p lands on a slab-registry page — "
+              "allocator cohabitation\n",
+              size, (void *)((uint8_t *)guard + sizeof(heap_guard_t)));
+
     guard->canary_start      = HEAP_CANARY_MAGIC;
     guard->size              = size;
     guard->caller            = "kmalloc";
@@ -426,26 +434,44 @@ void kfree(void *ptr)
     }
 
 #if HEAP_GUARD_ENABLED
+    /* Range-check BEFORE dereferencing the guard header. A garbage pointer
+     * (an overwritten local, a stale handle) used to reach the canary loads
+     * below, read whatever happened to live at ptr-0x20, and die in a
+     * SILENT cli;hlt behind debug_printf — which compiles to nothing in a
+     * normal build. The machine froze without a word; naming the pointer
+     * and halting loudly is the whole difference between a diagnosis and a
+     * morning of guessing. panic() prints, dumps and stops every core. */
     heap_guard_t *guard = (heap_guard_t *)((uint8_t *)ptr - sizeof(heap_guard_t));
 
-    if (guard->canary_start != HEAP_CANARY_MAGIC)
-    {
-        debug_printf("[HEAP] CORRUPTION: Start canary destroyed at %p\n", ptr);
-        debug_printf("[HEAP]   Expected: 0x%llx, Got: 0x%llx\n",
-                     HEAP_CANARY_MAGIC, guard->canary_start);
-        while (1) asm volatile("cli; hlt");
+    if ((uintptr_t)guard < (uintptr_t)memory_pool ||
+        (uintptr_t)guard >= (uintptr_t)memory_pool + memory_pool_size)
+        panic("[HEAP] kfree(%p): not a heap pointer (pool %p..%p) — "
+              "freed twice, never allocated, or an overwritten local\n",
+              ptr, memory_pool,
+              (void *)((uintptr_t)memory_pool + memory_pool_size));
+
+    if (guard->canary_start != HEAP_CANARY_MAGIC) {
+        /* Slab-lens on the pointer's page: a destroyed "canary" of 0 with a
+         * page whose first words parse as a plausible SlabPage is the
+         * signature of an impostor page handed out by the slab free-list
+         * (see slab.c recruitment gates) — print the page's claimed
+         * geometry so the corpse names its allocator. */
+        typedef struct { uint16_t obj_size, total_slots, free_count, free_head; } page_lens_t;
+        const page_lens_t *lens =
+            (const page_lens_t *)((uintptr_t)ptr & ~(uintptr_t)0xFFF);
+        panic("[HEAP] kfree(%p): start canary destroyed "
+              "(expected 0x%llx, got 0x%llx); page lens: obj_size=%u "
+              "slots=%u free=%u head=%u — impostor slab page, a neighbour "
+              "overflow, or not a block start\n",
+              ptr, HEAP_CANARY_MAGIC, guard->canary_start,
+              lens->obj_size, lens->total_slots, lens->free_count, lens->free_head);
     }
 
     uint64_t *end_canary = (uint64_t *)((uint8_t *)guard + guard->canary_end_offset);
     if (*end_canary != HEAP_CANARY_MAGIC)
-    {
-        debug_printf("[HEAP] CORRUPTION: End canary destroyed at %p (size=%zu)\n",
-                     ptr, guard->size);
-        debug_printf("[HEAP]   Expected: 0x%llx, Got: 0x%llx\n",
-                     HEAP_CANARY_MAGIC, *end_canary);
-        debug_printf("[HEAP]   This indicates buffer overflow!\n");
-        while (1) asm volatile("cli; hlt");
-    }
+        panic("[HEAP] kfree(%p): end canary destroyed (size=%zu, "
+              "expected 0x%llx, got 0x%llx) — buffer overflow in this block\n",
+              ptr, guard->size, HEAP_CANARY_MAGIC, *end_canary);
 
     kfree_internal(guard);
 #else

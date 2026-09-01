@@ -67,6 +67,7 @@
 #include "manifest_selftest.h"
 #include "crate_io_selftest.h"
 #include "auth_decouple_selftest.h"
+#include "slab.h"   /* slab_identity_selftest */
 #include "operations_deck.h"
 #include "hardware_deck.h"
 #include "system_deck.h"
@@ -333,6 +334,7 @@ void kernel_main(void)
     { int p = 0, f = 0; TmeRunTests(&p, &f); (void)p; (void)f; }
     AddrWaitSelfTest();
     XhciRingSelfTest();
+    slab_identity_selftest();
 
     debug_printf("[INIT] TSS Dynamic Stacks...\n");
     tss_setup_dynamic_stacks();
