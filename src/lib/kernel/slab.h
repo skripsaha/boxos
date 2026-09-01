@@ -42,5 +42,8 @@ void* slab_alloc(size_t size);
 void  slab_free(void* ptr);
 void  slab_activate_pull_map(void);
 bool  slab_owns(void* ptr);
+/* Boot-time proof that membership comes from the page registry, not page
+ * content — panics if a content heuristic ever creeps back. */
+void  slab_identity_selftest(void);
 
 #endif // SLAB_H
