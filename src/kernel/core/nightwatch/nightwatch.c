@@ -215,9 +215,37 @@ static void nightwatch_verdict(bool all_quiet)
                     e->pid, e->generation, nightwatch_state_name(e->state),
                     e->home_core, (int)e->on_cpu, (unsigned)e->wait_reason);
             if (result_ready && speak)
+            {
                 kprintf("      ‼ RESULT UNDELIVERED — ring holds head=%lu tail=%lu, "
                         "yet this process still waits\n",
                         (unsigned long)rr_head, (unsigned long)rr_tail);
+                /* Name the record itself. head/tail prove SOMETHING lies
+                 * unread; whose reply it is decides where to look next, and
+                 * evidence that stops one question short of the answer sends
+                 * the reader off to guess it. Best-effort: the slot lives at
+                 * a cabin VA, so the walk can fail mid-teardown — then the
+                 * line simply does not print. */
+                process_t *owner = process_find_ref(e->pid);
+                if (owner && owner->cabin && e->result_ring_phys)
+                {
+                    const ResultRing *rr =
+                        (const ResultRing *)vmm_phys_to_virt(e->result_ring_phys);
+                    uintptr_t slot_uva = result_ring_slot_uvaddr(rr, rr_head);
+                    const ResultSlot *slot = (const ResultSlot *)
+                        vmm_translate_user_addr(owner->cabin->vmm, slot_uva,
+                                                sizeof(ResultSlot));
+                    if (slot)
+                        kprintf("        head slot: seq=%lu ctx=%u sender=%u "
+                                "err=%u len=%u addr=0x%lx\n",
+                                (unsigned long)__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE),
+                                (unsigned)slot->r.context,
+                                (unsigned)slot->r.sender_pid,
+                                (unsigned)slot->r.error_code,
+                                (unsigned)slot->r.data_length,
+                                (unsigned long)slot->r.data_addr);
+                }
+                if (owner) process_ref_dec(owner);
+            }
             if (touch_ready && speak)
                 kprintf("      ‼ TOUCH UNDELIVERED — ring holds head=%lu tail=%lu, "
                         "yet this process still waits\n",
