@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "video_colors.h"
+#include "boxos_color.h"
 
 typedef enum {
     DISPLAY_VGA_TEXT = 0,
@@ -17,30 +18,37 @@ void VideoInitFramebuffer(uint64_t phys_addr, uint32_t width, uint32_t height,
  * (after guide_init).  Re-publish is idempotent. */
 void VideoNotifyReady(void);
 
-void VideoPrintChar(char ch, uint8_t attr);
-void VideoPrint(const char *str);
+/* ───── Colour state — one full #RRGGBB pair ─────
+ * VideoSetColor(attr) is the EXACT attribute converter for the kernel's own
+ * %[E]/%[S]/… paths: palette-index → palette RGB, no rounding anywhere, so
+ * the VGA backend's draw-time quantisation reproduces the identical
+ * attribute byte. User-supplied colours arrive through the Rgb entry
+ * points and keep all 24 bits. */
+void VideoSetColor(uint8_t attr);
+void VideoSetColorRgb(uint32_t fg, uint32_t bg);
+void VideoGetColorRgb(uint32_t *fg, uint32_t *bg);
+
+/* ───── Print path ───── */
+void VideoPrintCharRgb(char ch, uint32_t fg, uint32_t bg);
+void VideoPrintCharCur(char ch);           /* current colour pair */
+void VideoPrint(const char *str);          /* current colour pair */
 void VideoPrintNewline(void);
-void VideoPrintError(const char *str);
-void VideoPrintSuccess(const char *str);
-void VideoPrintHint(const char *str);
 
-void VideoClearScreen(void);
-void VideoClearLine(int line);
-void VideoClearToEol(void);
+/* ───── Screen ops ───── */
+void VideoClearScreenRgb(uint32_t fg, uint32_t bg);
+void VideoClearLineRgb(int line, uint32_t fg, uint32_t bg);
+void VideoClearToEol(void);                /* current colour pair */
 void VideoScrollUp(void);
-void VideoChangeBackground(uint8_t new_bg);
 
+/* ───── Cursor ───── */
 void VideoSetCursor(int x, int y);
 int  VideoGetCursorX(void);
 int  VideoGetCursorY(void);
 void VideoUpdateCursor(void);
 
-void    VideoSetColor(uint8_t color);
-uint8_t VideoGetColor(void);
-void    VideoResetColor(void);
-
-void    VideoBatchBegin(void);
-void    VideoBatchEnd(void);
+/* ───── Batch passthrough ───── */
+void VideoBatchBegin(void);
+void VideoBatchEnd(void);
 
 int         VideoGetCols(void);
 int         VideoGetRows(void);

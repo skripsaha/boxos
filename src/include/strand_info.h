@@ -49,8 +49,10 @@
 
 /* Per-strand print/IPC-output buffer (boxlib print.c StrandPrintState). Fixed
  * size, always present (unlike the lazy opt-in stashes) since every strand
- * that ever calls print/printf needs one. */
-#define STRAND_PRINT_BYTES     272u
+ * that ever calls print/printf needs one. 272 → 280 when the colour caches
+ * grew from one attribute byte to two full #RRGGBB pairs (S1 of the
+ * console-stream epic). */
+#define STRAND_PRINT_BYTES     280u
 
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */

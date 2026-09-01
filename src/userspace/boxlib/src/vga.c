@@ -11,7 +11,12 @@
  *     used to cost up to 10 syscalls (alternating SET_COLOR + PUTSTRING);
  *     batched it's a single submit, one kernel re-entry total.
  *
- * Getter ops (vga_getcolor/cursor/dimensions) ALWAYS go immediate even
+ * Colour: full #RRGGBB pairs on the wire ([u32 fg][u32 bg] little-endian
+ * in op params). Sentinels are resolved to concrete triples HERE, before
+ * anything is cached or sent — the kernel stores concrete values only,
+ * so a getter round-trips exactly what a setter shipped.
+ *
+ * Getter ops (vga_getcolor_rgb/cursor/dimensions) ALWAYS go immediate even
  * inside a batch — they need the kernel's answer before the caller can
  * decide what comes next. Cached values short-circuit them when
  * possible so most getters never reach the kernel anyway.
@@ -29,8 +34,9 @@
 
 #define VGA_TIMEOUT_MS BOX_TIMEOUT_FAST_MS
 
-static uint8_t s_color        = 0x07;
-static bool    s_color_valid  = false;
+static Color   s_fg          = COLOR_LIGHT_GRAY;
+static Color   s_bg          = COLOR_BLACK;
+static bool    s_color_valid = false;
 
 static uint8_t s_cursor_row   = 0;
 static uint8_t s_cursor_col   = 0;
@@ -54,13 +60,19 @@ static bool    s_dims_valid   = false;
 #define HW_VGA_NEWLINE        0x7A
 #define HW_VGA_GET_DIMENSIONS 0x7B
 
+/* Little-endian u32 into an op-param byte stream (params are unaligned). */
+static inline void put_color_param(uint8_t *dst, Color c)
+{
+    memcpy(dst, &c, sizeof(uint32_t));
+}
+
 /* ===========================================================================
  * Batch state — sized so a typical printf (≈8 colored runs of ≤96 bytes) fits
  * comfortably in one commit. Hitting either ceiling auto-flushes and starts a
  * new batch so the caller never has to manage capacity.
  * =========================================================================== */
 #define VGA_BATCH_MANIFEST_BYTES  1024u    /* ManifestBuilder scratch */
-#define VGA_BATCH_PAYLOAD_BYTES   2048u    /* PUTSTRING in-crate arena */
+#define VGA_BATCH_PAYLOAD_BYTES   2048u    /* PUTSTRING in-crate staging */
 #define VGA_BATCH_CRATES_MAX      32u
 
 /* Nesting depth so a wrapper that does its own vga_begin/vga_commit
@@ -105,9 +117,9 @@ static int batch_flush_locked(void)
     /* Reset BEFORE returning so the next vga_* call lands on a clean
      * builder regardless of which failure mode hit. */
     batch_reset_locked();
-    /* Cursor and color caches are now ambiguous (no per-op output crates
-     * were attached in batch mode), so invalidate them. The next getter
-     * will re-fetch from the kernel. */
+    /* Cursor cache is now ambiguous (no per-op output crates were
+     * attached in batch mode), so invalidate it. The next getter will
+     * re-fetch from the kernel. */
     s_cursor_valid = false;
     return rc;
 }
@@ -116,7 +128,7 @@ static bool batch_have_capacity(uint32_t param_bytes,
                                 uint32_t payload_bytes)
 {
     /* Reserve sizeof(ManifestOp) + param_bytes in the builder, and
-     * payload_bytes in the input arena, plus one Crate slot. */
+     * payload_bytes in the input staging buffer, plus one Crate slot. */
     uint32_t need_mfs = sizeof(ManifestOp) + param_bytes;
     if (s_mb.size + need_mfs > s_mb.capacity) return false;
     if (s_payload_used + payload_bytes > sizeof(s_payload)) return false;
@@ -153,26 +165,34 @@ int vga_commit(void)
  *  Cached query operations — always go immediate; getters can't be batched.
  * ========================================================================= */
 
-int vga_getcolor(void)
+int vga_getcolor_rgb(Color *fg, Color *bg)
 {
-    if (s_color_valid) return (int)s_color;
+    if (!fg || !bg) return -ERR_INVALID_ARGS;
+    if (s_color_valid) {
+        *fg = s_fg;
+        *bg = s_bg;
+        return 0;
+    }
 
     /* Inside an active batch, accumulated ops have NOT been applied by
      * the kernel yet — an immediate kernel read here would return the
-     * pre-batch color and disagree with what the caller thinks they
+     * pre-batch colour and disagree with what the caller thinks they
      * just set. Flush first so kernel state catches up; the outer
      * vga_commit is still safe because the depth counter is untouched. */
     if (batch_active()) (void)batch_flush_preserving_depth();
 
-    uint8_t out = 0;
+    uint32_t out[2] = {0, 0};
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_GET_COLOR,
                      NULL, 0, NULL, 0,
-                     &out, sizeof(out), NULL,
+                     out, sizeof(out), NULL,
                      VGA_TIMEOUT_MS, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
-    s_color = out;
+    s_fg = out[0];
+    s_bg = out[1];
     s_color_valid = true;
-    return (int)s_color;
+    *fg = s_fg;
+    *bg = s_bg;
+    return 0;
 }
 
 int vga_getcursor(vga_pos_t *pos)
@@ -183,7 +203,7 @@ int vga_getcursor(vga_pos_t *pos)
         pos->col = s_cursor_col;
         return 0;
     }
-    /* Same rationale as vga_getcolor: flush before reading so the
+    /* Same rationale as vga_getcolor_rgb: flush before reading so the
      * cursor we report reflects every batched op the caller issued. */
     if (batch_active()) (void)batch_flush_preserving_depth();
 
@@ -242,12 +262,17 @@ static int batch_add_op(uint16_t opcode,
                                 params, param_size);
 }
 
-int vga_setcolor(uint8_t color)
+int vga_setcolor_rgb(Color fg, Color bg)
 {
-    s_color = color;
+    fg = BoxColorResolveFg(fg);
+    bg = BoxColorResolveBg(bg);
+    s_fg = fg;
+    s_bg = bg;
     s_color_valid = true;
 
-    uint8_t params[1] = { color };
+    uint8_t params[8];
+    put_color_param(&params[0], fg);
+    put_color_param(&params[4], bg);
 
     if (batch_active()) {
         if (!batch_have_capacity(sizeof(params), 0)) {
@@ -261,7 +286,7 @@ int vga_setcolor(uint8_t color)
     }
 
     return MfCall1(DECK_HARDWARE, HW_VGA_SET_COLOR,
-                   params, 1, NULL, 0,
+                   params, sizeof(params), NULL, 0,
                    NULL, 0, NULL,
                    VGA_TIMEOUT_MS, NULL);
 }
@@ -298,9 +323,27 @@ int vga_setcursor(uint8_t row, uint8_t col)
     return 0;
 }
 
-static int vga_putstring_immediate(const char *str, size_t len, uint8_t color)
+/* Current pair for the write ops below. First use without an explicit
+ * setcolor fetches the kernel's truth once (another Cabin may have set
+ * the console colour before us). */
+static int current_pair(Color *fg, Color *bg)
 {
-    uint8_t params[2] = { color, 0 };
+    if (s_color_valid) {
+        *fg = s_fg;
+        *bg = s_bg;
+        return 0;
+    }
+    return vga_getcolor_rgb(fg, bg);
+}
+
+static int vga_putstring_immediate(const char *str, size_t len,
+                                   Color fg, Color bg)
+{
+    uint8_t params[9];
+    put_color_param(&params[0], fg);
+    put_color_param(&params[4], bg);
+    params[8] = 0;
+
     uint8_t out[3]    = {0};
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_PUTSTRING,
@@ -318,25 +361,30 @@ static int vga_putstring_immediate(const char *str, size_t len, uint8_t color)
     return rc;
 }
 
-static int vga_putstring_batched(const char *str, size_t len, uint8_t color)
+static int vga_putstring_batched(const char *str, size_t len,
+                                 Color fg, Color bg)
 {
     if (len == 0) return OK;
-    uint8_t params[2] = { color, 0 };
+    uint8_t params[9];
+    put_color_param(&params[0], fg);
+    put_color_param(&params[4], bg);
+    params[8] = 0;
 
-    /* Need: ManifestOp + 2-byte params  +  payload_bytes (the string)
+    /* Need: ManifestOp + 9-byte params  +  payload_bytes (the string)
      *       + 1 Crate slot. */
     if (!batch_have_capacity(sizeof(params), (uint32_t)len)) {
         int rc = batch_flush_locked();
         if (rc != OK) return rc;
     }
-    /* If a single string is bigger than the whole arena, fall through
-     * to the immediate path — there is no way to fit it batched. */
+    /* If a single string is bigger than the whole staging buffer, fall
+     * through to the immediate path — there is no way to fit it batched. */
     if (len > sizeof(s_payload)) {
-        return vga_putstring_immediate(str, len, color);
+        return vga_putstring_immediate(str, len, fg, bg);
     }
 
-    /* Copy the caller's bytes into our arena so the pointer remains
-     * valid through vga_commit even after the caller's frame unwinds. */
+    /* Copy the caller's bytes into our staging buffer so the pointer
+     * remains valid through vga_commit even after the caller's frame
+     * unwinds. */
     uint8_t *dst = s_payload + s_payload_used;
     memcpy(dst, str, len);
     s_payload_used += (uint32_t)len;
@@ -363,27 +411,57 @@ int vga_putchar(char c)
 {
     /* Route through PUTSTRING (1-byte input) so the kernel advances
      * the cursor naturally; PUTCHAR has different cursor semantics. */
-    int color = vga_getcolor();
-    if (color < 0) color = VIDEO_ATTR_DEFAULT;
+    Color fg, bg;
+    if (current_pair(&fg, &bg) != 0) {
+        fg = COLOR_LIGHT_GRAY;
+        bg = COLOR_BLACK;
+    }
 
     char buf[1] = { c };
-    if (batch_active()) return vga_putstring_batched(buf, 1, (uint8_t)color);
-    return vga_putstring_immediate(buf, 1, (uint8_t)color);
+    if (batch_active()) return vga_putstring_batched(buf, 1, fg, bg);
+    return vga_putstring_immediate(buf, 1, fg, bg);
 }
 
 int vga_puts(const char *str)
 {
     if (!str) return -ERR_INVALID_ARGS;
-    int color = vga_getcolor();
-    if (color < 0) color = VIDEO_ATTR_DEFAULT;
+    Color fg, bg;
+    if (current_pair(&fg, &bg) != 0) {
+        fg = COLOR_LIGHT_GRAY;
+        bg = COLOR_BLACK;
+    }
 
     size_t len = strlen(str);
     if (batch_active()) {
-        int rc = vga_putstring_batched(str, len, (uint8_t)color);
+        int rc = vga_putstring_batched(str, len, fg, bg);
         return rc == OK ? (int)len : rc;
     }
-    int rc = vga_putstring_immediate(str, len, (uint8_t)color);
+    int rc = vga_putstring_immediate(str, len, fg, bg);
     return rc < 0 ? rc : (int)len;
+}
+
+int vga_putchar_at(uint8_t row, uint8_t col, char ch, Color fg, Color bg)
+{
+    uint8_t params[11];
+    params[0] = row;
+    params[1] = col;
+    params[2] = (uint8_t)ch;
+    put_color_param(&params[3], BoxColorResolveFg(fg));
+    put_color_param(&params[7], BoxColorResolveBg(bg));
+
+    if (batch_active()) {
+        if (!batch_have_capacity(sizeof(params), 0)) {
+            int rc = batch_flush_locked();
+            if (rc != OK) return rc;
+        }
+        return batch_add_op(HW_VGA_PUTCHAR, params, sizeof(params),
+                            CRATE_INDEX_NONE) == 0 ? OK : -ERR_INVALID_ARGS;
+    }
+
+    return MfCall1(DECK_HARDWARE, HW_VGA_PUTCHAR,
+                   params, sizeof(params), NULL, 0,
+                   NULL, 0, NULL,
+                   VGA_TIMEOUT_MS, NULL);
 }
 
 int vga_newline(void)
@@ -416,9 +494,11 @@ int vga_newline(void)
     return 0;
 }
 
-int vga_clear(uint8_t color)
+int vga_clear_rgb(Color fg, Color bg)
 {
-    uint8_t params[1] = { color };
+    uint8_t params[8];
+    put_color_param(&params[0], BoxColorResolveFg(fg));
+    put_color_param(&params[4], BoxColorResolveBg(bg));
 
     if (batch_active()) {
         if (!batch_have_capacity(sizeof(params), 0)) {
@@ -433,7 +513,7 @@ int vga_clear(uint8_t color)
     }
 
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_CLEAR_SCREEN,
-                     params, 1, NULL, 0,
+                     params, sizeof(params), NULL, 0,
                      NULL, 0, NULL,
                      VGA_TIMEOUT_MS, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
@@ -443,9 +523,12 @@ int vga_clear(uint8_t color)
     return 0;
 }
 
-int vga_clear_line(uint8_t row, uint8_t color)
+int vga_clear_line_rgb(uint8_t row, Color fg, Color bg)
 {
-    uint8_t params[2] = { row, color };
+    uint8_t params[9];
+    params[0] = row;
+    put_color_param(&params[1], BoxColorResolveFg(fg));
+    put_color_param(&params[5], BoxColorResolveBg(bg));
 
     if (batch_active()) {
         if (!batch_have_capacity(sizeof(params), 0)) {
@@ -457,14 +540,13 @@ int vga_clear_line(uint8_t row, uint8_t color)
     }
 
     return MfCall1(DECK_HARDWARE, HW_VGA_CLEAR_LINE,
-                   params, 2, NULL, 0,
+                   params, sizeof(params), NULL, 0,
                    NULL, 0, NULL,
                    VGA_TIMEOUT_MS, NULL);
 }
 
-int vga_clear_to_eol(uint8_t color)
+int vga_clear_to_eol(void)
 {
-    (void)color;
     if (batch_active()) {
         if (!batch_have_capacity(0, 0)) {
             int rc = batch_flush_locked();
@@ -480,10 +562,8 @@ int vga_clear_to_eol(uint8_t color)
                    VGA_TIMEOUT_MS, NULL);
 }
 
-int vga_scroll_up(uint8_t lines, uint8_t fill_color)
+int vga_scroll_up(void)
 {
-    (void)lines; (void)fill_color;
-
     if (batch_active()) {
         if (!batch_have_capacity(0, 0)) {
             int rc = batch_flush_locked();

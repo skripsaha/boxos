@@ -9,7 +9,8 @@
 #include "box/system.h"
 #include "box/display.h"
 
-static uint8_t display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
+static Color display_fg = COLOR_LIGHT_GRAY;
+static Color display_bg = COLOR_BLACK;
 
 static void render(const uint8_t* data, uint16_t len) {
     /* One shell render() = one user-visible frame fragment. With the
@@ -28,16 +29,19 @@ static void render(const uint8_t* data, uint16_t len) {
         uint8_t b = data[i];
 
         if (b == DISP_CMD_CLEAR) {
-            vga_clear(VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK));
-            display_cached_color = VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK);
+            vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
+            display_fg = COLOR_LIGHT_GRAY;
+            display_bg = COLOR_BLACK;
             i++;
             continue;
         }
 
-        if (b == DISP_CMD_COLOR && i + 1 < len) {
-            display_cached_color = data[i + 1];
-            vga_setcolor(display_cached_color);
-            i += 2;
+        /* [cmd][u32 fg][u32 bg] — full #RRGGBB pair, little-endian. */
+        if (b == DISP_CMD_COLOR && i + 9 <= len) {
+            memcpy(&display_fg, &data[i + 1], 4);
+            memcpy(&display_bg, &data[i + 5], 4);
+            vga_setcolor_rgb(display_fg, display_bg);
+            i += 9;
             continue;
         }
 

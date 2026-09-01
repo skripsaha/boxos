@@ -5549,10 +5549,13 @@ void Phase28()
         box::vga::session s2;
         Check(s2.commit() == 0, "phase28 vga batch session commits");
         // color set/get round-trip (outside a session — getters resolve at once,
-        // a batched set would be deferred). box::color -> VGA attr -> back.
-        std::uint8_t want = color_to_vga_attr(box::colors::cyan.raw(), box::colors::black.raw());
+        // a batched set would be deferred). The pair comes back bit-exact:
+        // nothing between userspace and the kernel quantizes any more.
         box::vga::set_color(box::colors::cyan, box::colors::black);
-        Check(box::vga::color_attr() == want, "phase28 vga set_color/color_attr round-trip");
+        box::color rt_fg, rt_bg;
+        Check(box::vga::get_color(rt_fg, rt_bg) &&
+              rt_fg == box::colors::cyan && rt_bg == box::colors::black,
+              "phase28 vga set_color/get_color round-trip is exact rgb");
         box::vga::set_color(box::colors::light_gray, box::colors::black);  // restore a sane default
     } else {
         printf("[CXX] note phase28: vga text mode unavailable on this config\n");
@@ -55638,6 +55641,38 @@ void Phase240()
            "are one answer\n");
 }
 
+// ── Phase rgb: the C++ colour surface carries #RRGGBB end to end ───────────
+// In-band only: set_color/get_color round-trips an arbitrary 24-bit pair
+// bit-exactly through box::vga (the setter fires the kernel op; the getter
+// answers from boxlib's coherent cache — kernel truth is read raw by the
+// rgbtest utility, which also paints the screen probe for the host-side
+// screendump oracle tools/rgbcheck.sh).
+void PhaseRgb()
+{
+    box::vga::dimensions dim = box::vga::size();
+    if (dim.rows == 0 || dim.cols == 0) {
+        printf("[CXX] note phase rgb: vga unavailable on this config\n");
+        return;
+    }
+
+    box::color f, b;
+    Check(box::vga::set_color(box::color(0x12, 0x34, 0x56), box::color(0x65, 0x43, 0x21)),
+          "phase rgb set_color(#123456,#654321)");
+    Check(box::vga::get_color(f, b) &&
+          f == box::color(0x12, 0x34, 0x56) && b == box::color(0x65, 0x43, 0x21),
+          "phase rgb get_color returns the exact pair");
+
+    // Sentinels resolve to concrete role defaults before the wire.
+    Check(box::vga::set_color(box::colors::use_default, box::colors::inherit),
+          "phase rgb set_color(default,inherit)");
+    Check(box::vga::get_color(f, b) &&
+          f == box::colors::light_gray && b == box::colors::black,
+          "phase rgb sentinels resolve to light_gray/black");
+
+    box::vga::set_color(box::colors::light_gray, box::colors::black);
+    printf("[CXX] PASS phase rgb: full #rrggbb survives the whole path\n");
+}
+
 const PhaseRow kPhases[] = {
     {"0", Phase0},
     {"1", Phase1},
@@ -55893,6 +55928,7 @@ const PhaseRow kPhases[] = {
     {"238", Phase238},
     {"239", Phase239},
     {"240", Phase240},
+    {"rgb", PhaseRgb},
     // ‼ Last on purpose: it reloads the zone database, and a reload cannot be
     // undone from inside a process — [time.zone.db.list] only ever erases the
     // entry AFTER a position, never the front one.

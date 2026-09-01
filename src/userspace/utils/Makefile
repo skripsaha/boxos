@@ -63,7 +63,7 @@ BOXLIB_START = ../build/boxlib_start.o
 
 UTILS = help create show files tag untag name trash erase \
         me info say reboot bye defrag fsck ipc_test memtag hw \
-        timezone logsave lastsaid
+        timezone logsave lastsaid rgbtest
 
 .PHONY: all clean
 

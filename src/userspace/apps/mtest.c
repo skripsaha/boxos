@@ -87,7 +87,12 @@ int main(void)
      * Manifest path — proves hw ops are reachable through the new dispatch. */
     static uint8_t mbuf2[128];
     static const char hw_msg[] = "[mtest] HW VGA via Manifest works\n";
-    uint8_t  hw_params[2] = { 0x07u, 0x00u };  /* color=light gray, flags=0 */
+    /* [u32 fg][u32 bg][u8 flags] — light gray on black, flags=0. */
+    uint8_t  hw_params[9];
+    uint32_t hw_fg = 0xAAAAAAu, hw_bg = 0x000000u;
+    memcpy(&hw_params[0], &hw_fg, 4);
+    memcpy(&hw_params[4], &hw_bg, 4);
+    hw_params[8] = 0;
 
     ManifestBuilder mb2;
     if (ManifestBuilderInit(&mb2, mbuf2, sizeof(mbuf2)) != 0) exit(1);

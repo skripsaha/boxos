@@ -144,37 +144,47 @@ public:
     session &operator=(const session &) = delete;
 };
 
-// Write (quantized to the 16-color VGA palette at the boxlib boundary).
+// Write. Full #RRGGBB reaches the kernel; only the VGA *text* backend
+// quantizes, at draw time — the GOP framebuffer renders the value exactly.
 inline bool put(char c) noexcept { return vga_putchar(c) == 0; }
-inline bool put(const char *s) noexcept { return vga_puts(s) == 0; }
+/* vga_puts reports the byte count on success (like the C puts family), so
+ * success is "not negative" — `== 0` held only for the empty string and made
+ * this wrapper report failure for every string it ever drew. */
+inline bool put(const char *s) noexcept { return vga_puts(s) >= 0; }
 inline bool newline() noexcept { return vga_newline() == 0; }
 
-// Color: box::color → VGA attribute (fg+bg packed) for the current run.
+// Color: the box::color pair for following runs. Sentinels resolve to their
+// role defaults (fg → light gray, bg → black) before the wire.
 inline bool set_color(color fg, color bg = colors::inherit) noexcept
 {
-    return vga_setcolor(color_to_vga_attr(fg.raw(), bg.raw())) == 0;
+    return vga_setcolor_rgb(fg.raw(), bg.raw()) == 0;
 }
-inline std::uint8_t color_attr() noexcept
+// The kernel's current pair — concrete triples, exactly as a setter shipped
+// them (a set_color/get_color round-trip is bit-exact).
+inline bool get_color(color &fg, color &bg) noexcept
 {
-    int a = vga_getcolor();
-    return a < 0 ? 0u : static_cast<std::uint8_t>(a);
+    Color f = 0, b = 0;
+    if (vga_getcolor_rgb(&f, &b) != 0) return false;
+    fg = color::from_raw(f);
+    bg = color::from_raw(b);
+    return true;
 }
 
 inline bool clear(color bg = colors::black) noexcept
 {
-    return vga_clear(color_to_vga4(bg.raw())) == 0;
+    return vga_clear_rgb(colors::light_gray.raw(), bg.raw()) == 0;
 }
-inline bool clear_to_eol(color bg = colors::black) noexcept
+inline bool clear_to_eol() noexcept
 {
-    return vga_clear_to_eol(color_to_vga4(bg.raw())) == 0;
+    return vga_clear_to_eol() == 0;
 }
 inline bool clear_line(std::uint8_t row, color bg = colors::black) noexcept
 {
-    return vga_clear_line(row, color_to_vga4(bg.raw())) == 0;
+    return vga_clear_line_rgb(row, colors::light_gray.raw(), bg.raw()) == 0;
 }
-inline bool scroll_up(std::uint8_t lines, color fill = colors::black) noexcept
+inline bool scroll_up() noexcept
 {
-    return vga_scroll_up(lines, color_to_vga4(fill.raw())) == 0;
+    return vga_scroll_up() == 0;
 }
 inline bool move_cursor(std::uint8_t row, std::uint8_t col) noexcept
 {
