@@ -28,7 +28,6 @@
 
 /* Module-local state — neither escapes outside this TU. */
 static spinlock_t g_kprintf_lock;
-static uint8_t    current_attr = VIDEO_ATTR_DEFAULT;
 
 void console_lock_acquire(void) { spin_lock(&g_kprintf_lock); }
 void console_lock_release(void) { spin_unlock(&g_kprintf_lock); }
@@ -403,10 +402,14 @@ static int screen_emit(void *ctx, char c)
     kputchar(c);
     return 1;
 }
+/* The attribute escape drives the live video colour.  This used to write a
+ * module-local shadow that nothing ever read — %[E]/%[S]/%[W] had silently
+ * stopped colouring kernel output (the panic banner printed in whatever
+ * colour the last user op happened to leave behind). */
 static void screen_set_attr(void *ctx, uint8_t attr)
 {
     (void)ctx;
-    current_attr = attr;
+    VideoSetColor(attr);
 }
 static void screen_set_cursor(void *ctx, int x, int y)
 {
