@@ -179,11 +179,18 @@ int proc_exec_gen(const char *filename, const char *tags, uint32_t *out_gen)
      * out_actual tells us whether the generation half actually arrived. */
     uint32_t out_blob[2] = { 0, 0 };
     uint32_t out_actual = 0;
+    /* WITHOUT a deadline, deliberately. Spawn reads the program off the
+     * medium INSIDE this call — on a throttled stick that is minutes, and a
+     * guessed budget here split one fact into two lies: the caller was told
+     * "refused" while the kernel went on to start the child ("late"). The
+     * reply is guaranteed either way — success or a real error — so there
+     * is nothing for a timer to guard; an answer that never comes is a
+     * kernel defect Nightwatch names, not something to paper over. */
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
                      pbuf, psize,                  /* params = caller-tag augment */
                      filename, (uint32_t)name_len, /* in_crate = filename (unchanged) */
                      out_blob, sizeof(out_blob), &out_actual,
-                     SYS_TIMEOUT_MS, NULL);
+                     0 /* no deadline */, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
     return (int)out_blob[0];

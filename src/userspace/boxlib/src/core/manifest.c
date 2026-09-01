@@ -341,10 +341,12 @@ int MfCall1(uint16_t      deck,
                              params, param_size) != 0) return -ERR_INVALID_ARGS;
     if (ManifestBuilderFinalize(&mb) != 0)             return -ERR_INVALID_ARGS;
 
+    /* timeout_ms == 0 means WITHOUT a deadline (result_wait's own
+     * convention), not "the default one" — a bounded wait on an answer the
+     * kernel is guaranteed to deliver turns a late reply into a false
+     * refusal, and callers who chose 0 chose to trust the delivery. */
     Result r;
-    int rc = (timeout_ms != 0)
-               ? ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, timeout_ms)
-               : ManifestSubmit((Manifest *)mbuf, crates, cc, &r);
+    int rc = ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, timeout_ms);
 
     if (out_actual && out_idx != CRATE_INDEX_NONE) {
         *out_actual = (uint32_t)crates[out_idx].size;
