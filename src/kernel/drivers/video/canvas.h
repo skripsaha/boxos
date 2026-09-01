@@ -35,10 +35,17 @@
 
 #include "ktypes.h"
 #include "video_colors.h"
+#include "boxos_color.h"
 
+/* One character cell — full #RRGGBB pair per cell (the Color/Canvas
+ * principle: colour is cell metadata, never an in-band byte). The GOP
+ * backend renders fg/bg exactly; the VGA text backend quantises the pair
+ * to its 16-colour attribute at draw time. */
 typedef struct TextCell {
-    char    ch;
-    uint8_t attr;
+    uint32_t fg;        /* #RRGGBB */
+    uint32_t bg;        /* #RRGGBB */
+    char     ch;
+    uint8_t  pad[3];
 } TextCell;
 
 typedef enum {
@@ -76,9 +83,9 @@ struct DisplayBackend {
      * flush the shifted shadow to VRAM. */
     void (*Scroll)(DisplayBackend *be, uint32_t dy);
 
-    /* Fill an entire row with the given attribute (used for clear-line
+    /* Fill an entire row with the given colour pair (used for clear-line
      * and post-clear-screen initialisation). */
-    void (*FillRow)(DisplayBackend *be, uint32_t row, uint8_t attr);
+    void (*FillRow)(DisplayBackend *be, uint32_t row, uint32_t fg, uint32_t bg);
 
     /* Flush damage rectangle [row_lo, row_hi) to the device. No-op for
      * backends that have already written to VRAM in DrawCells/Scroll. */
@@ -86,7 +93,7 @@ struct DisplayBackend {
 
     /* Optional caret rendering. NULL → caret is invisible. */
     void (*DrawCaret)(DisplayBackend *be,
-                      uint32_t col, uint32_t row, uint8_t attr);
+                      uint32_t col, uint32_t row, uint32_t fg);
 
     /* Optional Pull Map rebase for backends mapped via identity early-boot
      * addresses (legacy VGA text mode at 0xB8000). */
@@ -113,12 +120,11 @@ void CanvasFlushPending(void);
  * subsequent kprintf commits immediately.  Discards any pending plan. */
 void CanvasForceReset(void);
 
-void CanvasPrintChar(char c, uint8_t attr);
+void CanvasPrintChar(char c, uint32_t fg, uint32_t bg);
 void CanvasScrollUp(void);
-void CanvasClearScreen(void);
-void CanvasClearLine(int line);
-void CanvasClearToEol(uint8_t attr);
-void CanvasChangeBackground(uint8_t bg);
+void CanvasClearScreen(uint32_t fg, uint32_t bg);
+void CanvasClearLine(int line, uint32_t fg, uint32_t bg);
+void CanvasClearToEol(uint32_t fg, uint32_t bg);
 
 /* ───── Cursor ───── */
 void CanvasSetCursor(int x, int y);

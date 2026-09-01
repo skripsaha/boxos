@@ -32,9 +32,13 @@ void io_flush(void);
  *
  * Standard format specifiers:  %s %d %u %x %X %c %p %%
  *
- * Extension:  %color   — consumes one Color (uint32_t RGB) argument and
- *                        switches the foreground colour for following text
- *                        runs in the same printf call.
+ * Extensions: %color   — consumes one Color (#RRGGBB in a uint32_t) and
+ *                        switches the foreground for following text runs
+ *                        in the same printf call.
+ *             %bgcolor — the same for the background. Colour is a full
+ *                        24-bit (fg, bg) pair the whole way to the screen;
+ *                        the VGA text backend alone projects it onto its
+ *                        16 colours, by dominant hue, at draw time.
  *
  * UTF-8 input: ASCII passes through; multi-byte sequences are replaced with
  * '?' until the kernel-side font extension lands. This keeps printf safe for

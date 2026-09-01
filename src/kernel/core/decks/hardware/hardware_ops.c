@@ -68,21 +68,30 @@ static bool hw_irq_is_valid(uint8_t irq)
     return irq < irqchip_max_irqs() && irq != 0 && irq != 2;
 }
 
+/* Colours arrive as unaligned little-endian u32 inside op->params. */
+static inline uint32_t hw_color_param(const uint8_t *p)
+{
+    uint32_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+}
+
 /* =========================================================================
  *  VGA
  * ========================================================================= */
 
-/* HW_VGA_PUTCHAR  params:[u8 row][u8 col][u8 char][u8 color] */
+/* HW_VGA_PUTCHAR  params:[u8 row][u8 col][u8 char][u32 fg][u32 bg] */
 static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 11) return ERR_INVALID_ARGUMENT;
 
-    uint8_t row   = op->params[0];
-    uint8_t col   = op->params[1];
-    uint8_t ch    = op->params[2];
-    uint8_t color = op->params[3];
+    uint8_t  row = op->params[0];
+    uint8_t  col = op->params[1];
+    uint8_t  ch  = op->params[2];
+    uint32_t fg  = hw_color_param(&op->params[3]);
+    uint32_t bg  = hw_color_param(&op->params[7]);
 
     if (row >= (uint8_t)VideoGetRows() || col >= (uint8_t)VideoGetCols()) {
         return ERR_OUT_OF_RANGE;
@@ -90,23 +99,20 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     console_lock_acquire();
 
-    uint8_t old_x     = (uint8_t)VideoGetCursorX();
-    uint8_t old_y     = (uint8_t)VideoGetCursorY();
-    uint8_t old_color = VideoGetColor();
+    uint8_t old_x = (uint8_t)VideoGetCursorX();
+    uint8_t old_y = (uint8_t)VideoGetCursorY();
 
     VideoSetCursor(col, row);
-    VideoSetColor(color);
-    VideoPrintChar((char)ch, color);
+    VideoPrintCharRgb((char)ch, fg, bg);
     HwVgaMirrorChar((char)ch);
 
     VideoSetCursor(old_x, old_y);
-    VideoSetColor(old_color);
 
     console_lock_release();
     return OK;
 }
 
-/* HW_VGA_PUTSTRING  params:[u8 color][u8 flags]
+/* HW_VGA_PUTSTRING  params:[u32 fg][u32 bg][u8 flags]
  *                   in_crate: string bytes (size = byte count, no length cap)
  *                   out_crate (optional): [u8 chars_written][u8 row][u8 col] */
 static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -114,10 +120,11 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
 {
     (void)crate_count;
     if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 2)                return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 9)                return ERR_INVALID_ARGUMENT;
 
-    uint8_t color = op->params[0];
-    uint8_t flags = op->params[1];
+    uint32_t fg    = hw_color_param(&op->params[0]);
+    uint32_t bg    = hw_color_param(&op->params[4]);
+    uint8_t  flags = op->params[8];
 
     Crate *str_crate = &crates[op->in_crate];
     /* Snapshot the user string BEFORE taking the console lock, so user memory
@@ -143,15 +150,16 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
      * the character-salad screen the user saw on 2026-05-15. */
     console_lock_acquire();
 
-    uint8_t old_color = VideoGetColor();
-    VideoSetColor(color);
+    uint32_t old_fg, old_bg;
+    VideoGetColorRgb(&old_fg, &old_bg);
+    VideoSetColorRgb(fg, bg);
 
     uint64_t chars_written = 0;
     VideoBatchBegin();
     for (uint64_t i = 0; i < want; i++) {
         char c = str[i];
         if (c == '\0') break;
-        VideoPrintChar(c, color);
+        VideoPrintCharCur(c);
         LogRingPut(c);           /* see HwVgaMirrorChar: not behind the gate */
         chars_written++;
     }
@@ -163,7 +171,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
 #endif
 
     if (!(flags & VGA_PUTSTRING_FLAG_KEEP_COLOR)) {
-        VideoSetColor(old_color);
+        VideoSetColorRgb(old_fg, old_bg);
     }
 
     console_lock_release();
@@ -183,37 +191,31 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_CLEAR_SCREEN  params:[u8 color] */
+/* HW_VGA_CLEAR_SCREEN  params:[u32 fg][u32 bg] — every cell becomes a
+ * space in this pair; the current colour state is untouched. */
 static int HwVgaClearScreen(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                             const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    uint8_t color     = op->params[0];
-    uint8_t old_color = VideoGetColor();
-    VideoSetColor(color);
-    VideoClearScreen();
-    VideoSetColor(old_color);
+    VideoClearScreenRgb(hw_color_param(&op->params[0]),
+                        hw_color_param(&op->params[4]));
     return OK;
 }
 
-/* HW_VGA_CLEAR_LINE  params:[u8 row][u8 color] */
+/* HW_VGA_CLEAR_LINE  params:[u8 row][u32 fg][u32 bg] */
 static int HwVgaClearLine(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                           const OpContext *ctx)
 {
     (void)crates; (void)crate_count; (void)ctx;
-    if (op->param_size < 2) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 9) return ERR_INVALID_ARGUMENT;
 
-    uint8_t row   = op->params[0];
-    uint8_t color = op->params[1];
-
+    uint8_t row = op->params[0];
     if ((int)row >= VideoGetRows()) return ERR_OUT_OF_RANGE;
 
-    uint8_t old_color = VideoGetColor();
-    VideoSetColor(color);
-    VideoClearLine(row);
-    VideoSetColor(old_color);
+    VideoClearLineRgb(row, hw_color_param(&op->params[1]),
+                           hw_color_param(&op->params[5]));
     return OK;
 }
 
@@ -266,38 +268,40 @@ static int HwVgaSetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
-/* HW_VGA_SET_COLOR  params:[u8 color]
- *                   out_crate (optional): u8 old_color */
+/* HW_VGA_SET_COLOR  params:[u32 fg][u32 bg]
+ *                   out_crate (optional): [u32 old_fg][u32 old_bg] */
 static int HwVgaSetColor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
     (void)crate_count;
-    if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
 
-    uint8_t color     = op->params[0];
-    uint8_t old_color = VideoGetColor();
-    VideoSetColor(color);
+    uint32_t old[2];
+    VideoGetColorRgb(&old[0], &old[1]);
+    VideoSetColorRgb(hw_color_param(&op->params[0]),
+                     hw_color_param(&op->params[4]));
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
-        if (out->capacity >= 1) {
-            (void)crate_write(out, ctx, &old_color, 1);
+        if (out->capacity >= sizeof(old)) {
+            (void)crate_write(out, ctx, old, sizeof(old));
         }
     }
     return OK;
 }
 
-/* HW_VGA_GET_COLOR  out_crate: u8 color */
+/* HW_VGA_GET_COLOR  out_crate: [u32 fg][u32 bg] */
 static int HwVgaGetColor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                          const OpContext *ctx)
 {
     (void)crate_count;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 1) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t color = VideoGetColor();
-    if (crate_write(out, ctx, &color, 1) != OK) return ERR_INVALID_ADDRESS;
+    uint32_t pair[2];
+    VideoGetColorRgb(&pair[0], &pair[1]);
+    if (crate_write(out, ctx, pair, sizeof(pair)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 

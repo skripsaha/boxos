@@ -73,6 +73,16 @@ static bool canvas_fits_static(uint32_t cols, uint32_t rows)
     return cols <= CANVAS_STATIC_COLS && rows <= CANVAS_STATIC_ROWS;
 }
 
+/* A never-written cell: default pair, space glyph. The pair is the exact
+ * RGB of VIDEO_ATTR_DEFAULT so the VGA backend's draw-time quantisation
+ * reproduces the historical attribute byte bit-for-bit. */
+static inline TextCell cell_blank(void)
+{
+    return (TextCell){ .fg = BoxAttrFgRgb(VIDEO_ATTR_DEFAULT),
+                       .bg = BoxAttrBgRgb(VIDEO_ATTR_DEFAULT),
+                       .ch = ' ' };
+}
+
 typedef struct {
     DisplayBackend *be;
     uint32_t        cols;
@@ -143,14 +153,14 @@ static void cells_scroll_up(CanvasState *c, uint32_t dy)
 {
     if (dy == 0) return;
     if (dy >= c->rows) {
-        TextCell empty = { ' ', VIDEO_ATTR_DEFAULT };
+        TextCell empty = cell_blank();
         for (uint32_t i = 0; i < c->rows * c->cols; i++) c->cells[i] = empty;
         return;
     }
     memmove(c->cells,
             c->cells + (size_t)dy * c->cols,
             sizeof(TextCell) * (size_t)(c->rows - dy) * c->cols);
-    TextCell empty = { ' ', VIDEO_ATTR_DEFAULT };
+    TextCell empty = cell_blank();
     for (uint32_t r = c->rows - dy; r < c->rows; r++)
         for (uint32_t col = 0; col < c->cols; col++)
             c->cells[(size_t)r * c->cols + col] = empty;
@@ -233,9 +243,13 @@ static void canvas_commit_locked(CanvasState *c)
     if (be->DrawCaret) {
         uint32_t crow = c->row, ccol = c->col;
         if (crow < c->rows && ccol < c->cols) {
-            uint8_t attr = c->cells[(size_t)crow * c->cols + ccol].attr;
-            if (!attr) attr = VIDEO_ATTR_DEFAULT;
-            be->DrawCaret(be, ccol, crow, attr);
+            const TextCell *cell = &c->cells[(size_t)crow * c->cols + ccol];
+            uint32_t fg = cell->fg;
+            /* A fully zeroed pair is a never-initialised cell (black-on-
+             * black was attr 0x00 before): draw the caret in the default
+             * foreground so it stays visible — same rule as the old code. */
+            if (!fg && !cell->bg) fg = BoxAttrFgRgb(VIDEO_ATTR_DEFAULT);
+            be->DrawCaret(be, ccol, crow, fg);
             c->caret_col     = ccol;
             c->caret_row     = crow;
             c->caret_visible = true;
@@ -295,7 +309,7 @@ static void perform_scroll_locked(CanvasState *c)
     }
 }
 
-static void print_char_locked(CanvasState *c, char ch, uint8_t attr)
+static void print_char_locked(CanvasState *c, char ch, uint32_t fg, uint32_t bg)
 {
     if (ch == '\n') {
         c->col = 0;
@@ -306,7 +320,8 @@ static void print_char_locked(CanvasState *c, char ch, uint8_t attr)
     } else if (ch == '\b') {
         if (c->col > 0) {
             c->col--;
-            c->cells[(size_t)c->row * c->cols + c->col] = (TextCell){ ' ', attr };
+            c->cells[(size_t)c->row * c->cols + c->col] =
+                (TextCell){ .fg = fg, .bg = bg, .ch = ' ' };
             mark_cell_dirty(c, c->row, c->col);
         }
     } else if (ch == '\t') {
@@ -320,7 +335,8 @@ static void print_char_locked(CanvasState *c, char ch, uint8_t attr)
         }
     } else {
         if (c->row < c->rows && c->col < c->cols) {
-            c->cells[(size_t)c->row * c->cols + c->col] = (TextCell){ ch, attr };
+            c->cells[(size_t)c->row * c->cols + c->col] =
+                (TextCell){ .fg = fg, .bg = bg, .ch = ch };
             mark_cell_dirty(c, c->row, c->col);
         }
         c->col++;
@@ -391,7 +407,7 @@ void CanvasInit(DisplayBackend *be)
         }
     }
 
-    TextCell empty = { ' ', VIDEO_ATTR_DEFAULT };
+    TextCell empty = cell_blank();
     for (size_t i = 0; i < s_canvas.rows * s_canvas.cols; i++)
         s_canvas.cells[i] = empty;
     plan_reset(&s_canvas);
@@ -405,7 +421,7 @@ void CanvasInit(DisplayBackend *be)
     s_canvas.ready         = true;
 
     for (uint32_t r = 0; r < s_canvas.rows; r++)
-        be->FillRow(be, r, VIDEO_ATTR_DEFAULT);
+        be->FillRow(be, r, empty.fg, empty.bg);
     be->Present(be, 0, s_canvas.rows);
 }
 
@@ -497,12 +513,12 @@ void CanvasForceReset(void)
  *  Cell writers
  * ========================================================================= */
 
-void CanvasPrintChar(char ch, uint8_t attr)
+void CanvasPrintChar(char ch, uint32_t fg, uint32_t bg)
 {
     if (!s_canvas.ready) return;
     spin_lock(&s_canvas_lock);
     bool opened = implicit_open_locked(&s_canvas);
-    print_char_locked(&s_canvas, ch, attr);
+    print_char_locked(&s_canvas, ch, fg, bg);
     implicit_close_locked(&s_canvas, opened);
     spin_unlock(&s_canvas_lock);
 }
@@ -517,14 +533,14 @@ void CanvasScrollUp(void)
     spin_unlock(&s_canvas_lock);
 }
 
-void CanvasClearScreen(void)
+void CanvasClearScreen(uint32_t fg, uint32_t bg)
 {
     if (!s_canvas.ready) return;
     spin_lock(&s_canvas_lock);
     bool opened = implicit_open_locked(&s_canvas);
 
     CanvasState *c = &s_canvas;
-    TextCell empty = { ' ', VIDEO_ATTR_DEFAULT };
+    TextCell empty = { .fg = fg, .bg = bg, .ch = ' ' };
     for (uint32_t i = 0; i < c->rows * c->cols; i++) c->cells[i] = empty;
     c->plan_scroll = 0;
     plan_reset_dirty(c);
@@ -536,7 +552,7 @@ void CanvasClearScreen(void)
     spin_unlock(&s_canvas_lock);
 }
 
-void CanvasClearLine(int line)
+void CanvasClearLine(int line, uint32_t fg, uint32_t bg)
 {
     if (!s_canvas.ready) return;
     if (line < 0) return;
@@ -545,7 +561,7 @@ void CanvasClearLine(int line)
     if ((uint32_t)line >= c->rows) { spin_unlock(&s_canvas_lock); return; }
     bool opened = implicit_open_locked(c);
 
-    TextCell empty = { ' ', VIDEO_ATTR_DEFAULT };
+    TextCell empty = { .fg = fg, .bg = bg, .ch = ' ' };
     for (uint32_t col = 0; col < c->cols; col++)
         c->cells[(size_t)line * c->cols + col] = empty;
     mark_row_full(c, (uint32_t)line);
@@ -554,7 +570,7 @@ void CanvasClearLine(int line)
     spin_unlock(&s_canvas_lock);
 }
 
-void CanvasClearToEol(uint8_t attr)
+void CanvasClearToEol(uint32_t fg, uint32_t bg)
 {
     if (!s_canvas.ready) return;
     spin_lock(&s_canvas_lock);
@@ -562,32 +578,12 @@ void CanvasClearToEol(uint8_t attr)
     if (c->col >= c->cols || c->row >= c->rows) { spin_unlock(&s_canvas_lock); return; }
     bool opened = implicit_open_locked(c);
 
-    TextCell empty = { ' ', attr };
+    TextCell empty = { .fg = fg, .bg = bg, .ch = ' ' };
     for (uint32_t col = c->col; col < c->cols; col++)
         c->cells[(size_t)c->row * c->cols + col] = empty;
     c->plan_row_dirty[c->row] = 1;
     if (c->col < c->plan_col_lo[c->row]) c->plan_col_lo[c->row] = (uint16_t)c->col;
     c->plan_col_hi[c->row] = (uint16_t)c->cols;
-
-    implicit_close_locked(c, opened);
-    spin_unlock(&s_canvas_lock);
-}
-
-void CanvasChangeBackground(uint8_t bg)
-{
-    if (!s_canvas.ready) return;
-    spin_lock(&s_canvas_lock);
-    CanvasState *c = &s_canvas;
-    bool opened = implicit_open_locked(c);
-
-    uint8_t bg4 = (uint8_t)((bg & 0x0Fu) << 4);
-    for (uint32_t r = 0; r < c->rows; r++) {
-        for (uint32_t col = 0; col < c->cols; col++) {
-            TextCell *cell = &c->cells[(size_t)r * c->cols + col];
-            cell->attr = (uint8_t)((cell->attr & 0x0Fu) | bg4);
-        }
-        mark_row_full(c, r);
-    }
 
     implicit_close_locked(c, opened);
     spin_unlock(&s_canvas_lock);

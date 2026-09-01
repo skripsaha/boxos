@@ -39,11 +39,12 @@
 typedef struct StrandPrintState {
     char     io_buf[IO_BUF_SIZE];
     uint16_t io_buf_pos;
-    uint8_t  last_attr;
-    uint8_t  last_attr_set;
+    uint8_t  last_set;      /* last_fg/last_bg carry a sent pair */
     uint8_t  initialized;
-    uint8_t  _pad[3];
-    uint32_t color_fg;
+    uint8_t  _pad[4];
+    uint32_t last_fg;       /* last pair pushed to the backend (resolved) */
+    uint32_t last_bg;
+    uint32_t color_fg;      /* current colours (may hold sentinels) */
     uint32_t color_bg;
 } StrandPrintState;
 _Static_assert(sizeof(StrandPrintState) == STRAND_PRINT_BYTES,
@@ -90,7 +91,7 @@ void     io_set_mode(uint8_t mode)
      * strand's cache exists yet, so invalidating only the caller's own is
      * sufficient (every strand spawned afterwards starts uninitialised
      * anyway and re-sends its colour on its first emit). */
-    if (mode != g_io_mode) print_state_self()->last_attr_set = false;
+    if (mode != g_io_mode) print_state_self()->last_set = false;
     g_io_mode = mode;
 }
 uint8_t  io_get_mode(void)                { return g_io_mode; }
@@ -172,34 +173,54 @@ static void io_buf_append(StrandPrintState *ps, const char *data, size_t len)
     }
 }
 
+/* A colour record is parsed as one unit by the display daemon; unlike text
+ * it must never straddle a flush boundary. io_buf_append chunks freely, so a
+ * record that lands near the end of the buffer would arrive split across two
+ * messages — the daemon would eat the command byte, render the colour bytes
+ * as text, and a payload byte that happens to equal DISP_CMD_COLOR would
+ * spawn a phantom record swallowing eight bytes of real output. Flush first
+ * when the record would not fit whole. (The old 2-byte attribute record had
+ * the same hazard, only narrower.) */
+static void io_buf_put_record(StrandPrintState *ps, const char *rec, size_t len)
+{
+    if ((size_t)IO_BUF_SIZE - (size_t)ps->io_buf_pos < len) io_flush_state(ps);
+    io_buf_append(ps, rec, len);
+}
+
 /* ===========================================================================
  * Color state.
  *
- * push_vga_attr() converts the current 24-bit (fg, bg) into the kernel's
- * 8-bit VGA attribute and routes it to whichever backend is active. The
- * full RGB is still useful for printf %color which embeds a per-run colour
- * regardless of the global state.
+ * push_color() resolves the current (fg, bg) — sentinels become concrete
+ * triples — and routes the FULL 24-bit pair to whichever backend is
+ * active: a 9-byte DISP_CMD_COLOR record on the daemon wire, or a
+ * SET_COLOR op with an RGB pair on the direct VGA path. Nothing here
+ * rounds; the VGA text backend quantises at draw time inside the kernel.
  * =========================================================================== */
-static void push_vga_attr(StrandPrintState *ps)
+static void push_color(StrandPrintState *ps)
 {
-    uint8_t attr = color_to_vga_attr(ps->color_fg, ps->color_bg);
-    if (ps->last_attr_set && ps->last_attr == attr) return;   /* no-op */
+    uint32_t fg = BoxColorResolveFg(ps->color_fg);
+    uint32_t bg = BoxColorResolveBg(ps->color_bg);
+    if (ps->last_set && ps->last_fg == fg && ps->last_bg == bg) return;
 
     if (g_io_mode == IO_MODE_IPC) {
-        char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
-        io_buf_append(ps, cmd, 2);
+        char cmd[9];
+        cmd[0] = (char)DISP_CMD_COLOR;
+        memcpy(&cmd[1], &fg, 4);
+        memcpy(&cmd[5], &bg, 4);
+        io_buf_put_record(ps, cmd, sizeof(cmd));
     } else {
-        vga_setcolor(attr);
+        vga_setcolor_rgb(fg, bg);
     }
-    ps->last_attr     = attr;
-    ps->last_attr_set = true;
+    ps->last_fg  = fg;
+    ps->last_bg  = bg;
+    ps->last_set = true;
 }
 
 void  set_color(Color fg)
 {
     StrandPrintState *ps = print_state_self();
     ps->color_fg = fg;
-    push_vga_attr(ps);
+    push_color(ps);
 }
 Color get_color(void) { return print_state_self()->color_fg; }
 
@@ -207,7 +228,7 @@ void  set_color_bg(Color bg)
 {
     StrandPrintState *ps = print_state_self();
     ps->color_bg = bg;
-    push_vga_attr(ps);
+    push_color(ps);
 }
 Color get_color_bg(void) { return print_state_self()->color_bg; }
 
@@ -220,14 +241,20 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
 {
     if (len <= 0) return;
 
-    uint8_t attr = color_to_vga_attr(fg, bg);
+    fg = BoxColorResolveFg(fg);
+    bg = BoxColorResolveBg(bg);
+    bool changed = !ps->last_set || ps->last_fg != fg || ps->last_bg != bg;
 
     if (g_io_mode == IO_MODE_IPC) {
-        if (!ps->last_attr_set || ps->last_attr != attr) {
-            char cmd[2] = { (char)DISP_CMD_COLOR, (char)attr };
-            io_buf_append(ps, cmd, 2);
-            ps->last_attr     = attr;
-            ps->last_attr_set = true;
+        if (changed) {
+            char cmd[9];
+            cmd[0] = (char)DISP_CMD_COLOR;
+            memcpy(&cmd[1], &fg, 4);
+            memcpy(&cmd[5], &bg, 4);
+            io_buf_put_record(ps, cmd, sizeof(cmd));
+            ps->last_fg  = fg;
+            ps->last_bg  = bg;
+            ps->last_set = true;
         }
         /* Split on '\n' so the daemon's renderer keeps newline semantics. */
         int seg_start = 0;
@@ -247,10 +274,11 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
      * honouring newlines. vga_puts() takes a NUL-terminated string of
      * arbitrary length, but the underlying syscall packs into a kernel
      * buffer; for large segments we stream in 192-byte chunks. */
-    if (!ps->last_attr_set || ps->last_attr != attr) {
-        vga_setcolor(attr);
-        ps->last_attr     = attr;
-        ps->last_attr_set = true;
+    if (changed) {
+        vga_setcolor_rgb(fg, bg);
+        ps->last_fg  = fg;
+        ps->last_bg  = bg;
+        ps->last_set = true;
     }
     char tmp[192];
     int  seg_start = 0;
@@ -369,8 +397,8 @@ void clear(void)
     StrandPrintState *ps = print_state_self();
 
     /* Display state resets on clear; invalidate the colour cache so the
-     * next coloured run re-sends its attribute. */
-    ps->last_attr_set = false;
+     * next coloured run re-sends its pair. */
+    ps->last_set = false;
 
     if (g_io_mode == IO_MODE_IPC) {
         io_flush_state(ps);
@@ -378,7 +406,7 @@ void clear(void)
         broadcast("display", &cmd, 1);
         return;
     }
-    vga_clear(VIDEO_COLOR(VIDEO_LIGHT_GRAY, VIDEO_BLACK));
+    vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
 }
 
 /* ===========================================================================
@@ -506,6 +534,17 @@ __attribute__((weak)) int printf(const char *fmt, ...)
             FLUSH();
             cur_fg = (Color)va_arg(args, uint32_t);
             fmt += 5;
+            continue;
+        }
+
+        /* %bgcolor — the same for the background: colour is a (fg, bg)
+         * pair everywhere, and printf can steer both halves. */
+        if (*fmt == 'b' && fmt[1] == 'g' && fmt[2] == 'c' &&
+            fmt[3] == 'o' && fmt[4] == 'l' && fmt[5] == 'o' &&
+            fmt[6] == 'r') {
+            FLUSH();
+            cur_bg = (Color)va_arg(args, uint32_t);
+            fmt += 7;
             continue;
         }
 

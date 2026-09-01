@@ -87,7 +87,7 @@ void kputchar(char c)
     }
     else
     {
-        VideoPrintChar(c, VideoGetColor());
+        VideoPrintCharCur(c);
         VideoUpdateCursor();
     }
 }

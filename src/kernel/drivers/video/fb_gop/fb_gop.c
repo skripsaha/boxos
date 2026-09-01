@@ -112,10 +112,10 @@ static void fb_blit_nt(volatile uint8_t *dst, const uint8_t *src, size_t bytes)
  * ========================================================================= */
 
 static void render_glyph(FbGopState *s, uint32_t col, uint32_t row,
-                         char ch, uint8_t attr)
+                         char ch, uint32_t fg_rgb, uint32_t bg_rgb)
 {
-    uint32_t fg = FbPixelEncode(vga_palette[attr        & 0x0F], s->format);
-    uint32_t bg = FbPixelEncode(vga_palette[(attr >> 4) & 0x0F], s->format);
+    uint32_t fg = FbPixelEncode(fg_rgb, s->format);
+    uint32_t bg = FbPixelEncode(bg_rgb, s->format);
 
     uint32_t px = col * FONT_W;
     uint32_t py = row * FONT_H;
@@ -190,7 +190,7 @@ static void op_DrawCells(DisplayBackend *be,
     if (row >= be->rows) return;
     if (col_hi > be->cols) col_hi = be->cols;
     for (uint32_t c = col_lo; c < col_hi; c++)
-        render_glyph(s, c, row, cells_row[c].ch, cells_row[c].attr);
+        render_glyph(s, c, row, cells_row[c].ch, cells_row[c].fg, cells_row[c].bg);
 }
 
 static void op_Scroll(DisplayBackend *be, uint32_t dy)
@@ -218,12 +218,13 @@ static void op_Scroll(DisplayBackend *be, uint32_t dy)
     }
 }
 
-static void op_FillRow(DisplayBackend *be, uint32_t row, uint8_t attr)
+static void op_FillRow(DisplayBackend *be, uint32_t row, uint32_t fg, uint32_t bg)
 {
     FbGopState *s = (FbGopState *)be;
+    (void)fg;                          /* a filled row is all background */
     if (row >= be->rows) return;
-    uint32_t bg = FbPixelEncode(vga_palette[(attr >> 4) & 0x0F], s->format);
-    fill_pixel_strip(s, 0, s->width, row * FONT_H, FONT_H, bg);
+    fill_pixel_strip(s, 0, s->width, row * FONT_H, FONT_H,
+                     FbPixelEncode(bg, s->format));
 }
 
 static void op_Present(DisplayBackend *be, uint32_t row_lo, uint32_t row_hi)
@@ -243,14 +244,14 @@ static void op_Present(DisplayBackend *be, uint32_t row_lo, uint32_t row_hi)
                (size_t)hpx * s->stride);
 }
 
-static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint8_t attr)
+static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint32_t fg_rgb)
 {
     FbGopState *s = (FbGopState *)be;
     if (col >= be->cols || row >= be->rows) return;
 
     uint32_t px = col * FONT_W;
     uint32_t py = row * FONT_H + (FONT_H - 2);
-    uint32_t fg = FbPixelEncode(vga_palette[attr & 0x0F], s->format);
+    uint32_t fg = FbPixelEncode(fg_rgb, s->format);
 
     if (s->shadow) {
         for (uint32_t y = 0; y < 2; y++) {

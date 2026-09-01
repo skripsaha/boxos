@@ -302,13 +302,15 @@ static int b_uptime_ms(uint32_t i, void *ctx)
     return time_uptime_ms(&ms);
 }
 
-/* (5) HW deck — vga_setcolor: one byte param, no out crate. Slightly
- *     cheaper than uptime because there's no payload to copy back. */
+/* (5) HW deck — vga_setcolor_rgb: an 8-byte pair param, no out crate.
+ *     Slightly cheaper than uptime because there's no payload to copy
+ *     back. */
 static int b_vga_setcolor(uint32_t i, void *ctx)
 {
     (void)ctx;
     /* alternate to defeat any kernel-side "no-op" optimisation */
-    return vga_setcolor((uint8_t)((i & 1) ? 0x07 : 0x0F));
+    return vga_setcolor_rgb((i & 1) ? COLOR_LIGHT_GRAY : COLOR_WHITE,
+                            COLOR_BLACK);
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,

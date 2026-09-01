@@ -68,9 +68,23 @@ static void op_DrawCells(DisplayBackend *be,
     if (row >= be->rows) return;
     if (col_hi > be->cols) col_hi = be->cols;
     unsigned char *p = cell_ptr(row, col_lo);
+
+    /* Draw-time quantisation: the cell carries #RRGGBB, the hardware takes
+     * a 4+4-bit attribute. Runs share a colour, so memoise the last pair —
+     * one nearest-palette search per run, not per cell. Palette-exact pairs
+     * (everything the kernel itself prints) round-trip bit-for-bit. */
+    uint32_t memo_fg = 0, memo_bg = 0;
+    uint8_t  memo_attr = 0;
+    bool     memo_valid = false;
     for (uint32_t c = col_lo; c < col_hi; c++) {
+        if (!memo_valid || cells_row[c].fg != memo_fg || cells_row[c].bg != memo_bg) {
+            memo_fg    = cells_row[c].fg;
+            memo_bg    = cells_row[c].bg;
+            memo_attr  = BoxColorPairToAttr(memo_fg, memo_bg);
+            memo_valid = true;
+        }
         *p++ = (unsigned char)cells_row[c].ch;
-        *p++ = cells_row[c].attr;
+        *p++ = memo_attr;
     }
 }
 
@@ -92,9 +106,10 @@ static void op_Scroll(DisplayBackend *be, uint32_t dy)
     }
 }
 
-static void op_FillRow(DisplayBackend *be, uint32_t row, uint8_t attr)
+static void op_FillRow(DisplayBackend *be, uint32_t row, uint32_t fg, uint32_t bg)
 {
     if (row >= be->rows) return;
+    uint8_t attr = BoxColorPairToAttr(fg, bg);
     unsigned char *p = cell_ptr(row, 0);
     for (uint32_t c = 0; c < HW_VGA_COLS; c++) {
         *p++ = ' ';
@@ -108,9 +123,9 @@ static void op_Present(DisplayBackend *be, uint32_t row_lo, uint32_t row_hi)
     (void)be; (void)row_lo; (void)row_hi;
 }
 
-static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint8_t attr)
+static void op_DrawCaret(DisplayBackend *be, uint32_t col, uint32_t row, uint32_t fg)
 {
-    (void)attr;
+    (void)fg;                      /* real CRTC cursor — colourless */
     if (col >= be->cols || row >= be->rows) return;
     cursor_to(col, row);
 }
