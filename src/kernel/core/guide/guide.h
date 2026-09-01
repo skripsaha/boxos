@@ -16,4 +16,9 @@ void guide(void);
  * the caller manages that. */
 void guide_process_one(process_t *proc);
 
+/* Dispatch transport split: out[0] = Manifests that arrived enclosed in the
+ * envelope, out[1] = Manifests read from cabin memory by address. Surfaced
+ * via system.perf.dump. */
+void guide_dispatch_stats(uint64_t out[2]);
+
 #endif /* GUIDE_H */

@@ -42,6 +42,7 @@
 #include "perf_trace.h"
 #include "kernel_config.h"
 #include "amp.h"
+#include "guide.h"   /* guide_dispatch_stats — enclosed/addressed split for perf.dump */
 #include "atomics.h"        /* rdtsc — system.proc.cputime's in-flight term */
 
 /* TSC frequency, for turning a cycle delta into microseconds. */
@@ -1491,6 +1492,14 @@ static int SysPerfDump(const ManifestOp *op, Crate *crates, uint16_t crate_count
     (void)op; (void)crates; (void)crate_count; (void)ctx;
     perf_dump();
     ManifestStageDumpAll();
+    {
+        /* Dispatch transport split — the runtime witness that enclosed
+         * Manifests actually ride in their envelopes (guide.c). */
+        uint64_t d[2];
+        guide_dispatch_stats(d);
+        kprintf("[GUIDE] dispatches: enclosed=%lu addressed=%lu\n",
+                (unsigned long)d[0], (unsigned long)d[1]);
+    }
     return OK;
 }
 
