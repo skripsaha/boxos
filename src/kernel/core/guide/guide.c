@@ -52,15 +52,36 @@ void guide_init(void)
     debug_printf("[GUIDE] ReadyQueue initialized (intrusive, unbounded)\n");
 }
 
+/* Dispatch transport counters — how many Manifests arrived enclosed in the
+ * envelope vs named by address. Surfaced via system.perf.dump. The split is
+ * the runtime witness that the enclosure path actually runs (a green result
+ * with zero enclosed dispatches would mean the path was never exercised). */
+static volatile uint64_t g_dispatch_enclosed;
+static volatile uint64_t g_dispatch_addressed;
+
+void guide_dispatch_stats(uint64_t out[2])
+{
+    out[0] = __atomic_load_n(&g_dispatch_enclosed,  __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_dispatch_addressed, __ATOMIC_RELAXED);
+}
+
 /*
  * Manifest-mode dispatch.
  *
  *   1. Validate envelope sizes against MANIFEST_RAW_MAX_SIZE. No cap on
  *      crate_count — CrateStage handles arbitrary sizes safely.
- *   2. Stage the Manifest BYTES into this K-Core's ManifestStage scratch
- *      via vmm_user_buf_in_into. Manifests are READ-ONLY in handlers
- *      (const ManifestOp *) and no handler captures op→params pointers
- *      into async state, so the scratch can be released at dispatch exit.
+ *   2. Take the Manifest BYTES onto the kernel side. An ENCLOSED envelope
+ *      carries them in its own ring slot — one bounded memcpy out of the
+ *      already-translated Pocket, no cabin-memory read at all, and the
+ *      copy is taken before validation so a cabin scribbling on its slot
+ *      mid-dispatch races only with itself. An addressed envelope stages
+ *      them into this K-Core's ManifestStage scratch via
+ *      vmm_user_buf_in_into — that cabin memory must still be alive, which
+ *      is the submitter's side of the contract (it waits, or it owns the
+ *      bytes past the call; see boxos_pocket.h). Manifests are READ-ONLY
+ *      in handlers (const ManifestOp *) and no handler captures op→params
+ *      pointers into async state, so both copies can be dropped at
+ *      dispatch exit.
  *   3. Stage the Crate[] array via CrateStage (kmalloc + page-walked copy
  *      in). Unlike Manifest scratch, Crate ownership is conditional:
  *      sync handlers leave it on the dispatcher to commit_out + free;
@@ -95,6 +116,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
      * the staged kbuf into their async_ctx.
      */
     bool handle_mode = (pocket->flags & POCKET_FLAG_MANIFEST_HANDLE) != 0;
+    bool enclosed    = (pocket->flags & POCKET_FLAG_ENCLOSED) != 0;
 
     ManifestStage      *st         = NULL;
     ManifestStageGrant  grant      = { NULL, 0, MANIFEST_STAGE_TIER_INVALID, {0,0,0} };
@@ -103,6 +125,14 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     CompiledManifest   *cm_pinned  = NULL;   /* refcount pin (handle-mode) */
 
     error_t rc;
+
+    /* A handle names a compiled form already in kernel memory; an enclosure
+     * carries raw bytes. Claiming both at once is contradictory. */
+    if (handle_mode && enclosed) {
+        pocket->error_code = ERR_INVALID_ARGUMENT;
+        execution_deck_handler(pocket, proc);
+        return;
+    }
 
     if (handle_mode) {
         /* manifest_addr carries a 64-bit handle, not a vaddr. manifest_size
@@ -120,6 +150,36 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
             execution_deck_handler(pocket, proc);
             return;
         }
+    } else if (enclosed) {
+        /* The letter is in the envelope. Copy it out of the (user-writable)
+         * ring slot ONCE, into this K-Core's staging scratch, then validate
+         * and execute only the copy — a cabin rewriting its slot
+         * mid-dispatch can corrupt nothing but its own request. The slot
+         * itself cannot be reused under us: the producer may not touch it
+         * until KPocketPop moves head, which happens after this dispatch
+         * returns. Staging (rather than a guide stack buffer) keeps the
+         * dispatch frame small and the manifest lifetime identical to the
+         * addressed path. */
+        if (manifest_size < sizeof(Manifest) || manifest_size > POCKET_ENCLOSURE_MAX) {
+            pocket->error_code = ERR_INVALID_ARGUMENT;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+        st = ManifestStageCurrent();
+        if (!st) {
+            pocket->error_code = ERR_NOT_INITIALIZED;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+        rc = ManifestStageAcquire(st, manifest_size, &grant);
+        if (rc != OK) {
+            pocket->error_code = (uint32_t)rc;
+            execution_deck_handler(pocket, proc);
+            return;
+        }
+        m_kbuf = (uint8_t *)grant.kbuf;
+        memcpy(m_kbuf, pocket->enclosure, manifest_size);
+        __atomic_add_fetch(&g_dispatch_enclosed, 1, __ATOMIC_RELAXED);
     } else {
         if (manifest_uaddr == 0 || manifest_size < sizeof(Manifest)) {
             pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -155,6 +215,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
             execution_deck_handler(pocket, proc);
             return;
         }
+        __atomic_add_fetch(&g_dispatch_addressed, 1, __ATOMIC_RELAXED);
     }
 
     /* Crate staging is identical for both modes — async handlers still pin
@@ -192,6 +253,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
                                   &ctx, &result);
     }
     pocket->error_code = (uint32_t)rc;
+
 
     if (rc != OK && proc->pid >= 3) {
         if (handle_mode) {

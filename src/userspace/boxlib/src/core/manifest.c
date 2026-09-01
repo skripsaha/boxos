@@ -86,11 +86,31 @@ static void encode_manifest_pocket(Pocket          *p,
     pocket_prepare(p);
     p->flags         = POCKET_FLAG_MANIFEST;
     p->target_pid    = target_pid;
-    p->manifest_addr = (uint64_t)(uintptr_t)m;
     p->manifest_size = m->total_size;
     p->crates_addr   = (uint64_t)(uintptr_t)crates;
     p->crate_count   = crate_count;
     p->pier_id       = 0;
+
+    if (m->total_size <= POCKET_ENCLOSURE_MAX) {
+        /* The letter fits the envelope: carry the bytes in the ring slot
+         * itself. The producer cannot reuse the slot until the kernel moves
+         * head past it, so the enclosure is alive for exactly as long as the
+         * kernel may still read it — the caller's buffer (typically a stack
+         * frame) is free to die the moment the push returns. This is what
+         * makes fire-and-forget submission safe: an envelope that only NAMED
+         * a stack address handed the kernel a dead frame once the sender
+         * stopped waiting. */
+        p->flags |= POCKET_FLAG_ENCLOSED;
+        p->manifest_addr = 0;
+        memcpy(p->enclosure, m, m->total_size);
+    } else {
+        /* Too large to enclose: the envelope names the caller's memory, and
+         * that memory must outlive the kernel's read — a synchronous
+         * submitter guarantees it by waiting for the Result; a no-wait
+         * submitter must own the bytes past the call (see
+         * ManifestSubmitNoWait below). */
+        p->manifest_addr = (uint64_t)(uintptr_t)m;
+    }
 }
 
 /*
@@ -98,6 +118,18 @@ static void encode_manifest_pocket(Pocket          *p,
  * blocking for the reply. Used by touch_await and other async-pattern
  * callers that consume their own replies via a context-filtered
  * result_wait_any loop instead of the synchronous error_code return.
+ *
+ * Lifetime contract: a Manifest small enough for the enclosure
+ * (total_size <= POCKET_ENCLOSURE_MAX — every current no-wait caller)
+ * travels inside the ring slot and the caller's buffer may die at return.
+ * A larger Manifest travels by address, and since nobody waits here, the
+ * caller must keep the bytes in memory it owns until the reply arrives —
+ * the way box::ferry keeps them in its station-owned submission object.
+ * Handing this function a large Manifest on a stack frame about to return
+ * would give the kernel a dead frame to execute.
+ *
+ * The Crate[] array and crate payloads always travel by address; the same
+ * ownership rule applies to them regardless of manifest size.
  *
  * Sharing the encoder + push step here keeps the manifest-mode Pocket
  * layout in exactly one place (encode_manifest_pocket above). Drift

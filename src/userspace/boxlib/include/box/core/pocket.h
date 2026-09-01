@@ -9,8 +9,11 @@ extern "C" {
 #include "box/core/strand_self.h"   /* strand_rings() — per-strand ring routing (P5a) */
 
 /*
- * Pocket — Manifest-only envelope (Phase 12). Byte-identical to the
- * kernel's pocket.h layout — 64 bytes after the Phase-12 stride shrink.
+ * Pocket — the shared ABI struct, flags and enclosure geometry come from
+ * boxos_pocket.h (single source of truth for kernel and boxlib, like Crate
+ * and Manifest). A Manifest that fits the enclosure rides inside the ring
+ * slot itself, so the sender is free the moment the push returns — see the
+ * shared header for the three transport forms and their lifetime rules.
  *
  * PocketRing — Phase 11 lazy-growable, monotonic-index SPSC. The header
  * lives at CABIN_POCKET_RING_ADDR (0x2000) — one fixed page. Slots live
@@ -20,25 +23,7 @@ extern "C" {
  * Indices are 64-bit and never wrap. Slot lookup: slots_base + (idx % cap)*stride.
  */
 
-#define POCKET_FLAG_YIELD            0x80
-#define POCKET_FLAG_MANIFEST         0x40
-#define POCKET_FLAG_MANIFEST_HANDLE  0x20  /* manifest_addr is a uint64 handle, not a vaddr */
-
-typedef struct PACKED {
-    uint32_t pid;                /* kernel overwrites (security) */
-    uint32_t target_pid;         /* 0 = self, != 0 = IPC route */
-    uint32_t error_code;
-    uint8_t  flags;              /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST */
-    uint8_t  _reserved[3];
-    uint32_t manifest_size;      /* bytes at manifest_addr */
-    uint16_t crate_count;        /* number of entries in Crate[] */
-    uint16_t pier_id;            /* urgency lane */
-    uint64_t manifest_addr;      /* user vaddr of raw Manifest */
-    uint64_t crates_addr;        /* user vaddr of Crate[] */
-    uint8_t  _pad[24];           /* reserved for ABI growth (pad to 64 bytes) */
-} Pocket;
-
-STATIC_ASSERT(sizeof(Pocket) == 64, "Pocket must be 64 bytes");
+#include "boxos_pocket.h"
 
 /* PocketRingHeader — cacheline-separated cursors (mirror of kernel layout).
  *
@@ -55,7 +40,7 @@ typedef struct PACKED {
     /* Cacheline 0 — consumer cursor + read-only metadata. */
     volatile uint64_t head;             /* kernel cursor */
     uint64_t          slots_base;       /* user vaddr of slot 0 */
-    uint32_t          slot_size;        /* POCKET_SLOT_SIZE (64) */
+    uint32_t          slot_size;        /* POCKET_SLOT_SIZE (128) */
     uint32_t          slot_count_max;   /* ring capacity */
     uint64_t          magic;
     uint8_t           _pad_line0[32];   /* fill cacheline 0 */

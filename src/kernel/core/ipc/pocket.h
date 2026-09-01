@@ -7,50 +7,22 @@
 #include "error.h"
 
 /*
- * Pocket — kernel-bound syscall envelope (Phase 12: Manifest-only).
+ * Pocket — kernel-bound syscall envelope.
  *
- * Every Pocket either carries POCKET_FLAG_YIELD (cooperative tick, no work)
- * or POCKET_FLAG_MANIFEST (single-shot Manifest dispatch). In Manifest mode
- * the envelope carries pointers to the raw Manifest byte stream and the
- * Crate[] array, both living in the sender cabin's user heap.
+ * The struct, flags and enclosure geometry live in the shared ABI header
+ * boxos_pocket.h (single source of truth for kernel and boxlib — the same
+ * arrangement Crate and Manifest already have). This file adds the
+ * kernel-side accessors only.
  *
- * Layout is 64 bytes — half the legacy 128-byte slot stride. The shrink
- * doubles PocketRing capacity within the same 1 MiB slot reservation
- * (POCKET_RING_SLOT_MAX: 8192 → 16384) and halves the cacheline footprint
- * of the hot KPocketPeek / pocket_ring_push path.
- *
- * The trailing _pad[24] is reserved for ABI growth (priority hints, deadline
- * stamps, sender-credential bits) so future expansion does not renegotiate
- * the slot stride again.
+ * The 128-byte slot stride halves PocketRing capacity against the 64-byte
+ * era (POCKET_RING_SLOT_MAX 16384 → 8192 within the same 1 MiB slot
+ * reservation) and buys the enclosure: a Manifest that fits rides inside
+ * the envelope, so the kernel never reads it from cabin memory whose
+ * lifetime it cannot see. Capacity is a throughput knob, never a
+ * correctness boundary — a full ring back-pressures the push.
  */
 
-typedef struct __packed {
-    uint32_t pid;             /* kernel overwrites from process_t (security)  */
-    uint32_t target_pid;      /* 0 = self, != 0 = IPC route                   */
-    uint32_t error_code;      /* deck handlers write errors here              */
-    uint8_t  flags;           /* POCKET_FLAG_YIELD | POCKET_FLAG_MANIFEST     */
-    uint8_t  _reserved[3];
-    uint32_t manifest_size;   /* bytes at manifest_addr                       */
-    uint16_t crate_count;     /* number of entries in Crate[]                 */
-    uint16_t pier_id;         /* urgency lane                                 */
-    uint64_t manifest_addr;   /* user vaddr of raw Manifest                   */
-    uint64_t crates_addr;     /* user vaddr of Crate[]                        */
-    uint8_t  _pad[24];        /* reserved for ABI growth (pad to 64 bytes)    */
-} Pocket;
-
-_Static_assert(sizeof(Pocket) == 64, "Pocket must be 64 bytes for PocketRing packing");
-
-#define POCKET_FLAG_YIELD            0x80
-#define POCKET_FLAG_MANIFEST         0x40
-/*
- * POCKET_FLAG_MANIFEST_HANDLE — handle-mode submit (set TOGETHER with
- * POCKET_FLAG_MANIFEST). manifest_addr carries a 64-bit ManifestHandle
- * returned by SYSTEM_OP_MANIFEST_COMPILE, not a user vaddr; manifest_size
- * is ignored. The kernel resolves the handle, verifies the calling cabin
- * owns it, and calls ManifestExecute on the cached CompiledManifest —
- * skipping the full validate + per-op OpRegistryLookup pass.
- */
-#define POCKET_FLAG_MANIFEST_HANDLE  0x20
+#include "boxos_pocket.h"
 
 static inline uint64_t PocketManifestAddr(const Pocket *p)
 {
