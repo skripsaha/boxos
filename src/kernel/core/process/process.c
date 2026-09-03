@@ -262,6 +262,9 @@ static void process_init_strand_fields(process_t *proc)
     proc->irq_pending_head = NULL;
     spinlock_init(&proc->irq_lock);
 
+    proc->gone_waiters    = NULL;
+    spinlock_init(&proc->gone_lock);
+
     proc->wait_reason     = WAIT_NONE;
     proc->wait_start_time = 0;
     proc->hash_next       = NULL;
@@ -454,8 +457,8 @@ process_t *process_create(const char *tags)
     proc->pid = pid_alloc();
     if (proc->pid == PID_INVALID)
     {
-        debug_printf("[PROCESS] ERROR: PID allocation failed (exhaustion at %u/%u)\n",
-                     pid_allocated_count(), PID_MAX_COUNT);
+        kprintf("[PROCESS] ERROR: PID allocation failed (exhaustion at %u/%u)\n",
+                pid_allocated_count(), PID_MAX_COUNT);
         kfree(proc);
         return NULL;
     }
@@ -630,6 +633,23 @@ void process_set_state(process_t *proc, process_state_t new_state)
     {
         spin_unlock(&proc->state_lock);
         return;
+    }
+
+    /* Sleep is refused while an answer is already on the table. Every
+     * kernel park (addr_park, touch_await, storage) ends exactly when its
+     * token-stamped reply is consumed — so committing PROC_WAITING with
+     * such a reply published-and-unread is the lost-wake wedge itself
+     * (Nightwatch: "undelivered result ... a defect, not a slow test").
+     * Racing wakers take state_lock through process_set_state too, so
+     * under this lock the ring scan and the commit are one atom: either
+     * the completion landed first and we refuse the sleep, or we sleep
+     * first and the completion's unconditional PROC_WORKING flip (kring
+     * step 9) lands after — no interleaving loses the wake. The refusal
+     * degrades to exactly the contract every parked op already honours:
+     * return runnable, let the caller's result_wait consume the reply. */
+    if (new_state == PROC_WAITING && KResultRingHasPendingReply(proc))
+    {
+        new_state = PROC_WORKING;
     }
 
     proc->state = new_state;
@@ -1083,7 +1103,10 @@ process_t *strand_spawn(cabin_t *cabin, uintptr_t entry_va, uint64_t arg, bool j
     proc->pid = pid_alloc();
     if (proc->pid == PID_INVALID)
     {
-        debug_printf("[STRAND] ERROR: PID allocation failed\n");
+        /* Resource exhaustion at runtime, not an API misuse: say it on the
+         * record. A debug_printf here compiles to NOTHING in release and a
+         * silent refusal reads as a ghost at the caller. */
+        kprintf("[STRAND] ERROR: PID allocation failed (exhaustion)\n");
         kfree(proc);
         return NULL;
     }

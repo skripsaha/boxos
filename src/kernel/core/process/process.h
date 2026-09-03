@@ -34,6 +34,17 @@
 
 struct process_t;
 
+/* One strand waiting for a named incarnation to be gone (SysProcessGone).
+ * Allocated by the waiter, owned by the awaited process's gone list, freed by
+ * whoever delivers the answer — the death that drains the list, or the waiter
+ * itself when it wins the race and never parks. */
+typedef struct GoneWaiter {
+    struct process_t  *waiter;
+    uint32_t           want_generation; /* the incarnation asked about */
+    uint32_t           submit_cookie;   /* cloakroom token of its submit */
+    struct GoneWaiter *next;
+} GoneWaiter;
+
 typedef enum
 {
     WAIT_NONE = 0,
@@ -269,6 +280,18 @@ typedef struct process_t
      * use-after-return.  Zeroed by process_create's memset; linked=0 means
      * not in any bucket chain. */
     AddrWaitEntry     addr_wait_entry;
+
+    /* Who is waiting for THIS process to be gone.
+     *
+     * The list hangs on the awaited process, not in a side registry, because
+     * the thing being waited for is exactly this record's existence: while a
+     * waiter is attached the record is held (a deposit is not abandoned), and
+     * the one place that ends a life is the one place that drains the list —
+     * no lookup, no hashing, no window between "it died" and "someone finds
+     * out". Guarded by gone_lock, which nests INSIDE nothing: it is taken
+     * alone, and the wake it performs happens after it is dropped. */
+    struct GoneWaiter *gone_waiters;
+    spinlock_t        gone_lock;
 
     /* Which sleep a wake belongs to.
      *

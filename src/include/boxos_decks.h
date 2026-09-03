@@ -152,4 +152,14 @@
 #define SYSTEM_OP_STRAND_RELEASE    0xC3  /* (u32 pid) — clear a joinable strand's reap-block so the reaper can reclaim it (std::thread join/detach); zombie-until-join keeps thread::id (=pid) unique while joinable */
 #define SYSTEM_OP_STRAND_POOL_BIND  0xC4  /* (u64 pool_va)(u32 gen)(u64 orphan_pending_va) — bind this strand's StrandPool slab slot; kernel signals orphan_pending_va=1 after ORPHANED-stamp so userspace skips the 256-slot poll */
 
+/* ─── Wait until a named incarnation is gone ────────────────────────── */
+/* Being gone is a STATE, not an edge, and this op answers it as one: an
+ * incarnation already finished is reported at once, a live one is parked on
+ * and answered by the single place a life ends. There is no window between
+ * asking and subscribing, so nothing can be missed — which is the whole
+ * difference from watching the `process:died` multicast, where one dropped
+ * announcement used to mean waiting forever. Generation is mandatory: a pid
+ * alone names a seat, not a passenger, and the seat gets re-let. */
+#define SYSTEM_OP_PROCESS_GONE      0xC5  /* (u32 pid)(u32 generation) -> Result.error_code=OK, data_length = (u32)int32 exit disposition (proc_exit.h); ERR_PROCESS_NOT_FOUND = never issued */
+
 #endif // BOXOS_DECKS_H

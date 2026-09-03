@@ -1,4 +1,5 @@
 #include "touch.h"
+#include "sync_ops.h"   /* ProcessGoneDeliver — a death pays its named waiters */
 #include "logbook.h"
 #include "touch_queue.h"
 #include "touch_ring.h"
@@ -1252,6 +1253,21 @@ void TouchCleanupProcess(process_t *proc, int32_t exit_code)
                    "process:died wire payload must stay 12 bytes "
                    "(box/touch.h TouchProcessDied: pid@0, exit_code@4, generation@8)");
     TouchPublish("process:died", &died, sizeof(died));
+
+    /* Answer everyone parked on this incarnation being gone.
+     *
+     * This runs AFTER the touch_cleaned claim above, which is the single
+     * commit point of a death — so a waiter that reads that flag under
+     * gone_lock either sees the death (and never parks) or is already on the
+     * list this drains. There is no third interleaving, and therefore no way
+     * to sleep past the answer.
+     *
+     * Deliberately NOT the same thing as the publish above. process:died is a
+     * multicast announcement to whoever happens to listen, and a multicast may
+     * be dropped; this is a debt owed to a named waiter, and a debt may not.
+     * The list is spliced out under the lock and delivered outside it, so no
+     * cabin VMM work happens with the lock held. */
+    ProcessGoneDeliver(proc, exit_code);
 }
 
 void TouchIrqReturn(process_t *proc)
