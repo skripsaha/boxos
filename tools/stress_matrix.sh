@@ -61,10 +61,17 @@ MODE=${MODE:-${1:-full}}
 # 300 s was too small, and the way it failed is worth recording: on UEFI 16c
 # cxxtest overran it, the burst typed the next command into a shell still
 # parked on cxxtest, and the config reported zeros for every remaining test.
-# The suite was fine; the budget was not. 900 s is above the slowest observed
-# cxxtest (it completed inside a 450 s ceiling on that same configuration)
-# and still a real ceiling rather than "wait forever".
-POLL_SECONDS=900
+# The suite was fine; the budget was not. 900 s was set above the slowest
+# cxxtest observed then (450 s on that same configuration).
+#
+# Re-measured 2026-09-02, after the console became a guaranteed-delivery
+# stream: a print now lands on screen before the printer moves on, so a
+# suite's wall time includes its own rendering — and on 16 vCPUs emulated
+# by ONE TCG host thread that is the dominant term. Full cxxtest on UEFI
+# STRICT 16c: 1300 s, ALL PASS, zero exceptions. The ceiling is ~2x the
+# slowest observed run — a real ceiling, not "wait forever", and the loop
+# still exits the instant the marker appears.
+POLL_SECONDS=2700
 
 run_config() {
     cfg_name=$1
