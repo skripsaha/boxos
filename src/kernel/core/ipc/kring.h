@@ -37,6 +37,12 @@ uint32_t KPocketCount(process_t *proc);
  *                   allocation failure. */
 bool KResultPush(process_t *target, const Result *r);
 
+/* True when the ResultRing holds a published, unconsumed reply carrying a
+ * non-zero cloakroom token (an unanswered-to-its-owner submit completion).
+ * process_set_state consults this before committing PROC_WAITING — a
+ * process must never sleep past its own pending reply. */
+bool KResultRingHasPendingReply(process_t *proc);
+
 /* Diagnostic: snapshot per-return-path counters
  *   out[0]=null_args, [1]=no_hdr, [2]=zero_cap, [3]=pre_full, [4]=premap_fail,
  *   [5]=crosspg_fail, [6]=translate_fail, [7]=spin_warn, [8]=overflow, [9]=success */

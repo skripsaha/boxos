@@ -157,6 +157,41 @@ static ResultSlot *kring_translate_slot(process_t *target, uintptr_t uvaddr)
                                                   sizeof(ResultSlot));
 }
 
+/* True when the process's ResultRing holds a PUBLISHED, unconsumed entry
+ * whose context carries a non-zero cloakroom token — i.e. an answer to a
+ * synchronous submit its owner has not read yet. Such a process must never
+ * be committed to PROC_WAITING: every kernel-parked wait (addr_park,
+ * touch_await, storage) ends exactly when this reply is consumed, so
+ * sleeping past it is the "undelivered result" Nightwatch names — the
+ * lost-wake wedge. process_set_state uses this as the final futex-style
+ * re-check at the single place sleep is committed. Reads only the ring
+ * header and slot seq/context; the owner's userspace is suspended for the
+ * duration of the syscall that is asking, so nothing races the scan. */
+bool KResultRingHasPendingReply(process_t *proc)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return false;
+    uint32_t cap = rr->hdr.slot_count_max;
+    if (cap == 0) return false;
+
+    uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return false;
+    uint64_t scan_end = tail;
+    if (scan_end - head > cap) scan_end = head + cap;   /* defensive clamp */
+
+    for (uint64_t pos = head; pos < scan_end; pos++) {
+        uintptr_t   uva  = result_ring_slot_uvaddr(rr, pos);
+        ResultSlot *slot = kring_translate_slot(proc, uva);
+        if (!slot) continue;
+        uint64_t round = pos / cap;
+        if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != 2u * round + 1u)
+            continue;                    /* in-flight reservation or consumed */
+        if (KCTX_COOKIE24(slot->r.context) != 0) return true;
+    }
+    return false;
+}
+
 /* Cross-core wake helper — mirrors touch_wake_remote in touch.c.
  *
  * Real-HW rationale: process_set_state(target, PROC_WORKING) below
@@ -411,7 +446,10 @@ bool KResultPush(process_t *target, const Result *r)
         slot->r.data_length = 0;
         slot->r.data_addr   = 0;
         slot->r.sender_pid  = 0;
-        slot->r.context     = KCTX_GUIDE;
+        /* Keep the ORIGINAL context — kind AND cloakroom token — so the
+         * synthetic error still answers the submit it displaced; a flat
+         * KCTX_GUIDE here would strand a paired waiter forever. */
+        slot->r.context     = r->context;
         __atomic_add_fetch(&g_krp_overflow, 1, __ATOMIC_RELAXED);
     } else {
         slot->r = *r;
@@ -441,7 +479,18 @@ bool KResultPush(process_t *target, const Result *r)
      *     few cycles and avoids the race window where state lookup
      *     sees PROC_WORKING but the consumer is in fact idle. */
     if (!consumer_lost) {
-        if (process_get_state(target) == PROC_WAITING) {
+        if (KCTX_COOKIE24(r->context) != 0) {
+            /* A token-carrying Result ANSWERS a submit — its owner is
+             * kernel-parked on it, or mid-transition to that park. The old
+             * conditional flip lost the race on the second case: it read
+             * PROC_WORKING an instant before the parker committed WAITING,
+             * skipped the flip, and the strand slept forever on a reply
+             * already published (Nightwatch: "undelivered result"). Flip
+             * unconditionally — for a running target it is a benign no-op
+             * transition, and process_set_state's death-guard still refuses
+             * to resurrect corpses. */
+            process_set_state(target, PROC_WORKING);
+        } else if (process_get_state(target) == PROC_WAITING) {
             process_set_state(target, PROC_WORKING);
         }
         kring_wake_remote(target);

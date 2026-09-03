@@ -5,8 +5,23 @@
 #include "amp.h"
 #include "error.h"
 
-#define KCORE_QUEUE_CAPACITY   512
+/* Sized to the PROCESS LIMIT, deliberately. kcore_pending dedup guarantees
+ * a process occupies at most ONE slot across all queues, so a capacity of
+ * MAX_PROCESSES makes "queue full" impossible by construction — even if
+ * every process in the machine lands on the same K-Core at once. The old
+ * 512 was reachable under strand churn (4096 possible processes into
+ * 4×512 slots), and the failure branch left kcore_pending=1 with the
+ * pocket queued NOWHERE: every later notify saw pending set and skipped
+ * the submit, stranding the process forever — the all-idle mute wedge the
+ * 16-core matrix kept hitting (K-Cores honestly asleep over truly empty
+ * queues while the stranded strand spun in result_wait). Memory cost:
+ * 32 KiB of slot pointers per core, from the PMM at boot. */
+#include "boxos_limits.h"
+#define KCORE_QUEUE_CAPACITY   MAX_PROCESSES
 #define KCORE_QUEUE_MASK       (KCORE_QUEUE_CAPACITY - 1)
+
+_Static_assert((KCORE_QUEUE_CAPACITY & (KCORE_QUEUE_CAPACITY - 1)) == 0,
+               "KCORE_QUEUE_CAPACITY must be a power of two (ring mask)");
 #define KCORE_POP_SPIN_LIMIT   1000000
 
 struct process_t;
