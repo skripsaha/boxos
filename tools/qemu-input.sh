@@ -111,7 +111,12 @@ type_push() {
         if ! qcode=$(char_to_qcode "$c"); then
             die "unsupported char '$c' (0x$(printf '%02x' "'$c")) at pos $i"
         fi
-        batch+="sendkey ${qcode}
+        # Explicit short hold-time. QEMU's default holds a key ~100 ms; when
+        # the guest micro-stalls mid-keystroke on a busy single core, the
+        # still-held key crosses the PS/2 typematic threshold and floods the
+        # line with repeats (a matrix config died to a wall of 't'). 30 ms
+        # registers reliably and stays far below any repeat threshold.
+        batch+="sendkey ${qcode} 30
 "
         n=$((n+1))
         if [ "$n" -ge "$QI_CHUNK" ]; then
@@ -126,13 +131,45 @@ type_push() {
 }
 
 # How many leading characters of `want` the guest echoed into `text`.
+#
+# Matched as a SUBSEQUENCE, not a suffix. The shell echoes each key as one
+# byte; anything else the machine prints between two keystrokes (a kernel
+# line, a daemon trace) lands BETWEEN those bytes in the serial mirror.
+# Interleaved output inserts — it never deletes an echoed byte — so the
+# echoed prefix of `want` is exactly its longest leading subsequence of the
+# text. The old suffix-anchored match went to zero the moment one kernel
+# line landed mid-word, and the one-shot repair then re-sent a word the
+# guest already had ("help" arrived as "helpelp"; "touch_stress" as
+# "ttouch_stss" cost a matrix config). The caller pre-strips '['-prefixed
+# lines so kernel noise cannot even inflate the count.
 type_landed() {
     local text=$1 want=$2
-    local i
-    for (( i=${#want}; i>0; i-- )); do
-        case "$text" in *"${want:0:i}") printf '%s' "$i"; return 0 ;; esac
+    local i=0 j=0 tlen=${#text} wlen=${#want}
+    while [ "$i" -lt "$tlen" ] && [ "$j" -lt "$wlen" ]; do
+        [ "${text:i:1}" = "${want:j:1}" ] && j=$((j+1))
+        i=$((i+1))
     done
-    printf '0'
+    printf '%s' "$j"
+}
+
+# Erase up to n characters from the guest's current input line.
+# Backspaces past the start of an empty line editor do nothing, so sending a
+# generous count is safe and makes the erase idempotent — which is the whole
+# point: it needs no knowledge of how much actually landed.
+type_erase() {
+    local n=$1 batch="" i=0
+    while [ "$i" -lt "$n" ]; do
+        batch+="sendkey backspace 30
+"
+        i=$((i+1))
+        if [ $((i % QI_CHUNK)) -eq 0 ]; then
+            printf '%s' "$batch" | mon_send >/dev/null 2>&1
+            batch=""
+            sleep "$QI_GAP"
+        fi
+    done
+    [ -n "$batch" ] && printf '%s' "$batch" | mon_send >/dev/null 2>&1
+    sleep "$QI_GAP"
 }
 
 cmd_type() {
@@ -144,43 +181,46 @@ cmd_type() {
     # rare silent drop is the expensive kind. The shell echoes what it took, so
     # read that back and say what happened. Measured from the log's length
     # BEFORE typing, so the same command typed twice cannot answer for itself.
-    local before=0
-    if [ -f "$LOG" ]; then before=$(wc -c < "$LOG" | tr -d ' '); fi
+    #
+    # ‼ A short line is repaired by ERASING AND RETYPING THE WHOLE STRING, never
+    # by appending the tail the witness thinks is missing. The witness is a
+    # heuristic over a serial mirror the kernel also writes to, so its count can
+    # be off — and appending on a wrong count does the one thing a harness must
+    # never do: deliver a DIFFERENT command than it was asked to. Measured:
+    # "touch_stress" arrived as "touch_sesstress", and the configuration then
+    # spent its whole budget waiting for a marker that could not appear.
+    # Erase-and-retype is idempotent, so a wrong count costs a retry, not a lie.
+    local attempts=0
+    while : ; do
+        local before=0
+        if [ -f "$LOG" ]; then before=$(wc -c < "$LOG" | tr -d ' '); fi
 
-    type_push "$s"
+        type_push "$s"
+        [ -f "$LOG" ] || return 0
 
-    [ -f "$LOG" ] || return 0
+        # Slow and lost look identical in one sample and not in three. Watch the
+        # echo GROW: while it is still growing the guest is merely behind, and
+        # waiting is the only right thing. Three unchanged looks means it is not
+        # behind, it is short.
+        local attempt got=0 last=-1 still=0 echoed
+        for attempt in $(seq 1 30); do
+            sleep 0.1
+            echoed=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null \
+                         | /usr/bin/grep -av '^\[' | tr -d '\r\n')
+            got=$(type_landed "$echoed" "$s")
+            [ "$got" -ge "$len" ] && return 0
+            if [ "$got" -eq "$last" ]; then still=$((still+1)); else still=0; fi
+            last=$got
+            [ "$still" -ge 3 ] && break
+        done
 
-    # Slow and lost look identical in one sample and not in three. Watch the
-    # echo GROW: while it is still growing the guest is merely behind, and the
-    # only right thing is to keep waiting. When it has not moved across three
-    # consecutive looks it is not behind, it is short — and only then is the
-    # missing tail sent again, once. That distinction is what the first version
-    # of this check lacked, and lacking it turned "help" into "helpelp" on a
-    # machine busy verifying a volume seal.
-    local attempt got=0 last=-1 still=0 echoed retried=0
-    for attempt in $(seq 1 30); do
-        sleep 0.1
-        echoed=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null | tr -d '\r')
-        got=$(type_landed "$echoed" "$s")
-        [ "$got" -ge "$len" ] && return 0
-        if [ "$got" -eq "$last" ]; then still=$((still+1)); else still=0; fi
-        last=$got
-        if [ "$still" -ge 3 ] && [ "$retried" -eq 0 ]; then
-            retried=1; still=0
-            type_push "${s:got}"
+        attempts=$((attempts+1))
+        if [ "$attempts" -ge 3 ]; then
+            die "type: guest echoed $got of $len characters of \"$s\" after $attempts clean retries — keystrokes are being dropped"
         fi
+        # Wipe whatever did land, then start the line over from scratch.
+        type_erase $((len + 8))
     done
-
-    # Nothing is retyped, and that is deliberate. The first version of this
-    # check sent the tail again, which is the obvious repair and the wrong one:
-    # a slow echo is indistinguishable from a lost one, and on a machine busy
-    # verifying a volume seal the echo IS slow — so "help" arrived as "helpelp",
-    # the shell rejected it, and two logcheck scenarios reported a kernel that
-    # would not answer the keyboard. A harness may fail to deliver; it may not
-    # deliver something other than what it was asked to. The pacing above is
-    # the cure; this is only the witness.
-    die "type: guest echoed $got of $len characters of \"$s\" — keystrokes are being dropped"
 }
 
 cmd_key() {

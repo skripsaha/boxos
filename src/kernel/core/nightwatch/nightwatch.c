@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include "kcore.h"
 #include "result_ring.h"
+#include "pocket_ring.h"
 #include "touch_ring.h"
 #include "clockboard.h"
 #include "klib.h"
@@ -73,9 +74,57 @@ typedef struct
     uint64_t  expected;
     uintptr_t phys_addr;
     uint8_t   wait_reason;
+    uint8_t   kcore_pending;
     uint64_t  result_ring_phys;
     uint64_t  touch_ring_phys;
+    uint64_t  pocket_ring_phys;
 } NightwatchProbe;
+
+/* Persistence for the two oscillation-proof oracles. A busy box makes an
+ * unserved pocket or an unscheduled runnable a microsecond transient; a
+ * WEDGED box keeps them frozen. One stranded strand spinning in
+ * result_wait keeps a scheduler ticking, which keeps resetting the
+ * all-quiet clock — the exact blindness that hid the kcore_pending
+ * wedge — so these proofs cannot depend on quiet at all. Instead a
+ * suspect must be seen in the SAME stuck position on two consecutive
+ * periodic looks (>= NIGHTWATCH_LOOK_MS apart) before it is a verdict. */
+#define NIGHTWATCH_SUSPECTS 32u
+typedef struct
+{
+    uint32_t pid;
+    uint32_t generation;
+    uint64_t mark;      /* pocket head (unserved) or 1 (unscheduled) */
+    uint8_t  kind;      /* 1 = pocket unserved, 2 = runnable unscheduled */
+} NightwatchSuspect;
+static NightwatchSuspect g_suspects[NIGHTWATCH_SUSPECTS];
+static uint32_t          g_suspect_count;
+
+static bool nightwatch_was_suspect(uint32_t pid, uint32_t gen,
+                                   uint64_t mark, uint8_t kind)
+{
+    for (uint32_t i = 0; i < g_suspect_count; i++)
+        if (g_suspects[i].pid == pid && g_suspects[i].generation == gen &&
+            g_suspects[i].mark == mark && g_suspects[i].kind == kind)
+            return true;
+    return false;
+}
+
+/* An idle K-Core coexisting with a queued-but-unserved pocket is impossible
+ * when the doorbell chain is healthy: the K-Core's CLI-gated recheck refuses
+ * to sleep over a non-empty queue, and a submit IPIs it awake. So "a K-Core
+ * sleeps while this pocket waits" upgrades a slow box to a broken one. */
+static bool nightwatch_any_kcore_idle(void)
+{
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        if (g_amp.cores[c].is_kcore && g_core_idle[c])
+            return true;
+    return false;
+}
+
+static bool nightwatch_any_core_idle(void)
+{
+    return __atomic_load_n(&g_idle_cores, __ATOMIC_ACQUIRE) > 0;
+}
 
 void nightwatch_init(void)
 {
@@ -157,12 +206,17 @@ static void nightwatch_verdict(bool all_quiet)
         e->expected   = p->addr_wait_entry.expected;
         e->phys_addr  = p->addr_wait_entry.phys_addr;
         e->wait_reason      = (uint8_t)p->wait_reason;
+        e->kcore_pending    = __atomic_load_n(&p->kcore_pending, __ATOMIC_ACQUIRE);
         e->result_ring_phys = p->result_ring_phys;
         e->touch_ring_phys  = p->touch_ring_phys;
+        e->pocket_ring_phys = p->pocket_ring_phys;
     }
     process_list_unlock();
 
     uint32_t parked = 0, lost = 0, unreachable = 0, timed = 0, undelivered = 0;
+    uint32_t unserved = 0, unsched = 0;
+    NightwatchSuspect fresh[NIGHTWATCH_SUSPECTS];
+    uint32_t          fresh_count = 0;
 
     /* Two passes: judge in silence, then speak only with evidence. A pass that
      * finds nothing must cost nothing on the console — that is what lets this
@@ -171,9 +225,77 @@ static void nightwatch_verdict(bool all_quiet)
     {
     bool speak = (pass == 1);
     parked = lost = unreachable = timed = undelivered = 0;
+    unserved = unsched = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         NightwatchProbe *e = &probe[i];
+
+        /* POCKET UNSERVED. The submit itself was never taken: the PocketRing
+         * holds published pockets, kcore_pending claims a K-Core owes a
+         * visit, and the strand is not on a CPU — its userspace spins in
+         * result_wait for an answer to a question no one has read. One such
+         * spinner keeps a scheduler ticking, which is exactly what kept the
+         * all-quiet clock at zero and this defect invisible — so this proof
+         * is judged on PERSISTENCE instead: the same pocket head, unserved,
+         * seen on two consecutive periodic looks. */
+        if (e->pocket_ring_phys && !e->on_cpu && nightwatch_any_kcore_idle() &&
+            e->state != (uint8_t)PROC_DONE && e->state != (uint8_t)PROC_CRASHED)
+        {
+            const PocketRingHeader *ph =
+                (const PocketRingHeader *)vmm_phys_to_virt(e->pocket_ring_phys);
+            uint64_t pk_head = __atomic_load_n(&ph->head, __ATOMIC_ACQUIRE);
+            uint64_t pk_tail = __atomic_load_n(&ph->tail, __ATOMIC_ACQUIRE);
+            if (pk_tail != pk_head)
+            {
+                bool stuck = nightwatch_was_suspect(e->pid, e->generation,
+                                                    pk_head, 1u);
+                if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
+                {
+                    fresh[fresh_count].pid        = e->pid;
+                    fresh[fresh_count].generation = e->generation;
+                    fresh[fresh_count].mark       = pk_head;
+                    fresh[fresh_count].kind       = 1u;
+                    fresh_count++;
+                }
+                if (stuck)
+                {
+                    unserved++;
+                    if (speak)
+                        kprintf("  pid %u gen %u %s — ‼ POCKET UNSERVED: ring "
+                                "head=%lu tail=%lu, kcore_pending=%u, two looks "
+                                "and no K-Core came\n",
+                                e->pid, e->generation,
+                                nightwatch_state_name(e->state),
+                                (unsigned long)pk_head, (unsigned long)pk_tail,
+                                (unsigned)e->kcore_pending);
+                }
+            }
+        }
+
+        /* RUNNABLE UNSCHEDULED. WORKING, off-CPU, and still exactly there on
+         * the next look: the runqueue lost it, or a wake never enqueued it.
+         * Persistence gates it for the same oscillation reason as above. */
+        if (e->state == (uint8_t)PROC_WORKING && !e->on_cpu &&
+            nightwatch_any_core_idle())
+        {
+            bool stuck = nightwatch_was_suspect(e->pid, e->generation, 1u, 2u);
+            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
+            {
+                fresh[fresh_count].pid        = e->pid;
+                fresh[fresh_count].generation = e->generation;
+                fresh[fresh_count].mark       = 1u;
+                fresh[fresh_count].kind       = 2u;
+                fresh_count++;
+            }
+            if (stuck)
+            {
+                unsched++;
+                if (speak)
+                    kprintf("  pid %u gen %u working — ‼ RUNNABLE UNSCHEDULED: "
+                            "off-cpu across two looks (home=%u)\n",
+                            e->pid, e->generation, e->home_core);
+            }
+        }
 
         /* PENDING RESULT. Not every block is an addr-park: a process can be
          * waiting for a Result instead. If its ring already holds one — tail
@@ -297,9 +419,13 @@ static void nightwatch_verdict(bool all_quiet)
     }
 
     /* Nothing proven and the box is not even stopped: say nothing at all. */
-    bool proven = (lost || unreachable || undelivered);
+    bool proven = (lost || unreachable || undelivered || unserved || unsched);
     if (pass == 0 && !proven && !all_quiet)
     {
+        /* Nothing to say this look — but remember today's suspects so the
+         * NEXT look can convict what stays frozen in place. */
+        for (uint32_t s = 0; s < fresh_count; s++) g_suspects[s] = fresh[s];
+        g_suspect_count = fresh_count;
         kfree(probe);
         return;
     }
@@ -322,10 +448,11 @@ static void nightwatch_verdict(bool all_quiet)
         kprintf("[NIGHTWATCH] %u process(es) appeared mid-walk and were not described\n",
                 skipped);
 
-    if (lost || unreachable || undelivered)
+    if (lost || unreachable || undelivered || unserved || unsched)
         kprintf("[NIGHTWATCH] VERDICT: %u lost wake(s), %u unreachable park(s), "
-                "%u undelivered result(s) of %u parked — a defect, not a slow test\n",
-                lost, unreachable, undelivered, parked);
+                "%u undelivered result(s), %u unserved pocket(s), "
+                "%u unscheduled runnable(s) of %u parked — a defect, not a slow test\n",
+                lost, unreachable, undelivered, unserved, unsched, parked);
     else if (parked && parked == timed)
         kprintf("[NIGHTWATCH] VERDICT: %u parked, all with deadlines — will recover\n",
                 parked);
@@ -333,6 +460,9 @@ static void nightwatch_verdict(bool all_quiet)
         kprintf("[NIGHTWATCH] VERDICT: quiescent — %u parked, none provably stuck. "
                 "If this is a hang, it is neither an addr-park nor a pending result\n",
                 parked);
+
+    for (uint32_t s = 0; s < fresh_count; s++) g_suspects[s] = fresh[s];
+    g_suspect_count = fresh_count;
 
     kfree(probe);
 }
