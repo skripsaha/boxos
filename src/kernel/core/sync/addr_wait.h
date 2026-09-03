@@ -50,6 +50,13 @@ typedef struct AddrWaitEntry {
                                    * timeout (its park was woken early and the
                                    * strand re-parked, reusing this entry) can
                                    * never inject ERR_TIMEOUT into the new wait. */
+    uint32_t              submit_cookie;
+                                  /* the park submit's cloakroom token
+                                   * (OpContext.submit_cookie), echoed into the
+                                   * wake/timeout Result's context high bits so
+                                   * the parked strand's paired wait adopts ONLY
+                                   * its own completion — a stray reply on its
+                                   * ring can no longer read as a spurious wake. */
     uint8_t               done;   /* 1 = waker claimed this entry */
     uint8_t               linked; /* 1 = currently in a bucket chain */
     uint8_t               timed;  /* 1 = a park deadline was armed for this park */

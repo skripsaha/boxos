@@ -55,6 +55,9 @@ typedef struct WriteJob {
     uint64_t          bytes_done;
     uint32_t          flags;
     uint64_t          waybill;           /* Ф26e: ferry correlation token (0 = sync/no-token) */
+    uint32_t          submit_cookie;     /* the write submit's cloakroom token — echoed
+                                          * into the plain (waybill==0) completion so the
+                                          * caller's paired wait adopts only its own. */
 
     /* ---- in-flight chunk ---- */
     uint32_t          if_disk_block;

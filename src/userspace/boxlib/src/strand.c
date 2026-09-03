@@ -11,6 +11,7 @@
 #include "box/strand.h"
 #include "box/core/manifest.h"   /* MfCall1 */
 #include "box/memory.h"          /* malloc / free */
+#include "box/debug.h"           /* kdbg_print — loud spawn refusal */
 #include "box/touch.h"           /* touch_stash_free_self */
 #include "box/system.h"          /* yield */
 #include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
@@ -53,15 +54,29 @@ static uint32_t strand_spawn_impl(void (*fn)(void *arg), void *arg, uint8_t join
     params[1] = (uint64_t)(uintptr_t)s;                   /* arg -> rdi           */
     params[2] = (uint64_t)joinable;                       /* 1 = zombie-until-join */
 
+    /* WITHOUT a deadline, deliberately. The spawn runs entirely in the
+     * kernel — no medium, no other process — so its reply is guaranteed
+     * either way: a pid or a real refusal. A guessed budget here split one
+     * fact into two lies AND a corpse: on a congested box the caller was
+     * told "failed" and freed the start record, while the kernel went on
+     * to run the trampoline — which read the freed (poisoned) record and
+     * called a garbage fn (measured: cxxtest 16c, ghost strands dying at
+     * RIP=0x0/0x1, plus the double-free of `s` corrupting the heap under
+     * whoever allocated next). With no deadline the ownership is single
+     * again: refusal → ours to reclaim; success → the trampoline frees it.
+     * An answer that never comes is a kernel defect Nightwatch names, not
+     * something to paper over. */
     uint32_t pid = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN,
                      params, (uint16_t)sizeof(params),
                      NULL, 0,
                      &pid, (uint32_t)sizeof(pid), NULL,
-                     BOX_TIMEOUT_IPC_MS, NULL);
+                     0 /* no deadline */, NULL);
     if (rc != 0) {
-        /* Spawn failed: the kernel never ran the trampoline, so the start
-         * record is still ours to reclaim. */
+        /* Definitive refusal: the kernel never took the entry point, so the
+         * start record is still ours to reclaim. Say so — a silent spawn
+         * refusal already cost one debugging night as a ghost strand. */
+        kdbg_print("[strand] spawn refused rc=%d pid_out=%u", rc, pid);
         free(s);
         return 0;
     }

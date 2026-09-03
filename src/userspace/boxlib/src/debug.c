@@ -85,17 +85,20 @@ static int debug_vsnprintf(char *dst, int cap, const char *fmt, va_list ap)
 void kdbg(const char *msg)
 {
     if (!msg) return;
-    /* Long timeout (60s) — under heavy multi-core load (e.g. mid-stress)
-     * the kernel can take 100ms+ to dispatch HW_DEBUG_PRINT. A short timeout
-     * leaves the actual reply orphaned in our ResultRing, where the very
-     * next MfCall1 would pop it as if it were ITS own reply, leaking the
-     * stale error_code into an unrelated call. (S2 final_rc=302 / 902
-     * cascade.) */
+    /* WITHOUT a deadline, deliberately. The 60s budget that stood here was
+     * this file's own diagnosis half-applied: it documented that a timeout
+     * leaves the real reply orphaned in the ResultRing, where the very next
+     * MfCall1 pops it as ITS own answer (S2 final_rc=302/902 cascade) — and
+     * then kept a timer anyway, only longer. HW_DEBUG_PRINT is answered
+     * synchronously; the reply is guaranteed, so nothing needs guarding,
+     * and 16-core congestion proved even 60s is a guess something can
+     * outlast. An answer that never comes is a kernel defect Nightwatch
+     * names. */
     MfCall1(DECK_HARDWARE, HW_DEBUG_PRINT,
             NULL, 0,
             msg, (uint32_t)(strlen(msg) + 1),
             NULL, 0, NULL,
-            BOX_TIMEOUT_KDBG_MS, NULL);
+            0 /* no deadline — reply guaranteed */, NULL);
 }
 
 int kdbg_print(const char *fmt, ...)

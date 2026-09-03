@@ -31,6 +31,14 @@ typedef struct OpContext {
     struct process_t *proc;        /* initiator */
     uint32_t          target_pid;  /* IPC routing target, 0 = result-to-self */
     uint32_t          flags;       /* pocket-level flags propagated from envelope */
+    uint32_t          submit_cookie; /* the submit's cloakroom token
+                                    * (Pocket.cookie24). Every Result that
+                                    * ANSWERS this submit — the ordinary
+                                    * completion or a handler's self-push —
+                                    * must carry it in the context high bits
+                                    * (KCTX_PACK24) so the waiter can prove
+                                    * the reply is its own. Zero only on
+                                    * fire-and-forget pockets. */
     uint16_t          pier_id;     /* urgency lane */
     uint16_t          crate_count; /* mirror of the handler arg, exposed here so
                                     * async handlers can stash it into their

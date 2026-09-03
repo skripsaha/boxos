@@ -160,6 +160,9 @@ typedef struct {
     uint64_t         bytes_done;
     uint64_t         start_offset;
     uint64_t         waybill;       /* Ф26e: ferry correlation token (0 = sync/no-token) */
+    uint32_t         submit_cookie; /* the read submit's cloakroom token — echoed
+                                     * into the plain (waybill==0) completion so
+                                     * the caller's paired wait adopts its own. */
     void            *dma_phys;
     void            *dma_virt;
     uint32_t         in_flight_off_in_blk;
@@ -201,7 +204,7 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
      * ferry station and nothing else. A plain (waybill==0) read keeps
      * KCTX_GUIDE / data_addr==0 — byte-identical to the pre-ferry substrate. */
     if (ctx->waybill) { r.context = KCTX_STORAGE; r.data_addr = ctx->waybill; }
-    else              { r.context = KCTX_GUIDE; }
+    else              { r.context = KCTX_PACK24(KCTX_GUIDE, ctx->submit_cookie); }
 
     /* Commit bounce buffer back into user pages BEFORE waking caller.
      * If commit fails (e.g. user unmapped the page mid-flight) we still
@@ -443,6 +446,7 @@ static int ObjRead(const ManifestOp *op,
                         async_ctx->bytes_done    = 0;
                         async_ctx->start_offset  = offset;
                         async_ctx->waybill       = waybill;
+                        async_ctx->submit_cookie = ctx->submit_cookie;
                         async_ctx->dma_phys      = dma_phys;
                         async_ctx->dma_virt      = dma_virt;
                         /* CrateStage ownership transfer: the dispatcher

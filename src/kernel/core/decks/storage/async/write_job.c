@@ -551,7 +551,7 @@ static void wjob_finalize(WriteJob *j, int rc)
      * data_addr and flies the KCTX_STORAGE flag so boxlib routes it to the
      * ferry station; a plain write keeps KCTX_GUIDE / data_addr==0. */
     if (j->waybill) { r.context = KCTX_STORAGE; r.data_addr = j->waybill; }
-    else            { r.context = KCTX_GUIDE; }
+    else            { r.context = KCTX_PACK24(KCTX_GUIDE, j->submit_cookie); }
 
     if (j->target) {
         KResultPush(j->target, &r);
@@ -706,6 +706,7 @@ int ObjWriteAsync(uint32_t            file_id,
     j->src_bounce    = (void *)src_kp;
     j->flags         = flags;
     j->waybill       = waybill;
+    j->submit_cookie = ctx->submit_cookie;
     j->dma_phys      = dma_phys;
     j->dma_virt      = dma_virt;
 

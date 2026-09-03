@@ -239,6 +239,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     ctx.proc              = proc;
     ctx.target_pid        = pocket->target_pid;
     ctx.flags             = pocket->flags;
+    ctx.submit_cookie     = PocketCookie24(pocket);
     ctx.pier_id           = PocketPierId(pocket);
     ctx.crate_count       = crate_count;
     ctx.crates_uaddr      = crates_uaddr;

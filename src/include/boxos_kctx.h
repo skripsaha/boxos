@@ -33,4 +33,20 @@ typedef enum {
                           * the ferry stash so no other consumer ever sees one. */
 } KResultContext;
 
+/*
+ * `context` carries TWO facts packed in one u32:
+ *   low 8 bits  — the KResultContext kind above;
+ *   high 24 bits — the submit's cloakroom token (Pocket.cookie24) on every
+ *                  Result that answers a synchronous submit. Zero on
+ *                  results that answer nobody (IPC payload deliveries,
+ *                  Touch, ferry completions).
+ * The waiter adopts only the Result whose token matches its own submit;
+ * anything else of a reply kind is a proven orphan of an earlier call and
+ * is dropped where it stands. Readers therefore compare kinds through
+ * KCTX_KIND(), never against the raw field.
+ */
+#define KCTX_KIND(ctx)        ((uint32_t)(ctx) & 0xFFu)
+#define KCTX_COOKIE24(ctx)    ((uint32_t)(ctx) >> 8)
+#define KCTX_PACK24(kind, ck) ((uint32_t)(kind) | ((uint32_t)(ck) << 8))
+
 #endif /* BOXOS_KCTX_H */

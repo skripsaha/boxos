@@ -3,6 +3,7 @@
 #include "box/system.h"
 #include "box/cpu.h"
 #include "box/memory.h"   /* malloc / free — per-strand ferry stash heap backing (Ф26e) */
+#include "box/debug.h"    /* kdbg_print — a deadline-free wait must be able to accuse */
 
 bool result_available(void) {
     ResultRing* rr = result_ring();
@@ -272,7 +273,7 @@ bool result_pop_non_ipc(Result* out) {
         /* Ф26e: a ferry (KCTX_STORAGE) completion is NEVER a synchronous reply.
          * Route it to the isolated ferry stash so this sync/result_any consumer
          * can never steal it, then keep scanning for our real reply. */
-        if (entry.context == KCTX_STORAGE) {
+        if (KCTX_KIND(entry.context) == KCTX_STORAGE) {
             ferry_stash_push(&entry);
             continue;
         }
@@ -283,7 +284,7 @@ bool result_pop_non_ipc(Result* out) {
          * kernel publisher (or a stale third-party tool) still publishes
          * a Touch through this channel. The entry is discarded; real
          * Touches are delivered via touch_pop / touch_wait. */
-        if (entry.context == KCTX_TOUCH) {
+        if (KCTX_KIND(entry.context) == KCTX_TOUCH) {
             continue;
         }
         if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
@@ -305,7 +306,7 @@ bool result_pop_ipc(Result* out) {
             return true;
         }
         /* Ф26e: isolate ferry completions (see result_pop_non_ipc). */
-        if (entry.context == KCTX_STORAGE) {
+        if (KCTX_KIND(entry.context) == KCTX_STORAGE) {
             ferry_stash_push(&entry);
             continue;
         }
@@ -313,7 +314,7 @@ bool result_pop_ipc(Result* out) {
          * ResultRing. The defensive filter here drops any leftover
          * KCTX_TOUCH-tagged entry that might still arrive from a
          * mismatched kernel/boxlib build. */
-        if (entry.context == KCTX_TOUCH) {
+        if (KCTX_KIND(entry.context) == KCTX_TOUCH) {
             continue;
         }
         /* Skip transient async-park acks (see result_pop_non_ipc). */
@@ -334,7 +335,7 @@ bool result_pop_ferry(Result* out) {
 
     Result entry;
     while (result_pop(&entry)) {
-        if (entry.context == KCTX_STORAGE) {     /* our ferry completion */
+        if (KCTX_KIND(entry.context) == KCTX_STORAGE) {     /* our ferry completion */
             *out = entry;
             return true;
         }
@@ -342,7 +343,7 @@ bool result_pop_ferry(Result* out) {
             ipc_stash_push(&entry);
             continue;
         }
-        if (entry.context == KCTX_TOUCH) continue;
+        if (KCTX_KIND(entry.context) == KCTX_TOUCH) continue;
         if (entry.error_code == 9 /* ERR_WOULD_BLOCK */) continue;
         non_ipc_stash_push(&entry);              /* KCTX_GUIDE → sync / result_any */
     }
@@ -355,8 +356,8 @@ bool result_pop_ferry(Result* out) {
 void result_restash(const Result* r) {
     if (!r) return;
     Result e = *r;
-    if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return; }   /* defensive */
-    if (e.context == KCTX_TOUCH)   return;                             /* migrated out — drop */
+    if (KCTX_KIND(e.context) == KCTX_STORAGE) { ferry_stash_push(&e); return; }   /* defensive */
+    if (KCTX_KIND(e.context) == KCTX_TOUCH)   return;                             /* migrated out — drop */
     if (e.error_code == 9 /* ERR_WOULD_BLOCK */) return;              /* async-park ack — drop */
     if (e.sender_pid != 0) { ipc_stash_push(&e); return; }            /* IPC → receiver */
     non_ipc_stash_push(&e);                                            /* plain kernel reply */
@@ -409,7 +410,7 @@ void result_drain_orphan_replies(void) {
         /* Ф26e: a ferry completion is NOT an orphan — it belongs to a still-live
          * box::ferry awaiter. Preserve it in the isolated ferry stash instead of
          * dropping it (this drain runs first in every synchronous submit). */
-        if (entry.context == KCTX_STORAGE) {
+        if (KCTX_KIND(entry.context) == KCTX_STORAGE) {
             ferry_stash_push(&entry);
             continue;
         }
@@ -499,7 +500,7 @@ static bool result_wait_yield(Result* out, uint32_t timeout_ms) {
     }
 }
 
-bool result_wait(Result* out, uint32_t timeout_ms) {
+static bool result_wait_raw(Result* out, uint32_t timeout_ms) {
     if (!out) return false;
     /* Discard stale stash entries — manifest_submit always wants a FRESH
      * reply for THIS submission, never an old stash entry. Stale-reply
@@ -513,6 +514,48 @@ bool result_wait(Result* out, uint32_t timeout_ms) {
 
     if (cpu_has_waitpkg()) return result_wait_umwait(out, timeout_ms);
     return result_wait_yield(out, timeout_ms);
+}
+
+/* Replies dropped because their cloakroom token answered an EARLIER,
+ * abandoned submit — each one is a mis-pairing that would previously have
+ * been adopted as the current call's answer. Diagnostic only. */
+static uint64_t g_reply_orphans_dropped;
+
+uint64_t result_orphans_dropped(void)
+{
+    return __atomic_load_n(&g_reply_orphans_dropped, __ATOMIC_RELAXED);
+}
+
+bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
+    if (!out) return false;
+
+    /* The cloakroom rule: a coat is handed over by token, never "the next
+     * one off the rack". Every synchronous submit stamps a 24-bit token
+     * into its Pocket; the kernel echoes it in the reply's context high
+     * bits; anything of a reply kind carrying a DIFFERENT token is the
+     * provable orphan of an earlier call — drop it where it stands and
+     * keep waiting for our own. Dropping is safe precisely because a strand
+     * is inside at most ONE synchronous submit at a time: a foreign token
+     * therefore belongs to a call this strand has already abandoned, never
+     * to an outer frame waiting behind us. Before this, pairing was implicit
+     * by ring order and one late reply shifted every later wait onto the
+     * wrong answer (debug.c's S2 302/902 cascade; the 16c stack-smash
+     * family). */
+    uint64_t deadline_tsc = 0;
+    if (timeout_ms > 0) deadline_tsc = rdtsc() + cpu_ms_to_tsc(timeout_ms);
+
+    for (;;) {
+        uint32_t remaining_ms = timeout_ms;
+        if (timeout_ms > 0) {
+            uint64_t now = rdtsc();
+            if (now >= deadline_tsc) return false;
+            remaining_ms = (uint32_t)cpu_tsc_to_ms(deadline_tsc - now);
+            if (remaining_ms == 0) remaining_ms = 1;
+        }
+        if (!result_wait_raw(out, remaining_ms)) return false;
+        if (KCTX_COOKIE24(out->context) == expect_cookie) return true;
+        __atomic_add_fetch(&g_reply_orphans_dropped, 1u, __ATOMIC_RELAXED);
+    }
 }
 
 /* Block until ANY result arrives — no IPC/non-IPC filtering.
@@ -533,7 +576,7 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
     {
         Result e;
         if (result_pop(&e)) {
-            if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+            if (KCTX_KIND(e.context) == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
             *out = e;
             return true;
         }
@@ -550,7 +593,7 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
         if (result_available()) {
             Result e;
             if (result_pop(&e)) {
-                if (e.context == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+                if (KCTX_KIND(e.context) == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
                 *out = e;
                 return true;
             }
@@ -639,7 +682,7 @@ static bool result_wait_ferry_umwait(Result* out, uint32_t timeout_ms) {
         if (result_available()) {
             Result e;
             if (result_pop(&e)) {
-                if (e.context == KCTX_STORAGE) { *out = e; return true; }
+                if (KCTX_KIND(e.context) == KCTX_STORAGE) { *out = e; return true; }
                 result_restash(&e);
                 return false;   /* handed a sibling its record — yield to poll sweep */
             }
@@ -670,7 +713,7 @@ static bool result_wait_ferry_yield(Result* out, uint32_t timeout_ms) {
         if (result_available()) {
             Result e;
             if (result_pop(&e)) {
-                if (e.context == KCTX_STORAGE) { *out = e; return true; }
+                if (KCTX_KIND(e.context) == KCTX_STORAGE) { *out = e; return true; }
                 result_restash(&e);
                 return false;
             }

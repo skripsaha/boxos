@@ -43,7 +43,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             err_result.data_length = 0;
             err_result.data_addr   = 0;
             err_result.sender_pid  = 0;
-            err_result.context     = KCTX_IPC;
+            err_result.context     = KCTX_PACK24(KCTX_IPC, PocketCookie24(pocket));
             KResultPush(sender, &err_result);
             return -1;
         }
@@ -66,7 +66,8 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
             confirm.data_length = 0;
             confirm.data_addr   = 0;
             confirm.sender_pid  = 0;
-            confirm.context     = KCTX_IPC;
+            /* The sender's paired wait adopts this by its own token. */
+            confirm.context     = KCTX_PACK24(KCTX_IPC, PocketCookie24(pocket));
             KResultPush(sender, &confirm);
         }
         return 0;
@@ -81,7 +82,8 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
     result.data_length = pocket->manifest_size;
     result.data_addr   = pocket->manifest_addr;
     result.sender_pid  = 0;
-    result.context     = KCTX_GUIDE;
+    /* Echo the submit's cloakroom token — the waiter adopts only its own. */
+    result.context     = KCTX_PACK24(KCTX_GUIDE, PocketCookie24(pocket));
 
     if (!KResultPush(target, &result))
     {
