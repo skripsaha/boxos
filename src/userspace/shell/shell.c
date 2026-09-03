@@ -1,7 +1,8 @@
 /*
  * shell.c — BoxOS interactive shell
  *
- * Architecture: Shell → IPC → Display Daemon → VGA
+ * Architecture: output rides the shell's console lane (Brook "console:N")
+ * to the display daemon; input requests (READLINE) still travel as IPC.
  * Input: line editor with cursor movement and history
  * Commands: built-in table + external utilities via proc_exec
  * Context: tag-based focus via `use` command

@@ -39,8 +39,9 @@ constexpr bool KnownSignal(int sig) noexcept
 // Default disposition: end the process, no cleanup. 128 + signal is the status
 // convention boxcxx already used before this file existed (Panic exits 134,
 // and 134 is 128 + SIGABRT). The console is flushed first: output is batched
-// per strand in boxlib's io_buf, and a diagnostic that never left the buffer
-// is a diagnostic that never happened on a machine with no debugger attached.
+// per strand in boxlib's console-lane frame, and a diagnostic that never left
+// the frame is a diagnostic that never happened on a machine with no debugger
+// attached.
 [[noreturn]] void DefaultDeath(int sig) noexcept
 {
     io_flush();
