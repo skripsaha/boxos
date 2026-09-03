@@ -47,12 +47,13 @@
  * head/tail/count/pad control block that boxlib overlays via StrandStashRing. */
 #define STRAND_STASH_BYTES     (STRAND_STASH_CAP * STRAND_STASH_ENTRY_SZ + 16u)
 
-/* Per-strand print/IPC-output buffer (boxlib print.c StrandPrintState). Fixed
- * size, always present (unlike the lazy opt-in stashes) since every strand
- * that ever calls print/printf needs one. 272 → 280 when the colour caches
- * grew from one attribute byte to two full #RRGGBB pairs (S1 of the
- * console-stream epic). */
-#define STRAND_PRINT_BYTES     280u
+/* Per-strand print state (boxlib print.c StrandPrintState). Fixed size,
+ * always present (unlike the lazy opt-in stashes) since every strand that
+ * ever calls print/printf needs one. 280 → 160 when the io_buf telegram
+ * buffer gave way to the console-lane frame: the block now carries a lane
+ * handle, one ConsoleRun under construction and the colour state (S2+S3 of
+ * the console-stream epic). */
+#define STRAND_PRINT_BYTES     160u
 
 typedef struct StrandInfo {
     uint64_t tcb_self;        /* @0  — System V variant-2 TCB self-pointer (fs:0) */

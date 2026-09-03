@@ -5,27 +5,41 @@
 #include "box/string.h"
 #include "box/ipc.h"
 #include "box/convert.h"
+#include "box/debug.h"
+#include "box/brook.h"
+#include "box/system.h"
+#include "box/cpu.h"
+#include "box/clock.h"
+#include "box/error.h"
 #include "box/core/notify.h"
+#include "box/core/result.h"
 #include "box/core/strand_self.h"
+#include "box/memory.h"
 #include "box/display.h"
 
 /* ===========================================================================
  * Per-strand print state — thread-confined, NO lock.
  *
- * Every strand (main + spawned) owns its own IPC output buffer, VGA-attr
- * cache and current colours. Concurrent strands calling print/printf never
- * touch each other's state, so the print path itself never takes a lock.
+ * Every strand (main + spawned) owns its own console lane, frame under
+ * construction, VGA-attr cache and current colours. Concurrent strands
+ * calling print/printf never touch each other's state, so the print path
+ * itself never takes a lock.
  *
- * That is NOT the same as "safe to call from inside any lock" — send()'s
- * result_wait can redirect a stray KCTX_STORAGE completion into
- * ferry_stash_push, which lazily mallocs a spawned strand's ferry stash
- * (core/result.c). A spawned strand's printf can therefore malloc, so
- * printf-under-heap_lock is only actually safe for a caller whose path has
- * no such allocation — "no malloc on the path" is the real requirement, not
- * "no lock". memory.c's heap_dump_tags calls printf while holding heap_lock;
- * its one caller (memtest.c) runs on the main strand, whose ferry stash is a
- * static ring (no malloc), so today's sole heap_lock caller is safe in
- * practice.
+ * The console is a stream: output rides a per-strand Brook lane the display
+ * daemon reads ("console:N", granted over DISP_CMD_LANE). The lane opens
+ * lazily on the strand's FIRST print — opening costs a daemon round-trip,
+ * a brook_open (kmalloc + PMM + VMM in both cabins) and one malloc for the
+ * handle, so only strands that actually print ever pay it (the
+ * touch_stash_ptr pattern). After that the steady-state path is memcpy into
+ * the frame plus a lock-free brook_push — no malloc, no syscall until the
+ * daemon side needs waking. That preserves the real safety contract of
+ * printf-under-heap_lock ("no malloc on the path"): memory.c's
+ * heap_dump_tags caller prints long after its strand's first print.
+ *
+ * A full lane SLOWS the writer (lane_push waits politely) — printing is
+ * never dropped. A dead daemon is an honest refusal: one kdbg trace, then
+ * the process falls back to direct VGA (the shell's own no-daemon
+ * precedent) so the machine keeps talking.
  *
  * Storage: the main strand uses a static instance (g_main_print_state); a
  * spawned strand's instance lives inline in its StrandInfo (print_state[]).
@@ -34,18 +48,24 @@
  * Per owner decision, a spawned strand's colours always start FRESH
  * (COLOR_DEFAULT / COLOR_BLACK) — no inheritance from whoever spawned it.
  * =========================================================================== */
-#define IO_BUF_SIZE 256
+
+enum {
+    LANE_UNOPENED = 0,   /* kernel zero-init — no lane yet */
+    LANE_OPEN     = 1,
+    LANE_DEAD     = 2,   /* daemon refused/left; strand emits direct VGA */
+};
 
 typedef struct StrandPrintState {
-    char     io_buf[IO_BUF_SIZE];
-    uint16_t io_buf_pos;
-    uint8_t  last_set;      /* last_fg/last_bg carry a sent pair */
-    uint8_t  initialized;
-    uint8_t  _pad[4];
-    uint32_t last_fg;       /* last pair pushed to the backend (resolved) */
-    uint32_t last_bg;
-    uint32_t color_fg;      /* current colours (may hold sentinels) */
-    uint32_t color_bg;
+    void      *lane;        /* Brook* — this strand's console lane */
+    ConsoleRun run;         /* frame under construction; run.len = fill */
+    uint32_t   last_fg;     /* VGA-direct colour cache (resolved pair) */
+    uint32_t   last_bg;
+    uint32_t   color_fg;    /* current colours (may hold sentinels) */
+    uint32_t   color_bg;
+    uint8_t    lane_state;  /* LANE_* */
+    uint8_t    last_set;    /* last_fg/last_bg carry a sent pair */
+    uint8_t    initialized;
+    uint8_t    _pad[5];
 } StrandPrintState;
 _Static_assert(sizeof(StrandPrintState) == STRAND_PRINT_BYTES,
               "StrandPrintState must match strand_info.h STRAND_PRINT_BYTES");
@@ -76,21 +96,25 @@ static StrandPrintState *print_state_self(void)
  *
  * Both stay PROCESS-GLOBAL (not per-strand): every strand shares one
  * backend and one discovered daemon. g_display_pid's write is hardened
- * below (first-writer-wins CAS) since any strand's readline/getchar can
- * race to discover it; g_io_mode is a single-writer invariant (see
- * io_set_mode).
+ * below (first-writer-wins CAS) since any strand's lane grant / readline /
+ * getchar can race to discover it; g_io_mode is a single-writer invariant
+ * (see io_set_mode) with one sanctioned exception — the daemon-death
+ * fallback flips it to IO_MODE_VGA so the machine keeps talking.
  * =========================================================================== */
 static uint8_t  g_io_mode      = IO_MODE_IPC;
 static uint32_t g_display_pid  = 0;
 
 void     io_set_mode(uint8_t mode)
 {
-    /* Switching between VGA and IPC paths invalidates the kernel/daemon
-     * colour state we cached locally; force the next emit to re-send.
+    /* Switching between VGA and IPC paths invalidates the kernel colour
+     * state we cached locally; force the next emit to re-send.
      * Single-writer invariant: call before any strand_spawn — no other
      * strand's cache exists yet, so invalidating only the caller's own is
      * sufficient (every strand spawned afterwards starts uninitialised
-     * anyway and re-sends its colour on its first emit). */
+     * anyway and re-sends its colour on its first emit). A strand that
+     * already opened a console lane and is then switched to VGA simply
+     * stops pushing; the daemon closes the idle lane when the strand
+     * exits (writer-leave drains to STREAM_CLOSED). */
     if (mode != g_io_mode) print_state_self()->last_set = false;
     g_io_mode = mode;
 }
@@ -99,40 +123,209 @@ void     io_set_display_pid(uint32_t pid) { g_display_pid = pid; }
 uint32_t io_get_display_pid(void)         { return g_display_pid; }
 
 /* ===========================================================================
- * IPC output buffer — coalesces bytes destined for the display daemon so
- * each tiny print() doesn't grab its own ResultRing slot. Per-strand
- * (StrandPrintState.io_buf): each strand flushes only its own bytes.
+ * Console lane — the strand's output stream to the display daemon.
+ *
+ * Grant protocol ("checkroom"): send DISP_CMD_LANE, the daemon opens the
+ * reader side of a fresh "console:N" Brook FIRST and only then replies
+ * [DISP_CMD_LANE][tag NUL] — the writer arrives at a laid table. A 1-byte
+ * reply is an honest refusal.
  * =========================================================================== */
+
+static void emit_run(StrandPrintState *ps, const char *bytes, int len,
+                     Color fg, Color bg);
+
+static void lane_fail(StrandPrintState *ps)
+{
+    /* Honest refusal, not silent swallowing: leave one trace, then keep
+     * the machine talking through direct VGA. Process-wide flip mirrors
+     * the shell's own no-daemon fallback; other strands' pushes fail the
+     * same way and converge here on their next emit. */
+    ps->lane_state = LANE_DEAD;
+    kdbg_print("[print] console lane unavailable; direct VGA from here on");
+    io_set_mode(IO_MODE_VGA);
+}
+
+/* Wait for the daemon's DISP_CMD_LANE reply. Messages that are not the
+ * grant are HELD aside and restashed after the wait — restashing inside
+ * the loop would hand the same message straight back to us (receive
+ * consults the ipc stash first), and dropping would eat a payload the
+ * application is owed (spawn args arrive before a utility's first print).
+ * The hold grows on demand so no flood can force a drop.
+ *
+ * The wait carries NO wall-clock deadline — a guessed number of
+ * milliseconds is exactly the timeout class that turns a slow stand into
+ * a phantom failure (measured: 16 vCPUs on one TCG thread stretched a
+ * grant past five seconds, and the old 2×2500 ms guess declared a live
+ * daemon dead). The only watchdog is a fact, not a clock: if the daemon
+ * PROCESS is gone, the wait ends. readline blocks on its reply under the
+ * same contract. */
+static bool lane_await_grant(char *tag, size_t tag_cap)
+{
+    Result  *held     = NULL;
+    uint32_t held_n   = 0;
+    uint32_t held_cap = 0;
+    bool     got      = false;
+    bool     asked    = false;
+
+    for (;;) {
+        if (!asked) {
+            uint8_t req = DISP_CMD_LANE;
+            if (g_display_pid != 0) {
+                if (send(g_display_pid, &req, 1) < 0) break;
+                asked = true;
+            } else {
+                /* The kernel answers "is anyone wearing the tag" on the
+                 * spot: ERR_ROUTE_NO_SUBSCRIBERS means there is no daemon
+                 * to wait for, so waiting would be watching a clock for an
+                 * event that cannot happen. A daemon that exists but has
+                 * not reached its loop yet banks the broadcast and answers
+                 * when it gets there — that is worth waiting out. */
+                int rc = broadcast("display", &req, 1);
+                if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS)
+                    break;
+                asked = true;
+            }
+        }
+
+        Result r;
+        if (!receive_wait(&r, 1000)) {
+            /* A quiet second — not a verdict. Check the fact that would
+             * make further waiting a lie: the daemon process being gone. */
+            if (g_display_pid != 0) {
+                proc_info_t info;
+                if (proc_info((uint16_t)g_display_pid, &info) != 0) break;
+            }
+            continue;
+        }
+
+        const uint8_t *d = (const uint8_t *)(uintptr_t)r.data_addr;
+        if (r.sender_pid != 0 && r.data_addr != 0 &&
+            r.data_length >= 1 && d[0] == DISP_CMD_LANE) {
+            if (r.data_length >= 2) {
+                uint32_t n = r.data_length - 1;
+                if (n >= tag_cap) n = (uint32_t)tag_cap - 1;
+                memcpy(tag, d + 1, n);
+                tag[n] = '\0';
+                if (tag[0] != '\0') {
+                    __sync_bool_compare_and_swap(&g_display_pid, 0,
+                                                 r.sender_pid);
+                    got = true;
+                }
+            }
+            break;   /* grant, or the daemon's explicit refusal */
+        }
+
+        if (held_n == held_cap) {
+            uint32_t cap = held_cap ? held_cap * 2 : 8;
+            Result *grown = (Result *)malloc(cap * sizeof(Result));
+            if (!grown) { result_restash(&r); break; }
+            if (held) {
+                memcpy(grown, held, held_n * sizeof(Result));
+                free(held);
+            }
+            held = grown;
+            held_cap = cap;
+        }
+        held[held_n++] = r;
+    }
+
+    /* Give every held message back in arrival order — the stash is
+     * consulted before the ring, so later consumers see them first. */
+    for (uint32_t i = 0; i < held_n; i++) result_restash(&held[i]);
+    if (held) free(held);
+    return got;
+}
+
+static bool lane_ensure(StrandPrintState *ps)
+{
+    if (ps->lane_state == LANE_OPEN) return true;
+    if (ps->lane_state == LANE_DEAD) return false;
+
+    char tag[64];
+    if (!lane_await_grant(tag, sizeof(tag))) {
+        lane_fail(ps);
+        return false;
+    }
+
+    /* Shape is part of tag identity; passing the canonical constants makes
+     * a header drift between writer and daemon fail loudly at open. */
+    Brook *b = brook_open(tag, sizeof(ConsoleRun), CONSOLE_LANE_FRAMES,
+                          BROOK_WRITER);
+    if (!b) {
+        lane_fail(ps);
+        return false;
+    }
+    ps->lane       = b;
+    ps->lane_state = LANE_OPEN;
+    return true;
+}
+
+/* Push one built frame. A full ring SLOWS the writer — output is never
+ * dropped — but the wait must be a POLITE one: the console is a fan-in of
+ * every printing strand into ONE daemon, and both naive waits fail it at
+ * scale (measured, print_stress 16 strands):
+ *   - brook_push's UMWAIT path holds the core while it watches the
+ *     cursor; sixteen watchers starve the very reader they wait for
+ *     (24k lines sat banked until the writers died);
+ *   - yield-per-attempt floods the Guide with a syscall storm from every
+ *     blocked writer, and the daemon's render ops drown in that queue
+ *     (299 frames rendered in 160 s).
+ * The shape that serves a fan-in is pause-spin with EXPONENTIAL backoff
+ * between yields: a fresh stall probes hot (microseconds), a standing
+ * stall backs off toward a few milliseconds of pause per yield — always
+ * shorter than the ring-drain it is waiting out, and hundreds (not
+ * hundreds of thousands) of syscalls per second per blocked writer.
+ * On daemon death flips to the VGA fallback and returns false so the
+ * caller re-delivers its content by the direct path. */
+#define LANE_PUSH_SPIN_MIN  2048u      /* same class as BROOK_SPIN_BUDGET */
+#define LANE_PUSH_SPIN_MAX  (1u << 20) /* ~ a few ms of PAUSE — µarch class */
+
+static bool lane_push(StrandPrintState *ps, const ConsoleRun *f)
+{
+    int      rc;
+    uint32_t budget = LANE_PUSH_SPIN_MIN;
+    uint32_t spins  = 0;
+    while ((rc = brook_try_push((Brook *)ps->lane, f)) == -ERR_WOULD_BLOCK) {
+        if (++spins < budget) {
+            __asm__ volatile("pause" ::: "memory");
+        } else {
+            spins = 0;
+            if (budget < LANE_PUSH_SPIN_MAX) budget <<= 1;
+            yield();
+        }
+    }
+    if (rc == 0) return true;
+
+    Brook *dead = (Brook *)ps->lane;
+    ps->lane = NULL;
+    lane_fail(ps);
+    if (dead) brook_release(dead);
+    return false;
+}
+
+static void lane_flush_run(StrandPrintState *ps)
+{
+    if (ps->run.len == 0) return;
+    ps->run.kind      = CONSOLE_RUN_TEXT;
+    ps->run._reserved = 0;
+    ps->run.tsc       = cpu_rdtsc();
+
+    bool    ok  = lane_push(ps, &ps->run);
+    uint8_t len = ps->run.len;
+    ps->run.len = 0;
+    if (!ok) {
+        /* The frame never reached the daemon; its text still must reach
+         * the screen. lane_fail switched us to VGA, so this re-emit takes
+         * the direct path (run.fg/bg are already resolved — resolving
+         * again is the identity). */
+        emit_run(ps, ps->run.text, len, ps->run.fg, ps->run.bg);
+    }
+}
 
 static void io_flush_state(StrandPrintState *ps)
 {
-    if (g_io_mode == IO_MODE_IPC && ps->io_buf_pos > 0) {
-        /* Unicast to the resolved display daemon when we know it. Earlier
-         * code unconditionally broadcast()'d to the "display" tag; if a
-         * caller had — for whatever reason — spawned a redundant display
-         * (shell does this when the autostart daemon hasn't reached its
-         * receive loop within 500 ms, see 2026-05-14 audit), every render
-         * frame hit *both* daemons and the user saw a duplicated screen
-         * plus character-by-character interleaving in the serial mirror.
-         *
-         * Broadcast is now strictly the discovery fallback (no display
-         * pid known yet). Once io_set_display_pid() / readline() /
-         * getchar() has resolved a daemon, all subsequent traffic flows
-         * to that single PID.
-         *
-         * Best-effort delivery: send/broadcast once and move on. Console
-         * output is not a guaranteed-delivery channel — under sustained
-         * saturation the display daemon's ResultRing can be full and a
-         * batch is dropped rather than retried. Making delivery reliable
-         * needs kernel-side IPC work (SysBroadcast full-ring handling,
-         * ipc_copy_to_heap reclaim) and is tracked as a separate session. */
-        if (g_display_pid != 0) {
-            send(g_display_pid, ps->io_buf, ps->io_buf_pos);
-        } else {
-            broadcast("display", ps->io_buf, ps->io_buf_pos);
-        }
-        ps->io_buf_pos = 0;
-    }
+    if (g_io_mode == IO_MODE_IPC && ps->lane_state == LANE_OPEN)
+        lane_flush_run(ps);
 }
 
 void io_flush(void)
@@ -140,77 +333,23 @@ void io_flush(void)
     io_flush_state(print_state_self());
 }
 
-/* Both helpers clamp io_buf_pos BEFORE computing remaining space, so a
- * corrupted or stale io_buf_pos can never drive `space` negative (which,
- * cast to size_t, used to turn into a huge value and memcpy() past the end
- * of io_buf — the underflow that let concurrent printf smash whatever
- * followed io_buf in memory). With per-strand state there is no concurrent
- * writer left to race, but the clamp costs nothing and stays as
- * defense-in-depth. */
-static void io_buf_putc(StrandPrintState *ps, char c)
-{
-    if (ps->io_buf_pos < IO_BUF_SIZE) ps->io_buf[ps->io_buf_pos++] = c;   /* clamp BEFORE write */
-    if (ps->io_buf_pos >= IO_BUF_SIZE) io_flush_state(ps);
-}
-
-static void io_buf_append(StrandPrintState *ps, const char *data, size_t len)
-{
-    while (len > 0) {
-        if (ps->io_buf_pos >= IO_BUF_SIZE) {
-            io_flush_state(ps);
-            /* io_flush_state is a no-op outside IPC mode, so io_buf_pos would
-             * stay pinned at IO_BUF_SIZE forever — bail instead of spinning. */
-            if (ps->io_buf_pos >= IO_BUF_SIZE) return;
-            continue;
-        }
-        size_t space = (size_t)IO_BUF_SIZE - (size_t)ps->io_buf_pos;   /* >0 here, can't underflow */
-        size_t chunk = len < space ? len : space;
-        memcpy(ps->io_buf + ps->io_buf_pos, data, chunk);
-        ps->io_buf_pos = (uint16_t)(ps->io_buf_pos + chunk);
-        data += chunk;
-        len  -= chunk;
-        if (ps->io_buf_pos >= IO_BUF_SIZE) io_flush_state(ps);
-    }
-}
-
-/* A colour record is parsed as one unit by the display daemon; unlike text
- * it must never straddle a flush boundary. io_buf_append chunks freely, so a
- * record that lands near the end of the buffer would arrive split across two
- * messages — the daemon would eat the command byte, render the colour bytes
- * as text, and a payload byte that happens to equal DISP_CMD_COLOR would
- * spawn a phantom record swallowing eight bytes of real output. Flush first
- * when the record would not fit whole. (The old 2-byte attribute record had
- * the same hazard, only narrower.) */
-static void io_buf_put_record(StrandPrintState *ps, const char *rec, size_t len)
-{
-    if ((size_t)IO_BUF_SIZE - (size_t)ps->io_buf_pos < len) io_flush_state(ps);
-    io_buf_append(ps, rec, len);
-}
-
 /* ===========================================================================
  * Color state.
  *
- * push_color() resolves the current (fg, bg) — sentinels become concrete
- * triples — and routes the FULL 24-bit pair to whichever backend is
- * active: a 9-byte DISP_CMD_COLOR record on the daemon wire, or a
- * SET_COLOR op with an RGB pair on the direct VGA path. Nothing here
- * rounds; the VGA text backend quantises at draw time inside the kernel.
+ * On the lane, colour is frame METADATA — every ConsoleRun carries its
+ * resolved (fg, bg) pair, so set_color is pure state and the pair rides
+ * the next emitted run. Only the direct VGA path pushes colour eagerly
+ * (the kernel keeps a current pair for kprintf and cursor-relative ops).
  * =========================================================================== */
 static void push_color(StrandPrintState *ps)
 {
+    if (g_io_mode == IO_MODE_IPC) return;
+
     uint32_t fg = BoxColorResolveFg(ps->color_fg);
     uint32_t bg = BoxColorResolveBg(ps->color_bg);
     if (ps->last_set && ps->last_fg == fg && ps->last_bg == bg) return;
 
-    if (g_io_mode == IO_MODE_IPC) {
-        char cmd[9];
-        cmd[0] = (char)DISP_CMD_COLOR;
-        memcpy(&cmd[1], &fg, 4);
-        memcpy(&cmd[5], &bg, 4);
-        io_buf_put_record(ps, cmd, sizeof(cmd));
-    } else {
-        vga_setcolor_rgb(fg, bg);
-    }
+    vga_setcolor_rgb(fg, bg);
     ps->last_fg  = fg;
     ps->last_bg  = bg;
     ps->last_set = true;
@@ -233,9 +372,10 @@ void  set_color_bg(Color bg)
 Color get_color_bg(void) { return print_state_self()->color_bg; }
 
 /* ===========================================================================
- * Low-level emit — push a chunk of ASCII bytes with a given Color. Honours
- * g_io_mode: VGA direct path uses vga_puts; IPC path embeds a DISP_CMD_COLOR
- * marker plus raw text into ps->io_buf.
+ * Low-level emit — push a chunk of ASCII bytes with a given colour pair.
+ * Honours g_io_mode: the IPC path packs ConsoleRun frames onto the lane
+ * ('\n' travels inside the text — it is content, not a control record);
+ * the VGA direct path uses vga_puts.
  * =========================================================================== */
 static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg, Color bg)
 {
@@ -243,37 +383,42 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
 
     fg = BoxColorResolveFg(fg);
     bg = BoxColorResolveBg(bg);
-    bool changed = !ps->last_set || ps->last_fg != fg || ps->last_bg != bg;
 
-    if (g_io_mode == IO_MODE_IPC) {
-        if (changed) {
-            char cmd[9];
-            cmd[0] = (char)DISP_CMD_COLOR;
-            memcpy(&cmd[1], &fg, 4);
-            memcpy(&cmd[5], &bg, 4);
-            io_buf_put_record(ps, cmd, sizeof(cmd));
-            ps->last_fg  = fg;
-            ps->last_bg  = bg;
-            ps->last_set = true;
-        }
-        /* Split on '\n' so the daemon's renderer keeps newline semantics. */
-        int seg_start = 0;
-        for (int i = 0; i <= len; i++) {
-            int at_end = (i == len);
-            int is_nl  = !at_end && bytes[i] == '\n';
-            if (at_end || is_nl) {
-                if (i > seg_start) io_buf_append(ps, bytes + seg_start, (size_t)(i - seg_start));
-                if (is_nl) io_buf_putc(ps, '\n');
-                seg_start = i + 1;
+    if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
+        if (ps->run.len > 0 && (ps->run.fg != fg || ps->run.bg != bg))
+            lane_flush_run(ps);
+
+        int off = 0;
+        while (off < len && ps->lane_state == LANE_OPEN) {
+            if (ps->run.len == CONSOLE_RUN_TEXT_MAX) {
+                lane_flush_run(ps);
+                continue;
             }
+            if (ps->run.len == 0) {
+                ps->run.fg = fg;
+                ps->run.bg = bg;
+            }
+            uint32_t space = CONSOLE_RUN_TEXT_MAX - ps->run.len;
+            uint32_t chunk = (uint32_t)(len - off);
+            if (chunk > space) chunk = space;
+            memcpy(ps->run.text + ps->run.len, bytes + off, chunk);
+            ps->run.len = (uint8_t)(ps->run.len + chunk);
+            off += chunk;
         }
-        return;
+        if (off >= len) return;
+
+        /* The daemon died mid-run (lane_flush_run above fell back); the
+         * pending frame was already re-emitted, deliver the remainder the
+         * direct way too. */
+        bytes += off;
+        len   -= off;
     }
 
     /* VGA direct: set colour only when it actually changed; emit text
      * honouring newlines. vga_puts() takes a NUL-terminated string of
      * arbitrary length, but the underlying syscall packs into a kernel
      * buffer; for large segments we stream in 192-byte chunks. */
+    bool changed = !ps->last_set || ps->last_fg != fg || ps->last_bg != bg;
     if (changed) {
         vga_setcolor_rgb(fg, bg);
         ps->last_fg  = fg;
@@ -350,11 +495,11 @@ void print(const char* str)
     if (!str) return;
     StrandPrintState *ps = print_state_self();
 
-    /* IO_MODE_IPC already batches into io_buf and flushes via one
-     * send/broadcast; IO_MODE_VGA wins a syscall reduction by feeding
-     * every internal vga_setcolor/vga_puts/vga_newline into a single
-     * Manifest. The nested vga_begin/vga_commit composes with an outer
-     * caller that may itself be batching (printf, shell renderer). */
+    /* IO_MODE_IPC batches into the lane frame and flushes lazily;
+     * IO_MODE_VGA wins a syscall reduction by feeding every internal
+     * vga_setcolor/vga_puts/vga_newline into a single Manifest. The
+     * nested vga_begin/vga_commit composes with an outer caller that may
+     * itself be batching (printf, shell renderer). */
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
@@ -381,7 +526,7 @@ void println(const char* str)
     if (g_io_mode == IO_MODE_IPC) {
         StrandPrintState *ps = print_state_self();
         if (str) print(str);
-        io_buf_putc(ps, '\n');
+        emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
         return;
     }
     /* VGA mode: wrap the print + newline in one batch so both fire as a
@@ -400,11 +545,18 @@ void clear(void)
      * next coloured run re-sends its pair. */
     ps->last_set = false;
 
-    if (g_io_mode == IO_MODE_IPC) {
-        io_flush_state(ps);
-        uint8_t cmd = DISP_CMD_CLEAR;
-        broadcast("display", &cmd, 1);
-        return;
+    if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
+        lane_flush_run(ps);
+        if (ps->lane_state == LANE_OPEN) {
+            ConsoleRun f;
+            memset(&f, 0, sizeof(f));
+            f.kind = CONSOLE_RUN_CLEAR;
+            f.fg   = COLOR_LIGHT_GRAY;
+            f.bg   = COLOR_BLACK;
+            f.tsc  = cpu_rdtsc();
+            if (lane_push(ps, &f)) return;
+        }
+        /* Daemon died on the way — the fallback below still clears. */
     }
     vga_clear_rgb(COLOR_LIGHT_GRAY, COLOR_BLACK);
 }
@@ -424,7 +576,7 @@ void clear(void)
  *
  * One printf currently produces N×emit_run calls (N = colour changes). For
  * VGA direct mode each emit is 1 setcolor + 1 puts syscall; for IPC mode
- * everything is coalesced into io_buf and flushed lazily.
+ * everything coalesces into lane frames and flushes lazily.
  * =========================================================================== */
 
 #define PRINTF_BUFLEN 512
@@ -455,9 +607,9 @@ static int append_str(char *buf, int pos, int max, const char *s)
  * share an ELF symbol.
  *
  * Weak rather than moved to its own translation unit because printf lives on
- * this file's statics — g_io_mode, the per-strand colour state, the shared
- * io_buf — and splitting it would mean exposing all three across a boundary to
- * solve a linking question. The link order that makes this work is already
+ * this file's statics — g_io_mode, the per-strand colour state, the lane
+ * machinery — and splitting it would mean exposing all three across a boundary
+ * to solve a linking question. The link order that makes this work is already
  * stated in apps/Makefile: libboxcxx.a before libbox.a, "so our runtime symbols
  * always win". */
 __attribute__((weak)) int printf(const char *fmt, ...)

@@ -23,6 +23,7 @@
 #include "box/cpu.h"
 #include "box/sync.h"
 #include "box/system.h"
+#include "box/clock.h"
 
 #define STRAND_COUNT 16u   /* main (id 0) + 15 spawned workers (id 1..15) */
 #define ITERS        2000u
@@ -61,7 +62,8 @@ static void run_pattern(uint32_t id)
     /* Per-strand print state is thread-confined and NOT auto-flushed on
      * strand exit (strand_exit deliberately skips it — that is whole-cabin
      * teardown's job). Without this, whatever is still sitting in this
-     * strand's io_buf when it exits is lost forever, not just delayed. */
+     * strand's console-lane frame when it exits is lost forever, not just
+     * delayed. */
     io_flush();
 
     __atomic_fetch_add(&g_done_count, 1u, __ATOMIC_RELEASE);
@@ -99,12 +101,26 @@ int main(void)
 
     /* Join: park until every strand (main included) has recorded done.
      * Re-read the live value right before each park so a decrement we
-     * missed returns immediately instead of sleeping on a stale count. */
-    uint32_t cycles = 0;
+     * missed returns immediately instead of sleeping on a stale count.
+     *
+     * The guard is a SILENCE watchdog on the CLOCK, not an iteration
+     * count: with the console-lane backpressure a strand finishes only
+     * when its output has actually rendered, so on a slow stand (16 TCG
+     * vCPUs on an oversubscribed host) an honest run takes minutes — and
+     * parks return early under wake-bucket noise, so counting parks would
+     * count nothing. Slow-but-moving is progress; only ten real minutes
+     * with NO strand finishing is a hang. */
     uint32_t cur;
+    uint32_t last_done      = 0;
+    uint64_t last_change_ms = clock_uptime_ms();
     while ((cur = __atomic_load_n(&g_done_count, __ATOMIC_ACQUIRE)) < STRAND_COUNT) {
-        if (++cycles > 600u) {
-            printf("[PS] FAIL: only %u/%u strands finished after timeout\n",
+        uint64_t now = clock_uptime_ms();
+        if (cur != last_done) {
+            last_done      = cur;
+            last_change_ms = now;
+        }
+        if (now - last_change_ms > 10u * 60u * 1000u) {
+            printf("[PS] FAIL: only %u/%u strands finished; no progress in 10 min\n",
                    cur, STRAND_COUNT);
             exit(1);
         }

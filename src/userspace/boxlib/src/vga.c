@@ -29,10 +29,20 @@
 #include "box/core/manifest.h"
 #include "box/core/notify.h"
 #include "box/core/result.h"
+#include "box/core/strand_self.h"
 #include "box/string.h"
 #include "box/timeouts.h"
 
-#define VGA_TIMEOUT_MS BOX_TIMEOUT_FAST_MS
+/* WITHOUT a deadline, deliberately. Every VGA op is answered synchronously
+ * by the Hardware Deck — success or a real error — so there is nothing for
+ * a timer to guard. A guessed budget here did worse than nothing: under
+ * congestion the call returned "timeout" while the kernel finished late,
+ * and that unpaired reply was popped by the NEXT MfCall as its own answer
+ * (the mis-pairing class debug.c documented years earlier), while the
+ * kernel's crate commit-out landed in a dead stack frame. An answer that
+ * never comes is a kernel defect Nightwatch names, not something to paper
+ * over. */
+#define VGA_TIMEOUT_MS 0u /* no deadline — the reply is guaranteed */
 
 static Color   s_fg          = COLOR_LIGHT_GRAY;
 static Color   s_bg          = COLOR_BLACK;
@@ -67,13 +77,17 @@ static inline void put_color_param(uint8_t *dst, Color c)
 }
 
 /* ===========================================================================
- * Batch state — sized so a typical printf (≈8 colored runs of ≤96 bytes) fits
- * comfortably in one commit. Hitting either ceiling auto-flushes and starts a
- * new batch so the caller never has to manage capacity.
+ * Batch state — sized for the console daemon's lane bursts, the heaviest
+ * batcher: dozens of ConsoleRun frames (a puts + a newline each) render in
+ * ONE commit, so a saturated console costs tens of submits per second, not
+ * thousands (measured on print_stress: submit count is the render-side
+ * wall). A typical printf still fits many times over. Hitting either
+ * ceiling auto-flushes and starts a new batch so the caller never has to
+ * manage capacity.
  * =========================================================================== */
-#define VGA_BATCH_MANIFEST_BYTES  1024u    /* ManifestBuilder scratch */
-#define VGA_BATCH_PAYLOAD_BYTES   2048u    /* PUTSTRING in-crate staging */
-#define VGA_BATCH_CRATES_MAX      32u
+#define VGA_BATCH_MANIFEST_BYTES  4096u    /* ManifestBuilder scratch */
+#define VGA_BATCH_PAYLOAD_BYTES   8192u    /* PUTSTRING in-crate staging */
+#define VGA_BATCH_CRATES_MAX      96u
 
 /* Nesting depth so a wrapper that does its own vga_begin/vga_commit
  * pair composes with an outer caller's batch. Without this, an inner
@@ -88,7 +102,17 @@ static uint32_t         s_payload_used = 0;
 static Crate            s_crates[VGA_BATCH_CRATES_MAX];
 static uint16_t         s_crate_count  = 0;
 
-static inline bool batch_active(void) { return s_batch_depth > 0; }
+/* The batch builder is MAIN-STRAND state. It is a set of bare statics
+ * (builder, payload staging, crate table, depth counter) with no lock —
+ * fine for the processes that batch today (shell, daemon: single strand),
+ * fatal if concurrent strands ever interleaved ops into one builder. A
+ * spawned strand therefore never batches: its begin/commit are no-ops and
+ * every write op submits immediately. The value caches (colour/cursor)
+ * stay shared — a spawned strand racing them can at worst leave a stale
+ * cached pair (one wrong-coloured run), never a corrupted submit. */
+static inline bool on_main_strand(void) { return strand_info_or_null() == NULL; }
+
+static inline bool batch_active(void) { return s_batch_depth > 0 && on_main_strand(); }
 
 static void batch_reset_locked(void)
 {
@@ -147,6 +171,7 @@ static int batch_flush_preserving_depth(void)
 
 void vga_begin(void)
 {
+    if (!on_main_strand()) return;   /* spawned strands never batch */
     /* First begin in a chain resets the builder; nested begin just
      * increments the depth counter so inner commits won't flush. */
     if (s_batch_depth == 0) batch_reset_locked();
@@ -155,6 +180,7 @@ void vga_begin(void)
 
 int vga_commit(void)
 {
+    if (!on_main_strand()) return OK;
     if (s_batch_depth == 0) return OK;
     /* Only the outermost commit fires the syscall. */
     if (--s_batch_depth > 0) return OK;
