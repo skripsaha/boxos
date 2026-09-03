@@ -165,11 +165,18 @@ error_t kcore_submit(struct process_t* proc)
         }
     }
 
-    // CRITICAL: Do NOT clear kcore_pending here.
-    // Userspace may have written new pockets to PocketRing before we returned.
-    // Keeping kcore_pending=1 ensures the next notify() will retry submission.
-    // Clearing it would cause pocket loss (in ring but never processed).
-    debug_printf("[KCORE] All queues full for PID %u, keeping kcore_pending=1 for retry\n", proc->pid);
+    /* Unreachable by construction: capacity equals the process limit and
+     * kcore_pending dedup holds each process to one slot, so no mix of
+     * live processes can fill a queue. If this ever prints, an invariant
+     * broke (slot leak, dedup bypass) — and the old quiet handling here
+     * was itself the wedge: keeping kcore_pending=1 with the pocket queued
+     * nowhere made every later notify skip the submit ("already pending"),
+     * stranding the process forever while the K-Cores slept over truly
+     * empty queues. Say it loudly; leave pending set so the evidence
+     * (ring non-empty, pending=1, queues full) stays intact for Nightwatch
+     * rather than being papered over by a retry that cannot succeed. */
+    kprintf("[KCORE] DEFECT: no queue slot for PID %u — dedup/capacity invariant broken\n",
+            proc->pid);
     return ERR_KCORE_SUBMIT_FAILED;
 
 submitted:
