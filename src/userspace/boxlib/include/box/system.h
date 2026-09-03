@@ -69,6 +69,22 @@ int proc_exec_tagged(const char* filename, const char* tags); /* child = file-ta
  * incarnation. Returns the pid (>0) or -err; *out_gen is 0 on any failure or if
  * the kernel did not report a generation. */
 int proc_exec_gen(const char* filename, const char* tags, uint32_t* out_gen);
+
+/* Wait until the incarnation (pid, generation) is gone, then report how it
+ * ended in *out_exit (proc_exit.h: >= 0 the code it passed to exit(), -1
+ * killed, -2 crashed). out_exit may be NULL.
+ *
+ * Being gone is asked as a STATE, so an incarnation that has already finished
+ * returns at once and a live one is parked on — there is no gap between
+ * asking and being registered, and therefore nothing to miss. That is the
+ * difference from watching the process:died multicast, where a single dropped
+ * announcement left a supervisor waiting for good.
+ *
+ * generation is mandatory: a pid names a seat, and seats are re-let.
+ * Returns 0 when gone, -ERR_PROCESS_NOT_FOUND if that incarnation was never
+ * issued (a mistyped pid must not read as success).
+ */
+int process_gone(uint32_t pid, uint32_t generation, int32_t* out_exit);
 int proc_kill(uint32_t pid);                                  /* kill another process by pid */
 
 int proc_tag_add(const char* tag);

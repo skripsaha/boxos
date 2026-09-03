@@ -44,34 +44,23 @@ const ShellCommand g_commands[] = {
  * External command execution
  * ========================================================================= */
 
-/* The shell's single standing process:died claim. Interned + claimed once
- * (lazily, on the first external command) and held for the shell's life:
- * process:died is a tag-multicast on the TouchRing — a separate ring from the
- * keyboard/args/display ResultRing — so this claim never disturbs input or IPC.
- * A child's exit (clean OR crash) is observed here, never via a send from the
- * child. */
-static TouchTag g_pdied       = TOUCH_TAG_INVALID;
-static bool     g_pdied_ready = false;
-
-static void ensure_death_watch(void)
-{
-    if (g_pdied_ready) return;
-    g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
-    if (g_pdied != TOUCH_TAG_INVALID && touch_claim(g_pdied, TOUCH_REST, 0, 0) == OK)
-        g_pdied_ready = true;
-}
+/* The shell no longer subscribes to process:died at all.
+ *
+ * It used to claim that multicast and read a child's exit off the TouchRing.
+ * The claim carried two costs and one defect. It had to be armed BEFORE the
+ * spawn and drained after, because a claim is a subscription to EDGES and an
+ * edge that arrives before you listen is simply not there. And a multicast is
+ * best-effort: TouchPublish may drop, and a dropped death left the shell
+ * waiting for one for the rest of the boot — measured on a wedged UEFI 16c
+ * machine, fifteen cores parked and the shell spinning in touch_wait forever,
+ * with no prompt ever again.
+ *
+ * process_gone asks the same question as a STATE instead, so there is no
+ * before-and-after to get wrong, nothing to pre-arm, nothing to drain, and
+ * nothing that can be dropped. */
 
 static int RunExternal(const char *name, ParsedCommand *cmd)
 {
-    /* Claim BEFORE the first spawn so a child that dies immediately can never
-     * beat us to its own death event, then drop any stale/foreign deaths
-     * banked on the TouchRing so the wait below only sees this child's. */
-    ensure_death_watch();
-    if (g_pdied_ready) {
-        Touch drain;
-        while (touch_try_pop_tag(g_pdied, &drain)) { }
-    }
-
     uint32_t gen = 0;
     int pid = proc_exec_gen(name, NULL, &gen);
     if (pid <= 0) {
@@ -128,25 +117,29 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
 
     send((uint32_t)pid, buf, (uint16_t)pos);
 
-    if (!g_pdied_ready) {
-        /* Cannot-happen: the registry rejected our claim. Rather than block on
-         * a child we cannot observe, run it detached and stay responsive. */
-        kdbg_print("[shell] process:died claim unavailable; running '%s' detached", name);
-        ShellDrainStaleIpc();
-        return 0;
-    }
 
-    /* Park forever on THIS child's death, matched by its canonical (pid,
-     * generation) so a recycled pid's foreign death cannot wake us early.
-     * process:died fires on clean exit AND crash, so there is no lost-death
-     * case to poll around — an unfired death would be a kernel-substrate bug. */
-    for (;;) {
-        Touch t;
-        if (!touch_wait_tag(g_pdied, &t, 0)) continue;
-        if (t.payload_len < sizeof(TouchProcessDied)) continue;
-        TouchProcessDied d;
-        memcpy(&d, t.payload, sizeof d);
-        if (d.pid == (uint32_t)pid && (gen == 0 || d.generation == gen)) break;
+    /* Wait until THIS child is gone — one park, no clock, nothing to poll.
+     *
+     * The kernel answers from the child's own record: already finished is
+     * reported at once, still running is parked on, and the single place a
+     * life ends pays every waiter it owes. Because the question is about a
+     * state rather than an event, there is no window between asking and being
+     * registered — the shape of failure that used to hang this shell (a
+     * dropped process:died) has no room left to happen.
+     *
+     * A missing answer would now be a kernel defect that Nightwatch can prove,
+     * which is the other half of the repair: the old wait spun in userspace,
+     * so the shell stayed PROC_WORKING and that spin also kept every core from
+     * ever looking idle — the oracle was blinded twice over, which is why this
+     * took three sessions to name. A parked waiter is visible. */
+    int32_t child_exit = 0;
+    int     gone_rc    = process_gone((uint32_t)pid, gen, &child_exit);
+    if (gone_rc != 0) {
+        /* The only honest failure left: the kernel says this incarnation was
+         * never issued, i.e. it vanished between spawn and ask. Say it rather
+         * than return as if the program had run. */
+        kdbg_print("[shell] '%s' (pid %d gen %u): process.gone refused — rc=%d",
+                   name, pid, gen, gone_rc);
     }
 
     /* Drain stray ResultRing residue (display PING replies, stray broadcasts). */

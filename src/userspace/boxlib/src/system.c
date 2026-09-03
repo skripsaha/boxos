@@ -36,7 +36,13 @@
 #define HW_SYSTEM_REBOOT    0x80
 #define HW_SYSTEM_SHUTDOWN  0x81
 
-#define SYS_TIMEOUT_MS  5000u
+/* WITHOUT a deadline, deliberately. Every op below is answered
+ * synchronously by its deck — success or a real error — so there is
+ * nothing for a timer to guard; a guessed budget turned congestion into a
+ * false refusal AND left the late reply unpaired on the ResultRing for the
+ * next MfCall to swallow as its own (the class debug.c named). An answer
+ * that never comes is a kernel defect Nightwatch names. */
+#define SYS_TIMEOUT_MS  0u /* no deadline — replies are guaranteed */
 
 /* Upper bound on a caller-supplied tag augment for proc_exec_tagged. Mirrors
  * the kernel PROCESS_TAG_SIZE (256) — the child's tag string can hold at most
@@ -63,6 +69,35 @@ int proc_cpu_time(uint64_t *out_us)
 
     memcpy(out_us, out, 8);
     return OK;
+}
+
+int process_gone(uint32_t pid, uint32_t generation, int32_t *out_exit)
+{
+    if (pid == 0 || generation == 0) return -ERR_INVALID_ARGUMENT;
+
+    uint8_t params[8];
+    memcpy(params,     &pid,        4);
+    memcpy(params + 4, &generation, 4);
+
+    /* No deadline, and here that is a statement about the kernel rather than
+     * optimism: the op parks only on an incarnation it has just confirmed is
+     * live, and the single place a life ends owes every parked waiter an
+     * answer. A child may legitimately run for hours — a clock would only be
+     * able to lie about that — while a reply that never comes is a kernel
+     * defect, which Nightwatch can now see precisely because this wait is a
+     * real park rather than a userspace spin. */
+    Result r;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROCESS_GONE,
+                     params, sizeof(params),
+                     NULL, 0,
+                     NULL, 0, NULL,
+                     0 /* no deadline */, &r);
+    if (rc != 0) return box_fail(rc);
+
+    /* The disposition rides in data_length as a value (proc_exit.h): >= 0 is
+     * the code the process passed to exit(), negative is how it was ended. */
+    if (out_exit) *out_exit = (int32_t)r.data_length;
+    return 0;
 }
 
 int proc_info(uint16_t pid, proc_info_t *info)

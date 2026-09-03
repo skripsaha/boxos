@@ -209,3 +209,30 @@ uint32_t pid_allocated_count(void)
     spin_unlock(&g_allocator.lock);
     return count;
 }
+
+PidLife pid_life(uint32_t pid, uint32_t generation)
+{
+    if (pid == PID_INVALID || generation == 0) return PID_LIFE_NEVER;
+
+    uint32_t index = pid - 1;
+    if (index >= PID_MAX_COUNT) return PID_LIFE_NEVER;
+
+    spin_lock(&g_allocator.lock);
+    uint32_t slot_gen  = g_allocator.generation[index];
+    bool     allocated = bitmap_test(g_allocator.bitmap, index);
+    spin_unlock(&g_allocator.lock);
+
+    /* Newer than anything this slot has ever issued: no such incarnation.
+     * A caller asking about it mistyped or invented it, and answering
+     * "finished" would be a lie that reads exactly like success. */
+    if (generation > slot_gen) return PID_LIFE_NEVER;
+
+    /* Older than the slot's count: the slot has been handed out again since,
+     * which cannot happen while the earlier tenant still holds it. */
+    if (generation < slot_gen) return PID_LIFE_DEPARTED;
+
+    /* The slot's current incarnation — the bitmap says whether it still
+     * holds the number. Freed means finished; the generation is not bumped
+     * again until the number is re-issued, so this stays true afterwards. */
+    return allocated ? PID_LIFE_LIVE : PID_LIFE_DEPARTED;
+}
