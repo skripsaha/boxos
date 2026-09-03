@@ -47,10 +47,10 @@ int send(uint32_t target_pid, const void* data, uint16_t size) {
     if (data && size > 0) {
         CrateSetInput(&c, (void *)data, size);
         return ipc_submit_one_op(0x40 /* ROUTE */, 0,
-                                 NULL, 0, &c, 1, target_pid, BOX_TIMEOUT_IPC_MS);
+                                 NULL, 0, &c, 1, target_pid, 0 /* no deadline — reply guaranteed */);
     }
     return ipc_submit_one_op(0x40, CRATE_INDEX_NONE,
-                             NULL, 0, NULL, 0, target_pid, BOX_TIMEOUT_IPC_MS);
+                             NULL, 0, NULL, 0, target_pid, 0 /* no deadline — reply guaranteed */);
 }
 
 int broadcast(const char* tag, const void* data, uint16_t size) {
@@ -70,11 +70,11 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
         CrateSetInput(&c, (void *)data, size);
         return ipc_submit_one_op(0x41 /* BROADCAST */, 0,
                                  tag_param, (uint16_t)(tlen + 1),
-                                 &c, 1, 0, BOX_TIMEOUT_IPC_MS);
+                                 &c, 1, 0, 0 /* no deadline — reply guaranteed */);
     }
     return ipc_submit_one_op(0x41, CRATE_INDEX_NONE,
                              tag_param, (uint16_t)(tlen + 1),
-                             NULL, 0, 0, BOX_TIMEOUT_IPC_MS);
+                             NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
 }
 
 int listen(uint64_t required_tags, uint8_t flags) {
@@ -83,7 +83,7 @@ int listen(uint64_t required_tags, uint8_t flags) {
     params[8] = flags;
     return ipc_submit_one_op(0x42 /* LISTEN */, CRATE_INDEX_NONE,
                              params, sizeof(params),
-                             NULL, 0, 0, BOX_TIMEOUT_IPC_MS);
+                             NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
 }
 
 bool receive(Result* out) {

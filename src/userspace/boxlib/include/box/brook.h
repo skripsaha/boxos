@@ -134,6 +134,12 @@ uint32_t brook_frame_count(const Brook *b);
 uint32_t brook_available(const Brook *b);
 uint32_t brook_free(const Brook *b);
 
+/* Writer-side history, read from the shared header (no syscall). For a
+ * reader holding a checkroom of lanes: ever_attached == false means nobody
+ * has ever written — an empty ring is provably empty forever once the
+ * writer-to-be is known dead, so the lane is safe to revoke. */
+bool brook_writer_ever_attached(const Brook *b);
+
 /* Introspection: the VA the kernel mapped this Brook's header at (diagnostics). */
 uint64_t brook_handle_header_va(const Brook *b);
 

@@ -136,6 +136,21 @@ static void encode_manifest_pocket(Pocket          *p,
  * between async and sync paths was the original reason touch.c carried
  * a hand-rolled copy of the envelope packing.
  */
+/* The next cloakroom token: process-wide, atomic, 24-bit, never zero
+ * (zero on the wire means "answers nobody" — fire-and-forget pockets).
+ * Uniqueness matters only across the handful of in-flight submits sharing
+ * a ring, so the 16M wrap is astronomically clear of collision. */
+static uint32_t g_submit_cookie;
+
+static uint32_t submit_cookie_next(void)
+{
+    uint32_t ck;
+    do {
+        ck = __atomic_add_fetch(&g_submit_cookie, 1u, __ATOMIC_RELAXED) & 0xFFFFFFu;
+    } while (ck == 0u);
+    return ck;
+}
+
 int ManifestSubmitNoWait(const Manifest *m,
                          const Crate    *crates,
                          uint16_t        crate_count,
@@ -163,22 +178,20 @@ int ManifestSubmitFull(const Manifest *m,
     if (crate_count > 0 && !crates)           return -ERR_INVALID_ARGS;
 
     /* Drop any orphan replies left over from prior timed-out callers BEFORE
-     * we submit. A stale reply in the ring would be popped first by our own
-     * result_wait and we would return its error_code as if it belonged to
-     * THIS submission — the cascading 902/302 in the multi-core S2 stress.
-     *
-     * Safe because ManifestSubmitFull is the synchronous entry point: when
-     * we reach here there is, by construction, no other pending submission
-     * for this process to whom an unconsumed reply could rightfully belong. */
+     * we submit — belt to the cloakroom token's braces: the token below
+     * already guarantees a stale reply can never be adopted, but a drained
+     * ring keeps the wait from wading through corpses. */
     result_drain_orphan_replies();
 
     Pocket p;
     encode_manifest_pocket(&p, m, crates, crate_count, target_pid);
+    uint32_t ck = submit_cookie_next();
+    PocketSetCookie24(&p, ck);
 
     if (pocket_submit(&p) != 0) return -ERR_POCKET_RING_FULL;
 
     Result tmp;
-    if (!result_wait(&tmp, timeout_ms)) {
+    if (!result_wait(&tmp, ck, timeout_ms)) {
         return -ERR_TIMEOUT;
     }
     if (out_result) *out_result = tmp;
@@ -199,7 +212,11 @@ int ManifestSubmit(const Manifest *m,
                    uint16_t        crate_count,
                    Result         *out_result)
 {
-    return ManifestSubmitTimeout(m, crates, crate_count, out_result, 1000);
+    /* No deadline: the reply to a synchronous submit is guaranteed, and a
+     * caller that abandons a pocket the K-Core has not processed yet leaves
+     * its stack-resident manifest and crates to be read — and written back
+     * to — after the frame is gone. */
+    return ManifestSubmitTimeout(m, crates, crate_count, out_result, 0);
 }
 
 /* -------------------------------------------------------------------------
@@ -261,11 +278,13 @@ static int submit_handle_pocket(ManifestHandle handle, const Crate *crates,
     p.crates_addr   = (uint64_t)(uintptr_t)crates;
     p.crate_count   = crate_count;
     p.pier_id       = 0;
+    uint32_t ck = submit_cookie_next();
+    PocketSetCookie24(&p, ck);
 
     if (pocket_submit(&p) != 0) return -ERR_POCKET_RING_FULL;
 
     Result tmp;
-    if (!result_wait(&tmp, timeout_ms)) return -ERR_TIMEOUT;
+    if (!result_wait(&tmp, ck, timeout_ms)) return -ERR_TIMEOUT;
     if (out_result) *out_result = tmp;
     return (int)tmp.error_code;
 }

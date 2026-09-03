@@ -24,7 +24,7 @@ int kb_getchar(void)
     int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     1000, NULL);
+                     0 /* no deadline — reply guaranteed */, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     if (out[3] != HW_KB_SUCCESS) return -ERR_RESULT_INVALID;
     return (int)out[0];
@@ -50,7 +50,7 @@ int kb_getchar_ex(kb_char_t *out_char)
     int rc = MfCall1(DECK_HARDWARE, HW_KB_GETCHAR,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     1000, NULL);
+                     0 /* no deadline — reply guaranteed */, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     if (out[3] != HW_KB_SUCCESS) return -ERR_RESULT_INVALID;
 
@@ -126,7 +126,7 @@ int kb_status(kb_status_t *status)
     int rc = MfCall1(DECK_HARDWARE, HW_KB_STATUS,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     1000, NULL);
+                     0 /* no deadline — reply guaranteed */, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     status->available   = (uint32_t)out[0]
                         | ((uint32_t)out[1] << 8)

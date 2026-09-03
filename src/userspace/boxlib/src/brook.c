@@ -137,7 +137,7 @@ static int brook_sys_open(const char *tag,
                      params, sizeof(params),
                      tag, (uint32_t)(strlen(tag) + 1),
                      out, sizeof(out), 0,
-                     30000, 0);
+                     0 /* no deadline — reply guaranteed */, 0);
     if (rc != 0) return rc;
     memcpy(out_va_header,    out,      sizeof(uint64_t));
     memcpy(out_va_slots,     out + 8,  sizeof(uint64_t));
@@ -151,7 +151,7 @@ static int brook_sys_release(uint64_t va_header)
     uint8_t params[8];
     memcpy(params, &va_header, sizeof(uint64_t));
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_BROOK_RELEASE,
-                   params, sizeof(params), 0, 0, 0, 0, 0, 30000, 0);
+                   params, sizeof(params), 0, 0, 0, 0, 0, 0 /* no deadline — reply guaranteed */, 0);
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -535,4 +535,10 @@ uint32_t brook_free(const Brook *b)
     uint64_t used = tail - head;
     uint32_t cap = b->frame_count;
     return used >= cap ? 0 : (uint32_t)(cap - used);
+}
+
+bool brook_writer_ever_attached(const Brook *b)
+{
+    if (!b) return false;
+    return brook_load_acquire_u32(&b->hdr->writer_ever_attached) != 0;
 }

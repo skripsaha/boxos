@@ -94,8 +94,18 @@ bool result_available(void);
 uint32_t result_count(void);
 bool result_pop(Result* out);
 
+// Paired wait for a synchronous submit's reply. `expect_cookie` is the
+// submit's cloakroom token (Pocket.cookie24, echoed by the kernel in the
+// reply's context high bits — see boxos_kctx.h): only the Result carrying
+// this token is returned; reply-kind entries with any other token are
+// provable orphans of earlier calls and are dropped where they stand.
 // Uses UMONITOR/UMWAIT on CPUs with WAITPKG; falls back to cooperative yield.
-bool result_wait(Result* out, uint32_t timeout_ms);
+bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms);
+
+// How many reply-kind Results were dropped as proven orphans of earlier,
+// abandoned submits. Steady zero on a healthy machine; a rising count means
+// calls are being abandoned somewhere.
+uint64_t result_orphans_dropped(void);
 
 bool result_pop_non_ipc(Result* out);
 bool result_pop_ipc(Result* out);

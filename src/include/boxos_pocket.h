@@ -63,7 +63,15 @@ typedef struct __packed {
     uint32_t target_pid;      /* 0 = self, != 0 = IPC route                   */
     uint32_t error_code;      /* deck handlers write errors here              */
     uint8_t  flags;           /* POCKET_FLAG_*                                */
-    uint8_t  _reserved[3];
+    /* The submit's cloakroom token, little-endian 24-bit, never zero for a
+     * synchronous submit. The kernel stamps it into the high 24 bits of the
+     * reply Result's `context` (see boxos_kctx.h), and the waiter accepts
+     * ONLY the Result carrying its own token — a coat is handed over by
+     * token, never "the next one off the rack". Before this, pairing was
+     * implicit by ring order, and one late reply (a timed-out caller's, a
+     * fire-and-forget's) shifted every later wait onto the wrong answer
+     * while the kernel's crate commit-out scribbled a dead stack frame. */
+    uint8_t  cookie24[3];
     uint32_t manifest_size;   /* bytes at manifest_addr, or in enclosure[]    */
     uint16_t crate_count;     /* number of entries in Crate[]                 */
     uint16_t pier_id;         /* urgency lane                                 */
@@ -79,6 +87,21 @@ typedef struct __packed {
 #endif
 
 static_assert(sizeof(Pocket) == 128, "Pocket must be 128 bytes (one ring slot)");
+
+/* Read/write the 24-bit submit token (little-endian bytes). */
+static inline uint32_t PocketCookie24(const Pocket *p)
+{
+    return (uint32_t)p->cookie24[0]
+         | ((uint32_t)p->cookie24[1] << 8)
+         | ((uint32_t)p->cookie24[2] << 16);
+}
+
+static inline void PocketSetCookie24(Pocket *p, uint32_t ck)
+{
+    p->cookie24[0] = (uint8_t)(ck & 0xFFu);
+    p->cookie24[1] = (uint8_t)((ck >> 8) & 0xFFu);
+    p->cookie24[2] = (uint8_t)((ck >> 16) & 0xFFu);
+}
 static_assert(__builtin_offsetof(Pocket, enclosure) == 40,
               "Pocket envelope fields must stay 40 bytes so the enclosure fills the slot");
 
