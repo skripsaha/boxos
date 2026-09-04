@@ -1,3 +1,4 @@
+#include "box/timeouts.h"
 #include "box/touch.h"
 #include "box/core/manifest.h"
 #include "box/core/result.h"
@@ -22,7 +23,7 @@ TouchTagPair touch_intern(const char *tag)
                      NULL, 0,
                      tag, (uint32_t)(strlen(tag) + 1),
                      out, sizeof(out), NULL,
-                     30000, NULL);
+                     BOX_ANSWER_WATCHDOG_MS, NULL);
     if (rc != 0) return pair;
     pair.full = (TouchTag)out[0];
     pair.bare = (TouchTag)out[1];
@@ -54,7 +55,7 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_CLAIM,
                    params, param_size,
                    NULL, 0, NULL, 0, NULL,
-                   30000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 int touch_release(TouchTag tag)
@@ -65,7 +66,7 @@ int touch_release(TouchTag tag)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_RELEASE,
                    params, 2,
                    NULL, 0, NULL, 0, NULL,
-                   30000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
@@ -98,7 +99,7 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
     Result r;
-    return ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, 1000);
+    return ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_WATCHDOG_MS);
 }
 
 /* Diagnostic counters — bumped from touch_await consumer path. */
@@ -169,12 +170,24 @@ void touch_pop_stats(uint64_t out[8])
     touch_ring_pop_stats(out);
 }
 
+uint64_t touch_owed(void)
+{
+    TouchRing *rr = touch_ring();
+    if (!rr) return 0;
+    /* ACQUIRE pairs with the kernel's RELEASE store under owed_lock — see
+     * touch.c TouchOwedHandOver. Non-zero means the kernel accepted events
+     * for this ring that did not fit in it and is holding them in order. */
+    return __atomic_load_n(&rr->hdr.owed, __ATOMIC_ACQUIRE);
+}
+
 static inline uint64_t touch_rdtsc(void)
 {
     uint32_t lo, hi;
     __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
     return ((uint64_t)hi << 32) | lo;
 }
+
+void yield(void);  /* boxlib (yield.c) — declared here to avoid pulling sync.h */
 
 static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
 {
@@ -186,6 +199,14 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
     volatile uint64_t *tail_addr = (volatile uint64_t *)
         ((uintptr_t)rr + OFFSETOF(TouchRing, hdr.tail));
 
+    /* Absolute ceiling for the owed-hand-over loop below. The UMWAIT branch
+     * re-arms its own slice each turn and reports the deadline through
+     * umwait's wake reason, but the hand-over branch never reaches UMWAIT —
+     * without this a bounded wait would yield past its own timeout for as long
+     * as the kernel held anything. 0 == wait forever, and forever means it. */
+    uint64_t owed_deadline = timeout_ms
+                             ? touch_rdtsc() + cpu_ms_to_tsc(timeout_ms) : 0;
+
     while (1) {
         __sync_synchronize();
         if (touch_pop(out)) return true;
@@ -194,6 +215,17 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
         __sync_synchronize();
 
         if (touch_available()) continue;
+
+        /* The ring is empty and the kernel is still holding events for it: it
+         * could not fit them and left the count on this very cacheline. `tail`
+         * cannot move while that is true, so an UMWAIT here would be waiting
+         * for a knock that cannot come. Open the door instead — a yield is a
+         * syscall, and the gate hands the rest over on the way in. */
+        if (touch_owed() != 0) {
+            if (owed_deadline != 0 && touch_rdtsc() >= owed_deadline) return false;
+            yield();
+            continue;
+        }
 
         uint64_t deadline_tsc;
         if (timeout_ms == 0) {
@@ -216,7 +248,6 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
  * (it can never be scheduled while we hold the core). Pause a small budget, then
  * yield — mirrors brook_wait_cycle and result_wait_ipc_yield so the no-WAITPKG
  * path is single-core-safe, never a hard spin. */
-void yield(void);  /* boxlib (yield.c) — declared here to avoid pulling sync.h */
 #define TOUCH_SPIN_BUDGET 2048u
 
 static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
@@ -232,7 +263,13 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
         if (touch_pop(out)) return true;
 
         if (timeout_ms > 0 && touch_rdtsc() >= deadline) return false;
-        if (++spin < TOUCH_SPIN_BUDGET) {
+        /* Same door as the UMWAIT path: events the ring refused are handed
+         * over in the guide, so go there now rather than spend the whole spin
+         * budget waiting for a tail that cannot move. */
+        if (touch_owed() != 0) {
+            spin = 0;
+            yield();
+        } else if (++spin < TOUCH_SPIN_BUDGET) {
             __asm__ volatile("pause");
         } else {
             spin = 0;
@@ -478,7 +515,7 @@ int touch_irq_return(void)
 {
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_IRQ_RETURN,
                    NULL, 0, NULL, 0, NULL, 0, NULL,
-                   1000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
@@ -491,7 +528,7 @@ int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_REGISTER,
                    params, 4,
                    NULL, 0, NULL, 0, NULL,
-                   1000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 int touch_ack(TouchTag tag)
@@ -502,5 +539,5 @@ int touch_ack(TouchTag tag)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_ACK,
                    params, 2,
                    NULL, 0, NULL, 0, NULL,
-                   1000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }

@@ -328,6 +328,21 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
         }
     }
 
+    /* An answer that is OWED is an answer. The ring is not the whole story
+     * once the kernel holds events it could not fit (touch.c, Owed): those
+     * are accepted, ordered and waiting for a door, and this strand parking
+     * on an empty ring would be parking on an event it has already been
+     * promised. The wake that would free it is the hand-over at its own next
+     * syscall — which it will not make while parked. So do not park: end the
+     * await, let it come round again, and the door at the syscall gate hands
+     * the events over on the way in.
+     *
+     * Reachable whenever a hand-over on another core holds the drain token and
+     * then fails, and unconditionally in the mutation oracle that routes every
+     * delivery through the queue — which is how it was found. */
+    if (__atomic_load_n(&ctx->proc->owed_count, __ATOMIC_RELAXED) != 0)
+        process_set_state(ctx->proc, PROC_WORKING);
+
     /* Answer nothing. This used to fall through without the flag, so the guide
      * pushed the transient ERR_WOULD_BLOCK ack as a reply — into the caller's
      * ResultRing, where KResultPush's last step reads "target is PROC_WAITING"

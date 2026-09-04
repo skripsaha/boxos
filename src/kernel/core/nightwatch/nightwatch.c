@@ -12,6 +12,7 @@
 #include "scheduler.h"
 #include "kcore.h"
 #include "result_ring.h"
+#include "kring.h"
 #include "pocket_ring.h"
 #include "touch_ring.h"
 #include "clockboard.h"
@@ -39,22 +40,13 @@
  * raw scheduler tick also means this threshold is honest milliseconds and does
  * not silently change meaning if the tick rate is ever retuned.
  */
-#define NIGHTWATCH_QUIET_MS 10000u
 #define NIGHTWATCH_LOOK_MS  10000u
 
 /* Per-core idle marks. A plain byte per core rather than a bitmask: MAX_CORES
  * is 256, so no single word covers it, and a byte store needs no atomic. */
 static volatile uint8_t  g_core_idle[MAX_CORES];
 static volatile uint32_t g_idle_cores;
-static volatile uint64_t g_quiet_since_ms;   /* uptime when the LAST core went idle */
-static volatile uint8_t  g_reported;      /* one report per stall episode */
 static volatile uint8_t  g_armed;         /* init done */
-/* How many cores must be idle for the system to be idle. Snapshotted at init,
- * AFTER the APs have booted: g_amp.total_cores counts cores the firmware
- * described, and one that never answered INIT-SIPI would never mark itself
- * idle — leaving the count permanently short and Nightwatch permanently
- * silent, which is the one failure mode a detector must not have. */
-static uint32_t g_watch_cores = 1;
 static volatile uint64_t g_last_look_ms;   /* rate limit for the proof pass */
 
 /* One process, copied out from under process_lock so every check and every
@@ -75,6 +67,7 @@ typedef struct
     uintptr_t phys_addr;
     uint8_t   wait_reason;
     uint8_t   kcore_pending;
+    uint32_t  awaiting;          /* cloakroom token this strand holds out for */
     uint64_t  result_ring_phys;
     uint64_t  touch_ring_phys;
     uint64_t  pocket_ring_phys;
@@ -121,6 +114,48 @@ static bool nightwatch_any_kcore_idle(void)
     return false;
 }
 
+/* EVERY K-Core asleep — nobody in the kernel is working on anybody's submit.
+ * Deliberately distinct from any_kcore_idle above: one sleeping K-Core proves
+ * nothing while another is mid-op, and an op may be honest work of arbitrary
+ * length (proc_exec reads the image INSIDE the call — on a throttled stick
+ * that is minutes). Accusing on a clock would convict that work; asking
+ * whether anyone is working on it convicts only a machine that has stopped. */
+/* Has the machine delivered ANY answer since the last look?
+ *
+ * Every other fact this watch gathers describes one instant, and an instant is
+ * not a stall: a strand can sit on one token for ten seconds while its own
+ * process does useful work in other strands, with the pocket ring momentarily
+ * empty and the K-Cores momentarily asleep. MEASURED — cxxtest was accused
+ * forty-four times while it was passing phase after phase.
+ *
+ * Answers delivered is the one number that says the machine as a whole is
+ * moving. If it has advanced since the previous look, nothing here is stuck,
+ * whatever any single snapshot looked like. It is the difference between
+ * "this strand is waiting" (ordinary) and "this strand is waiting and nothing
+ * anywhere is being answered" (a stall). */
+static bool nightwatch_answers_advanced(void)
+{
+    static uint64_t s_last;
+    uint64_t stats[9];
+    KResultPushStats(stats);
+    uint64_t now = stats[8];              /* successful publishes since boot */
+    bool advanced = (now != s_last);
+    s_last = now;
+    return advanced;
+}
+
+static bool nightwatch_all_kcores_idle(void)
+{
+    bool any = false;
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        if (g_amp.cores[c].is_kcore)
+        {
+            if (!g_core_idle[c]) return false;
+            any = true;
+        }
+    return any;
+}
+
 static bool nightwatch_any_core_idle(void)
 {
     return __atomic_load_n(&g_idle_cores, __ATOMIC_ACQUIRE) > 0;
@@ -130,18 +165,15 @@ void nightwatch_init(void)
 {
     for (uint32_t i = 0; i < MAX_CORES; i++)
         g_core_idle[i] = 0;
-    g_idle_cores     = 0;
-    g_quiet_since_ms = 0;
-    g_reported       = 0;
+    g_idle_cores = 0;
 
     uint32_t online = 0;
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
         if (amp_core_online(&g_amp.cores[c])) online++;
-    g_watch_cores = online ? online : 1u;
 
     __atomic_store_n(&g_armed, 1, __ATOMIC_RELEASE);
-    kprintf("[NIGHTWATCH] armed — %u core(s) watched, stall described after %u ms idle\n",
-            g_watch_cores, (unsigned)NIGHTWATCH_QUIET_MS);
+    kprintf("[NIGHTWATCH] armed — %u core(s) watched; speaks only with proof\n",
+            online);
 }
 
 static const char *nightwatch_state_name(uint8_t s)
@@ -172,7 +204,7 @@ static uint64_t nightwatch_peek(uintptr_t phys)
  * nothing while holding process_lock — kprintf takes the console lock, and
  * that ordering is not one this kernel establishes anywhere else.
  */
-static void nightwatch_verdict(bool all_quiet)
+static void nightwatch_verdict(void)
 {
     /* Size the snapshot before taking the lock: allocating under process_lock
      * would nest the heap lock inside it for no reason. A few spare slots
@@ -207,14 +239,65 @@ static void nightwatch_verdict(bool all_quiet)
         e->phys_addr  = p->addr_wait_entry.phys_addr;
         e->wait_reason      = (uint8_t)p->wait_reason;
         e->kcore_pending    = __atomic_load_n(&p->kcore_pending, __ATOMIC_ACQUIRE);
+        /* What this strand says it is holding out for. The kernel cannot infer
+         * it — a strand inside result_wait is PROC_WORKING or parked, and
+         * neither says WHAT for — so the waiter publishes it into its own
+         * reply-ring header and this reads it. A guest may write anything
+         * there; it can only mislead the report about itself, which is why it
+         * is a hint that must be corroborated by facts below and never trusted
+         * on its own. Read through the direct map, so it cannot fault. */
+        e->awaiting = 0;
+        if (p->result_ring_phys)
+        {
+            const ResultRing *arr =
+                (const ResultRing *)vmm_phys_to_virt(p->result_ring_phys);
+            if (arr)
+                e->awaiting = (uint32_t)__atomic_load_n(&arr->hdr.awaiting,
+                                                        __ATOMIC_ACQUIRE);
+        }
         e->result_ring_phys = p->result_ring_phys;
         e->touch_ring_phys  = p->touch_ring_phys;
         e->pocket_ring_phys = p->pocket_ring_phys;
     }
     process_list_unlock();
 
+    /* Tokens whose silence is LAWFUL.
+     *
+     * A strand parked on process.gone is waiting for another process to die.
+     * That answer is owed by an EVENT, not by anyone working right now, and a
+     * child may legitimately run for hours — the shell waiting out a cxxtest
+     * is exactly this, and a watch that convicts it is a watch nobody will
+     * believe when it is finally right. So these tokens are collected and the
+     * oracle below steps over them.
+     *
+     * Collected AFTER the snapshot and by reference, never under
+     * process_list_lock: gone_lock is documented to nest inside nothing. If
+     * the list does not fit, the oracle stands down for this look rather than
+     * convict a strand it merely failed to look up — an oracle that guesses
+     * when incomplete is worse than one that waits for the next look. */
+    /* Sampled exactly once per look: the call advances its own baseline, so a
+     * second call in the same walk would always report "no progress". */
+    const bool answers_moving = nightwatch_answers_advanced();
+
+    uint32_t gone_tokens[NIGHTWATCH_SUSPECTS];
+    uint32_t gone_count    = 0;
+    bool     gone_complete = true;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        process_t *gp = process_find_ref(probe[i].pid);
+        if (!gp) continue;
+        spin_lock(&gp->gone_lock);
+        for (GoneWaiter *w = gp->gone_waiters; w; w = w->next)
+        {
+            if (gone_count < NIGHTWATCH_SUSPECTS) gone_tokens[gone_count++] = w->submit_cookie;
+            else                                  gone_complete = false;
+        }
+        spin_unlock(&gp->gone_lock);
+        process_ref_dec(gp);
+    }
+
     uint32_t parked = 0, lost = 0, unreachable = 0, timed = 0, undelivered = 0;
-    uint32_t unserved = 0, unsched = 0;
+    uint32_t unserved = 0, unsched = 0, owed = 0;
     NightwatchSuspect fresh[NIGHTWATCH_SUSPECTS];
     uint32_t          fresh_count = 0;
 
@@ -225,7 +308,7 @@ static void nightwatch_verdict(bool all_quiet)
     {
     bool speak = (pass == 1);
     parked = lost = unreachable = timed = undelivered = 0;
-    unserved = unsched = 0;
+    unserved = unsched = owed = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         NightwatchProbe *e = &probe[i];
@@ -294,6 +377,92 @@ static void nightwatch_verdict(bool all_quiet)
                     kprintf("  pid %u gen %u working — ‼ RUNNABLE UNSCHEDULED: "
                             "off-cpu across two looks (home=%u)\n",
                             e->pid, e->generation, e->home_core);
+            }
+        }
+
+        /* ANSWER OWED. A strand is holding out for a reply to a submit, and
+         * nobody is producing it.
+         *
+         * This is the one stall the other oracles cannot see. They look for
+         * work that was never taken; this one is about work that WAS taken and
+         * never paid for — the pocket is gone from the ring, the doorbell is
+         * quiet, and the strand waits on a token that will never be answered.
+         * Waiting is correct behaviour here, which is what makes it invisible:
+         * there is no deadline to expire and nothing left queued to notice.
+         *
+         * Judged on FACTS, never on a clock. A clock cannot work here at all:
+         * proc_exec reads its image inside the call (minutes off a throttled
+         * stick) and process.gone waits out a whole child's life (hours), and
+         * both are owed an answer that is simply not due yet. So instead:
+         *
+         *   the pocket ring is empty          — the work was taken, not queued
+         *   the doorbell is quiet             — no K-Core owes this strand a visit
+         *   EVERY K-Core is asleep            — nobody is working on it now
+         *   the token is not a lawful death-wait (above)
+         *   and all of it is still true one full look later
+         *
+         * Together those say: the machine has stopped, and this strand is what
+         * it stopped on. Any one of them alone is an ordinary busy moment. */
+        /* Deliberately NOT gated on being off-cpu. The two shapes this has to
+         * cover are opposites — a strand PARKED on a reply that never came,
+         * and one SPINNING in userspace for it — and the spinner is on a CPU
+         * by definition. Whether the waiter burns a core or sleeps says
+         * nothing about whether anyone is producing its answer, which is the
+         * only question here. (The spinner is also why this cannot be the
+         * whole story on a uniprocessor: it holds the one core, so no core
+         * goes idle and this verdict never runs. On a single core a stall of
+         * this shape still needs a person to notice it.) */
+        if (e->awaiting != 0 && gone_complete && !answers_moving &&
+            e->kcore_pending == 0 &&
+            e->state != (uint8_t)PROC_DONE && e->state != (uint8_t)PROC_CRASHED &&
+            nightwatch_all_kcores_idle())
+        {
+            bool lawful = false;
+            for (uint32_t g = 0; g < gone_count; g++)
+                if (gone_tokens[g] == e->awaiting) { lawful = true; break; }
+
+            bool pocket_empty = true;
+            if (e->pocket_ring_phys)
+            {
+                const PocketRingHeader *oh =
+                    (const PocketRingHeader *)vmm_phys_to_virt(e->pocket_ring_phys);
+                pocket_empty = (__atomic_load_n(&oh->tail, __ATOMIC_ACQUIRE) ==
+                                __atomic_load_n(&oh->head, __ATOMIC_ACQUIRE));
+            }
+
+            if (!lawful && pocket_empty)
+            {
+                bool stuck = nightwatch_was_suspect(e->pid, e->generation,
+                                                    (uint64_t)e->awaiting, 3u);
+                if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
+                {
+                    fresh[fresh_count].pid        = e->pid;
+                    fresh[fresh_count].generation = e->generation;
+                    fresh[fresh_count].mark       = (uint64_t)e->awaiting;
+                    fresh[fresh_count].kind       = 3u;
+                    fresh_count++;
+                }
+                if (stuck)
+                {
+                    owed++;
+                    /* One line per stall, not one every ten seconds for as
+                     * long as it lasts: a watch that repeats itself buries the
+                     * evidence it just produced. A different token is a
+                     * different stall and speaks again. */
+                    static uint32_t s_said_token;
+                    bool fresh_stall = (s_said_token != e->awaiting);
+                    if (speak) s_said_token = e->awaiting;
+                    if (speak && fresh_stall)
+                        kprintf("  pid %u gen %u %s — ‼ ANSWER OWED: waiting on "
+                                "submit 0x%06x across two looks; its pocket ring "
+                                "is empty, its K-Core doorbell is quiet, and every "
+                                "K-Core is asleep. The work was taken and the "
+                                "answer was never produced — no deadline can "
+                                "expire on an answer nobody is making\n",
+                                e->pid, e->generation,
+                                nightwatch_state_name(e->state),
+                                (unsigned)e->awaiting);
+                }
             }
         }
 
@@ -419,8 +588,8 @@ static void nightwatch_verdict(bool all_quiet)
     }
 
     /* Nothing proven and the box is not even stopped: say nothing at all. */
-    bool proven = (lost || unreachable || undelivered || unserved || unsched);
-    if (pass == 0 && !proven && !all_quiet)
+    bool proven = (lost || unreachable || undelivered || unserved || unsched || owed);
+    if (pass == 0 && !proven)
     {
         /* Nothing to say this look — but remember today's suspects so the
          * NEXT look can convict what stays frozen in place. */
@@ -431,7 +600,7 @@ static void nightwatch_verdict(bool all_quiet)
     }
     if (pass == 0)
         kprintf("[NIGHTWATCH] %s at uptime %lu ms — %u process(es):\n",
-                proven ? "EVIDENCE" : "every core idle",
+                "EVIDENCE",
                 (unsigned long)clockboard_uptime_ms(), n);
     }
 
@@ -448,11 +617,12 @@ static void nightwatch_verdict(bool all_quiet)
         kprintf("[NIGHTWATCH] %u process(es) appeared mid-walk and were not described\n",
                 skipped);
 
-    if (lost || unreachable || undelivered || unserved || unsched)
+    if (lost || unreachable || undelivered || unserved || unsched || owed)
         kprintf("[NIGHTWATCH] VERDICT: %u lost wake(s), %u unreachable park(s), "
                 "%u undelivered result(s), %u unserved pocket(s), "
-                "%u unscheduled runnable(s) of %u parked — a defect, not a slow test\n",
-                lost, unreachable, undelivered, unserved, unsched, parked);
+                "%u unscheduled runnable(s), %u answer(s) owed of %u parked "
+                "— a defect, not a slow test\n",
+                lost, unreachable, undelivered, unserved, unsched, owed, parked);
     else if (parked && parked == timed)
         kprintf("[NIGHTWATCH] VERDICT: %u parked, all with deadlines — will recover\n",
                 parked);
@@ -475,10 +645,7 @@ void nightwatch_core_idle(uint8_t core)
     if (!g_core_idle[core])
     {
         g_core_idle[core] = 1;
-        uint32_t now_idle = __atomic_add_fetch(&g_idle_cores, 1, __ATOMIC_ACQ_REL);
-        if (now_idle >= g_watch_cores)
-            __atomic_store_n(&g_quiet_since_ms, clockboard_uptime_ms(),
-                             __ATOMIC_RELEASE);
+        __atomic_add_fetch(&g_idle_cores, 1, __ATOMIC_ACQ_REL);
         return;   /* just went quiet — nothing to judge yet */
     }
 
@@ -487,34 +654,36 @@ void nightwatch_core_idle(uint8_t core)
      * our own. */
     uint64_t now = clockboard_uptime_ms();
 
-    /* Is the WHOLE box stopped? That still earns a description even when the
-     * proofs come up empty — "everything is asleep and I cannot say why" is
-     * itself worth printing once. */
-    bool all_quiet = false;
-    if (__atomic_load_n(&g_idle_cores, __ATOMIC_ACQUIRE) >= g_watch_cores)
-    {
-        uint64_t since = __atomic_load_n(&g_quiet_since_ms, __ATOMIC_ACQUIRE);
-        all_quiet = (since != 0) && (now - since >= NIGHTWATCH_QUIET_MS) &&
-                    !__atomic_load_n(&g_reported, __ATOMIC_ACQUIRE);
-    }
-
-    /* Otherwise this is the cheap periodic look: any idle core will do, rate
-     * limited, and silent unless it can prove something. */
-    if (!all_quiet)
-    {
-        uint64_t last = __atomic_load_n(&g_last_look_ms, __ATOMIC_ACQUIRE);
-        if (last != 0 && now - last < NIGHTWATCH_LOOK_MS) return;
-    }
+    /* There used to be a second mode here: "are ALL cores asleep?", which
+     * printed a description even with no proof to offer. It was removed
+     * because it never once fired and could not have.
+     *
+     * MEASURED: four cores, seven minutes at an idle prompt — not a line. The
+     * clock it depended on was reset by nightwatch_core_busy every time any
+     * core picked up a real process, and on this machine something always
+     * wakes: a daemon, a timer, a strand looking for work. Ten uninterrupted
+     * seconds of universal sleep never happen.
+     *
+     * And it could not have earned its keep even if it had fired, because the
+     * thing it claimed to detect is indistinguishable from health. An idle
+     * prompt IS every core asleep and every strand parked — an x-ray of this
+     * machine waiting for a keypress looks exactly like an x-ray of it wedged.
+     * What separates them is not how many cores sleep but WHAT the sleepers
+     * are waiting for, which is the question the ANSWER OWED oracle asks.
+     *
+     * So: one cheap periodic look from any idle core, and silence unless
+     * something can be proven. A watch that cannot prove anything has nothing
+     * to say, and saying it anyway is how a log teaches people to skim. */
+    uint64_t last = __atomic_load_n(&g_last_look_ms, __ATOMIC_ACQUIRE);
+    if (last != 0 && now - last < NIGHTWATCH_LOOK_MS) return;
 
     /* One core does the walk. */
-    uint64_t last = __atomic_load_n(&g_last_look_ms, __ATOMIC_RELAXED);
+    last = __atomic_load_n(&g_last_look_ms, __ATOMIC_RELAXED);
     if (!__atomic_compare_exchange_n(&g_last_look_ms, &last, now, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
-    if (all_quiet)
-        __atomic_store_n(&g_reported, 1, __ATOMIC_RELEASE);
 
-    nightwatch_verdict(all_quiet);
+    nightwatch_verdict();
 }
 
 void nightwatch_core_busy(uint8_t core)
@@ -525,8 +694,4 @@ void nightwatch_core_busy(uint8_t core)
 
     g_core_idle[core] = 0;
     __atomic_sub_fetch(&g_idle_cores, 1, __ATOMIC_ACQ_REL);
-    __atomic_store_n(&g_quiet_since_ms, 0, __ATOMIC_RELEASE);
-    /* Progress happened, so a LATER stall is a new episode and deserves its
-     * own report. */
-    __atomic_store_n(&g_reported, 0, __ATOMIC_RELEASE);
 }

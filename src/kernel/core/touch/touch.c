@@ -298,6 +298,230 @@ static void touch_wake_remote(process_t *target)
     }
 }
 
+/* ────────────────────────────────────────────────────────────────────────
+ * Owed — what a full ring refused, and did not lose.
+ *
+ * A claim is a promise. A TouchRing that has no free slot used to end the
+ * story: the publish was retried, then thrown away and counted. For an event
+ * that happens once in a strand's life — process:died above all — a throw-away
+ * is a supervisor waiting forever for something that already happened.
+ *
+ * So an event the ring refuses is HELD instead, in the order the ring would
+ * have carried it, and handed over when the ring has room. Three decisions
+ * make that safe:
+ *
+ *   WHERE IT HANGS. On the ring's owner (process_t), never on a subscription.
+ *   It is the RING that is full — one ring is one stream with one order, and a
+ *   queue per subscription would have to be found, locked and ref-counted on
+ *   every hand-over, putting the subscription lock in the publish and yield
+ *   paths. Hanging it on the ring costs a pointer chase and nothing else.
+ *
+ *   WHICH LOCK. owed_lock, and it is a LEAF: held only to link or unlink one
+ *   node and to publish the depth into the ring's slip. KTouchPush is never
+ *   called under it — that call walks VMM and spins on the Vyukov gate, and a
+ *   publisher on another core must not queue behind it for a lock whose whole
+ *   job is to move a pointer.
+ *
+ *   WHERE THE BOUND COMES FROM. The ring itself: a queue may grow to one more
+ *   ring's worth, no further. A subscriber that has fallen a whole ring behind
+ *   has consumed nothing at all for that entire window — that is not congestion
+ *   but a stopped consumer, and kernel memory is not its to grow. Below that
+ *   line nothing is lost. Above it the loss is loud and named.
+ *
+ * The hand-over happens at the door: the syscall gate (idt.c), which every
+ * entry into the kernel passes through — sync dispatch, K-Core submit, and
+ * the YIELD short-circuit that never reaches the guide at all. And because a
+ * consumer asleep in UMWAIT on the
+ * ring's `tail` would never learn it should come to that door — a full ring's
+ * tail does not move — the depth is mirrored into TouchRingHeader.owed, which
+ * shares that cacheline. Writing the slip wakes the sleeper.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+typedef struct TouchOwed {
+    struct TouchOwed *next;
+    uint16_t tag_id;
+    uint16_t flags;
+    uint32_t source_pid;
+    uint32_t plen;
+    uint8_t  payload[BOXOS_TOUCH_PAYLOAD_MAX];
+} TouchOwed;
+
+static TouchRing *touch_owed_ring(process_t *proc)
+{
+    if (!proc || !proc->touch_ring_phys) return NULL;
+    return (TouchRing *)vmm_phys_to_virt(proc->touch_ring_phys);
+}
+
+/* The bound: this strand's own ring capacity (64 for a Hammock-carved strand,
+ * TOUCH_RING_SLOT_MAX for a cabin's main ring). Taken from the ring, never
+ * invented. */
+static uint32_t touch_owed_bound(process_t *proc)
+{
+    TouchRing *rr = touch_owed_ring(proc);
+    return rr ? rr->hdr.slot_count_max : 0u;
+}
+
+/* Publish the depth into the ring header's slip. Called only with owed_lock
+ * held: two writers racing here could leave 0 behind while an event is still
+ * owed, and a consumer reading that 0 would go back to sleep on a tail that
+ * cannot move. */
+static void touch_owed_slip_locked(process_t *proc, uint32_t depth)
+{
+    TouchRing *rr = touch_owed_ring(proc);
+    if (rr) __atomic_store_n(&rr->hdr.owed, (uint64_t)depth, __ATOMIC_RELEASE);
+}
+
+/* Take the event onto the queue's tail. Returns false only past the bound (or
+ * with no ring / no memory) — the one case that is a real loss. */
+static bool touch_owed_append(process_t *proc, TouchTag tag_id, uint16_t flags,
+                              uint32_t source_pid, const void *kpayload,
+                              uint32_t plen)
+{
+    uint32_t bound = touch_owed_bound(proc);
+    if (bound == 0) return false;
+    if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) >= bound)
+        return false;
+
+    if (plen > BOXOS_TOUCH_PAYLOAD_MAX) plen = BOXOS_TOUCH_PAYLOAD_MAX;
+
+    TouchOwed *n = (TouchOwed *)kmalloc(sizeof(TouchOwed));
+    if (!n) return false;
+    n->next       = NULL;
+    n->tag_id     = tag_id;
+    n->flags      = flags;
+    n->source_pid = source_pid;
+    n->plen       = plen;
+    if (plen > 0 && kpayload) memcpy(n->payload, kpayload, plen);
+
+    bool taken = false;
+    spin_lock(&proc->owed_lock);
+    uint32_t depth = __atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED);
+    if (depth < bound) {
+        if (proc->owed_tail) proc->owed_tail->next = n;
+        else                 proc->owed_head       = n;
+        proc->owed_tail = n;
+        depth++;
+        __atomic_store_n(&proc->owed_count, depth, __ATOMIC_RELEASE);
+        touch_owed_slip_locked(proc, depth);
+        taken = true;
+    }
+    spin_unlock(&proc->owed_lock);
+
+    if (!taken) { kfree(n); return false; }
+
+    /* Wake exactly as a successful push would (KTouchPush step 9). An event
+     * has been ACCEPTED for this strand; that it is in the queue rather than
+     * in the ring is the kernel's business, not the sleeper's. Without this a
+     * strand parked in touch_await with an empty ring — reachable when a
+     * drainer on another core holds the token and its own push then fails —
+     * would sleep on a tail no one is going to move. It wakes, finds nothing
+     * in the ring, sees the slip, and comes to the door.
+     *
+     * A consumer in userspace UMWAIT needs no IPI at all: the slip store above
+     * writes the very cacheline its UMONITOR is armed on. */
+    if (process_get_state(proc) == PROC_WAITING)
+        process_set_state(proc, PROC_WORKING);
+    touch_wake_remote(proc);
+    return true;
+}
+
+void TouchOwedHandOver(process_t *proc)
+{
+    if (!proc) return;
+    if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) == 0) return;
+
+    /* One hand-over at a time. Order is the whole value of the queue, and two
+     * drainers popping concurrently would interleave it. A caller that loses
+     * the token does not wait for it: its own event goes behind the drainer's
+     * on the tail, which is the same order either way. */
+    uint32_t expected = 0;
+    if (!__atomic_compare_exchange_n(&proc->owed_draining, &expected, 1u,
+                                     false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return;
+
+    for (;;) {
+        spin_lock(&proc->owed_lock);
+        TouchOwed *n = proc->owed_head;
+        if (n) {
+            proc->owed_head = n->next;
+            if (!proc->owed_head) proc->owed_tail = NULL;
+            n->next = NULL;
+        }
+        spin_unlock(&proc->owed_lock);
+        if (!n) break;
+
+        /* owed_count is NOT decremented here. It counts what is still owed —
+         * the queue plus the one node in this drainer's hand — so a publisher
+         * reading it can never see 0 while an event is still undelivered and
+         * jump the queue into the ring. */
+        if (!KTouchPush(proc, n->tag_id, n->flags, n->source_pid,
+                        n->plen ? n->payload : NULL, n->plen)) {
+            /* Still no room. Back to the head it goes, exactly where it was. */
+            spin_lock(&proc->owed_lock);
+            n->next = proc->owed_head;
+            proc->owed_head = n;
+            if (!proc->owed_tail) proc->owed_tail = n;
+            spin_unlock(&proc->owed_lock);
+            break;
+        }
+
+        kfree(n);
+        spin_lock(&proc->owed_lock);
+        uint32_t left = __atomic_sub_fetch(&proc->owed_count, 1, __ATOMIC_ACQ_REL);
+        touch_owed_slip_locked(proc, left);
+        spin_unlock(&proc->owed_lock);
+
+        __atomic_add_fetch(&g_touch_delivered, 1, __ATOMIC_RELAXED);
+    }
+
+    __atomic_store_n(&proc->owed_draining, 0u, __ATOMIC_RELEASE);
+}
+
+void TouchOwedRelease(process_t *proc)
+{
+    if (!proc) return;
+
+    spin_lock(&proc->owed_lock);
+    TouchOwed *n = proc->owed_head;
+    proc->owed_head  = NULL;
+    proc->owed_tail  = NULL;
+    __atomic_store_n(&proc->owed_count, 0u, __ATOMIC_RELEASE);
+    touch_owed_slip_locked(proc, 0u);
+    spin_unlock(&proc->owed_lock);
+
+    while (n) {
+        TouchOwed *next = n->next;
+        kfree(n);
+        n = next;
+    }
+}
+
+/* The ring refused and the queue is past its bound: this event is GONE.
+ *
+ * A counter nobody reads is not diagnostics. A dropped event can strand a
+ * subscriber forever — process:died most of all, since a supervisor blocking
+ * on it has nothing else to wake it — so the drop says so, names the victim,
+ * and does it once per burst rather than once per event so a saturated ring
+ * cannot drown the console it is trying to warn. */
+static void touch_drop_announce(process_t *target, TouchTag tag_id)
+{
+    uint64_t fails = __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
+    uint64_t now_ms = clockboard_uptime_ms();
+    uint64_t last   = __atomic_load_n(&g_touch_drop_announced_ms, __ATOMIC_RELAXED);
+    if (now_ms - last >= TOUCH_DROP_ANNOUNCE_MS &&
+        __atomic_compare_exchange_n(&g_touch_drop_announced_ms, &last, now_ms,
+                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
+        kprintf("[TOUCH] ERROR: dropped a publish to pid %u (tag %u) — ring full "
+                "AND its owed queue is a full ring behind (%u held); %lu dropped "
+                "since boot. That subscriber has consumed nothing for a whole "
+                "ring's worth of events; one blocked on this event will not be "
+                "woken by it\n",
+                target->pid, (unsigned)tag_id,
+                (unsigned)__atomic_load_n(&target->owed_count, __ATOMIC_RELAXED),
+                (unsigned long)fails);
+    }
+}
+
 void TouchRestDeliver(process_t *target, TouchTag tag_id,
                       const void *kpayload, uint32_t plen,
                       uint32_t source_pid, uint16_t flags)
@@ -309,46 +533,58 @@ void TouchRestDeliver(process_t *target, TouchTag tag_id,
      * round (consumer must read before releasing seq, see
      * touch_ring.h). This closes the buf_heap_next physical-RAM leak
      * the multiplexed-ResultRing design suffered from. */
+    if (!target) return;
 
-    /* Bounded retry on ring contention. The retries cover the brief
-     * window where the consumer is mid-pop on the slot we landed on;
-     * past the budget we drop and increment the failure counter (the
-     * old behaviour preserved 84%→100% delivery on 16-core stress;
-     * see project memory `touch_stress_complete_2026_05_05`). */
-    enum { TOUCH_PUSH_RETRIES = 64 };
-    for (int attempt = 0; attempt < TOUCH_PUSH_RETRIES; attempt++) {
-        if (KTouchPush(target, tag_id, flags, source_pid, kpayload, plen)) {
-            __atomic_add_fetch(&g_touch_delivered, 1, __ATOMIC_RELAXED);
-            touch_wake_remote(target);
-            return;
-        }
-        for (int p = 0; p < 32; p++) cpu_pause();
-        if (target->destroying) {
-            /* Target is dying — its ring is nobody's business any more. Counted,
-             * not announced: this drop harms no one. */
-            __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
+    /* A dying strand's ring is nobody's business any more, and a promise made
+     * to a strand that is already gone is not a promise — TouchCleanupProcess
+     * is on its way to free the queue this would join. Counted, not announced:
+     * this drop harms no one. Checked once, here, because the retry loop that
+     * used to re-check it every turn is gone. */
+    if (__atomic_load_n(&target->destroying, __ATOMIC_ACQUIRE)) {
+        __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
+        return;
+    }
+
+    /* Anything already owed to this ring comes first: the queue IS the ring's
+     * order, and an event that went round it into a slot the queue was waiting
+     * for would arrive before events accepted earlier. Settle the debt, and if
+     * it does not settle, join its tail. */
+    if (__atomic_load_n(&target->owed_count, __ATOMIC_RELAXED) != 0) {
+        TouchOwedHandOver(target);
+        if (__atomic_load_n(&target->owed_count, __ATOMIC_RELAXED) != 0) {
+            if (!touch_owed_append(target, tag_id, flags, source_pid,
+                                   kpayload, plen))
+                touch_drop_announce(target, tag_id);
             return;
         }
     }
-    /* Out of retries: this event is GONE.
+
+    /* One honest attempt, and no retry.
      *
-     * A counter nobody reads is not diagnostics. A dropped event can strand a
-     * subscriber forever — process:died most of all, since a supervisor
-     * blocking on it has nothing else to wake it — so the drop says so, names
-     * the victim, and does it once per burst rather than once per event so a
-     * saturated ring cannot drown the console it is trying to warn. */
-    uint64_t fails = __atomic_add_fetch(&g_touch_push_fail, 1, __ATOMIC_RELAXED);
-    uint64_t now_ms = clockboard_uptime_ms();
-    uint64_t last   = __atomic_load_n(&g_touch_drop_announced_ms, __ATOMIC_RELAXED);
-    if (now_ms - last >= TOUCH_DROP_ANNOUNCE_MS &&
-        __atomic_compare_exchange_n(&g_touch_drop_announced_ms, &last, now_ms,
-                                    false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED)) {
-        kprintf("[TOUCH] ERROR: dropped a publish to pid %u (tag %u) — ring full past "
-                "%d retries; %lu dropped since boot. A subscriber blocked on this "
-                "event will not be woken by it\n",
-                target->pid, (unsigned)tag_id, TOUCH_PUSH_RETRIES,
-                (unsigned long)fails);
+     * There used to be 64 of them, 32 PAUSEs apart, because a full ring used
+     * to be answered by a guess and the only way to get a real answer was to
+     * ask again. It is answered truthfully now, at once (touch_ring.c): the
+     * claim is taken only when the ring provably has room, so "no" means no.
+     *
+     * Retrying would be worse than useless. The only thing that can make room
+     * is the consumer, and the consumer makes room by running — while this
+     * K-Core spins with the event still in its hand, having not yet written
+     * the slip that is what tells the consumer to come to the door at all. The
+     * old loop spent 2048 PAUSEs delaying the very mechanism that resolves the
+     * situation it was waiting on. What the ring refuses is owed instead, and
+     * the slip goes out immediately. */
+    if (KTouchPush(target, tag_id, flags, source_pid, kpayload, plen)) {
+        __atomic_add_fetch(&g_touch_delivered, 1, __ATOMIC_RELAXED);
+        touch_wake_remote(target);
+        return;
     }
+
+    /* A claim is a promise: hold the event for this ring and hand it over at
+     * the strand's next syscall. */
+    if (touch_owed_append(target, tag_id, flags, source_pid, kpayload, plen))
+        return;
+
+    touch_drop_announce(target, tag_id);
     touch_wake_remote(target);
 }
 
@@ -1223,6 +1459,13 @@ void TouchCleanupProcess(process_t *proc, int32_t exit_code)
     }
     if (unlinked > 0)
         __atomic_sub_fetch(&g_total_subs, unlinked, __ATOMIC_RELEASE);
+
+    /* Release anything still owed to this strand's ring. Its consumer is gone,
+     * so the promise has no one left to keep it for; the slip goes to 0 with
+     * it. A publisher that appends after this point (it may still hold a proc
+     * ref) leaves a node behind — TouchOwedRelease runs once more in the final
+     * teardown, where no reference can exist. */
+    TouchOwedRelease(proc);
 
     /* Drain pending INTERRUPT-mode queue (per-strand). */
     spin_lock(&proc->irq_lock);

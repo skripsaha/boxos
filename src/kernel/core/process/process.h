@@ -34,6 +34,10 @@
 
 struct process_t;
 
+/* One Touch event the kernel accepted for a strand's ring but could not fit
+ * in it. Defined in touch.c — nothing outside Touch takes it apart. */
+struct TouchOwed;
+
 /* One strand waiting for a named incarnation to be gone (SysProcessGone).
  * Allocated by the waiter, owned by the awaited process's gone list, freed by
  * whoever delivers the answer — the death that drains the list, or the waiter
@@ -202,6 +206,28 @@ typedef struct process_t
      * owns its own Touch subscriptions (keyed by sub->proc), so the guard
      * and the teardown are per-strand. */
     uint8_t           touch_cleaned;
+
+    /* Owed — Touch events accepted for THIS strand's ring that did not fit in
+     * it. A claim is a promise, so what the ring refuses is held here in the
+     * order the ring would have carried it, and handed over at the next door
+     * the strand comes to (the syscall gate, idt.c).
+     *
+     * The queue hangs on the RING's owner, never on a subscription: it is the
+     * ring that is full, and one ring is one stream with one order. Its depth
+     * is mirrored into the ring header's `owed` slip so a consumer asleep on
+     * that cacheline learns the kernel is still holding its events.
+     *
+     * owed_lock is a LEAF lock: held only to link/unlink one node and publish
+     * the count. KTouchPush is NEVER called under it — the drainer takes a node
+     * off the queue, drops the lock, pushes, and re-links at the head on
+     * refusal. owed_count is the queue length PLUS the at-most-one node a
+     * drainer holds in flight, so it never reads 0 while an event is still
+     * owed. owed_draining is the single-drainer token. See touch.c. */
+    struct TouchOwed *owed_head;
+    struct TouchOwed *owed_tail;
+    spinlock_t        owed_lock;
+    volatile uint32_t owed_count;
+    volatile uint32_t owed_draining;
 
     /* Phase 2K+ — CET shadow stack per-process state. */
     uintptr_t         user_ssp_phys;

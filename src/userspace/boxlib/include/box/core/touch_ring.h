@@ -43,11 +43,19 @@ typedef struct PACKED {
 
     /* Cacheline 1 — producer cursor (kernel MPSC). */
     volatile uint64_t tail;
-    uint8_t           _pad_line1[56];
+    /* Kernel-held events for this ring: accepted, promised, not yet fitted.
+     * Kernel writes, we only read. It shares this cacheline with `tail` on
+     * purpose — UMONITOR watches the line, so the kernel writing the slip
+     * wakes a consumer that is asleep on a tail which cannot move. Non-zero
+     * means: your ring is not the whole story, come to the door. */
+    volatile uint64_t owed;
+    uint8_t           _pad_line1[48];
 } TouchRingHeader;
 
 STATIC_ASSERT(sizeof(TouchRingHeader) == 128,
               "TouchRingHeader must be 128 bytes (two cachelines)");
+STATIC_ASSERT(OFFSETOF(TouchRingHeader, owed) == 72,
+              "TouchRingHeader.owed must share cacheline 1 with tail");
 
 /* Per-slot envelope — metadata + inline payload + Vyukov gate.
  *

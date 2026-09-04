@@ -11,6 +11,8 @@
 #include "box/core/manifest.h"   /* MfCall1 — raw kill-other for the killed case */
 #include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_PROC_KILL */
 #include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
+#include "box/strand.h"          /* strand_spawn — TT22 needs a 64-slot ring */
+#include "box/sync.h"            /* yield */
 #include "proc_exit.h"           /* PROC_EXIT_KILLED — shared exit disposition */
 
 #define TAG_PING    "test:ping"
@@ -1050,6 +1052,114 @@ static void test21(void)
 }
 
 /* ---------- main ---------- */
+
+/* ---------- T22: a claim is a promise — a full ring loses nothing ----------
+ *
+ * The main strand's TouchRing is 8192 slots and never fills in practice; a
+ * SPAWNED strand's is 64, carved out of its Hammock slot and not growable. That
+ * is where a publish used to be thrown away after its retries, and a thrown-away
+ * event can strand its subscriber forever.
+ *
+ * So: spawn a strand, have it claim a tag and then stay away from its ring while
+ * this strand publishes more events than the ring can hold. Release it and read.
+ * Every event must arrive, and in the order it was sent — what did not fit was
+ * owed, not dropped, and the queue is FIFO. Before the Owed queue this test
+ * received 64-odd of 96 and the kernel printed "[TOUCH] ERROR: dropped a
+ * publish"; the tail of the sequence simply did not exist.
+ *
+ * It also exercises the hand-over door end to end: the strand drains its ring,
+ * finds it empty with the header's `owed` slip non-zero, and yields — and a
+ * yield is a syscall, which is the gate at which the kernel hands the rest
+ * over. */
+#define OWED_TAG     "test:owed"
+#define OWED_EVENTS  96u    /* 64 the ring can hold + 32 that can only be owed */
+
+static TouchTagPair    g_owed_pair;
+static volatile uint32_t g_owed_claimed;    /* strand → main: tag claimed      */
+static volatile uint32_t g_owed_release;    /* main → strand: publishing done  */
+static volatile uint32_t g_owed_got;        /* strand: events received         */
+static volatile uint32_t g_owed_disorder;   /* strand: out-of-sequence arrivals */
+static volatile uint32_t g_owed_done;       /* strand → main: finished reading */
+
+static void owed_strand(void *arg)
+{
+    (void)arg;
+    if (touch_claim(g_owed_pair.full, TOUCH_REST, 0, 0) != 0) {
+        __atomic_store_n(&g_owed_done, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_owed_claimed, 1, __ATOMIC_RELEASE);
+
+    /* Stay off the ring while the publisher runs — filling it is the point.
+     * yield() rather than a hard spin: it gives the core back on a uniprocessor
+     * and it is also the door, so the kernel gets its chance to hand over and
+     * (correctly) cannot, because the ring is full. */
+    while (__atomic_load_n(&g_owed_release, __ATOMIC_ACQUIRE) == 0)
+        yield();
+
+    /* Read with touch_wait, not touch_wait_tag: this strand's ring carries only
+     * our tag, so nothing needs filtering, and touch_wait is the path that ends
+     * in UMWAIT on the ring header — which is exactly the path the slip has to
+     * rescue. (touch_wait_tag with a deadline returns at once on a stash-less
+     * strand, by its own documented degrade, and would never reach the wait.)
+     * The slice keeps every turn bounded; the deadline bounds the whole read. */
+    uint32_t expect = 0;
+    uint64_t deadline = uptime_ms() + 15000;
+    for (;;) {
+        Touch t;
+        if (!touch_wait(&t, 500)) {
+            if (uptime_ms() >= deadline) break;
+            continue;
+        }
+        if (t.tag_id != g_owed_pair.full) continue;
+        uint32_t seq = 0;
+        if (t.payload_len >= sizeof(uint32_t))
+            memcpy(&seq, t.payload, sizeof(uint32_t));
+        if (seq != expect) __atomic_add_fetch(&g_owed_disorder, 1, __ATOMIC_RELAXED);
+        expect++;
+        if (__atomic_add_fetch(&g_owed_got, 1, __ATOMIC_ACQ_REL) >= OWED_EVENTS)
+            break;
+    }
+    __atomic_store_n(&g_owed_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test22(void)
+{
+    g_owed_claimed = g_owed_release = g_owed_got = g_owed_disorder = g_owed_done = 0;
+    g_owed_pair = touch_intern(OWED_TAG);
+    if (g_owed_pair.full == TOUCH_TAG_INVALID) { fail(22, "tag intern failed"); return; }
+
+    if (strand_spawn(owed_strand, NULL) == 0) { fail(22, "strand_spawn failed"); return; }
+
+    uint64_t t0 = uptime_ms();
+    while (__atomic_load_n(&g_owed_claimed, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 5000) { fail(22, "strand never claimed the tag"); return; }
+        yield();
+    }
+
+    uint32_t sent = 0;
+    for (uint32_t i = 0; i < OWED_EVENTS; i++) {
+        if (touch_send(g_owed_pair, &i, sizeof(i), 0) != 0) break;
+        sent++;
+    }
+    __atomic_store_n(&g_owed_release, 1, __ATOMIC_RELEASE);
+
+    if (sent != OWED_EVENTS) { fail(22, "publisher could not send the burst"); return; }
+
+    t0 = uptime_ms();
+    while (__atomic_load_n(&g_owed_done, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 20000) break;
+        yield();
+    }
+
+    uint32_t got = __atomic_load_n(&g_owed_got,      __ATOMIC_ACQUIRE);
+    uint32_t dis = __atomic_load_n(&g_owed_disorder, __ATOMIC_ACQUIRE);
+    kdbg_print("[TT 22] ring=64 sent=%u received=%u out-of-order=%u",
+               (unsigned)OWED_EVENTS, (unsigned)got, (unsigned)dis);
+    if (got == OWED_EVENTS && dis == 0) pass(22);
+    else                                fail(22, "a full ring lost or reordered events");
+}
+
 int main(void)
 {
     CabinInfo *ci = cabin_info();
@@ -1118,6 +1228,7 @@ int main(void)
     test19();
     test20();
     test21();
+    test22();
 
     kdbg_print("[TT SUMMARY] %d/%d passed", g_passed, g_total);
     return 0;

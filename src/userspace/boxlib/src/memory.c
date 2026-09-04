@@ -3,6 +3,7 @@
 #undef malloc
 #endif
 
+#include "box/timeouts.h"
 #include "box/memory.h"
 #include "box/sync.h"
 #include "box/string.h"
@@ -154,7 +155,7 @@ static int prefault_huge_locked(uintptr_t va_base, uint64_t size_2m_aligned) {
     return MfCall1(DECK_SYSTEM, HEAP_OP_PREFAULT,
                    params, sizeof(params),
                    NULL, 0, NULL, 0, NULL,
-                   30000, NULL);
+                   BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 // Core allocation logic. tag_id must already be resolved.
@@ -412,7 +413,7 @@ static void strand_pool_bind_kernel(StrandPool *pool, uint32_t gen) {
     (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_POOL_BIND,
                   params, sizeof(params),
                   NULL, 0, NULL, 0, NULL,
-                  30000, NULL);
+                  BOX_ANSWER_WATCHDOG_MS, NULL);
 }
 
 /* Reclaim every ORPHANED slab slot: flush its cached blocks back to the global
