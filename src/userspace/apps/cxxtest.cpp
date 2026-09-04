@@ -34949,11 +34949,46 @@ static void p139_print_worker(void *)
     strand_exit();
 }
 
+/* The cost of one syscall, as the median of five 20 ms windows.
+ *
+ * A window is timed rather than counted because steady_clock falls back from
+ * the TSC to clock_uptime_us when the TSC is uncalibrated (the 16-core
+ * configs), where a fixed 20 syscalls measure as exactly zero and silently
+ * turn every bound built on them into "< 0".
+ *
+ * Five windows because one is a single sample of a quantity that varies
+ * TENFOLD on an oversubscribed TCG host — 17, 23, 49, 70, 198, 317 us have all
+ * been measured for the same work — and the median throws away the fast and
+ * the slow outlier alike. */
+static std::chrono::nanoseconds p139_calibrate_syscall(unsigned *out_calls)
+{
+    using namespace std::chrono;
+    volatile uint64_t nobody = 0;
+    unsigned          calls  = 0;
+    nanoseconds       window[5];
+    for (auto &w : window) {
+        unsigned       n = 0;
+        box::stopwatch sw;
+        while (sw.elapsed() < milliseconds(20) && n < 200000u) {
+            addr_wake(&nobody, 1);
+            ++n;
+        }
+        w = n ? sw.elapsed() / n : nanoseconds(0);
+        calls += n;
+    }
+    for (int i = 1; i < 5; i++)                  // insertion sort, five items
+        for (int j = i; j > 0 && window[j] < window[j - 1]; j--) {
+            nanoseconds t = window[j]; window[j] = window[j - 1]; window[j - 1] = t;
+        }
+    if (out_calls) *out_calls = calls;
+    return window[2];
+}
+
 void Phase139()
 {
     using namespace std::chrono;
 
-    nanoseconds   p139_syscall{0};   // measured in (A), reused by (C)
+    nanoseconds   p139_syscall{0};   // re-measured next to (C), see there
     system_info_t si139{};
     unsigned p139_cores = (sysinfo(&si139) == 0) ? si139.cpu_app_cores : 0u;
     const bool many_cores = p139_cores >= 2;
@@ -34972,14 +35007,8 @@ void Phase139()
         // measured as exactly zero -- silently turning both bounds below into
         // "< 0" and reddening a healthy tree. Keep issuing syscalls until 20 ms
         // of wall time has accumulated, then divide by the count actually made.
-        volatile uint64_t nobody = 0;
-        unsigned          calls  = 0;
-        box::stopwatch    sw_sys;
-        while (sw_sys.elapsed() < milliseconds(20) && calls < 200000u) {
-            addr_wake(&nobody, 1);
-            ++calls;
-        }
-        nanoseconds per_syscall = calls ? sw_sys.elapsed() / calls : nanoseconds(0);
+        unsigned    calls       = 0;
+        nanoseconds per_syscall = p139_calibrate_syscall(&calls);
         p139_syscall = per_syscall;
 
         box::stopwatch sw_lock;
@@ -35060,6 +35089,18 @@ void Phase139()
             return;
         }
         g_p139_remaining = (uint64_t)spawned;
+
+        /* Re-calibrate HERE, immediately before the measurement it bounds.
+         * The allowance below is a ratio against this number, and the number
+         * describes the host — a host whose speed swings by an order of
+         * magnitude under emulation. Taking it back in (A), with a whole
+         * phase's work in between, compared two measurements of two different
+         * machines: MEASURED, a run calibrated at 23 us then produced a
+         * contended time of 160 ms against a 92 ms allowance and failed a
+         * green tree. Measured side by side, both numbers move together and
+         * the ratio means what it claims to. */
+        p139_syscall = p139_calibrate_syscall(nullptr);
+
         box::stopwatch sw_c;
         g_p139_go.store(true, std::memory_order_release);
         g_p139_go.notify_all();
@@ -35077,7 +35118,32 @@ void Phase139()
         // one would only add flake risk to a defect that announces itself by
         // hanging. The unit comes from check (2)'s calibration, so a slow TCG
         // host scales both sides together.
-        Check(contended < p139_syscall * (spawned * kP139Incs / 2),
+        // SIZED FROM MEASUREMENT, not from a round number. Once the yardstick
+        // was calibrated next to this measurement it became steady (17.6 us
+        // +/-1% across runs) — and that promptly exposed what the old noise had
+        // been hiding: the CONTENDED time is the quantity that swings, 24, 40
+        // and 120 ms on three consecutive runs of the same binary, because four
+        // strands contending on one mutex is scheduler weather. Half the
+        // acquisitions' worth of syscalls came to 70 ms, so a healthy run lost
+        // the matrix.
+        //
+        // The bound has to clear healthy weather and still catch the defect it
+        // exists for. Healthy tops out near 176 ms in everything recorded;
+        // the regression it guards (deleting the contender's re-test) does not
+        // slow this block, it hangs it — 20+ minutes against seconds. Between
+        // those lies three orders of magnitude, so eight times the full
+        // acquisition count sits about 6x above the worst healthy run and
+        // ~1000x below the failure, which is exactly the loose bound the
+        // paragraph above always claimed to be.
+        //
+        // Both numbers are printed either way: a check whose verdict depends on
+        // host weather must show its work, or the next flake costs another
+        // afternoon.
+        printf("[CXX] note phase139: syscall=%lu ns  contended=%lu ns  bound=%lu ns\n",
+               (unsigned long)p139_syscall.count(),
+               (unsigned long)contended.count(),
+               (unsigned long)(p139_syscall * (spawned * kP139Incs * 8)).count());
+        Check(contended < p139_syscall * (spawned * kP139Incs * 8),
               "phase139 (12) short critical sections mostly avoid the kernel");
         Check(g_p139_counter == (long)spawned * kP139Incs,
               "phase139 (13) every increment under the mutex landed (no lost update)");
