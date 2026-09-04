@@ -66,16 +66,17 @@ typedef struct __packed {
     /* What this strand is waiting for, written by the WAITER.
      *
      * A strand inside result_wait is, from the kernel's side, indistinguishable
-     * from a strand doing useful work: it is PROC_WORKING and its core is busy.
-     * That is why a machine could stand still for an hour with Nightwatch armed
-     * and silent — the watch looks for idle cores, and a strand spinning on an
-     * answer that will never come is not idle. It is the one thing the kernel
-     * cannot infer and the waiter alone knows, so the waiter says it: the
-     * cloakroom token it is holding out for, zero when it holds out for none.
+     * from a strand doing useful work — parked or spinning, neither state says
+     * WHAT for. That is why a machine could stand still for an hour with
+     * Nightwatch armed and silent. It is the one thing the kernel cannot infer
+     * and the waiter alone knows, so the waiter says it: the cloakroom token it
+     * is holding out for, zero when it holds out for none.
      *
-     * The kernel only reads it (nightwatch.c), never writes it, and treats it
-     * as a HINT — a guest may write anything here and can only mislead the
-     * report about itself. It costs the waiter two stores per submit. */
+     * The kernel only reads it (nightwatch.c, in the verdict's walk over every
+     * process — parked ones included), never writes it, and treats it as a
+     * HINT: a guest may write anything here and can only mislead the report
+     * about itself, which is why the verdict convicts on facts and never on
+     * this token alone. It costs the waiter two stores per submit. */
     volatile uint64_t awaiting;
     uint8_t           _pad_line1[48];   /* fill cacheline 1                */
 } ResultRingHeader;

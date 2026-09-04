@@ -92,6 +92,45 @@ typedef struct
 static NightwatchSuspect g_suspects[NIGHTWATCH_SUSPECTS];
 static uint32_t          g_suspect_count;
 
+/* Stalls already announced.
+ *
+ * Keyed by the STALL, not by a single token: one shared "last token said"
+ * variable is wrong the moment two strands are owed at once, because each
+ * overwrites the other's and both then speak on every look — the very
+ * repetition the suppression exists to stop.
+ *
+ * Written only from the verdict, which one core at a time enters through the
+ * CAS on g_last_look_ms. The accesses are still spelled out atomically rather
+ * than left as plain loads and stores: the writer is serialised but it is not
+ * always the SAME core, and state handed between cores must say so in the
+ * code, not rely on the reader knowing that x86 stores happen to be visible.
+ * A small ring — a machine with more than this many distinct stalls at once
+ * has one story, not eight, and the oldest entry is the one worth losing. */
+#define NIGHTWATCH_SAID 8u
+static volatile uint32_t g_said_pid[NIGHTWATCH_SAID];
+static volatile uint32_t g_said_gen[NIGHTWATCH_SAID];
+static volatile uint32_t g_said_token[NIGHTWATCH_SAID];
+static volatile uint32_t g_said_next;
+
+static bool nightwatch_already_said(uint32_t pid, uint32_t gen, uint32_t token)
+{
+    for (uint32_t i = 0; i < NIGHTWATCH_SAID; i++)
+        if (__atomic_load_n(&g_said_token[i], __ATOMIC_RELAXED) == token &&
+            __atomic_load_n(&g_said_pid[i],   __ATOMIC_RELAXED) == pid   &&
+            __atomic_load_n(&g_said_gen[i],   __ATOMIC_RELAXED) == gen)
+            return true;
+    return false;
+}
+
+static void nightwatch_mark_said(uint32_t pid, uint32_t gen, uint32_t token)
+{
+    uint32_t i = __atomic_load_n(&g_said_next, __ATOMIC_RELAXED) % NIGHTWATCH_SAID;
+    __atomic_store_n(&g_said_pid[i],   pid,   __ATOMIC_RELAXED);
+    __atomic_store_n(&g_said_gen[i],   gen,   __ATOMIC_RELAXED);
+    __atomic_store_n(&g_said_token[i], token, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_said_next,     i + 1u, __ATOMIC_RELEASE);
+}
+
 static bool nightwatch_was_suspect(uint32_t pid, uint32_t gen,
                                    uint64_t mark, uint8_t kind)
 {
@@ -135,12 +174,15 @@ static bool nightwatch_any_kcore_idle(void)
  * anywhere is being answered" (a stall). */
 static bool nightwatch_answers_advanced(void)
 {
-    static uint64_t s_last;
+    /* Serialised by the same CAS gate as the rest of the verdict, and spelled
+     * atomically for the same reason: the single writer is not always the same
+     * core. */
+    static volatile uint64_t s_last;
     uint64_t stats[9];
     KResultPushStats(stats);
-    uint64_t now = stats[8];              /* successful publishes since boot */
-    bool advanced = (now != s_last);
-    s_last = now;
+    uint64_t now  = stats[8];             /* successful publishes since boot */
+    bool advanced = (now != __atomic_load_n(&s_last, __ATOMIC_RELAXED));
+    __atomic_store_n(&s_last, now, __ATOMIC_RELEASE);
     return advanced;
 }
 
@@ -274,7 +316,20 @@ static void nightwatch_verdict(void)
      * process_list_lock: gone_lock is documented to nest inside nothing. If
      * the list does not fit, the oracle stands down for this look rather than
      * convict a strand it merely failed to look up — an oracle that guesses
-     * when incomplete is worse than one that waits for the next look. */
+     * when incomplete is worse than one that waits for the next look.
+     *
+     * ‼ KNOWN LIMIT, named rather than left to be rediscovered: process.gone
+     * is the only lawful open-ended wait the kernel can currently RECOGNISE.
+     * Storage reads, addr_park and touch_await also promise their answer for
+     * later (the handlers that set async_owns_crates), and nothing records
+     * that promise anywhere this walk can see it. Such a wait, if it were ever
+     * both open-ended and alone on a sleeping machine, would be accused
+     * wrongly. It has not happened — a full matrix and seven minutes at an
+     * idle prompt both give owed=0, because storage waits run under load where
+     * the progress witness sees answers flowing, and touch_await is bounded at
+     * 30 s. Closing it properly means the kernel keeping a register of
+     * promised answers, which is its own piece of work; until then this
+     * paragraph is the honest edge of what the oracle knows. */
     /* Sampled exactly once per look: the call advances its own baseline, so a
      * second call in the same walk would always report "no progress". */
     const bool answers_moving = nightwatch_answers_advanced();
@@ -447,12 +502,13 @@ static void nightwatch_verdict(void)
                     owed++;
                     /* One line per stall, not one every ten seconds for as
                      * long as it lasts: a watch that repeats itself buries the
-                     * evidence it just produced. A different token is a
-                     * different stall and speaks again. */
-                    static uint32_t s_said_token;
-                    bool fresh_stall = (s_said_token != e->awaiting);
-                    if (speak) s_said_token = e->awaiting;
+                     * evidence it just produced. A different (pid, generation,
+                     * token) is a different stall and speaks for itself. */
+                    bool fresh_stall =
+                        !nightwatch_already_said(e->pid, e->generation, e->awaiting);
                     if (speak && fresh_stall)
+                    {
+                        nightwatch_mark_said(e->pid, e->generation, e->awaiting);
                         kprintf("  pid %u gen %u %s — ‼ ANSWER OWED: waiting on "
                                 "submit 0x%06x across two looks; its pocket ring "
                                 "is empty, its K-Core doorbell is quiet, and every "
@@ -462,6 +518,7 @@ static void nightwatch_verdict(void)
                                 e->pid, e->generation,
                                 nightwatch_state_name(e->state),
                                 (unsigned)e->awaiting);
+                    }
                 }
             }
         }
