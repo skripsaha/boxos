@@ -205,13 +205,27 @@ cmd_type() {
         local attempt got=0 last=-1 still=0 echoed
         for attempt in $(seq 1 30); do
             sleep 0.1
+            # `|| true` is load-bearing, not defensive habit. This script runs
+            # under `set -euo pipefail`, and grep exits 1 when it matches
+            # NOTHING — which is the normal state of this window for as long as
+            # the only output so far is kernel lines (they all start with '[').
+            # pipefail then failed the assignment and `set -e` killed the whole
+            # script mid-wait, with no message: the caller saw a non-zero exit
+            # and an EMPTY error file, and reported "keystrokes dropped" for a
+            # guest that had merely not echoed yet. Measured: a full matrix
+            # configuration lost this way, blaming the OS for the harness.
             echoed=$(tail -c "+$((before + 1))" "$LOG" 2>/dev/null \
-                         | /usr/bin/grep -av '^\[' | tr -d '\r\n')
+                         | /usr/bin/grep -av '^\[' | tr -d '\r\n' || true)
             got=$(type_landed "$echoed" "$s")
             [ "$got" -ge "$len" ] && return 0
             if [ "$got" -eq "$last" ]; then still=$((still+1)); else still=0; fi
             last=$got
-            [ "$still" -ge 3 ] && break
+            # A full second of no growth, not a third of one. "Slow" and "lost"
+            # are told apart by patience, and 0.3 s is not patience on a host
+            # that is emulating 4-16 vCPUs on one TCG thread while a matrix
+            # runs: the guest routinely takes longer than that to echo, and
+            # calling that a dropped keystroke retypes a line nobody lost.
+            [ "$still" -ge 10 ] && break
         done
 
         attempts=$((attempts+1))
