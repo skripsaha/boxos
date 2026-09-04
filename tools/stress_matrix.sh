@@ -94,6 +94,7 @@ run_config() {
     # Per-test counters (cumulative pattern matches over serial.log).
     mt_seen=0; fl_seen=0; bn_seen=0
     TIMED_OUT_CMD=""
+    TYPING_FAILED_CMD=""
     # Single-run tests reuse `want=1` against the first appearance of
     # their pattern. Fast mode drops historical-regression duplicates
     # and the long-tail tests (write_stress ~30 s, touch_stress ~30 s
@@ -107,7 +108,24 @@ run_config() {
     fi
     for c in $burst
     do
-        tools/qemu-input.sh type "$c" >/dev/null 2>&1
+        # qemu-input's `type` verifies its own work: it reads the guest's echo
+        # back and retypes the whole line up to three times, then dies saying
+        # so. That verdict used to be thrown away — stderr to /dev/null and the
+        # exit status unread — after which this loop pressed Enter on a line
+        # the guest had only half taken. The shell answered "Unknown command:
+        # touch_ss", the test never ran, and the config then spent its entire
+        # 2700 s budget waiting for a marker that could not appear. A harness
+        # that cannot type must say THAT, not let the OS be blamed for it.
+        if ! tools/qemu-input.sh type "$c" 2>build/.typeerr; then
+            echo "  KEYSTROKES DROPPED while typing '$c':"
+            sed 's/^/    /' build/.typeerr 2>/dev/null
+            echo "  (burst stopped here — pressing Enter on a half-typed line"
+            echo "   would run a DIFFERENT command and blame the OS for it)"
+            TYPING_FAILED_CMD=$c
+            rm -f build/.typeerr
+            break
+        fi
+        rm -f build/.typeerr
         tools/qemu-input.sh key ret  >/dev/null 2>&1
 
         case "$c" in
@@ -138,7 +156,13 @@ run_config() {
             write_concurrent) pat="\[WC\] PASS";              want=1 ;;
             write_stress)     pat="\[WS SUMMARY\] all 3 PASS";want=1 ;;
             touch_test)       pat="\[TT SUMMARY\]";           want=1 ;;
-            decks)            pat=", 0 failed";               want=1 ;;
+            # NOT ", 0 failed" — the kernel prints that itself, twice, on
+            # every boot ("[TME TEST] 8 passed, 0 failed" and "[TESTS] TagFS:
+            # ... 0 failed ..."). The counter below therefore started at 2
+            # before decks had run at all, so the gate `decks < 1` could never
+            # go red and this test was effectively ungated: a config where
+            # decks never ran still came out green. Match the app's own line.
+            decks)            pat="\\[decks\\] [0-9]+ passed, 0 failed"; want=1 ;;
             touch_stress)
                 # Wait for the FINAL "[STRESS] Done" marker —
                 # touch_stress prints it after S1+S2+S3 regardless of
@@ -155,9 +179,25 @@ run_config() {
         # later test — which reads as "twelve tests failed" when one timed out.
         # So a timeout ENDS this config's burst and says so by name.
         timed_out=""
+        # A suite that has ALREADY announced failure is finished, and waiting
+        # out the budget for a marker it will never print is 45 minutes spent
+        # learning nothing. cxxtest prints "TOTAL FAILURES: n" and exits; the
+        # old loop then sat until 2700 s and reported a TIMEOUT, which reads
+        # as "the machine wedged" when the truth was "one phase failed and the
+        # suite ended normally". Watch for the terminal failure line too, and
+        # stop the moment either verdict lands.
+        case "$c" in
+            cxxtest) fail_pat="\[CXX\] TOTAL FAILURES: [1-9]" ;;
+            *)       fail_pat="" ;;
+        esac
         deadline=$(( $(date +%s) + POLL_SECONDS ))
         while :; do
             [ "$(grep -cE "$pat" build/serial.log)" -ge "$want" ] && break
+            if [ -n "$fail_pat" ] && grep -qE "$fail_pat" build/serial.log; then
+                echo "  '$c' ANNOUNCED FAILURE and ended — not a timeout:"
+                grep -E "$fail_pat" build/serial.log | sed 's/^/    /' | tail -1
+                break
+            fi
             [ "$(date +%s)" -ge "$deadline" ] && { timed_out=1; break; }
             sleep 0.5
         done
@@ -229,7 +269,7 @@ run_config() {
     wc_p=$(grep -c        "\[WC\] PASS"               build/serial.log)
     ws_p=$(grep -c        "\[WS SUMMARY\] all 3 PASS" build/serial.log)
     tt_p=$(grep -c        "\[TT SUMMARY\]"            build/serial.log)
-    decks_p=$(grep -c     ", 0 failed"                build/serial.log)
+    decks_p=$(grep -cE    "\\[decks\\] [0-9]+ passed, 0 failed" build/serial.log)
     ts1_p=$(grep -cE      "\[STRESS S1\].*PASS"       build/serial.log)
     ts2_p=$(grep -cE      "\[STRESS S2\].*PASS"       build/serial.log)
     ts3_p=$(grep -cE      "\[STRESS S3\].*PASS"       build/serial.log)
@@ -309,6 +349,7 @@ run_config() {
     [ "$selftest_ok"  -lt 1 ] && ok=0
 
     [ -n "$TIMED_OUT_CMD" ] && ok=0
+    [ -n "$TYPING_FAILED_CMD" ] && ok=0
 
     if [ "$ok" = "1" ]; then
         echo "  RESULT: PASS"
