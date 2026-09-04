@@ -280,17 +280,51 @@ static bool lane_ensure(StrandPrintState *ps)
 #define LANE_PUSH_SPIN_MIN  2048u      /* same class as BROOK_SPIN_BUDGET */
 #define LANE_PUSH_SPIN_MAX  (1u << 20) /* ~ a few ms of PAUSE — µarch class */
 
+/* How long a jammed lane may stay silent before it says so. Not a deadline —
+ * this wait never expires and never drops a line — a WATCH over silence. */
+#define LANE_JAM_ANNOUNCE_MS  60000u
+
 static bool lane_push(StrandPrintState *ps, const ConsoleRun *f)
 {
     int      rc;
     uint32_t budget = LANE_PUSH_SPIN_MIN;
     uint32_t spins  = 0;
+    uint64_t began  = 0;
+    bool     said   = false;
     while ((rc = brook_try_push((Brook *)ps->lane, f)) == -ERR_WOULD_BLOCK) {
         if (++spins < budget) {
             __asm__ volatile("pause" ::: "memory");
         } else {
             spins = 0;
             if (budget < LANE_PUSH_SPIN_MAX) budget <<= 1;
+
+            /* A full lane must not drop the line, so this waits without a
+             * deadline — and a deadline-free wait with no voice is how a
+             * machine stands still in perfect silence. MEASURED: a matrix run
+             * stopped mid-line inside phase35 with a writer here, and nothing
+             * in the log said anything at all; Nightwatch could not see it
+             * either, because a writer waiting for ring space has no
+             * unanswered submit to notice — it is waiting for a READER.
+             *
+             * So the wait keeps waiting, and after long enough it says once
+             * what no one else can: the reader is attached (a departed one
+             * fails the push outright, below) and it is not draining.
+             * kdbg_print reaches the kernel directly through HW_DEBUG_PRINT
+             * rather than through this lane, so the complaint cannot queue
+             * behind the jam it is describing. */
+            if (!said) {
+                uint64_t now = cpu_rdtsc();
+                if (began == 0) {
+                    began = now;
+                } else if (now - began >= cpu_ms_to_tsc(LANE_JAM_ANNOUNCE_MS)) {
+                    said = true;
+                    kdbg_print("[print] DEFECT: console lane full for %u ms — "
+                               "the reader is attached but not draining. This "
+                               "writer is still waiting (it will not drop the "
+                               "line); output stops here until the lane moves",
+                               (unsigned)LANE_JAM_ANNOUNCE_MS);
+                }
+            }
             yield();
         }
     }
