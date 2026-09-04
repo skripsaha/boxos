@@ -117,8 +117,18 @@ run_config() {
         # 2700 s budget waiting for a marker that could not appear. A harness
         # that cannot type must say THAT, not let the OS be blamed for it.
         if ! tools/qemu-input.sh type "$c" 2>build/.typeerr; then
-            echo "  KEYSTROKES DROPPED while typing '$c':"
-            sed 's/^/    /' build/.typeerr 2>/dev/null
+            type_rc=$?
+            echo "  KEYSTROKES DROPPED while typing '$c' (exit $type_rc):"
+            # Print the code even when the message is empty. An empty complaint
+            # once cost a whole configuration and an hour of reading: the typer
+            # had died under `set -e` with nothing to say, and "keystrokes
+            # dropped" was the harness blaming the OS for its own exit.
+            if [ -s build/.typeerr ]; then
+                sed 's/^/    /' build/.typeerr 2>/dev/null
+            else
+                echo "    (the typer exited without a message — a harness fault,"
+                echo "     not a guest one; see tools/qemu-input.sh)"
+            fi
             echo "  (burst stopped here — pressing Enter on a half-typed line"
             echo "   would run a DIFFERENT command and blame the OS for it)"
             TYPING_FAILED_CMD=$c
