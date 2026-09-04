@@ -262,6 +262,12 @@ static void process_init_strand_fields(process_t *proc)
     proc->irq_pending_head = NULL;
     spinlock_init(&proc->irq_lock);
 
+    proc->owed_head     = NULL;
+    proc->owed_tail     = NULL;
+    proc->owed_count    = 0;
+    proc->owed_draining = 0;
+    spinlock_init(&proc->owed_lock);
+
     proc->gone_waiters    = NULL;
     spinlock_init(&proc->gone_lock);
 
@@ -1969,6 +1975,14 @@ static void process_cleanup_immediate(process_t *proc)
     }
 
     process_free_kernel_stack(proc);
+
+    /* Last sweep of the Touch Owed queue. TouchCleanupProcess emptied it at
+     * death, but a publisher still holding a proc ref could have appended
+     * after that; here the ref count is zero, so whatever is left is ours.
+     * It runs BEFORE the rings go: the sweep clears the ring's slip, and for
+     * a main strand that ring page is the cabin's, freed by the cabin_ref_dec
+     * below. */
+    TouchOwedRelease(proc);
 
     /* Reclaim this strand's per-strand IPC rings + StrandInfo and its hammock
      * user stack (both no-ops for the main strand) while the cabin's address

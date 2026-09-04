@@ -84,7 +84,20 @@ typedef struct __packed {
      * vice versa), turning every push into an RFO storm on real
      * 16-core hardware. */
     volatile uint64_t tail;
-    uint8_t           _pad_line1[56];     /* fill cacheline 1 */
+    /* Events the kernel accepted for this ring but could not fit in it —
+     * the Owed queue's depth (touch.c). Written by the kernel under the
+     * owner's owed_lock, read-only for userspace.
+     *
+     * It sits HERE, on the producer cacheline, because that is the line the
+     * consumer already watches: touch_wait_umwait arms UMONITOR on &tail and
+     * then UMWAITs with no deadline. A ring that is full has a tail that will
+     * not move, so a consumer that drained its slots and went back to sleep
+     * would never learn that the kernel is still holding its events. Writing
+     * this counter writes that line, so the slip wakes the sleeper and tells
+     * it what the ring cannot: come to the door (yield) and the kernel will
+     * hand the rest over. */
+    volatile uint64_t owed;
+    uint8_t           _pad_line1[48];     /* fill cacheline 1 */
 } TouchRingHeader;
 
 _Static_assert(sizeof(TouchRingHeader) == 128,
@@ -93,6 +106,9 @@ _Static_assert(__builtin_offsetof(TouchRingHeader, head) == 0,
                "TouchRingHeader.head must start at offset 0");
 _Static_assert(__builtin_offsetof(TouchRingHeader, tail) == 64,
                "TouchRingHeader.tail must start at cacheline 1 (offset 64)");
+_Static_assert(__builtin_offsetof(TouchRingHeader, owed) == 72,
+               "TouchRingHeader.owed must share cacheline 1 with tail — the "
+               "consumer's UMONITOR watches that line and nothing else");
 
 /* Per-slot envelope: metadata + inline payload + Vyukov gate.
  *
@@ -190,11 +206,12 @@ bool KTouchPush(process_t *target,
 
 /* Diagnostic: snapshot per-return-path counters.
  *   out[0] = null/no-hdr/zero-cap rejections
- *   out[1] = pre-check full
- *   out[2] = page-map failures (pre or cross-page)
+ *   out[1] = refused because the ring was full (the event becomes Owed)
+ *   out[2] = page-map failures
  *   out[3] = translate failures
- *   out[4] = spin-budget exhausted (consumer lost)
- *   out[5] = synthetic-ERR overflow slots published
+ *   out[4] = publishes that had to retry the claim (producer contention)
+ *   out[5] = claims whose slot was not released — a consumer reporting a head
+ *            it has not reached; its own stream is what suffers
  *   out[6] = successful publishes */
 void KTouchPushStats(uint64_t out[7]);
 

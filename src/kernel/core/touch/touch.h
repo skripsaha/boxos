@@ -324,6 +324,27 @@ void   TouchRestDeliver(struct process_t *target, TouchTag tag_id,
                         const void *kpayload, uint32_t plen,
                         uint32_t source_pid, uint16_t flags);
 
+/* Hand over what a full ring made this strand wait for.
+ *
+ * Called at the door — the syscall gate (idt.c syscall_handler) — and from
+ * the publish path itself, so an event can never overtake one the ring
+ * already refused. The gate, and not guide_process_pocket: the YIELD
+ * short-circuit pops its pocket and reschedules without ever entering the
+ * guide, and a yield is exactly how a consumer that has read the `owed` slip
+ * comes back to ask for the rest. Pushes in FIFO order until
+ * the ring refuses again; a refusal puts the node straight back at the head.
+ * Takes no lock across KTouchPush and looks up no subscription: the queue
+ * belongs to the ring, and the ring belongs to `proc`.
+ *
+ * Cheap to call unconditionally — it returns on a relaxed load when nothing
+ * is owed, which is the case for every strand almost all of the time. */
+void   TouchOwedHandOver(struct process_t *proc);
+
+/* Free everything still owed to a dying strand and clear its slip. Called
+ * from TouchCleanupProcess and again from the final teardown, once no
+ * publisher can hold a reference. Idempotent. */
+void   TouchOwedRelease(struct process_t *proc);
+
 /* Claim management — tag_id-only API. Kernel allocates TouchSub. */
 error_t TouchClaimSet(struct process_t *proc, TouchTag tag_id,
                       TouchMode mode, ManifestHandle manifest,

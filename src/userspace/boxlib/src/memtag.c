@@ -1,3 +1,4 @@
+#include "box/timeouts.h"
 #include "box/memtag.h"
 #include "box/core/manifest.h"
 #include "box/string.h"
@@ -56,7 +57,7 @@ int mem_query(const char *const *required,
                  0, 0,
                  spec, spec_len,
                  raw, out_cap, 0,
-                 30000, 0);
+                 BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return box_fail(rc);
 
     uint32_t count = 0;
@@ -76,7 +77,7 @@ int mem_region_info(uint32_t region_id, mem_region_info_t *out)
                      params, sizeof(params),
                      0, 0,
                      out, sizeof(*out), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }
 
@@ -89,7 +90,7 @@ uint32_t mem_region_from_phys(uint64_t phys)
                      params, sizeof(params),
                      0, 0,
                      &result, sizeof(result), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return MEMTAG_INVALID_REGION_ID;
     return result;
 }
@@ -104,7 +105,7 @@ uint32_t mem_region_from_virt(const void *virt)
                      params, sizeof(params),
                      0, 0,
                      &result, sizeof(result), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return MEMTAG_INVALID_REGION_ID;
     return result;
 }
@@ -119,7 +120,7 @@ error_t mem_region_from_phys_ex(uint64_t phys, uint32_t *out_region_id)
                      params, sizeof(params),
                      0, 0,
                      &result, sizeof(result), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return box_errno_of(box_fail(rc));
     *out_region_id = result;
     return OK;
@@ -136,7 +137,7 @@ error_t mem_region_from_virt_ex(const void *virt, uint32_t *out_region_id)
                      params, sizeof(params),
                      0, 0,
                      &result, sizeof(result), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return box_errno_of(box_fail(rc));
     *out_region_id = result;
     return OK;
@@ -158,7 +159,7 @@ int mem_region_tags(uint32_t region_id,
                      params, sizeof(params),
                      0, 0,
                      out_buf, out_buf_size, 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return box_fail(rc);
     memcpy(out_count, out_buf, sizeof(uint32_t));
     /* Shift the string region left over the count prefix. Source comes
@@ -177,7 +178,7 @@ int mem_stats(mem_stats_t *out)
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_MEMTAG_STATS,
                      0, 0, 0, 0,
                      out, sizeof(*out), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }
 
@@ -193,7 +194,7 @@ int mem_set_guard(const char *tag_str, int on)
                      params, sizeof(params),
                      tag_str, (uint32_t)(strlen(tag_str) + 1),
                      0, 0, 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }
 
@@ -206,7 +207,7 @@ int mem_cabin_grant(uint32_t pid, const char *tag_str)
                      params, sizeof(params),
                      tag_str, (uint32_t)(strlen(tag_str) + 1),
                      0, 0, 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }
 
@@ -219,7 +220,7 @@ int mem_cabin_revoke(uint32_t pid, const char *tag_str)
                      params, sizeof(params),
                      tag_str, (uint32_t)(strlen(tag_str) + 1),
                      0, 0, 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }
 
@@ -235,7 +236,7 @@ int mem_cabin_tags(uint32_t pid,
                      params, sizeof(params),
                      0, 0,
                      out_buf, out_buf_size, 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return box_fail(rc);
     memcpy(out_count, out_buf, sizeof(uint32_t));
     uint32_t str_bytes = out_buf_size - sizeof(uint32_t);
@@ -255,6 +256,6 @@ int mem_check_access(uint32_t pid, uint32_t region_id, mem_check_t *out)
                      params, sizeof(params),
                      0, 0,
                      out, sizeof(*out), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     return box_fail(rc);
 }

@@ -248,6 +248,13 @@ void touch_stash_free_self(void);
  * for users that only see box/touch.h). */
 void touch_pop_stats(uint64_t out[8]);
 
+/* How many events the kernel accepted for this strand's Touch ring but could
+ * not fit in it. Non-zero means the ring is not the whole story: the kernel is
+ * holding them in order and will hand them over at the next pocket this strand
+ * submits. The waiters below act on it themselves; read it directly only for
+ * diagnostics. */
+uint64_t touch_owed(void);
+
 void touch_await_stats(uint32_t out[7]);
 
 /* Caching macros — for COMPILE-TIME CONSTANT tag strings only.

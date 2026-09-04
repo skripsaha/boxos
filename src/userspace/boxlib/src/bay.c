@@ -1,3 +1,4 @@
+#include "box/timeouts.h"
 #include "box/bay.h"
 #include "box/core/manifest.h"
 #include "box/string.h"
@@ -20,7 +21,7 @@ void *bay_open(const char *tag, uint64_t size, uint32_t flags)
                      params, sizeof(params),
                      tag, (uint32_t)(strlen(tag) + 1),
                      out, sizeof(out), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return 0;
 
     uint64_t user_va = 0;
@@ -37,7 +38,7 @@ int bay_release(void *ptr)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_BAY_RELEASE,
                    params, sizeof(params),
                    0, 0, 0, 0, 0,
-                   30000, 0);
+                   BOX_ANSWER_WATCHDOG_MS, 0);
 }
 
 uint64_t bay_size(void *ptr)
@@ -52,7 +53,7 @@ uint64_t bay_size(void *ptr)
                      params, sizeof(params),
                      0, 0,
                      out, sizeof(out), 0,
-                     30000, 0);
+                     BOX_ANSWER_WATCHDOG_MS, 0);
     if (rc != 0) return 0;
     uint64_t size = 0;
     memcpy(&size, out, sizeof(uint64_t));

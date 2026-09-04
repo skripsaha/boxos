@@ -63,7 +63,21 @@ typedef struct __packed {
 
     /* Cacheline 1 — producer reservation cursor (kernel MPSC). */
     volatile uint64_t tail;             /* producer reservation cursor (kernel) */
-    uint8_t           _pad_line1[56];   /* fill cacheline 1                */
+    /* What this strand is waiting for, written by the WAITER.
+     *
+     * A strand inside result_wait is, from the kernel's side, indistinguishable
+     * from a strand doing useful work: it is PROC_WORKING and its core is busy.
+     * That is why a machine could stand still for an hour with Nightwatch armed
+     * and silent — the watch looks for idle cores, and a strand spinning on an
+     * answer that will never come is not idle. It is the one thing the kernel
+     * cannot infer and the waiter alone knows, so the waiter says it: the
+     * cloakroom token it is holding out for, zero when it holds out for none.
+     *
+     * The kernel only reads it (nightwatch.c), never writes it, and treats it
+     * as a HINT — a guest may write anything here and can only mislead the
+     * report about itself. It costs the waiter two stores per submit. */
+    volatile uint64_t awaiting;
+    uint8_t           _pad_line1[48];   /* fill cacheline 1                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 128,
@@ -72,6 +86,9 @@ _Static_assert(__builtin_offsetof(ResultRingHeader, head) == 0,
                "ResultRingHeader.head must start at offset 0");
 _Static_assert(__builtin_offsetof(ResultRingHeader, tail) == 64,
                "ResultRingHeader.tail must start at cacheline 1 (offset 64)");
+_Static_assert(__builtin_offsetof(ResultRingHeader, awaiting) == 72,
+               "ResultRingHeader.awaiting must sit at offset 72 — both sides "
+               "of the boundary agree on it by number, not by luck");
 
 /* Per-slot Vyukov-style envelope: payload + generation counter.
  * Lives at slots_base + (idx % slot_count_max) * RESULT_SLOT_SIZE. */

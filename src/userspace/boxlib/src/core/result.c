@@ -526,7 +526,7 @@ uint64_t result_orphans_dropped(void)
     return __atomic_load_n(&g_reply_orphans_dropped, __ATOMIC_RELAXED);
 }
 
-bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
+static bool result_wait_inner(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
     if (!out) return false;
 
     /* The cloakroom rule: a coat is handed over by token, never "the next
@@ -556,6 +556,33 @@ bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
         if (KCTX_COOKIE24(out->context) == expect_cookie) return true;
         __atomic_add_fetch(&g_reply_orphans_dropped, 1u, __ATOMIC_RELAXED);
     }
+}
+
+/* Say what is being waited for, for as long as it is being waited for.
+ *
+ * The kernel cannot tell a strand doing work from a strand waiting on an
+ * answer — parked or spinning, neither state says WHAT for. That gap is why a
+ * wedge could hold this machine still with Nightwatch armed and never a word.
+ * So the waiter publishes its own cloakroom token into the ring header it
+ * already shares with the kernel, and clears it on every exit.
+ *
+ * The kernel reads it in Nightwatch's verdict, which walks every process — so
+ * this speaks for a strand that is fast asleep just as well as for one burning
+ * a core. And it is only ever a HINT: the verdict convicts on facts (the
+ * pocket ring empty, the doorbell quiet, every K-Core asleep, and the token
+ * unchanged a full look later), never on this token or on a clock. It has to
+ * be that way, because a submit may be owed an answer for hours and still be
+ * perfectly healthy — process.gone waits out a whole child's life.
+ *
+ * Two stores per synchronous submit, in a wrapper rather than edits at each
+ * return: this way there is no exit path that can forget, now or later. */
+bool result_wait(Result* out, uint32_t expect_cookie, uint32_t timeout_ms) {
+    ResultRing* rr = result_ring();
+    if (rr) __atomic_store_n(&rr->hdr.awaiting, (uint64_t)expect_cookie,
+                             __ATOMIC_RELEASE);
+    bool ok = result_wait_inner(out, expect_cookie, timeout_ms);
+    if (rr) __atomic_store_n(&rr->hdr.awaiting, 0u, __ATOMIC_RELEASE);
+    return ok;
 }
 
 /* Block until ANY result arrives — no IPC/non-IPC filtering.

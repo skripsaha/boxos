@@ -69,11 +69,18 @@ typedef struct PACKED {
 
     /* Cacheline 1 — producer reservation cursor (kernel MPSC). */
     volatile uint64_t tail;             /* kernel reservation cursor */
-    uint8_t           _pad_line1[56];   /* fill cacheline 1 */
+    /* The cloakroom token this strand is holding out for, 0 when none.
+     * Written here by result_wait so the kernel's watch can tell a strand
+     * that is working from one that is waiting for an answer nobody is going
+     * to give — see the kernel's result_ring.h for why it cannot infer it. */
+    volatile uint64_t awaiting;
+    uint8_t           _pad_line1[48];   /* fill cacheline 1 */
 } ResultRingHeader;
 
 STATIC_ASSERT(sizeof(ResultRingHeader) == 128,
               "ResultRingHeader must be 128 bytes (two cachelines)");
+STATIC_ASSERT(OFFSETOF(ResultRingHeader, awaiting) == 72,
+              "ResultRingHeader.awaiting must sit at offset 72 (kernel agrees)");
 
 typedef struct PACKED {
     ResultRingHeader hdr;

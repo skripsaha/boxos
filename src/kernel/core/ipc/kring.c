@@ -223,26 +223,24 @@ static inline void kring_wake_remote(process_t *target)
 static volatile uint64_t g_krp_null_args;
 static volatile uint64_t g_krp_no_hdr;
 static volatile uint64_t g_krp_zero_cap;
-static volatile uint64_t g_krp_pre_full;
-static volatile uint64_t g_krp_premap_fail;
-static volatile uint64_t g_krp_crosspg_fail;
+static volatile uint64_t g_krp_full;
+static volatile uint64_t g_krp_map_fail;
 static volatile uint64_t g_krp_translate_fail;
-static volatile uint64_t g_krp_spin_limit;
-static volatile uint64_t g_krp_overflow;
+static volatile uint64_t g_krp_contended;
+static volatile uint64_t g_krp_seq_broken;
 static volatile uint64_t g_krp_success;
 
-void KResultPushStats(uint64_t out[10])
+void KResultPushStats(uint64_t out[9])
 {
     out[0] = __atomic_load_n(&g_krp_null_args,      __ATOMIC_RELAXED);
     out[1] = __atomic_load_n(&g_krp_no_hdr,         __ATOMIC_RELAXED);
     out[2] = __atomic_load_n(&g_krp_zero_cap,       __ATOMIC_RELAXED);
-    out[3] = __atomic_load_n(&g_krp_pre_full,       __ATOMIC_RELAXED);
-    out[4] = __atomic_load_n(&g_krp_premap_fail,    __ATOMIC_RELAXED);
-    out[5] = __atomic_load_n(&g_krp_crosspg_fail,   __ATOMIC_RELAXED);
-    out[6] = __atomic_load_n(&g_krp_translate_fail, __ATOMIC_RELAXED);
-    out[7] = __atomic_load_n(&g_krp_spin_limit,     __ATOMIC_RELAXED);
-    out[8] = __atomic_load_n(&g_krp_overflow,       __ATOMIC_RELAXED);
-    out[9] = __atomic_load_n(&g_krp_success,        __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&g_krp_full,           __ATOMIC_RELAXED);
+    out[4] = __atomic_load_n(&g_krp_map_fail,       __ATOMIC_RELAXED);
+    out[5] = __atomic_load_n(&g_krp_translate_fail, __ATOMIC_RELAXED);
+    out[6] = __atomic_load_n(&g_krp_contended,      __ATOMIC_RELAXED);
+    out[7] = __atomic_load_n(&g_krp_seq_broken,     __ATOMIC_RELAXED);
+    out[8] = __atomic_load_n(&g_krp_success,        __ATOMIC_RELAXED);
 }
 
 bool KResultPush(process_t *target, const Result *r)
@@ -275,225 +273,187 @@ bool KResultPush(process_t *target, const Result *r)
         return false;
     }
 
-    /* (1) Cheap fullness pre-check. Best-effort; we re-validate after the
-     *     atomic reservation. ACQUIRE on head so we see the consumer's
-     *     most recent advance. */
-    uint64_t head      = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
-    uint64_t tail_snap = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
-    if ((tail_snap - head) >= cap) {
-        __atomic_add_fetch(&g_krp_pre_full, 1, __ATOMIC_RELAXED);
-        return false;
-    }
-
-    /* (2) Pre-map BOTH the snapshot's slot page AND the next page.
+    /* ── Claim a position, or refuse. Nothing here waits on the consumer. ──
      *
-     *     Why two: after the atomic fetch_add at step (3), concurrent
-     *     K-Cores may have pushed our reserved `pos` onto the next 4-KiB
-     *     page. The historical code only pre-mapped one page, then tried
-     *     to map the other lazily AFTER the reservation — if that lazy
-     *     map failed (e.g. PMM transiently exhausted), the slot was
-     *     stranded and the consumer would spin on slot.seq forever,
-     *     freezing the entire cabin's IPC. By pre-mapping the next page
-     *     too, we move that map call BEFORE the reservation, so any
-     *     failure happens without state change: we return false, the
-     *     ring stays consistent.
+     * The claim used to be an unconditional fetch_add, and everything that
+     * followed was repair work for a claim taken before it was known to be
+     * good: a re-check for having passed the consumer, a cross-page map that
+     * could fail with the position already spent, and a wait on the slot's
+     * Vyukov gate capped at a guessed 16384 PAUSEs. Past the guess the code
+     * declared the consumer lost and published a synthetic ERR in place of the
+     * caller's answer. The guess is a lie in both directions on a loaded host
+     * — long enough to hold a K-Core for half a millisecond, short enough to
+     * discard a live reply because a vCPU was descheduled — and its failure
+     * mode was to answer a syscall with an error it never earned.
      *
-     *     With 32-byte ResultSlot stride and 4 KiB pages there are 128
-     *     slots per page. The reserved `pos` returned by fetch_add at
-     *     step (3) can be at most "tail_snap + concurrent_producers - 1"
-     *     ahead of our snapshot — so the actually-used page is either
-     *     uvaddr_pre's page or its immediate 4 KiB successor. */
-    uintptr_t uvaddr_pre     = result_ring_slot_uvaddr(rr, tail_snap);
-    uintptr_t one_page_ahead = uvaddr_pre + 4096u;
-    if (vmm_ensure_user_page(target->cabin->vmm, uvaddr_pre, /*writable=*/true) != 0) {
-        __atomic_add_fetch(&g_krp_premap_fail, 1, __ATOMIC_RELAXED);
-        return false;
+     * The claim is now taken only when it is provably good, by CAS on the
+     * tail, and it rests on one fact about the consumer:
+     *
+     *   THE CONSUMER RELEASES A SLOT'S seq BEFORE IT ADVANCES head.
+     *   (boxlib result.c: `slot->seq = expected+1` RELEASE, then
+     *    `hdr.head = pos+1` RELEASE — in that order, always.)
+     *
+     * So every position in [head, head + cap) names a slot the consumer has
+     * already finished with. A producer that claims only inside that window
+     * claims a slot that is ALREADY free: no gate spin, no budget, no
+     * destroying-probe woven through it, no synthetic ERR, no "consumer lost".
+     *
+     * Every failure — full ring, no page, no translation — now happens BEFORE
+     * the claim, so a claimed slot is always filled. That closes the window
+     * this function used to document and accept: "this single slot remains
+     * stuck until process exit", which froze one modulo position of a cabin's
+     * reply ring for the life of the process.
+     *
+     * `head` lives in a page the guest can write. A guest that reports a head
+     * it has not reached makes the kernel reuse a slot it is still reading —
+     * and corrupts its OWN reply stream, in its OWN page. It is counted and
+     * said out loud rather than waited on; the previous code's answer to the
+     * same lie was to stall for half a millisecond and corrupt it anyway. */
+    /* ── The answer's room is reserved, so an answer is never refused. ─────
+     *
+     * Two different things arrive in a strand's reply ring, and only one of
+     * them has somebody asleep on it:
+     *
+     *   an ANSWER carries a cloakroom token (KCTX_COOKIE24) — it is the reply
+     *   to a Pocket this strand submitted, and its owner is parked on it. Lose
+     *   it and the strand sleeps forever on a question already answered.
+     *
+     *   UNSOLICITED traffic — IPC another process chose to send — has no
+     *   token. Nobody is committed to it, and its sender learns of the refusal
+     *   and may act on it.
+     *
+     * A strand can have at most `pocket_cap` submits outstanding, because that
+     * is how many Pockets fit in the ring it submits through — so if the last
+     * `pocket_cap` slots of the reply ring are kept for answers, an answer can
+     * never find the ring full. The geometry already grants it (a Hammock
+     * strand has 256 Pocket slots against 512 Result slots; the cabin's rings
+     * are the same 1 MiB against 1 MiB, and a Result slot is the smaller), so
+     * this reserves nothing that unsolicited traffic had any right to.
+     *
+     * That is the invariant the rest of the system's honesty rests on: it is
+     * what makes it correct for a caller to wait for an answer WITHOUT a
+     * deadline, and a deadline on a guaranteed answer is exactly how a slow
+     * machine turns a completed operation into a false refusal — while the
+     * abandoned caller's stack-resident Manifest and Crates are still going to
+     * be read and written by the K-Core (see boxlib manifest.c ManifestSubmit).
+     * Reserve the room here, and that whole class of bug has nowhere to live. */
+    uint32_t limit = cap;
+    if (KCTX_COOKIE24(r->context) == 0) {
+        PocketRing *pr = kring_pocket_hdr(target);
+        uint32_t reserve = pr ? pr->hdr.slot_count_max : (cap / 2u);
+        limit = (cap > reserve) ? (cap - reserve) : (cap / 2u);
+        if (limit == 0) limit = 1u;
     }
-    /* Best-effort pre-map of the next page — ONLY when it is still inside
-     * this ring's own slot region. The small eager-mapped per-strand rings
-     * (P5a) end with an unmapped guard page; pre-mapping past the region would
-     * silently fault that guard in and defeat it. It is also pointless: the
-     * reserved `pos` always resolves (via modulo) to an in-region page, which
-     * the cross-page step below maps if it differs from uvaddr_pre. Harmless
-     * for the large lazily-mapped cabin region (the page-ahead is in-region
-     * except at the very end, where the wrap is handled the same way). If it
-     * fails, the crosspg path re-attempts with a synthetic ERR if needed. */
-    uint64_t slots_end = rr->hdr.slots_base + (uint64_t)cap * rr->hdr.slot_size;
-    if (one_page_ahead < slots_end) {
-        (void)vmm_ensure_user_page(target->cabin->vmm, one_page_ahead, /*writable=*/true);
-    }
 
-    /* (3) Atomic reservation — MPSC linearisation point. Even with N
-     *     concurrent K-Cores each gets a unique pos. Use ACQ_REL so the
-     *     slot writes that follow are ordered after this fetch. */
-    uint64_t pos = __atomic_fetch_add(&rr->hdr.tail, 1, __ATOMIC_ACQ_REL);
+    ResultSlot *slot    = NULL;
+    uintptr_t   ensured = 0;   /* page whose mapping this call has secured */
+    uint32_t    turns   = 0;
+    uint64_t    pos     = 0;
 
-    /* (4) Re-check fullness against our reserved pos. Concurrent reservations
-     *     may have pushed us past capacity; if so, publish a benign error
-     *     into the slot so the consumer drains it instead of deadlocking
-     *     on slot.seq forever. */
-    bool overflow = (pos - head) >= cap;
-
-    /* (5) Cross-page case: pos may have advanced into a slot page that
-     *     wasn't pre-mapped. Try to map; if THAT fails, treat the slot
-     *     as overflow so we publish a synthetic ERR (no strand). */
-    uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
-    if (uvaddr != uvaddr_pre && uvaddr != one_page_ahead) {
-        if (vmm_ensure_user_page(target->cabin->vmm, uvaddr, /*writable=*/true) != 0) {
-            __atomic_add_fetch(&g_krp_crosspg_fail, 1, __ATOMIC_RELAXED);
-            kprintf("[KRP] WARN: cross-page map failed at pos=%lu pid=%u — "
-                    "synthesizing ERR slot to avoid stranding the ring\n",
-                    (unsigned long)pos, (unsigned int)target->pid);
-            overflow = true;   /* force the synthetic ERR path below */
-        }
-    }
-
-    ResultSlot *slot = kring_translate_slot(target, uvaddr);
-    if (!slot) {
-        /* Residual strand window: vmm_ensure_user_page succeeded but
-         * translate_slot couldn't walk the user PT. The only way this
-         * happens is a concurrent unmap from process_destroy or a
-         * page-table corruption — both are bugs upstream that we
-         * cannot recover from here without holding a hard reference
-         * on the user page. We log and return false; the consumer
-         * sees the slot stuck on seq==2*round, which TouchAwait /
-         * receive_wait treats as "nothing here, retry later". A
-         * subsequent push to a different slot (different round)
-         * makes forward progress for the same producer; this single
-         * slot remains stuck until process exit.
+    for (;;) {
+        /* head BEFORE tail, and never the other way round.
          *
-         * Mitigation: pre-map both possible pages above so the
-         * common path never hits this branch. Residual cases are
-         * rare-enough to not justify the complexity of a per-page
-         * refcount today. */
-        __atomic_add_fetch(&g_krp_translate_fail, 1, __ATOMIC_RELAXED);
-        kprintf("[KRP] WARN: translate failed pos=%lu pid=%u (slot stuck — "
-                "consumer treats as empty)\n",
-                (unsigned long)pos, (unsigned int)target->pid);
-        return false;
+         * Both cursors only ever grow and tail >= head is the ring's own
+         * invariant — but that is a statement about the ring at one instant,
+         * not about two loads taken at two. Read tail first and the consumer
+         * can advance head past it in between; the snapshot then has head >
+         * pos, `pos - head` wraps to a colossal unsigned number, and the ring
+         * declares itself full when it is in fact empty. Reading head FIRST
+         * makes the order do the work: tail is sampled later, so it cannot be
+         * behind the head we already have.
+         *
+         * MEASURED, not reasoned into place afterwards: with the loads the
+         * other way round this refused an ANSWER once in a two-hour matrix,
+         * reporting "full at 4294967295 of 32768 slots", and the strand
+         * waiting on that answer never woke. */
+        uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+        pos           = __atomic_load_n(&rr->hdr.tail, __ATOMIC_RELAXED);
+        if (pos - head >= limit) {
+            uint64_t n = __atomic_fetch_add(&g_krp_full, 1, __ATOMIC_RELAXED);
+            /* Refusing an ANSWER is not a statistic. Somebody is parked on it,
+             * and every caller of this function drops the return value, so the
+             * refusal would otherwise be perfectly silent — and the strand
+             * would simply never wake. Say it, name the victim, and rate-limit
+             * so a saturated ring cannot drown the console it is warning. */
+            if (KCTX_COOKIE24(r->context) != 0 && (n & 0x3Fu) == 0) {
+                kprintf("[KRP] ERROR: dropped an ANSWER for pid %u (token %u) — "
+                        "reply ring full at %u of %u slots. The strand waiting "
+                        "on that answer will not be woken by it\n",
+                        (unsigned int)target->pid,
+                        (unsigned int)KCTX_COOKIE24(r->context),
+                        (unsigned int)(pos - head), (unsigned int)cap);
+            }
+            return false;
+        }
+
+        uintptr_t uvaddr = result_ring_slot_uvaddr(rr, pos);
+        uintptr_t page   = uvaddr & ~(uintptr_t)(VMM_PAGE_SIZE - 1);
+        if (page != ensured) {
+            if (vmm_ensure_user_page(target->cabin->vmm, uvaddr,
+                                     /*writable=*/true) != 0) {
+                __atomic_add_fetch(&g_krp_map_fail, 1, __ATOMIC_RELAXED);
+                return false;
+            }
+            ensured = page;
+        }
+
+        slot = kring_translate_slot(target, uvaddr);
+        if (!slot) {
+            __atomic_add_fetch(&g_krp_translate_fail, 1, __ATOMIC_RELAXED);
+            return false;
+        }
+
+        /* The linearisation point. A failure here means ANOTHER PRODUCER won
+         * the tail — the ring moved forward, so this is lock-free progress and
+         * not a spin on someone else's liveness. The failing exchange refreshes
+         * `pos` with the winner's value, so the next turn considers the
+         * position that actually came free. */
+        if (__atomic_compare_exchange_n(&rr->hdr.tail, &pos, pos + 1,
+                                        /*weak=*/true, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_RELAXED)) {
+            break;
+        }
+        if (++turns == 1) __atomic_add_fetch(&g_krp_contended, 1, __ATOMIC_RELAXED);
     }
 
-    /* (6) Vyukov gate: wait until the slot's seq matches our round's
-     *     "ready for write" value.
-     *
-     *     `tail` was already incremented at step (3), so we may NEVER
-     *     abandon the slot without publishing a seq advance — the
-     *     consumer expects every reserved slot to eventually transition
-     *     `2*round → 2*round+1`, and a forgotten slot would freeze the
-     *     ring's modulo position forever.
-     *
-     *     But we also cannot spin unbounded. If the userspace consumer
-     *     has crashed, frozen, or simply fallen catastrophically behind
-     *     under real-HW IRQ pressure, an unbounded `for(;;)` here stalls
-     *     every K-Core that lands in KResultPush for the same target.
-     *     The fix is two-pronged: (a) cap the spin at KRP_SPIN_BUDGET
-     *     iterations of cpu_pause(), and (b) periodically probe
-     *     `target->destroying` so we bail out early once the cabin is
-     *     known to be tearing down.
-     *
-     *     On budget exhaustion or destroying-detect we set `overflow`
-     *     and fall through to publish a synthetic ERR_RESULT_RING_FULL
-     *     at step (7). The slot's seq still advances at step (8), the
-     *     consumer (if any) sees a benign error, and the ring stays
-     *     consistent. Empirically the worst observed spin under 16-core
-     *     stress is well below 1<<14 iterations on STRICT QEMU; real
-     *     silicon is similar. The 1<<14 budget gives ~500 µs headroom
-     *     at 3 GHz with ~100-cycle PAUSE — long enough for any sane
-     *     consumer to drain its prior slot, short enough that a frozen
-     *     consumer doesn't wedge producer K-Cores for tens of ms (the
-     *     historical 1<<20 ≈ 33 ms tail). With the IPI wake at step
-     *     (9) the consumer is poked as soon as we publish, so the long
-     *     tail is no longer needed. */
     uint64_t round    = pos / cap;
     uint64_t expected = 2u * round;
 
-    enum { KRP_SPIN_BUDGET = 1u << 14 };
-    /* Probe `target->destroying` every 4 K PAUSE iterations (≈ 125 µs at
-     * 3 GHz with Skylake+-class PAUSE ≈ 140 cycles); 4 probes over the
-     * 16 K budget keeps the "early bail when cabin tears down" promise
-     * meaningful instead of a single check at spin 0. Mask MUST be
-     * strictly smaller than KRP_SPIN_BUDGET-1 or the check degrades to
-     * once-per-spin. */
-    enum { KRP_DESTROYING_PROBE_MASK = 0x0FFFu };
-    bool consumer_lost = false;
-    for (uint64_t spins = 0; ; spins++) {
-        uint64_t seq = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
-        if (seq == expected) break;
-        if (spins >= KRP_SPIN_BUDGET) {
-            __atomic_add_fetch(&g_krp_spin_limit, 1, __ATOMIC_RELAXED);
-            kprintf("[KRP] WARN: spin budget exhausted pid=%u pos=%lu seq=%lu expected=%lu — publishing synthetic ERR\n",
-                    (unsigned int)target->pid, (unsigned long)pos,
-                    (unsigned long)seq, (unsigned long)expected);
-            consumer_lost = true;
-            break;
+    /* The claim's own guarantee, read back once. One ACQUIRE load, and it is
+     * the only thing that can tell a broken consumer from a healthy one — so
+     * it is read, counted and named, never waited on. */
+    if (__atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) != expected) {
+        uint64_t n = __atomic_fetch_add(&g_krp_seq_broken, 1, __ATOMIC_RELAXED);
+        if ((n & 0x3FFu) == 0) {
+            kprintf("[KRP] WARN: pid %u reported a head its consumer has not "
+                    "reached (slot %lu of round %lu was not released); its own "
+                    "reply stream is what gets overwritten\n",
+                    (unsigned int)target->pid, (unsigned long)(pos % cap),
+                    (unsigned long)round);
         }
-        if ((spins & KRP_DESTROYING_PROBE_MASK) == 0 &&
-            __atomic_load_n(&target->destroying, __ATOMIC_ACQUIRE)) {
-            __atomic_add_fetch(&g_krp_spin_limit, 1, __ATOMIC_RELAXED);
-            consumer_lost = true;
-            break;
-        }
-        cpu_pause();
     }
 
-    /* (7) Write payload. On overflow OR consumer-lost, write a synthetic
-     *     error so the consumer (if any wakes up) drains the slot and
-     *     the ring continues. Slot is NEVER abandoned mid-round — the
-     *     seq advance at step (8) is the linearisation guarantee for
-     *     the consumer. */
-    if (overflow || consumer_lost) {
-        slot->r.error_code  = ERR_RESULT_RING_FULL;
-        slot->r.data_length = 0;
-        slot->r.data_addr   = 0;
-        slot->r.sender_pid  = 0;
-        /* Keep the ORIGINAL context — kind AND cloakroom token — so the
-         * synthetic error still answers the submit it displaced; a flat
-         * KCTX_GUIDE here would strand a paired waiter forever. */
-        slot->r.context     = r->context;
-        __atomic_add_fetch(&g_krp_overflow, 1, __ATOMIC_RELAXED);
-    } else {
-        slot->r = *r;
-        __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
-    }
+    slot->r = *r;
+    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
 
-    /* (8) Publish — release-store the slot's seq so the consumer's
-     *     ACQUIRE-load sees the payload write. */
+    /* Publish — the RELEASE store makes the payload above visible to the
+     * consumer's ACQUIRE load of the same word. */
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
 
-    /* (9) Wake target if it was sleeping. If overflow we still wake —
-     *     the consumer needs to drain the error slot to keep the ring
-     *     moving. Skip the wake when consumer_lost since either the
-     *     cabin is destroying (state writes during teardown race the
-     *     teardown logic, harmless but pointless) or it has been frozen
-     *     long enough that one more wake won't help.
+    /* Wake. The home core may be HLT/MWAIT-idle and would not learn of the
+     * reply until the next LAPIC tick; the IPI is the doorbell.
      *
-     *     IPI follows the state flip: process_set_state enqueues the
-     *     target on its home_core's runqueue, but the home core may be
-     *     HLT/MWAIT-idle and miss the new work until the next LAPIC
-     *     tick. The IPI is the doorbell that fires the reschedule
-     *     immediately. Mirrors the touch_wake_remote pattern in
-     *     touch.c TouchRestDeliver — without it, ResultRing replies
-     *     pick up a multi-ms wakeup tail on real silicon with deep
-     *     C-states. Always-send-on-publish is correct: even when the
-     *     target is currently running on home_core, an extra IPI is a
-     *     few cycles and avoids the race window where state lookup
-     *     sees PROC_WORKING but the consumer is in fact idle. */
-    if (!consumer_lost) {
-        if (KCTX_COOKIE24(r->context) != 0) {
-            /* A token-carrying Result ANSWERS a submit — its owner is
-             * kernel-parked on it, or mid-transition to that park. The old
-             * conditional flip lost the race on the second case: it read
-             * PROC_WORKING an instant before the parker committed WAITING,
-             * skipped the flip, and the strand slept forever on a reply
-             * already published (Nightwatch: "undelivered result"). Flip
-             * unconditionally — for a running target it is a benign no-op
-             * transition, and process_set_state's death-guard still refuses
-             * to resurrect corpses. */
-            process_set_state(target, PROC_WORKING);
-        } else if (process_get_state(target) == PROC_WAITING) {
-            process_set_state(target, PROC_WORKING);
-        }
-        kring_wake_remote(target);
+     * A token-carrying Result ANSWERS a submit — its owner is kernel-parked on
+     * it, or mid-transition to that park. The flip is unconditional for that
+     * case: a conditional one lost the race against a parker that had not yet
+     * committed PROC_WAITING, and the strand then slept forever on a reply
+     * already published. For a running target the transition is a benign
+     * no-op, and process_set_state's death-guard still refuses corpses. */
+    if (KCTX_COOKIE24(r->context) != 0) {
+        process_set_state(target, PROC_WORKING);
+    } else if (process_get_state(target) == PROC_WAITING) {
+        process_set_state(target, PROC_WORKING);
     }
-    return !overflow && !consumer_lost;
+    kring_wake_remote(target);
+    return true;
 }

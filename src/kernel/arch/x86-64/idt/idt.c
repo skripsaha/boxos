@@ -28,6 +28,8 @@
 #include "linker_symbols.h"
 #include "cpu_calibrate.h" // cpu_tsc_recal_tick (periodic recalibration)
 #include "touch_queue.h"
+#include "nightwatch.h"
+#include "clockboard.h"
 #include "pit.h"
 #include "irq_defer.h"
 
@@ -1392,6 +1394,28 @@ void syscall_handler(interrupt_frame_t *frame)
     spin_unlock(&sched_state->scheduler_lock);
 
     frame->rax = 0;
+
+    /* The door: settle what the kernel owes this strand's Touch ring before
+     * anything else it came for.
+     *
+     * It stands HERE, at the syscall gate, and not in guide_process_pocket,
+     * because the guide is not the gate — the yield short-circuit below pops
+     * its pocket and schedules without ever entering guide(), and a yield is
+     * precisely how a consumer that has read the `owed` slip comes to ask for
+     * the rest. A door the asking never reaches is not a door. Every other
+     * path into the kernel passes through here too, so one check covers them
+     * all: sync dispatch, async K-Core submit, and the yield hint.
+     *
+     * A strand arriving here has been running, so it has had its chance to
+     * drain its ring; what did not fit before may fit now. Handing over BEFORE
+     * the dispatch is also what lets a touch_await park correctly — the slots
+     * land first, and the park's own ring re-check then undoes itself.
+     *
+     * Costs one relaxed load when nothing is owed, which is nearly always. The
+     * hand-over is self-limiting: it stops the moment the ring refuses again,
+     * so it can never push more than the consumer just drained. */
+    if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) != 0)
+        TouchOwedHandOver(proc);
 
     /* Yield short-circuit. Cooperative-scheduling hint: pockets tagged
      * with POCKET_FLAG_YIELD skip guide() — the process stays WORKING
