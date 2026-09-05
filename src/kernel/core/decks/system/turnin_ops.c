@@ -152,7 +152,18 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
  *
  * A pid nobody answers to is not an error. The ringer is a peer acting on a
  * bell it took from a shared page; the strand that hung it may have gone in
- * the meantime, and telling the ringer so would give it nothing to do. */
+ * the meantime, and telling the ringer so would give it nothing to do.
+ *
+ * ‼ IT ANSWERS NOTHING, and that is the point of a doorbell. The first version
+ * replied like any other op, so the ringer waited for it — a full synchronous
+ * round trip, taken from inside printf, every time a printing strand found the
+ * console asleep. A ring is a favour done for somebody else; making the ringer
+ * block on it puts one strand's liveness inside another's, on the hottest path
+ * in the system, for an answer that says nothing it could act on. Nothing is
+ * lost by not answering: a ring that fails to land leaves the sleeper's bell
+ * marked and its peer will hang a fresh one on its next trip down, and a ring
+ * to a departed strand was always a no-op. Same discipline as TURN_IN — the
+ * handler owns the completion, and there is no completion. */
 static int SysBell(const ManifestOp *op, Crate *crates,
                    uint16_t crate_count, const OpContext *ctx)
 {
@@ -160,19 +171,25 @@ static int SysBell(const ManifestOp *op, Crate *crates,
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
     if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
 
+    /* Past this point nothing is answered, so every exit must say so — a
+     * silent op that replies on one path is worse than one that always does. */
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+
     uint32_t who;
     memcpy(&who, op->params, sizeof(uint32_t));
-    if (who == 0) return ERR_INVALID_ARGUMENT;
+    if (who == 0) return ERR_WOULD_BLOCK;
 
     process_t *target = process_find_ref(who);
-    if (!target) return OK;
+    if (!target) return ERR_WOULD_BLOCK;
 
     Result r;
     memset(&r, 0, sizeof(r));
     r.error_code = ERR_WOULD_BLOCK;
     (void)KResultPush(target, &r);
     process_ref_dec(target);
-    return OK;
+
+    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    return ERR_WOULD_BLOCK;
 }
 
 error_t TurnInOpsRegister(void)

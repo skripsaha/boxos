@@ -1135,10 +1135,13 @@ bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
             const BrookHeader *h = brook_kernel_header(o);
             if (!h) continue;
 
-            if (is_reader &&
-                __atomic_load_n(&h->reader_bell, __ATOMIC_ACQUIRE) != 0) hung = true;
-            if (is_writer &&
-                __atomic_load_n(&h->writer_bell, __ATOMIC_ACQUIRE) != 0) hung = true;
+            /* Asleep in a stream — durable now that taking a bell only marks
+             * it. This is the fact that separates a strand owed a ring from
+             * one merely parked elsewhere while a stream waits for it. */
+            uint32_t rb = __atomic_load_n(&h->reader_bell, __ATOMIC_ACQUIRE);
+            uint32_t wb = __atomic_load_n(&h->writer_bell, __ATOMIC_ACQUIRE);
+            if (is_reader && rb != 0) hung = true;
+            if (is_writer && wb != 0) hung = true;
 
             /* head BEFORE tail — same rule as the Result ring: read the
              * consumer cursor first and the producer cursor cannot be sampled
@@ -1191,10 +1194,14 @@ static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t depart
                                                                : &kh->writer_bell;
     uint32_t who = __atomic_load_n(bell, __ATOMIC_ACQUIRE);
     if (who == 0) return 0;
-    if (!__atomic_compare_exchange_n(bell, &who, 0u, false,
+    if (who & BROOK_BELL_RUNG) return 0;        /* already rung for this sleep */
+    /* Mark, never erase — the sleeper's own hand is the only one that clears
+     * this word, so the fact that it IS asleep in a stream survives the ring.
+     * See BROOK_BELL_RUNG in brook.h. */
+    if (!__atomic_compare_exchange_n(bell, &who, who | BROOK_BELL_RUNG, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         return 0;                       /* the peer took it first and rang */
-    return who;
+    return BROOK_BELL_PID(who);
 }
 
 /* Outside every lock: deliver the ring.

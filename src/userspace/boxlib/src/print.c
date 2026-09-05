@@ -260,74 +260,46 @@ static bool lane_ensure(StrandPrintState *ps)
     return true;
 }
 
-/* Push one built frame. A full ring SLOWS the writer — output is never
- * dropped — but the wait must be a POLITE one: the console is a fan-in of
- * every printing strand into ONE daemon, and both naive waits fail it at
- * scale (measured, print_stress 16 strands):
- *   - brook_push's UMWAIT path holds the core while it watches the
- *     cursor; sixteen watchers starve the very reader they wait for
- *     (24k lines sat banked until the writers died);
- *   - yield-per-attempt floods the Guide with a syscall storm from every
- *     blocked writer, and the daemon's render ops drown in that queue
- *     (299 frames rendered in 160 s).
- * The shape that serves a fan-in is pause-spin with EXPONENTIAL backoff
- * between yields: a fresh stall probes hot (microseconds), a standing
- * stall backs off toward a few milliseconds of pause per yield — always
- * shorter than the ring-drain it is waiting out, and hundreds (not
- * hundreds of thousands) of syscalls per second per blocked writer.
- * On daemon death flips to the VGA fallback and returns false so the
+/* Push one built frame. A full lane SLOWS the writer — output is never dropped
+ * — and until this had a bell, the wait had to be a guess.
+ *
+ * WHAT STOOD HERE, and why the guessing was not the writer's fault. Both naive
+ * waits fail a fan-in at scale, measured with sixteen printing strands:
+ *   - brook_push's old UMWAIT path held the core while it watched the reader's
+ *     cursor; sixteen watchers starved the very reader they were waiting for,
+ *     and 24k lines sat banked until the writers died;
+ *   - a yield per attempt flooded the Guide with a syscall storm from every
+ *     blocked writer, and the daemon's render ops drowned in that queue — 299
+ *     frames rendered in 160 s.
+ * So what stood here was the shape that survives both: pause-spin with
+ * exponential backoff between yields, LANE_PUSH_SPIN_MIN doubling toward
+ * LANE_PUSH_SPIN_MAX. It worked, and every number in it was a guess about a
+ * machine nobody could measure — "always shorter than the ring-drain it is
+ * waiting out" was a hope, not a fact. Beside it stood a second guess: after
+ * sixty seconds of silence, announce that the lane is jammed, because a
+ * deadline-free wait with no voice is how a machine stands still without a
+ * word.
+ *
+ * Both guesses are gone, and neither is replaced by a better number. The
+ * writer now hangs its own bell — in the cacheline the daemon already reads
+ * for `tail` on every pop — and the daemon rings it the moment it frees a
+ * slot. brook_push does that and then turns in, so a blocked writer costs
+ * NOTHING rather than a core: strictly better than the UMWAIT it replaces, and
+ * its syscall count is bounded by how many times it SLEEPS instead of by how
+ * often it retries.
+ *
+ * The sixty-second voice is not replaced either, because the jam now has a
+ * better witness than a stopwatch. A daemon that stops draining sleeps with
+ * frames unread and its own bell hung out, and Nightwatch convicts exactly
+ * that (BrookBellUnrung) — naming the reader that is not draining, on facts,
+ * with no clock anywhere in it, and without the writer having to narrate its
+ * own wait.
+ *
+ * On daemon death this flips to the VGA fallback and returns false so the
  * caller re-delivers its content by the direct path. */
-#define LANE_PUSH_SPIN_MIN  2048u      /* same class as BROOK_SPIN_BUDGET */
-#define LANE_PUSH_SPIN_MAX  (1u << 20) /* ~ a few ms of PAUSE — µarch class */
-
-/* How long a jammed lane may stay silent before it says so. Not a deadline —
- * this wait never expires and never drops a line — a WATCH over silence. */
-#define LANE_JAM_ANNOUNCE_MS  60000u
-
 static bool lane_push(StrandPrintState *ps, const ConsoleRun *f)
 {
-    int      rc;
-    uint32_t budget = LANE_PUSH_SPIN_MIN;
-    uint32_t spins  = 0;
-    uint64_t began  = 0;
-    bool     said   = false;
-    while ((rc = brook_try_push((Brook *)ps->lane, f)) == -ERR_WOULD_BLOCK) {
-        if (++spins < budget) {
-            __asm__ volatile("pause" ::: "memory");
-        } else {
-            spins = 0;
-            if (budget < LANE_PUSH_SPIN_MAX) budget <<= 1;
-
-            /* A full lane must not drop the line, so this waits without a
-             * deadline — and a deadline-free wait with no voice is how a
-             * machine stands still in perfect silence. MEASURED: a matrix run
-             * stopped mid-line inside phase35 with a writer here, and nothing
-             * in the log said anything at all; Nightwatch could not see it
-             * either, because a writer waiting for ring space has no
-             * unanswered submit to notice — it is waiting for a READER.
-             *
-             * So the wait keeps waiting, and after long enough it says once
-             * what no one else can: the reader is attached (a departed one
-             * fails the push outright, below) and it is not draining.
-             * kdbg_print reaches the kernel directly through HW_DEBUG_PRINT
-             * rather than through this lane, so the complaint cannot queue
-             * behind the jam it is describing. */
-            if (!said) {
-                uint64_t now = cpu_rdtsc();
-                if (began == 0) {
-                    began = now;
-                } else if (now - began >= cpu_ms_to_tsc(LANE_JAM_ANNOUNCE_MS)) {
-                    said = true;
-                    kdbg_print("[print] DEFECT: console lane full for %u ms — "
-                               "the reader is attached but not draining. This "
-                               "writer is still waiting (it will not drop the "
-                               "line); output stops here until the lane moves",
-                               (unsigned)LANE_JAM_ANNOUNCE_MS);
-                }
-            }
-            yield();
-        }
-    }
+    int rc = brook_push((Brook *)ps->lane, f);
     if (rc == 0) return true;
 
     Brook *dead = (Brook *)ps->lane;

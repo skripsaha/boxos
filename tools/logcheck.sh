@@ -2800,23 +2800,38 @@ run_sleeps() {
 # nobody hangs out is also a bell nobody rings, and Nightwatch would then have
 # nothing to describe. Leaving the sign up and refusing to pull the cord is the
 # exact defect the check exists for, and it is the one that leaves evidence.
+# BOTH ringers, and both on purpose. Silencing only the peer's leaves the
+# kernel's departure ring to rescue the sleeper the moment the other end lets
+# go — measured: the staged wedge healed itself in six seconds and there was
+# nothing left to observe. A bell that nobody rings, from anywhere, is the
+# defect this is about.
 bell_off() {
     cp src/userspace/boxlib/src/brook.c "$SCRATCH/brook.c.bak"
+    cp src/kernel/core/brook/brook.c    "$SCRATCH/kbrook.c.bak"
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/brook.c"
 s = open(p).read()
-anchor = "    if (!brook_cas_u32(bell, who, 0)) return;   /* somebody else is ringing */"
+anchor = "    if (!brook_cas_u32(bell, who, who | BROOK_BELL_RUNG)) return;"
 assert anchor in s, "bell mutation anchor missing"
 s = s.replace(anchor, anchor + "\n    return;   /* logcheck mutation: the bell is never rung */", 1)
 open(p, "w").write(s)
+
+p = "src/kernel/core/brook/brook.c"
+s = open(p).read()
+anchor = "    if (who == 0) return;\n    process_t *target = process_find_ref(who);"
+assert anchor in s, "kernel bell mutation anchor missing"
+s = s.replace(anchor, "    return;   /* logcheck mutation: the kernel never rings either */\n" + anchor, 1)
+open(p, "w").write(s)
 EOF
     grep -q "logcheck mutation" src/userspace/boxlib/src/brook.c || { echo "bell mutation install FAILED"; exit 1; }
-    sleep 1; touch src/userspace/boxlib/src/brook.c
+    grep -q "logcheck mutation" src/kernel/core/brook/brook.c    || { echo "kernel bell mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/brook.c src/kernel/core/brook/brook.c
 }
 
 bell_restore() {
-    [ -f "$SCRATCH/brook.c.bak" ] && cp "$SCRATCH/brook.c.bak" src/userspace/boxlib/src/brook.c
-    sleep 1; touch src/userspace/boxlib/src/brook.c
+    [ -f "$SCRATCH/brook.c.bak" ]  && cp "$SCRATCH/brook.c.bak"  src/userspace/boxlib/src/brook.c
+    [ -f "$SCRATCH/kbrook.c.bak" ] && cp "$SCRATCH/kbrook.c.bak" src/kernel/core/brook/brook.c
+    sleep 1; touch src/userspace/boxlib/src/brook.c src/kernel/core/brook/brook.c
 }
 
 # And the other half: a box that never turns in. Removing the submit leaves the
@@ -2892,7 +2907,12 @@ run_sleepsmut() {
     ./tools/qemu-input.sh key ret >/dev/null 2>&1
     sleep 2
     EARLY=$(tail -n +$((MARK + 1)) build/serial.log)
-    sleep 8
+    # Long enough for TWO Nightwatch looks. The watch convicts on a delivery
+    # that is still unread a whole look later, never on one instant — a
+    # delivery in flight looks exactly like a lost one for the microseconds
+    # between the record and the wake, and sleeping strands go through that gap
+    # thousands of times a second under a print storm.
+    sleep 28
     cp build/serial.log "$SCRATCH/serial.sleepsmut.bell.log"
     make run-stop >/dev/null 2>&1
     bell_restore
@@ -2901,6 +2921,16 @@ run_sleepsmut() {
         bad "sleepsmut: bell disabled and the line STILL arrived on time — the check proves nothing"
     else
         ok "sleepsmut: bell disabled — the line was not on screen while the writer lived"
+    fi
+
+    # lane_push used to announce its own jam after sixty seconds. It does not
+    # any more, because it sleeps instead of spinning and a sleeper cannot
+    # narrate. This is what took that job: the watch names the jam from facts,
+    # with no clock in it. If it ever goes quiet, the jam goes silent with it.
+    if grep -q "BELL UNRUNG" "$SCRATCH/serial.sleepsmut.bell.log"; then
+        ok "sleepsmut: Nightwatch named the jam — BELL UNRUNG, on facts, with no deadline"
+    else
+        bad "sleepsmut: nobody rang and NOBODY SAID SO — a stream can now jam in silence"
     fi
 
     turnin_off; build

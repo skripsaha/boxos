@@ -169,6 +169,23 @@ struct process_t;
  *   alive==0 && ever_attached==0 → no peer YET; keep waiting (lets a
  *                                  reader open before any writer attaches).
  * ───────────────────────────────────────────────────────────────────── */
+/* Taking a bell MARKS it; it does not erase it. The peer that rings sets this
+ * bit, and only the sleeper itself ever writes the word back to zero.
+ *
+ * The first design had the ringer CAS the bell to 0, which is the obvious way
+ * to make exactly one peer pay — and it destroyed the only evidence that the
+ * strand was asleep in a stream at all. A ring that is taken and then LOST
+ * left a header indistinguishable from a healthy one, so Nightwatch went blind
+ * on precisely the failure the bell exists to make visible. Found by staging
+ * that failure: the watch said nothing for thirty seconds over a wedged
+ * reader.
+ *
+ * With the mark, the word answers two questions instead of one — is this
+ * strand asleep in a brook (non-zero), and did anybody already ring for it
+ * (bit set) — and neither answer can be erased by the peer. */
+#define BROOK_BELL_RUNG   0x80000000u
+#define BROOK_BELL_PID(v) ((v) & ~BROOK_BELL_RUNG)
+
 typedef struct {
     /* Cacheline 0 (64 B) — writer state, watched by reader */
     volatile uint64_t tail;                  /* writer writes; reader reads */
