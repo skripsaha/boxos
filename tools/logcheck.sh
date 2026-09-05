@@ -2744,10 +2744,20 @@ run_sleeps() {
     sleep 1
     ./tools/qemu-input.sh key ret >/dev/null 2>&1
 
-    # quietprint: line 1, three seconds of silence, line 2, three more, done.
-    # Look at two seconds — inside the FIRST silence. Line one must already be
-    # there and the program must still be running.
-    sleep 2
+    # quietprint: line 1, three seconds asleep in brook_pop, line 2, three more
+    # in a touch park, done. Measure INSIDE the first silence — that window has
+    # a strand blocked in brook_pop, a sibling parked, and a shell and a daemon
+    # turned in, so a box that is not idle here has a waiter that spins.
+    sleep 1
+    local WA WB WUSED
+    WA=$(qemu_cpu_cs); sleep 2; WB=$(qemu_cpu_cs)
+    WUSED=$(( (WB - WA) * 100 / 200 ))
+    echo "     with a strand blocked in brook_pop: ${WUSED}% of one core"
+    if [ "$WUSED" -lt 25 ]; then ok "sleeps: a blocked brook_pop costs ${WUSED}% of a core"
+    else                        bad "sleeps: a blocked brook_pop costs ${WUSED}% of a core — the reader is spinning"; fi
+
+    # Look at three seconds — still inside the FIRST silence. Line one must
+    # already be there and the program must still be running.
     EARLY=$(tail -n +$((MARK + 1)) build/serial.log)
     printf '%s\n' "$EARLY" > "$SCRATCH/serial.sleeps.early.log"
 
@@ -2773,6 +2783,10 @@ run_sleeps() {
         && ok "sleeps: quietprint ran to the end" \
         || bad "sleeps: quietprint never finished"
 
+    printf '%s' "$LATE" | grep -q "\[QP\] line 2 at .* (brook)" \
+        && ok "sleeps: the first silence really was a blocked brook_pop" \
+        || bad "sleeps: quietprint fell back to a touch park — the brook sleep was not exercised"
+
     local T2
     T2=$(printf '%s' "$LATE" | sed -n 's/.*\[QP\] line 2 at \([0-9]*\) ms.*/\1/p' | head -1)
     if [ -n "$T2" ] && [ "$T2" -ge 2900 ] && [ "$T2" -le 4200 ]; then
@@ -2791,7 +2805,7 @@ bell_off() {
     python3 - <<'EOF'
 p = "src/userspace/boxlib/src/brook.c"
 s = open(p).read()
-anchor = """    if (!brook_cas_u32(&h->bell, who, 0)) return;   /* another writer is ringing */"""
+anchor = "    if (!brook_cas_u32(bell, who, 0)) return;   /* somebody else is ringing */"
 assert anchor in s, "bell mutation anchor missing"
 s = s.replace(anchor, anchor + "\n    return;   /* logcheck mutation: the bell is never rung */", 1)
 open(p, "w").write(s)
@@ -2824,6 +2838,29 @@ EOF
 turnin_restore() {
     [ -f "$SCRATCH/turnin.c.bak" ] && cp "$SCRATCH/turnin.c.bak" src/userspace/boxlib/src/turnin.c
     sleep 1; touch src/userspace/boxlib/src/turnin.c
+}
+
+# And the reader's own half: a brook_pop that spins instead of sleeping. This
+# is the narrowest of the three — turn-in stays, the bell stays, only the wait
+# inside Brook goes back to watching a cacheline — so it is the one that says
+# whether the window measurement is about brook_pop or merely about the box.
+brookpop_off() {
+    cp src/userspace/boxlib/src/brook.c "$SCRATCH/brook.c.popbak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/brook.c"
+s = open(p).read()
+anchor = "        brook_sleep_until(b, brook_pop_ready);"
+assert anchor in s, "brookpop mutation anchor missing"
+s = s.replace(anchor, "        brook_wait_cycle(&h->tail, &spin, 0);   /* logcheck mutation: spin, do not sleep */", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/userspace/boxlib/src/brook.c || { echo "brook_pop mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/brook.c
+}
+
+brookpop_restore() {
+    [ -f "$SCRATCH/brook.c.popbak" ] && cp "$SCRATCH/brook.c.popbak" src/userspace/boxlib/src/brook.c
+    sleep 1; touch src/userspace/boxlib/src/brook.c
 }
 
 # sleepsmut — the oracle measured against itself.
@@ -2888,8 +2925,168 @@ run_sleepsmut() {
         ok "sleepsmut: Turn In removed — the box went back to ${USED}% of a core"
     fi
 
+    brookpop_off; build
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
+    i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 1
+    local WA WB WUSED
+    WA=$(qemu_cpu_cs); sleep 2; WB=$(qemu_cpu_cs)
+    WUSED=$(( (WB - WA) * 100 / 200 ))
+    sleep 8
+    cp build/serial.log "$SCRATCH/serial.sleepsmut.brookpop.log"
+    make run-stop >/dev/null 2>&1
+    brookpop_restore
+
+    echo "     blocked brook_pop without the sleep: ${WUSED}% of one core"
+    if [ "$WUSED" -lt 25 ]; then
+        bad "sleepsmut: brook_pop set back to spinning and the box was STILL idle at ${WUSED}% — the window measurement proves nothing"
+    else
+        ok "sleepsmut: brook_pop set back to spinning — the window went to ${WUSED}% of a core"
+    fi
+
     build   # leave the tree built from clean sources either way
     [ $FAIL -eq $before_fail ] || echo "     (a red line above means the oracle cannot see its own defect)"
+}
+
+# ===========================================================================
+# lines — one strand's line is never cut in half by another's
+# ===========================================================================
+#
+# The console is a fan-in: every printing strand has its own lane, and the
+# daemon merges them in global push order. The unit it interleaves is a FRAME,
+# so where a frame ends decides whether concurrent output is readable. It used
+# to end wherever the 108-byte run filled up, which lands mid-line, and two
+# strands printing at once then spliced into each other:
+#
+#     [PS-11] 00000[PS-04] 00000000
+#     [PS-04787
+#
+# Nothing was ever lost — the character count came out exact on every run, on
+# both sides of the fix — so no test could see it by counting. What it cost was
+# grep: every marker in this project is one, and a torn "[STRAND] PASS" reads
+# as a machine that hung. That is what made sixteen-core runs a lottery.
+#
+# print_stress is the instrument: sixteen strands, two thousand numbered lines
+# each, all of one exact shape. Anything that does not match that shape is a
+# line something else got into. MEASURED: ~300-700 spliced lines per run before
+# the fix, 0 of 32000 after.
+run_lines() {
+    echo "== lines: sixteen strands printing at once, and not one line spliced =="
+    build
+
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "lines: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
+
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "print_stress" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 3
+        tail -n +$((MARK + 1)) build/serial.log | grep -q "PS SUMMARY" && break
+        i=$((i+1))
+    done
+    # The serial line discipline is CRLF, and a trailing \r defeats a `$`
+    # anchor on BSD grep — strip it once here rather than have every check
+    # below carry the same footnote.
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.lines.log"
+    make run-stop >/dev/null 2>&1
+
+    grep -q "PS SUMMARY.*PASS" "$SCRATCH/serial.lines.log" \
+        && ok "lines: print_stress ran to the end" \
+        || bad "lines: print_stress never finished"
+
+    local WHOLE DIGITS
+    WHOLE=$(grep -cE '^\[PS-[0-9]{2}\] [0-9]{8}$' "$SCRATCH/serial.lines.log" | tr -d ' ')
+    DIGITS=$(tr -cd '0-9' < "$SCRATCH/serial.lines.log" | wc -c | tr -d ' ')
+    echo "     $WHOLE of 32000 lines whole; $DIGITS digits on the wire"
+
+    # Exactly 32000, not "nearly". A single splice is a marker somebody's grep
+    # will miss one run in ten, which is the whole failure this closes.
+    if [ "$WHOLE" -eq 32000 ]; then ok "lines: all 32000 lines came out whole"
+    else                            bad "lines: $WHOLE of 32000 whole — $((32000 - WHOLE)) line(s) were spliced"; fi
+
+    # And the older, weaker fact, kept because it is the one that says the
+    # difference between a splice and a LOSS: the characters are all there.
+    if [ "$DIGITS" -ge 256000 ]; then ok "lines: every character reached the log ($DIGITS digits)"
+    else                              bad "lines: only $DIGITS digits reached the log — characters were LOST, not merely spliced"; fi
+}
+
+# The mutation: cut a frame wherever the buffer happens to fill, as it did
+# before. Nothing breaks, nothing is lost, and the log becomes unmatchable —
+# which is exactly why this needs an oracle rather than an eye.
+linecut_off() {
+    cp src/userspace/boxlib/src/print.c "$SCRATCH/print.c.bak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/print.c"
+s = open(p).read()
+anchor = "                lane_flush_lines(ps);"
+assert anchor in s, "linecut mutation anchor missing"
+s = s.replace(anchor, "                lane_flush_run(ps);   /* logcheck mutation: cut anywhere */", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/userspace/boxlib/src/print.c || { echo "linecut mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/print.c
+}
+
+linecut_restore() {
+    [ -f "$SCRATCH/print.c.bak" ] && cp "$SCRATCH/print.c.bak" src/userspace/boxlib/src/print.c
+    sleep 1; touch src/userspace/boxlib/src/print.c
+}
+
+run_linesmut() {
+    echo "== linesmut: cut frames anywhere again, and require the oracle to notice =="
+    linecut_off; build
+
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "print_stress" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 3
+        tail -n +$((MARK + 1)) build/serial.log | grep -q "PS SUMMARY" && break
+        i=$((i+1))
+    done
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.linesmut.log"
+    make run-stop >/dev/null 2>&1
+    linecut_restore
+
+    local WHOLE
+    WHOLE=$(grep -cE '^\[PS-[0-9]{2}\] [0-9]{8}$' "$SCRATCH/serial.linesmut.log" | tr -d ' ')
+    echo "     cutting anywhere: $WHOLE of 32000 lines whole"
+    if [ "$WHOLE" -eq 32000 ]; then
+        bad "linesmut: frames cut anywhere and nothing spliced — the check proves nothing"
+    else
+        ok "linesmut: frames cut anywhere — $((32000 - WHOLE)) line(s) spliced, and the oracle sees them"
+    fi
+
+    build   # leave the tree built from clean sources
 }
 
 case "${1:-both}" in
@@ -2908,6 +3105,8 @@ case "${1:-both}" in
     gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
     sleeps)     run_sleeps ;;
+    lines)      run_lines ;;
+    linesmut)   run_linesmut ;;
     sleepsmut)  run_sleepsmut ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
@@ -2921,8 +3120,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

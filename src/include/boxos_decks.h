@@ -177,4 +177,22 @@
  * one to guess — the caller loops and asks again. */
 #define SYSTEM_OP_TURN_IN           0xC6  /* (u64 touch_tail_seen)(u64 result_tail_seen) — answers nothing */
 
+/* ─── Bell — wake a strand, and say nothing ──────────────────────────── */
+/* Brook's two ends wake each other across a shared page the kernel never
+ * sees, and a departing end has to be able to wake the survivor. All any of
+ * them needs is for the sleeper's Result cursor to move; there is nothing to
+ * say beyond "come".
+ *
+ * It is deliberately NOT an empty IPC message. That was tried, and it forced
+ * every receive path in the system to learn that a contentless message is not
+ * a message — a global change to what IPC means, made to hide one subsystem's
+ * doorbell. A zero-length message is a perfectly legitimate thing for a
+ * program to send, and swallowing it everywhere to serve Brook is the kind of
+ * quiet semantic change that turns up months later as an unexplained lost
+ * message. So the bell has its own op, and the record it pushes wears the
+ * shape every consumer has discarded since long before it existed: no sender,
+ * no token, ERR_WOULD_BLOCK — "this moved the cursor, that was its whole
+ * job". */
+#define SYSTEM_OP_BELL              0xC7  /* (u32 pid) — wake that strand; carries nothing */
+
 #endif // BOXOS_DECKS_H

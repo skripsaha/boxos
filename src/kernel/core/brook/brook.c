@@ -33,6 +33,8 @@
 #include "acpi.h"          /* acpi_get_numa, ACPI_NUMA_DOMAIN_UNKNOWN */
 #include "amp.h"           /* amp_get_core_index, g_amp.cores */
 #include "cpuid.h"         /* g_cpu_caps for WAITPKG + monitor line size */
+#include "kring.h"         /* KResultPush — the kernel rings a departing peer's bell */
+#include "result.h"        /* Result */
 
 /* ─────────────────────────────────────────────────────────────────────
  * Page-class policy mirrors Bay. 4 KiB by default; 2 MiB when total
@@ -62,6 +64,11 @@ typedef struct BrookBucket {
 } BrookBucket;
 
 static BrookBucket g_brook_buckets[BROOK_BUCKETS];
+
+/* The kernel's half of the bell — defined near BrookBellUnrung, declared here
+ * because both release paths use it and both sit above it. */
+static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t departing_role);
+static void     brook_ring_pid(uint32_t who);
 
 static volatile uint64_t g_stat_objects;
 static volatile uint64_t g_stat_claims;
@@ -981,10 +988,16 @@ error_t BrookReleaseInternal(struct process_t *proc, uint64_t user_va_header)
                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED);
         if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
     }
+    /* Take the survivor's bell HERE, under the lock that guards the header;
+     * the ring itself waits until the lock is dropped (BrookRingPeer). */
+    uint32_t ring_pid = brook_take_survivor_bell_locked(kh, claim->role);
 
     brook_drop_ref_locked(b, brook);
     /* `brook` may have been freed inside brook_drop_ref_locked when
      * ref_count hit zero — do NOT touch it past this point. */
+
+    /* Lock is gone (drop_ref_locked releases it either way): ring now. */
+    brook_ring_pid(ring_pid);
 
     kfree(claim);
     if (g_stat_claims > 0) atomic_fetch_sub_u64(&g_stat_claims, 1);
@@ -1051,9 +1064,16 @@ void BrookCleanupProcess(struct process_t *proc)
                                             __ATOMIC_RELAXED);
                 if (brook->reader_pid == proc->pid) brook->reader_pid = 0;
             }
+            /* A strand that DIES holding one end is the commonest way a stream
+             * ends, and the sleeper on the other end has even less to go on
+             * than after an orderly release — nobody called anything. Take the
+             * bell here, ring below the lock. */
+            uint32_t ring_pid = brook_take_survivor_bell_locked(kh, to_free->role);
 
             brook_drop_ref_locked(b, brook);
             /* `brook` may be freed past this point — don't touch it. */
+
+            brook_ring_pid(ring_pid);
 
             if (g_stat_claims > 0) atomic_fetch_sub_u64(&g_stat_claims, 1);
             atomic_fetch_add_u64(&g_stat_releases, 1);
@@ -1064,75 +1084,138 @@ void BrookCleanupProcess(struct process_t *proc)
     }
 }
 
-/* See brook.h. Walks every bucket because a brook is keyed by tag, not by
- * reader — there is no index from a pid to the streams it reads, and building
- * one to serve a report that runs only when the whole machine has gone quiet
- * would be a lock in every open and release to save a walk nobody is waiting
- * on. 256 buckets, single-digit brooks in each.
+/* See brook.h. Walks every bucket because a brook is keyed by tag, not by the
+ * strands on its ends — there is no index from a pid to the streams it holds,
+ * and building one to serve a report that runs only when the whole machine has
+ * gone quiet would be a lock in every open and release to save a walk nobody
+ * is waiting on. 256 buckets, single-digit brooks in each.
  *
  * ‼ WHAT A LOST RING ACTUALLY LOOKS LIKE, and it is not what it sounds like.
- * The obvious test — "a bell still hanging over unread frames" — is the wrong
- * one, and a staged defect proved it: a writer TAKES the bell (the CAS is what
- * makes exactly one writer pay) and only then rings. Lose the ring and the
- * bell is already down; the lane sits with one frame and a clean header, and
- * that test sees nothing at all. Measured, not reasoned: with the ring
- * disabled the wedged lane read bell=0 head=0 tail=1.
+ * The obvious test — "a bell still hanging over a stream that has work" — is
+ * the wrong one, and a staged defect proved it: the peer TAKES the bell (the
+ * CAS is what makes exactly one of them pay) and only then rings. Lose the ring
+ * and the bell is already down; the stream sits with one frame and a clean
+ * header, and that test sees nothing at all. Measured, not reasoned: with the
+ * ring disabled the wedged lane read bell=0 head=0 tail=1.
  *
- * So the accusation rests on two facts from the same reader:
+ * So the accusation rests on two facts from the same strand:
  *
- *   IT WENT TO SLEEP EXPECTING BELLS — at least one of its brooks carries its
- *   pid. Only a reader that hung one is owed a ring, which is what keeps this
- *   away from the perfectly legitimate case of a strand parked on something
- *   else while frames wait for it to come back.
+ *   IT WENT TO SLEEP EXPECTING A BELL — at least one of its brooks carries its
+ *   pid, on the side it holds. Only a strand that hung one is owed a ring,
+ *   which is what keeps this away from the perfectly legitimate case of a
+ *   strand parked on something else while a stream waits for it to come back.
  *
- *   AND ONE OF THEM HAS FRAMES IT HAS NOT READ — someone wrote for a strand
- *   that is asleep.
+ *   AND ONE OF THEM COULD HAVE SERVED IT — a reader with frames it has not
+ *   read, or a writer with room it has not been told about. Somebody moved a
+ *   cursor for a strand that is asleep.
  *
- * Together, with every core idle and the caller having already established
- * that, they say: output was produced for a sleeper and the sleeper was not
- * told. Reports the unread brook, since that is the one to go and look at. */
-bool BrookBellUnrung(uint32_t reader_pid, uint16_t *out_tag_id,
+ * Both ends are checked, because both ends sleep: a reader waiting for a frame
+ * and a writer waiting for a slot are the same defect wearing different hats,
+ * and the writer's is the console jam that used to be visible only as a line
+ * of print sixty seconds later. */
+bool BrookBellUnrung(uint32_t strand_pid, uint16_t *out_tag_id,
                      uint64_t *out_head, uint64_t *out_tail)
 {
-    if (reader_pid == 0) return false;
+    if (strand_pid == 0) return false;
 
     bool     hung   = false;
-    bool     unread = false;
+    bool     served = false;
     uint16_t tag    = 0;
-    uint64_t uhead = 0, utail = 0;
+    uint64_t shead = 0, stail = 0;
 
     for (uint32_t i = 0; i < BROOK_BUCKETS; i++) {
         BrookBucket *b = &g_brook_buckets[i];
         spin_lock(&b->lock);
         for (BrookObject *o = b->head; o; o = o->bucket_next) {
-            if (o->reader_pid != reader_pid || !o->header_phys) continue;
+            if (!o->header_phys) continue;
+            bool is_reader = (o->reader_pid == strand_pid);
+            bool is_writer = (o->writer_pid == strand_pid);
+            if (!is_reader && !is_writer) continue;
 
             const BrookHeader *h = brook_kernel_header(o);
             if (!h) continue;
 
-            if (__atomic_load_n(&h->bell, __ATOMIC_ACQUIRE) != 0) hung = true;
+            if (is_reader &&
+                __atomic_load_n(&h->reader_bell, __ATOMIC_ACQUIRE) != 0) hung = true;
+            if (is_writer &&
+                __atomic_load_n(&h->writer_bell, __ATOMIC_ACQUIRE) != 0) hung = true;
 
             /* head BEFORE tail — same rule as the Result ring: read the
              * consumer cursor first and the producer cursor cannot be sampled
              * behind it, so an empty stream can never look full. */
             uint64_t head = __atomic_load_n(&h->head, __ATOMIC_ACQUIRE);
             uint64_t tail = __atomic_load_n(&h->tail, __ATOMIC_ACQUIRE);
-            if (!unread && head != tail) {
-                unread = true;
+            bool     can  = is_reader ? (head != tail)
+                                      : ((tail - head) < o->frame_count);
+            if (!served && can) {
+                served = true;
                 tag    = o->tag_id;
-                uhead  = head;
-                utail  = tail;
+                shead  = head;
+                stail  = tail;
             }
         }
         spin_unlock(&b->lock);
-        if (hung && unread) break;
+        if (hung && served) break;
     }
 
-    if (!hung || !unread) return false;
+    if (!hung || !served) return false;
     if (out_tag_id) *out_tag_id = tag;
-    if (out_head)   *out_head   = uhead;
-    if (out_tail)   *out_tail   = utail;
+    if (out_head)   *out_head   = shead;
+    if (out_tail)   *out_tail   = stail;
     return true;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * BrookRingPeer — the kernel rings for a peer that cannot ring for itself.
+ *
+ * A strand asleep on a stream is woken by the other end moving a cursor. A
+ * strand asleep on a stream whose other end has DEPARTED is woken by nothing
+ * at all: the departure is a store to `*_alive` made by a kernel that has no
+ * cursor to move, and the sleeper's last look happened before it. It would
+ * wait for a frame that can never come, or a slot that will never be freed.
+ *
+ * So the kernel does exactly what the departing peer would have done if it
+ * still could: take the survivor's bell and ring it. Split in two on purpose —
+ * TAKE runs under the bucket lock that guards the header, RING does not,
+ * because ringing walks the target's page tables (KResultPush) and that is not
+ * work to do with a bucket lock held.
+ * ───────────────────────────────────────────────────────────────────── */
+
+/* Under the bucket lock: take the SURVIVOR's bell. `departing_role` is the
+ * side that is leaving, so the bell taken is the other one. Returns the pid to
+ * ring, or 0 if nobody was asleep. */
+static uint32_t brook_take_survivor_bell_locked(BrookHeader *kh, uint32_t departing_role)
+{
+    if (!kh) return 0;
+    volatile uint32_t *bell = (departing_role == BROOK_WRITER) ? &kh->reader_bell
+                                                               : &kh->writer_bell;
+    uint32_t who = __atomic_load_n(bell, __ATOMIC_ACQUIRE);
+    if (who == 0) return 0;
+    if (!__atomic_compare_exchange_n(bell, &who, 0u, false,
+                                     __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+        return 0;                       /* the peer took it first and rang */
+    return who;
+}
+
+/* Outside every lock: deliver the ring.
+ *
+ * Exactly the record system.bell pushes — no sender, no token,
+ * ERR_WOULD_BLOCK: the shape every consumer in boxlib has discarded since the
+ * async-park ack existed. Its whole job is to move the target's Result cursor,
+ * which is what its sleep is watching, and wearing a shape nobody can mistake
+ * for a message is what keeps this out of anybody's mailbox.
+ * Best-effort: a target already gone needs no telling. */
+static void brook_ring_pid(uint32_t who)
+{
+    if (who == 0) return;
+    process_t *target = process_find_ref(who);
+    if (!target) return;
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    r.error_code = ERR_WOULD_BLOCK;
+    (void)KResultPush(target, &r);
+    process_ref_dec(target);
 }
 
 void BrookStatsSnapshot(uint64_t out[4])

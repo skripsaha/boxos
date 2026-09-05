@@ -605,6 +605,12 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
         Result e;
         if (result_pop(&e)) {
             if (KCTX_KIND(e.context) == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+            /* Records whose only job was to move the cursor — the async-park
+             * ack, and Brook's bell — are not messages. Every other consumer
+             * in this file has always dropped them; this raw pop is the one
+             * that did not, and an IPC server handed one would read it as
+             * traffic that nobody sent. */
+            if (e.error_code == 9 /* ERR_WOULD_BLOCK */) return false;
             *out = e;
             return true;
         }
@@ -622,6 +628,7 @@ bool result_wait_any(Result* out, uint32_t timeout_ms) {
             Result e;
             if (result_pop(&e)) {
                 if (KCTX_KIND(e.context) == KCTX_STORAGE) { ferry_stash_push(&e); return false; }
+                if (e.error_code == 9 /* ERR_WOULD_BLOCK */) continue;   /* cursor only */
                 *out = e;
                 return true;
             }
