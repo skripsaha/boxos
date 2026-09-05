@@ -23,7 +23,7 @@ TouchTagPair touch_intern(const char *tag)
                      NULL, 0,
                      tag, (uint32_t)(strlen(tag) + 1),
                      out, sizeof(out), NULL,
-                     BOX_ANSWER_WATCHDOG_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return pair;
     pair.full = (TouchTag)out[0];
     pair.bare = (TouchTag)out[1];
@@ -55,7 +55,7 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_CLAIM,
                    params, param_size,
                    NULL, 0, NULL, 0, NULL,
-                   BOX_ANSWER_WATCHDOG_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int touch_release(TouchTag tag)
@@ -66,7 +66,7 @@ int touch_release(TouchTag tag)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_RELEASE,
                    params, 2,
                    NULL, 0, NULL, 0, NULL,
-                   BOX_ANSWER_WATCHDOG_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
@@ -99,7 +99,7 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
     Result r;
-    return ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_WATCHDOG_MS);
+    return ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_GUARANTEED);
 }
 
 /* Diagnostic counters — bumped from touch_await consumer path. */
@@ -484,12 +484,16 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
 
-    /* params: [u16 tag][u16 _pad][u32 timeout_ms] */
-    uint32_t to = (timeout_ms == 0) ? 30000 : timeout_ms;
+    /* params: [u16 tag][u16 _pad][u32 timeout_ms]. Zero goes through as zero:
+     * the kernel arms no timer for it (SysTouchAwait) and the park lasts until
+     * an event is published. It used to be turned into 30 s here, so a strand
+     * that asked to wait forever was woken every half minute for nothing — and
+     * a lost wakeup was blanketed instead of being seen, which Nightwatch does
+     * now (TOUCH UNDELIVERED). */
     uint8_t params[8];
     memset(params, 0, sizeof(params));
-    memcpy(params,     &tag, sizeof(uint16_t));
-    memcpy(params + 4, &to,  sizeof(uint32_t));
+    memcpy(params,     &tag,        sizeof(uint16_t));
+    memcpy(params + 4, &timeout_ms, sizeof(uint32_t));
 
     if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_AWAIT, 0,
                              CRATE_INDEX_NONE, CRATE_INDEX_NONE, params, 8) != 0)
@@ -516,13 +520,21 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
 
     /* Wait on TouchRing for an event. The kernel will wake us via
      * KTouchPush's PROC_WAITING→PROC_WORKING flip; touch_wait covers
-     * both the UMWAIT and pause-spin paths. */
-    uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
-    uint32_t left  = (spent >= (uint64_t)to) ? 0u : (uint32_t)((uint64_t)to - spent);
+     * both the UMWAIT and pause-spin paths. With no deadline `left` stays 0
+     * and means to touch_wait what it meant to the kernel: until an event. */
+    uint32_t left = 0;
+    if (timeout_ms != 0) {
+        uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
+        if (spent >= (uint64_t)timeout_ms) {
+            /* The park used the entire deadline. A zero must NOT reach
+             * touch_wait, where it would spell "wait forever". */
+            __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
+            return -ERR_TIMEOUT;
+        }
+        left = (uint32_t)((uint64_t)timeout_ms - spent);
+    }
 
-    /* left == 0 means the park used the entire deadline. It must NOT reach
-     * touch_wait, where 0 spells "wait forever". */
-    if (left == 0 || !touch_wait(out, left)) {
+    if (!touch_wait(out, left)) {
         __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
         return -ERR_TIMEOUT;
     }
@@ -535,7 +547,7 @@ int touch_irq_return(void)
 {
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_IRQ_RETURN,
                    NULL, 0, NULL, 0, NULL, 0, NULL,
-                   BOX_ANSWER_WATCHDOG_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
@@ -548,7 +560,7 @@ int touch_register(TouchTag tag, TouchPolicy policy, TouchCapability capability)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_REGISTER,
                    params, 4,
                    NULL, 0, NULL, 0, NULL,
-                   BOX_ANSWER_WATCHDOG_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int touch_ack(TouchTag tag)
@@ -559,5 +571,5 @@ int touch_ack(TouchTag tag)
     return MfCall1(DECK_SYSTEM, SYSTEM_OP_TOUCH_ACK,
                    params, 2,
                    NULL, 0, NULL, 0, NULL,
-                   BOX_ANSWER_WATCHDOG_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }

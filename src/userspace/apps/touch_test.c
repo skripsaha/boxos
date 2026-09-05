@@ -10,7 +10,7 @@
 #include "box/error.h"
 #include "box/core/manifest.h"   /* MfCall1 — raw kill-other for the killed case */
 #include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_PROC_KILL */
-#include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
+#include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
 #include "box/strand.h"          /* strand_spawn — TT22 needs a 64-slot ring */
 #include "box/sync.h"            /* yield */
 #include "proc_exit.h"           /* PROC_EXIT_KILLED — shared exit disposition */
@@ -680,7 +680,7 @@ static void test13(void)
     int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                           &target, (uint16_t)sizeof(target),
                           NULL, 0, NULL, 0, NULL,
-                          BOX_TIMEOUT_IPC_MS, NULL);
+                          BOX_ANSWER_GUARANTEED, NULL);
     if (kill_rc != 0) { fail(13, "PROC_KILL failed"); touch_release(tag); return; }
 
     int32_t code = 0;
@@ -930,7 +930,7 @@ static int proc_spawn_raw(const char *tags)
                    params, (uint16_t)sizeof(params),
                    tags, (uint32_t)strlen(tags),
                    NULL, 0, NULL,
-                   BOX_TIMEOUT_IPC_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 /* ---------- T17: proc.spawn child auth-level subset of spawner; no escalation -
@@ -1025,7 +1025,7 @@ static void test20(void)
     int kill_rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                           &target, (uint16_t)sizeof(target),
                           NULL, 0, NULL, 0, NULL,
-                          BOX_TIMEOUT_IPC_MS, NULL);
+                          BOX_ANSWER_GUARANTEED, NULL);
     if (kill_rc != ERR_ACCESS_DENIED) { fail(20, "kill of foreign parent not denied"); return; }
     pass(20);
 }
@@ -1046,7 +1046,7 @@ static void test21(void)
                      &parent, (uint16_t)sizeof(parent),
                      tag, (uint32_t)strlen(tag),
                      NULL, 0, NULL,
-                     BOX_TIMEOUT_IPC_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != ERR_ACCESS_DENIED) { fail(21, "tag-add on foreign parent not denied"); return; }
     pass(21);
 }

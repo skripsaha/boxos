@@ -14,6 +14,7 @@
 #include "box/string.h"
 #include "box/types.h"
 #include "box/error.h"
+#include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 
 #define STORAGE_TAG_QUERY       0x01
 #define STORAGE_TAG_SET         0x02
@@ -33,8 +34,6 @@
 #define STORAGE_SNAP_LIST       0x22
 #define STORAGE_OBJ_ANCHOR      0x23
 #define STORAGE_SNAP_INFO       0x24
-
-#define STORAGE_TIMEOUT_MS      5000u
 
 /* =========================================================================
  *  CREATE / QUERY
@@ -63,7 +62,7 @@ int create(const char *filename, const char *tags)
                      params, sizeof(params),
                      in, in_size,
                      &file_id, sizeof(file_id), NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     return (int)file_id;
 }
@@ -90,7 +89,7 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
                      NULL, 0,
                      in, in_size,
                      out, out_cap, &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 4) return 0;
 
@@ -117,7 +116,7 @@ int file_info(uint32_t file_id, file_info_t *info)
                      &file_id, sizeof(file_id),
                      NULL, 0,
                      out, sizeof(out), &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 20) return -ERR_INTERNAL;
 
@@ -189,7 +188,7 @@ int64_t fread(uint32_t file_id, uint64_t offset, void *buffer, size_t size)
                      params, sizeof(params),
                      NULL, 0,
                      buffer, req, &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     return (int64_t)out_actual;            /* 0..req, always >= 0 */
 }
@@ -212,7 +211,7 @@ int64_t fwrite(uint32_t file_id, uint64_t offset, const void *buffer, size_t siz
                      params, sizeof(params),
                      buffer, req,
                      out, sizeof(out), &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 8) return (int64_t)req; /* op succeeded; assume full write of the submitted crate */
 
@@ -241,7 +240,7 @@ int file_rename(uint32_t file_id, const char *new_filename)
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_RENAME,
                      params, (uint16_t)(6 + fn_len),
                      NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -250,7 +249,7 @@ int delete(uint32_t file_id)
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_DELETE,
                      &file_id, sizeof(file_id),
                      NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -264,7 +263,7 @@ int file_truncate(uint32_t file_id, uint64_t new_size)
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_TRUNCATE,
                      params, sizeof(params),
                      NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -281,7 +280,7 @@ int tag_add(uint32_t file_id, const char *tag)
                      &file_id, sizeof(file_id),
                      tag, (uint32_t)tag_len,
                      NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -294,7 +293,7 @@ int tag_remove(uint32_t file_id, const char *key)
                      &file_id, sizeof(file_id),
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -307,7 +306,7 @@ int context_set(const char *tag)
                      NULL, 0,
                      tag, (uint32_t)tl,
                      NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -315,7 +314,7 @@ int context_clear(void)
 {
     int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_CLEAR,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -330,7 +329,7 @@ int context_get(char out_tags[][64], uint32_t max_tags, uint32_t *out_count)
                      NULL, 0,
                      NULL, 0,
                      buf, sizeof(buf), &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 4) return -ERR_INTERNAL;
 
@@ -397,7 +396,7 @@ int snap_create(const char *name, uint32_t file_id, uint32_t *out_snap_id)
                      params, (uint16_t)(5 + name_len),
                      NULL, 0,
                      &out, sizeof(out), &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 4) return -ERR_INTERNAL;
     *out_snap_id = out;
@@ -409,7 +408,7 @@ int snap_delete(uint32_t snap_id)
     int rc = MfCall1(DECK_STORAGE, STORAGE_SNAP_DELETE,
                      &snap_id, sizeof(snap_id),
                      NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -426,7 +425,7 @@ int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count)
                      NULL, 0,
                      NULL, 0,
                      buf, buf_bytes, &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 4) return -ERR_INTERNAL;
     uint32_t count;
@@ -449,7 +448,7 @@ int snap_info(uint32_t snap_id, snap_info_t *out)
                      &snap_id, sizeof(snap_id),
                      NULL, 0,
                      buf, sizeof(buf), &out_actual,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < sizeof(buf)) return -ERR_INTERNAL;
 
@@ -475,6 +474,6 @@ int anchor(uint32_t file_id)
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_ANCHOR,
                      &file_id, sizeof(file_id),
                      NULL, 0, NULL, 0, NULL,
-                     STORAGE_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }

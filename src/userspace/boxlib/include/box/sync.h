@@ -144,8 +144,9 @@ INLINE void uspin_unlock(uspin_t *s) {
 // ‼ A CONTENDED unlock now makes a syscall, and unlock is destructor-reachable
 // (~lock_guard, ~unique_lock), including while an exception unwinds. It cannot
 // fail the unlock — the lock word is already free before the wake is attempted
-// — but it can block for the wake's MfCall1 budget, and a dropped wake falls
-// to the backstop rather than being reported.
+// — but it does wait for the kernel's answer to the wake, and a wake that
+// cannot reach its sleeper (the parked page migrated, see the kernel's
+// addr_wait.h) falls to the backstop rather than being reported.
 //
 // Still intentionally simple:
 //   - No recursion (recursive locking deadlocks)

@@ -630,7 +630,6 @@
 #include "box/cxx/system.h"
 #include "box/cxx/system_touch.h"
 #include "box/cxx/tagfs.h"
-#include "box/cxx/timeouts.h"
 #include "box/cxx/timing.h"
 #include "box/cxx/touch.h"
 
@@ -10527,7 +10526,7 @@ void Phase54()
 }
 
 // ── Ф25e: explicit snapshot model (record snapshot vs live handle) + typed
-//    tags + anchor_all + snapshot::adopt + vga::clear_line + chrono timeouts ──
+//    tags + anchor_all + snapshot::adopt + vga::clear_line ──
 void Phase55()
 {
     using box::tagfs::file;
@@ -10639,16 +10638,9 @@ void Phase55()
     //     (like every box::vga op); the syscall round-trip is what's checked.
     Check(box::vga::clear_line(0, box::colors::black), "phase55 vga::clear_line syscall ok");
 
-    // (6) chrono timeouts — the C macros are the single source of truth; the
-    //     chrono type carries the unit, proven across units at compile time.
-    static_assert(box::timeouts::fast == std::chrono::milliseconds(BOX_TIMEOUT_FAST_MS));
-    static_assert(box::timeouts::storage == std::chrono::seconds(5));
-    static_assert(box::timeouts::kdbg == std::chrono::minutes(1));
-    Check(box::timeouts::input.count() == 30000, "phase55 input timeout == 30s");
-
     printf("[CXX] PASS phase55: box::tagfs::record (captured snapshot vs live/reread) "
            "+ typed tags (tag::as<T> / file::add_tag<T>) + anchor_all + "
-           "snapshot::adopt + vga::clear_line + box::timeouts (chrono)\n");
+           "snapshot::adopt + vga::clear_line\n");
 }
 
 void Phase56()

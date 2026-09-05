@@ -14,7 +14,7 @@
 #include "box/debug.h"           /* kdbg_print — loud spawn refusal */
 #include "box/touch.h"           /* touch_stash_free_self */
 #include "box/system.h"          /* yield */
-#include "box/timeouts.h"        /* BOX_TIMEOUT_IPC_MS */
+#include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
 #include "box/error.h"
 #include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_STRAND_SPAWN, SYSTEM_OP_PROC_KILL */
 
@@ -100,7 +100,7 @@ void strand_release(uint32_t pid)
     (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_STRAND_RELEASE,
                   &p, (uint16_t)sizeof(p),
                   NULL, 0, NULL, 0, NULL,
-                  BOX_TIMEOUT_IPC_MS, NULL);
+                  BOX_ANSWER_GUARANTEED, NULL);
 }
 
 void strand_exit(void)
@@ -126,7 +126,7 @@ void strand_exit(void)
         int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
                          &target, (uint16_t)sizeof(target),
                          NULL, 0, NULL, 0, NULL,
-                         BOX_TIMEOUT_IPC_MS, NULL);
+                         BOX_ANSWER_GUARANTEED, NULL);
         if (rc == 0) break;
         yield();
     }

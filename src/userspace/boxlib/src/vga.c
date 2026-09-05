@@ -33,17 +33,6 @@
 #include "box/string.h"
 #include "box/timeouts.h"
 
-/* WITHOUT a deadline, deliberately. Every VGA op is answered synchronously
- * by the Hardware Deck — success or a real error — so there is nothing for
- * a timer to guard. A guessed budget here did worse than nothing: under
- * congestion the call returned "timeout" while the kernel finished late,
- * and that unpaired reply was popped by the NEXT MfCall as its own answer
- * (the mis-pairing class debug.c documented years earlier), while the
- * kernel's crate commit-out landed in a dead stack frame. An answer that
- * never comes is a kernel defect Nightwatch names, not something to paper
- * over. */
-#define VGA_TIMEOUT_MS 0u /* no deadline — the reply is guaranteed */
-
 static Color   s_fg          = COLOR_LIGHT_GRAY;
 static Color   s_bg          = COLOR_BLACK;
 static bool    s_color_valid = false;
@@ -137,7 +126,7 @@ static int batch_flush_locked(void)
     Result r;
     int rc = ManifestSubmitTimeout((Manifest *)s_mbuf,
                                    s_crates, s_crate_count,
-                                   &r, VGA_TIMEOUT_MS);
+                                   &r, BOX_ANSWER_GUARANTEED);
     /* Reset BEFORE returning so the next vga_* call lands on a clean
      * builder regardless of which failure mode hit. */
     batch_reset_locked();
@@ -211,7 +200,7 @@ int vga_getcolor_rgb(Color *fg, Color *bg)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_GET_COLOR,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_fg = out[0];
     s_bg = out[1];
@@ -237,7 +226,7 @@ int vga_getcursor(vga_pos_t *pos)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_GET_CURSOR,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_cursor_row = out[0];
     s_cursor_col = out[1];
@@ -263,7 +252,7 @@ int vga_getdimensions(vga_dimensions_t *dims)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_GET_DIMENSIONS,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_dims_cols = out[0];
     s_dims_rows = out[1];
@@ -314,7 +303,7 @@ int vga_setcolor_rgb(Color fg, Color bg)
     return MfCall1(DECK_HARDWARE, HW_VGA_SET_COLOR,
                    params, sizeof(params), NULL, 0,
                    NULL, 0, NULL,
-                   VGA_TIMEOUT_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int vga_setcursor(uint8_t row, uint8_t col)
@@ -341,7 +330,7 @@ int vga_setcursor(uint8_t row, uint8_t col)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_SET_CURSOR,
                      params, 2, NULL, 0,
                      out, sizeof(out), NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_cursor_row = out[0];
     s_cursor_col = out[1];
@@ -376,7 +365,7 @@ static int vga_putstring_immediate(const char *str, size_t len,
                      params, sizeof(params),
                      str, (uint32_t)len,
                      out, sizeof(out), &out_actual,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc == 0 && out_actual >= 3) {
         s_cursor_row = out[1];
         s_cursor_col = out[2];
@@ -487,7 +476,7 @@ int vga_putchar_at(uint8_t row, uint8_t col, char ch, Color fg, Color bg)
     return MfCall1(DECK_HARDWARE, HW_VGA_PUTCHAR,
                    params, sizeof(params), NULL, 0,
                    NULL, 0, NULL,
-                   VGA_TIMEOUT_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int vga_newline(void)
@@ -510,7 +499,7 @@ int vga_newline(void)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_NEWLINE,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), &out_actual,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     if (out_actual >= 2) {
         s_cursor_row = out[0];
@@ -541,7 +530,7 @@ int vga_clear_rgb(Color fg, Color bg)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_CLEAR_SCREEN,
                      params, sizeof(params), NULL, 0,
                      NULL, 0, NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_cursor_row = 0;
     s_cursor_col = 0;
@@ -568,7 +557,7 @@ int vga_clear_line_rgb(uint8_t row, Color fg, Color bg)
     return MfCall1(DECK_HARDWARE, HW_VGA_CLEAR_LINE,
                    params, sizeof(params), NULL, 0,
                    NULL, 0, NULL,
-                   VGA_TIMEOUT_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int vga_clear_to_eol(void)
@@ -585,7 +574,7 @@ int vga_clear_to_eol(void)
     return MfCall1(DECK_HARDWARE, HW_VGA_CLEAR_TO_EOL,
                    NULL, 0, NULL, 0,
                    NULL, 0, NULL,
-                   VGA_TIMEOUT_MS, NULL);
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int vga_scroll_up(void)
@@ -603,7 +592,7 @@ int vga_scroll_up(void)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_SCROLL_UP,
                      NULL, 0, NULL, 0,
                      NULL, 0, NULL,
-                     VGA_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc < 0 ? rc : -rc;
     s_cursor_valid = false;
     return 0;

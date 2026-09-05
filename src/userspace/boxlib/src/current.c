@@ -16,7 +16,7 @@
 #include "box/string.h"   /* strcmp, strncmp, memcpy, memset      */
 #include "box/core/manifest.h" /* MfCall1                          */
 #include "boxos_decks.h"  /* DECK_HARDWARE                        */
-#include "box/timeouts.h" /* BOX_TIMEOUT_FAST_MS                  */
+#include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED                */
 
 /* The hardware deck's log-ring door. Named here the way debug.c names
  * HW_DEBUG_PRINT next to it: userspace does not include kernel headers, and
@@ -96,14 +96,13 @@ static int cur_log_pull(Current *c, uint64_t from, uint32_t want,
                      params, sizeof(params),
                      NULL, 0,
                      c->log_buf, CUR_LOG_HEADER + want,
-                     /* Sub-microsecond in-kernel work — a memcpy of at most a
-                      * page — so TIMEOUT_FAST is the constant box/timeouts.h
-                      * prescribes, and a named one rather than the default is
-                      * what that file asks every MfCall1 to pass. It matters
-                      * more here than most: logsave issues hundreds of these
-                      * back to back, and a reply orphaned by a timeout is
-                      * popped by the NEXT call as if it were its own. */
-                     NULL, BOX_TIMEOUT_FAST_MS, NULL);
+                     /* A memcpy of at most a page, answered on the spot. It
+                      * used to carry a 5 s deadline, and it matters here more
+                      * than most that it no longer does: logsave issues
+                      * hundreds of these back to back, and a reply abandoned
+                      * by a deadline is exactly the orphan the next call
+                      * would have to step over. */
+                     NULL, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != OK) return rc > 0 ? -rc : rc;
 
     uint64_t oldest, written, copied;

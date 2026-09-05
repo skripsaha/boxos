@@ -82,9 +82,15 @@ int kb_readline(char *buffer, size_t size, bool echo)
     bool   done  = false;
 
     while (!done) {
+        /* No deadline. A key may be hours away, and the kernel parks this
+         * strand until one is published — nothing a clock could add. What
+         * stood here was a 30 s wait that re-armed itself on expiry: a wake
+         * every half minute for nothing, and a blanket over a lost wakeup,
+         * which Nightwatch now names instead (TOUCH UNDELIVERED). A non-zero
+         * rc is therefore a real refusal, never a lapse, and it is returned. */
         Touch t;
-        int rc = touch_await(kb_tag, &t, 30000);
-        if (rc != 0) continue;
+        int rc = touch_await(kb_tag, &t, 0);
+        if (rc != 0) return rc;
 
         /* Payload is inline inside `t` (TouchRing copies it on pop) —
          * no separate cabin allocation, lifetime is the local `Touch t`. */

@@ -11,6 +11,7 @@
 #include "box/core/result.h"
 #include "box/string.h"
 #include "box/error.h"
+#include "box/timeouts.h" /* BOX_ANSWER_GUARANTEED — every op here is answered */
 #include "box/memory.h"   /* strand_pool_flush_self — main-pool flush at exit */
 #include "boxos_decks.h"  /* SYSTEM_OP_* opcodes — single source */
 
@@ -36,14 +37,6 @@
 #define HW_SYSTEM_REBOOT    0x80
 #define HW_SYSTEM_SHUTDOWN  0x81
 
-/* WITHOUT a deadline, deliberately. Every op below is answered
- * synchronously by its deck — success or a real error — so there is
- * nothing for a timer to guard; a guessed budget turned congestion into a
- * false refusal AND left the late reply unpaired on the ResultRing for the
- * next MfCall to swallow as its own (the class debug.c named). An answer
- * that never comes is a kernel defect Nightwatch names. */
-#define SYS_TIMEOUT_MS  0u /* no deadline — replies are guaranteed */
-
 /* Upper bound on a caller-supplied tag augment for proc_exec_tagged. Mirrors
  * the kernel PROCESS_TAG_SIZE (256) — the child's tag string can hold at most
  * that many bytes — and fits inside the 256-byte MfCall1 param region. */
@@ -63,7 +56,7 @@ int proc_cpu_time(uint64_t *out_us)
                      NULL, 0,
                      NULL, 0,
                      out, sizeof(out), &actual,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (actual < 8) return -ERR_INTERNAL;
 
@@ -111,7 +104,7 @@ int proc_info(uint16_t pid, proc_info_t *info)
                      &pid32, sizeof(pid32),
                      NULL, 0,
                      out, sizeof(out), &out_actual,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     if (out_actual < 32) return -ERR_INTERNAL;
 
@@ -134,7 +127,7 @@ int tls_set_fsbase(uint64_t base)
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_TLS_FSBASE,
                      &base, sizeof(base),
                      NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -181,7 +174,7 @@ void _Exit(int exit_code)
         kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                           &kill_param, sizeof(kill_param),
                           NULL, 0, NULL, 0, NULL,
-                          SYS_TIMEOUT_MS, NULL);
+                          BOX_ANSWER_GUARANTEED, NULL);
         if (kill_rc != 0) yield();
     }
     if (kill_rc != 0) {
@@ -249,7 +242,7 @@ int proc_kill(uint32_t pid)
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                      &target, (uint16_t)sizeof(target),
                      NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -271,7 +264,7 @@ static int proc_tag_op(const char *tag, uint16_t opcode, uint8_t *out_byte)
                      out_byte ? &out_storage : NULL,
                      out_byte ? 1 : 0,
                      NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (out_byte) *out_byte = out_storage;
     return box_fail(rc);
 }
@@ -300,7 +293,7 @@ int reboot(void)
      * back OK yet the machine did not reboot). */
     int rc = MfCall1(DECK_HARDWARE, HW_SYSTEM_REBOOT,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return rc != 0 ? box_fail(rc) : -ERR_INTERNAL;
 }
 
@@ -308,7 +301,7 @@ int shutdown(void)
 {
     int rc = MfCall1(DECK_HARDWARE, HW_SYSTEM_SHUTDOWN,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return rc != 0 ? box_fail(rc) : -ERR_INTERNAL;
 }
 
@@ -320,7 +313,7 @@ int sysinfo(system_info_t *info)
     uint32_t got      = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_INFO,
                      NULL, 0, NULL, 0,
-                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
 
@@ -358,7 +351,7 @@ int defrag(uint32_t file_id, uint32_t target_block)
                      params, sizeof(params),
                      NULL, 0,
                      &score, sizeof(score), NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     return (int)score;
 }
@@ -369,7 +362,7 @@ int fragmentation(void)
     int rc = MfCall1(DECK_SYSTEM, SYS_FRAG_SCORE,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
     uint32_t score = 0;
     memcpy(&score, out, 4);
@@ -380,7 +373,7 @@ int perf_dump(void)
 {
     int rc = MfCall1(DECK_SYSTEM, SYS_PERF_DUMP,
                      NULL, 0, NULL, 0, NULL, 0, NULL,
-                     SYS_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
@@ -395,7 +388,7 @@ int efi_info(efi_info_t *out)
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_INFO,
                      NULL, 0, NULL, 0,
-                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
 
@@ -425,7 +418,7 @@ int efi_esrt_entry(uint32_t idx, efi_esrt_entry_t *out)
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_ESRT_GET,
                      NULL, 0, params, sizeof(params),
-                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
     memcpy(out->fw_class,                       blob + 0,  16);
@@ -445,7 +438,7 @@ int efi_verify_pe(const void *pe_buf, uint32_t pe_size, efi_verify_t *out)
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_VERIFY_PE,
                      pe_buf, pe_size, NULL, 0,
-                     blob, sizeof(blob), &got, SYS_TIMEOUT_MS, NULL);
+                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
     uint32_t result_u32;

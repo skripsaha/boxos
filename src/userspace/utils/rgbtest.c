@@ -51,7 +51,7 @@ static int kernel_pair(Color *fg, Color *bg)
     int rc = MfCall1(DECK_HARDWARE, HW_VGA_GET_COLOR,
                      NULL, 0, NULL, 0,
                      out, sizeof(out), NULL,
-                     BOX_TIMEOUT_FAST_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc;
     *fg = out[0];
     *bg = out[1];

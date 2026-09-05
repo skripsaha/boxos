@@ -304,8 +304,11 @@ int ManifestSubmitHandle(ManifestHandle  handle,
                          uint16_t        crate_count,
                          Result         *out_result)
 {
+    /* No deadline, for the same reason as ManifestSubmit: the reply is
+     * guaranteed, and abandoning the submit leaves the caller's Crate[] to
+     * be written back into after its frame is gone. */
     return ManifestSubmitHandleTimeout(handle, crates, crate_count,
-                                        out_result, 1000);
+                                        out_result, 0);
 }
 
 int ManifestReleaseHandle(ManifestHandle handle)

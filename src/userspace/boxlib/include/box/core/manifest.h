@@ -91,7 +91,10 @@ int ManifestBuilderFinalize(ManifestBuilder *mb);
  *
  * Returns:
  *    OK on successful execution
- *    ERR_TIMEOUT  if no result arrives within timeout_ms (default 1000)
+ *    ERR_TIMEOUT  only from the *Timeout variants, when the caller named a
+ *                 deadline and it passed. ManifestSubmit itself has none: the
+ *                 reply is guaranteed, and a deadline would abandon a Manifest
+ *                 and Crates on the caller's stack to a K-Core still using them.
  *    other error_t propagated from kernel
  */
 int ManifestSubmit(const Manifest *m,
@@ -137,7 +140,9 @@ int ManifestSubmitNoWait(const Manifest *m,
  * out_actual is provided and an out_crate exists, *out_actual is set to the
  * number of bytes the kernel wrote into out_buf.
  *
- * timeout_ms == 0 uses the default (ManifestSubmit). out_result is optional.
+ * timeout_ms == 0 means no deadline — the reply is guaranteed (see
+ * box/timeouts.h). A non-zero value is a deadline the caller chose to keep,
+ * and belongs only where silence is possible. out_result is optional.
  *
  * Returns:  OK (0) on success; ERR_TIMEOUT or any kernel error_t otherwise.
  *           Negative values for builder/submit failures.
