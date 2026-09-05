@@ -1421,12 +1421,26 @@ void syscall_handler(interrupt_frame_t *frame)
      * with POCKET_FLAG_YIELD skip guide() — the process stays WORKING
      * and just gives up its timeslice, returning to the run queue on
      * the next tick. Must be checked BEFORE the async dispatch path
-     * to avoid a kcore_pending re-arm race. */
-    Pocket *peek = KPocketPeek(proc);
+     * to avoid a kcore_pending re-arm race.
+     *
+     * ‼ This makes the gate a SECOND consumer of the strand's pocket ring, and
+     * it is not alone in it: on more than one core a K-Core may be draining
+     * the same ring at this moment, and the yield at the head may be the very
+     * pocket it is standing on. The pop therefore names the position that was
+     * looked at and takes it only if it is still the head. The pop that stood
+     * here took "whatever is at the head now" — and when the K-Core had just
+     * taken the yield itself, that was the strand's NEXT pocket, popped
+     * unread; its owner then waited for an answer to a question nobody had
+     * opened. Measured on a frozen 16-core machine — the numbers are on
+     * KPocketPopAt in kring.c. If the K-Core took the yield first, the CAS
+     * fails and nothing is taken; the strand still gives its core away, which
+     * is all a yield ever asked for. */
+    uint64_t peek_pos;
+    Pocket  *peek = KPocketPeek(proc, &peek_pos);
 
     if (peek && (peek->flags & POCKET_FLAG_YIELD))
     {
-        KPocketPop(proc);
+        (void)KPocketPopAt(proc, peek_pos);
         context_save_from_frame(proc, frame);
         schedule(frame);
         return;
