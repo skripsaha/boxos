@@ -28,7 +28,8 @@
 #include "box/cpu.h"
 #include "box/core/manifest.h"
 #include "box/core/pocket.h"
-#include "box/ipc.h"      /* send — the bell rings with an empty message */
+#include "box/turnin.h"   /* box_turn_in — a sleep on a stream must cost no core */
+#include "box/core/strand_self.h"  /* strand_self — whose bell to hang */
 #include "boxos_decks.h"  /* SYSTEM_OP_BROOK_* opcodes — single source */
 
 /* Shape limits — mirror kernel brook.h. Caller-side validation gives
@@ -66,13 +67,14 @@ typedef struct {
     uint32_t          frame_size;
     uint32_t          frame_count;
     uint64_t          magic;
-    uint8_t           _pad_line0[32];
+    volatile uint32_t writer_bell;       /* a sleeping writer's pid; 0 = awake */
+    uint8_t           _pad_line0[28];
 
     /* Cacheline 1 — reader state, watched by writer */
     volatile uint64_t head;
     volatile uint32_t reader_alive;
     volatile uint32_t reader_ever_attached;
-    volatile uint32_t bell;              /* sleeping reader's pid; 0 = awake */
+    volatile uint32_t reader_bell;       /* a sleeping reader's pid; 0 = awake */
     uint8_t           _pad_line1[44];
 } BrookHeaderUser;
 
@@ -86,8 +88,10 @@ STATIC_ASSERT(OFFSETOF(BrookHeaderUser, writer_alive) < 64,
               "writer_alive must share CL0 with tail");
 STATIC_ASSERT(OFFSETOF(BrookHeaderUser, reader_alive) >= 64,
               "reader_alive must share CL1 with head");
-STATIC_ASSERT(OFFSETOF(BrookHeaderUser, bell) >= 64,
-              "bell must share CL1 with head — the line the writer already reads");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, reader_bell) >= 64,
+              "reader_bell must share CL1 with head — the line the writer already reads");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, writer_bell) < 64,
+              "writer_bell must share CL0 with tail — the line the reader already reads");
 
 /* ─────────────────────────────────────────────────────────────────────
  * Brook — opaque user handle. Allocated via malloc on open, freed on
@@ -101,6 +105,7 @@ struct Brook {
     uint32_t         frame_count;/* immutable after open, power-of-2 */
     uint32_t         role;       /* BROOK_WRITER or BROOK_READER */
     uint32_t         streaming;  /* BROOK_STREAM was set at open: skip EOF/TERM */
+    uint32_t         self_pid;   /* whose bell to hang — resolved once at open */
 };
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -126,34 +131,120 @@ static inline bool brook_cas_u32(volatile uint32_t *p, uint32_t expect, uint32_t
                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
-/* Take the bell if one is hung out, and ring it.
+/* Take a bell if one is hung out, and ring it.
  *
- * Called by the writer immediately after publishing a frame — and ONLY there,
- * because a bell means "I looked and there was nothing", so it is a frame
- * appearing that makes it worth ringing.
+ * Called by whichever side has just made the other side's wait end — the
+ * writer after publishing a frame, the reader after freeing a slot — and ONLY
+ * there, because a bell means "I looked and there was nothing", so it is the
+ * cursor moving that makes it worth ringing.
  *
  * The CAS is what keeps the cost at one ring per sleep no matter how many
- * writers a reader has: the first to take the bell rings, every other writer
- * finds 0 and pays a compare. The reader hangs it out again next time it goes
- * down.
+ * pushes or pops follow: the first to take the bell rings, everyone after
+ * finds 0 and pays a compare. The sleeper hangs it out again next time it
+ * goes down.
  *
- * The message is EMPTY. A bell says nothing; it only says come. An empty
- * message is still an arrival — it advances the reader's Result ring tail,
- * which is exactly the cursor its sleep is waiting on — and a reader draining
- * its mailbox discards it without needing to know what it was. That keeps
- * Brook from having to learn anybody's wire protocol.
+ * A bell says nothing; it only says come. It is its own kernel op rather than
+ * an empty IPC message, and deliberately: an empty message was tried, and
+ * hiding it required every receive path in the system to learn that a
+ * contentless message is not a message — a change to what IPC means, made to
+ * serve one subsystem's doorbell. system.bell pushes a record wearing the
+ * shape every consumer has always discarded, so it can never be mistaken for
+ * a message or for somebody's answer, and Brook never has to learn anybody's
+ * wire protocol.
  *
- * Best-effort by construction: a ring to a pid that has gone away fails, and a
- * failure here must never turn a successful push into an error. The bell has
- * already been taken down, so the next push does not retry it — if the reader
- * really is alive and merely missed this one, it hangs the bell out again on
- * its next trip down. */
-static void brook_bell_ring(BrookHeaderUser *h)
+ * Best-effort by construction: a ring to a pid that has gone away is answered
+ * OK and does nothing, and a failure here must never turn a successful push or
+ * pop into an error. The bell has already been taken down, so this does not
+ * retry it — if the peer really is alive and merely missed this one, it hangs
+ * its bell out again on its next trip down. */
+static void brook_ring(volatile uint32_t *bell)
 {
-    uint32_t who = brook_load_acquire_u32(&h->bell);
+    uint32_t who = brook_load_acquire_u32(bell);
     if (who == 0) return;
-    if (!brook_cas_u32(&h->bell, who, 0)) return;   /* another writer is ringing */
-    (void)send(who, NULL, 0);
+    if (!brook_cas_u32(bell, who, 0)) return;   /* somebody else is ringing */
+
+    uint8_t params[4];
+    memcpy(params, &who, sizeof(uint32_t));
+    (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_BELL,
+                  params, sizeof(params), NULL, 0, NULL, 0, NULL,
+                  0 /* no deadline — reply guaranteed */, NULL);
+}
+
+/* This side's own bell — the one it hangs out — and the peer's, which it
+ * rings. A writer sleeps on writer_bell and rings reader_bell; a reader is the
+ * mirror image. */
+static inline volatile uint32_t *brook_own_bell(BrookHeaderUser *h, uint32_t role)
+{
+    return (role == BROOK_WRITER) ? &h->writer_bell : &h->reader_bell;
+}
+
+static inline volatile uint32_t *brook_peer_bell(BrookHeaderUser *h, uint32_t role)
+{
+    return (role == BROOK_WRITER) ? &h->reader_bell : &h->writer_bell;
+}
+
+/* Has the wait ended? Each is its side's own question — "is there a frame
+ * yet", "is there room yet" — asked one last time with the bell already
+ * hanging, and it must also answer TRUE for a peer that has DEPARTED. A stream
+ * whose other end went away between the caller's look and this one would
+ * otherwise be slept on for ever: the departure is a store to `*_alive` that
+ * no sleeping strand is going to read.
+ *
+ * Neither decides anything. The caller's loop re-runs and does the real work —
+ * the copy, or the freeze-CAS that turns a departure into EOF. */
+static bool brook_pop_ready(Brook *b)
+{
+    BrookHeaderUser *h = b->hdr;
+    uint64_t head = brook_load_relaxed_u64(&h->head);   /* ours; single reader */
+    uint64_t tail = brook_load_acquire_u64(&h->tail);
+    if (head != tail) return true;
+    if (b->streaming) return false;
+    return brook_load_acquire_u32(&h->writer_alive) == 0 &&
+           brook_load_acquire_u32(&h->writer_ever_attached) != 0;
+}
+
+static bool brook_push_ready(Brook *b)
+{
+    BrookHeaderUser *h = b->hdr;
+    uint64_t tail = brook_load_relaxed_u64(&h->tail);   /* ours; single writer */
+    uint64_t head = brook_load_acquire_u64(&h->head);
+    if ((tail - head) < b->frame_count) return true;
+    if (b->streaming) return false;
+    return brook_load_acquire_u32(&h->reader_alive) == 0 &&
+           brook_load_acquire_u32(&h->reader_ever_attached) != 0;
+}
+
+/* Go to sleep on this stream, and be reachable while asleep.
+ *
+ * The order is the whole proof, and it is the same one the console daemon
+ * uses: hang the bell FIRST, then take the delivery mark, then look ONE more
+ * time. Anything the peer does from here on either finds the bell out (and
+ * rings, which is itself an arrival on this strand's Result ring), or moves
+ * the cursor this last look reads. There is no third way and no gap between
+ * the two.
+ *
+ * `recheck` is the caller's own question — "is there a frame yet", "is there
+ * room yet" — asked again with the bell already hanging. It also has to
+ * answer true for a peer that has DEPARTED, or a stream whose other end went
+ * away between the caller's look and this one would be slept on for ever.
+ *
+ * Returns with the bell taken back in. The caller loops and looks again: this
+ * promises nothing about how long it slept, only that it did not spin. */
+static void brook_sleep_until(Brook *b, bool (*recheck)(Brook *))
+{
+    BrookHeaderUser   *h    = b->hdr;
+    volatile uint32_t *mine = brook_own_bell(h, b->role);
+
+    /* SEQ_CST, and the seq_cst is the point: it is a full barrier, so this
+     * store cannot sit in the store buffer while the look below already runs.
+     * The peer's half is fenced by its own cursor publish (a locked exchange),
+     * so one of the two always sees the other. */
+    __atomic_store_n(mine, b->self_pid, __ATOMIC_SEQ_CST);
+
+    TurnInMark mark = box_mark();
+    if (!recheck(b)) box_turn_in(mark);
+
+    __atomic_store_n(mine, 0u, __ATOMIC_RELEASE);
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -243,6 +334,11 @@ Brook *brook_open(const char *tag, uint32_t frame_size, uint32_t frame_count,
     b->frame_count = out_fc;
     b->role        = role;
     b->streaming   = (flags & BROOK_STREAM) ? 1u : 0u;
+    /* Resolved once, here, and never again: a bell has to name a STRAND, and
+     * the strand that opens a Brook is the one that will sleep on it. Asking
+     * for it on the sleeping path instead would put a lookup between hanging
+     * the bell and the last look, which is the one place nothing may go. */
+    b->self_pid    = strand_self();
     return b;
 }
 
@@ -273,14 +369,14 @@ static inline bool brook_cas_freeze_peer(volatile uint32_t *peer_alive)
 int brook_release(Brook *b)
 {
     if (!b) return -ERR_INVALID_ARGS;
-    /* Take the bell in on the way out. A reader that leaves with its pid still
-     * hanging leaves a writer a cord to pull for a reader that is not there —
+    /* Take the bell in on the way out. A side that leaves with its pid still
+     * hanging leaves its peer a cord to pull for somebody who is not there —
      * one wasted message per lane, and a stale pid on a page the kernel keeps
      * for as long as the writer holds it. Nothing depends on this being done;
      * it is done because leaving it undone is untidy in a way that becomes
      * confusing evidence later. */
-    if (b->hdr && b->role == BROOK_READER)
-        __atomic_store_n(&b->hdr->bell, 0u, __ATOMIC_RELEASE);
+    if (b->hdr)
+        __atomic_store_n(brook_own_bell(b->hdr, b->role), 0u, __ATOMIC_RELEASE);
     int rc = brook_sys_release(b->va_header);
     free(b);
     return rc;
@@ -430,7 +526,7 @@ static int brook_push_core(Brook *b, const void *frame,
              * that already reads the reader's cacheline for `head`. */
             __atomic_exchange_n(&h->tail, tail + 1, __ATOMIC_SEQ_CST);
 
-            brook_bell_ring(h);
+            brook_ring(&h->reader_bell);
             return 0;
         }
 
@@ -459,13 +555,21 @@ static int brook_push_core(Brook *b, const void *frame,
         if (mode == BROOK_MODE_TIMEOUT) {
             uint64_t now = clock_uptime_ms();
             if (now >= deadline_ms) return -ERR_TIMEOUT;
+
+            /* A BOUNDED wait keeps its spin. Ending it needs a clock, and a
+             * sleep with no deadline has none — the caller who set a deadline
+             * expects to be back soon, and is the one who must watch it.
+             * Writer monitors CL1 (reader state): a reader-side pop advances
+             * head, and a kernel-side reader-death writes reader_alive, both
+             * on the same cacheline, both wake us. */
+            brook_wait_cycle(&h->head, &spin, deadline_ms);
+            continue;
         }
 
-        /* Writer monitors CL1 (reader state). A reader-side pop
-         * advances head, and a kernel-side reader-death writes to
-         * reader_alive — both on the same cacheline, both wake us. */
-        brook_wait_cycle(&h->head, &spin,
-                         (mode == BROOK_MODE_TIMEOUT) ? deadline_ms : 0);
+        /* BLOCK. Nothing to watch for and no deadline to watch it with, so
+         * stop watching: hang the bell and go to sleep. A reader that frees a
+         * slot rings it; so does the kernel if the reader departs. */
+        brook_sleep_until(b, brook_push_ready);
     }
 }
 
@@ -488,7 +592,20 @@ static int brook_pop_core(Brook *b, void *frame,
         if (head != tail) {
             const uint8_t *slot = b->slots + ((uint32_t)(head & cap_mask)) * fs;
             memcpy(frame, slot, fs);
-            brook_store_release_u64(&h->head, head + 1);
+
+            /* Publish with a LOCKed exchange rather than a release store —
+             * the writer's half of the same argument at the push above. The
+             * value written is identical; what the locked form buys is the
+             * StoreLoad barrier the bell check below cannot do without, since
+             * x86 lets a load pass an earlier store to a different location
+             * (SDM 3A 9.2.3.4). Without it this core could read `writer_bell`
+             * while its own `head` was still in the store buffer, and a
+             * sleeping writer — whose own half IS fenced — would read the old
+             * head. Neither sees the other and the stream stops with room in
+             * it. */
+            __atomic_exchange_n(&h->head, head + 1, __ATOMIC_SEQ_CST);
+
+            brook_ring(&h->writer_bell);
             return 0;
         }
 
@@ -520,13 +637,19 @@ static int brook_pop_core(Brook *b, void *frame,
         if (mode == BROOK_MODE_TIMEOUT) {
             uint64_t now = clock_uptime_ms();
             if (now >= deadline_ms) return -ERR_TIMEOUT;
+
+            /* Bounded: keep the spin, for the writer's reasons (see there).
+             * Reader monitors CL0 (writer state): a writer-side push advances
+             * tail, and a kernel-side writer-death writes writer_alive, both
+             * on the same cacheline. */
+            brook_wait_cycle(&h->tail, &spin, deadline_ms);
+            continue;
         }
 
-        /* Reader monitors CL0 (writer state). A writer-side push
-         * advances tail, and a kernel-side writer-death writes to
-         * writer_alive — both on the same cacheline. */
-        brook_wait_cycle(&h->tail, &spin,
-                         (mode == BROOK_MODE_TIMEOUT) ? deadline_ms : 0);
+        /* BLOCK — hang the bell and sleep. This is the wait that used to hold
+         * a core for as long as a stream was quiet, which on a console lane or
+         * a Current is most of the time a machine is on. */
+        brook_sleep_until(b, brook_pop_ready);
     }
 }
 
@@ -571,31 +694,38 @@ int brook_pop_timeout(Brook *b, void *frame, uint32_t timeout_ms)
  * Query helpers — zero syscalls.
  * ───────────────────────────────────────────────────────────────────── */
 /* ─────────────────────────────────────────────────────────────────────
- * The bell — reader side. See box/brook.h for the discipline.
+ * The bell, hung by hand. See box/brook.h for the discipline.
+ *
+ * brook_pop and brook_push hang their own bells and need nobody to do it for
+ * them. These exist for a reader that does NOT block inside Brook — the
+ * console daemon, which try_pops many lanes and then sleeps once for all of
+ * them, so the hanging and the sleeping happen in different places and neither
+ * belongs to any one stream.
+ *
+ * Whose bell depends on the role: a writer hangs on CL0 where a reader already
+ * reads `tail`, a reader on CL1 where a writer already reads `head`.
  * ───────────────────────────────────────────────────────────────────── */
-int brook_bell_hang(Brook *b, uint32_t reader_pid)
+int brook_bell_hang(Brook *b, uint32_t strand_pid)
 {
-    if (!b || !b->hdr)           return -ERR_INVALID_ARGS;
-    if (b->role != BROOK_READER) return -ERR_INVALID_ARGS;
-    if (reader_pid == 0)         return -ERR_INVALID_ARGS;
+    if (!b || !b->hdr)    return -ERR_INVALID_ARGS;
+    if (strand_pid == 0)  return -ERR_INVALID_ARGS;
 
     /* SEQ_CST, and the seq_cst is the whole point: it is a full barrier, so
      * this store cannot sit in the store buffer while the caller's next act —
-     * looking at `tail` one last time — already executes. Pair it with the
-     * writer's locked publish and one of the two always sees the other. */
-    __atomic_store_n(&b->hdr->bell, reader_pid, __ATOMIC_SEQ_CST);
+     * its one last look — already executes. Pair it with the peer's locked
+     * cursor publish and one of the two always sees the other. */
+    __atomic_store_n(brook_own_bell(b->hdr, b->role), strand_pid, __ATOMIC_SEQ_CST);
     return 0;
 }
 
 int brook_bell_take(Brook *b)
 {
-    if (!b || !b->hdr)           return -ERR_INVALID_ARGS;
-    if (b->role != BROOK_READER) return -ERR_INVALID_ARGS;
+    if (!b || !b->hdr) return -ERR_INVALID_ARGS;
 
-    /* Awake again. Taking the bell in needs no ordering of its own — a writer
-     * that reads a stale pid merely rings a reader that is already up, which
+    /* Awake again. Taking the bell in needs no ordering of its own — a peer
+     * that reads a stale pid merely rings a strand that is already up, which
      * costs one empty message and wakes nobody twice. */
-    __atomic_store_n(&b->hdr->bell, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(brook_own_bell(b->hdr, b->role), 0u, __ATOMIC_RELEASE);
     return 0;
 }
 

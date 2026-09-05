@@ -356,6 +356,68 @@ static void lane_flush_run(StrandPrintState *ps)
     }
 }
 
+/* Flush WHOLE LINES, and keep the unfinished one for the next frame.
+ *
+ * A frame is the unit the daemon interleaves. It merges every lane in global
+ * push order, so two strands printing at once alternate at frame boundaries —
+ * and a boundary that falls in the middle of a line puts half of one strand's
+ * line inside another's. MEASURED, sixteen strands on sixteen cores: roughly
+ * three hundred of thirty-two thousand lines came out spliced, e.g.
+ *
+ *     [PS-11] 00000[PS-04] 00000000
+ *     [PS-04787
+ *
+ * Nothing is LOST — the character count is exact, every time — but a spliced
+ * line is unreadable, and worse, unmatchable: every marker this system is
+ * checked by is a grep, and a torn "[STRAND] PASS" is a green run reported as
+ * a hang. That is what made a sixteen-core matrix a lottery.
+ *
+ * The cut is therefore taken at the last newline in the run rather than at the
+ * end of the buffer, and the remainder — an unfinished line — stays behind to
+ * be completed by the writer that owns it. A line then occupies whole frames
+ * and cannot be split by anybody else's.
+ *
+ * Two cases still end a frame mid-line, and both are honest: a single line
+ * longer than a whole frame has nowhere else to break, and a colour change
+ * inside a line genuinely ends a run (the run IS the colour). Neither is a
+ * splice between two writers waiting to happen the way an arbitrary
+ * 108th-byte boundary was.
+ *
+ * Frame count is unchanged in the case that matters — the cut moves by at most
+ * one line's worth, it does not add frames. */
+static void lane_flush_lines(StrandPrintState *ps)
+{
+    uint8_t len = ps->run.len;
+    if (len == 0) return;
+
+    int cut = -1;
+    for (int i = (int)len - 1; i >= 0; i--) {
+        if (ps->run.text[i] == '\n') { cut = i + 1; break; }
+    }
+    /* No line ends inside this run, or the run already ends on one: it goes
+     * whole either way. */
+    if (cut <= 0 || (uint8_t)cut == len) { lane_flush_run(ps); return; }
+
+    char    tail[CONSOLE_RUN_TEXT_MAX];
+    uint8_t tlen = (uint8_t)(len - cut);
+    memcpy(tail, ps->run.text + cut, tlen);
+    Color fg = ps->run.fg, bg = ps->run.bg;
+
+    ps->run.len = (uint8_t)cut;
+    lane_flush_run(ps);
+
+    if (ps->lane_state == LANE_OPEN) {
+        ps->run.fg  = fg;
+        ps->run.bg  = bg;
+        memcpy(ps->run.text, tail, tlen);
+        ps->run.len = tlen;
+    } else {
+        /* The lane died inside the flush and it has already re-delivered its
+         * own bytes the direct way; the carried remainder must follow them. */
+        emit_run(ps, tail, tlen, fg, bg);
+    }
+}
+
 static void io_flush_state(StrandPrintState *ps)
 {
     if (g_io_mode == IO_MODE_IPC && ps->lane_state == LANE_OPEN)
@@ -425,7 +487,9 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
         int off = 0;
         while (off < len && ps->lane_state == LANE_OPEN) {
             if (ps->run.len == CONSOLE_RUN_TEXT_MAX) {
-                lane_flush_run(ps);
+                /* Always makes room: the cut leaves either nothing or the
+                 * unfinished tail, both shorter than a full run. */
+                lane_flush_lines(ps);
                 continue;
             }
             if (ps->run.len == 0) {

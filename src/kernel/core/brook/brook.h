@@ -152,13 +152,14 @@ struct process_t;
  *     - tail [writer writes; reader reads]
  *     - writer_alive [kernel writes]
  *     - writer_ever_attached [kernel writes]
+ *     - writer_bell [a sleeping writer's pid; the reader takes it and rings]
  *     - frame_size, frame_count, magic [immutable]
  *
  *   Cacheline 1 (reader-state) — watched by writer:
  *     - head [reader writes; writer reads]
  *     - reader_alive [kernel writes]
  *     - reader_ever_attached [kernel writes]
- *     - bell [sleeping reader writes its pid; writer takes it and rings]
+ *     - reader_bell [a sleeping reader's pid; the writer takes it and rings]
  *
  * head/tail are monotonic uint64 counters; modulo against frame_count
  * (power-of-2) gives the slot index.
@@ -176,29 +177,42 @@ typedef struct {
     uint32_t          frame_size;            /* immutable after create */
     uint32_t          frame_count;           /* immutable, power-of-2 */
     uint64_t          magic;                 /* BROOK_HEADER_MAGIC */
-    uint8_t           _pad_line0[32];
+    volatile uint32_t writer_bell;           /* see the bells, below */
+    uint8_t           _pad_line0[28];
 
     /* Cacheline 1 (64 B) — reader state, watched by writer */
     volatile uint64_t head;                  /* reader writes; writer reads */
     volatile uint32_t reader_alive;
     volatile uint32_t reader_ever_attached;
-    /* THE BELL — the pid of a reader that has gone to sleep, 0 while it is
-     * awake. A Brook is the one delivery surface in this system the kernel
-     * never sees: a push is a store into a shared page, so nothing exists to
-     * wake a reader that has stopped looking. The bell is how the sleeper says
-     * where to reach it, and it sits HERE, on the line the writer already reads
-     * for `head` on every single push — so a reader that is awake costs the
-     * writer one compare against a line already in its cache, and nothing else.
+    /* THE BELLS — how a side that has gone to sleep can still be reached.
      *
-     * A writer that finds a bell takes it (CAS to 0, so exactly one writer pays)
-     * and rings: an empty message to that pid, which lands in its Result ring
-     * and is itself the wake. Once per SLEEP, never per frame.
+     * A Brook is the one delivery surface in this system the kernel never
+     * sees: a push and a pop are stores into a shared page, so nothing exists
+     * to wake a peer that has stopped looking. A bell is the sleeper's own
+     * pid, left where the other side already looks, and it is symmetric
+     * because the waiting is:
      *
-     * Hanging it out and taking it in are Dekker's two halves with the writer's
-     * publish — see brook_bell_hang() in boxlib brook.c for the fence argument.
-     * A stale pid (reader gone, seat re-let) rings a stranger's doorbell once
-     * and costs it a discarded empty message. */
-    volatile uint32_t bell;
+     *   reader_bell — a READER with an empty stream hangs it here, on the line
+     *   a writer already reads for `head` on every push. The writer takes it
+     *   (CAS to 0, so exactly one writer pays) and rings.
+     *
+     *   writer_bell — a WRITER with a full stream hangs it on CL0, on the line
+     *   a reader already reads for `tail` on every pop. The reader rings it
+     *   after freeing a slot.
+     *
+     * Each bell lives in ITS OWN side's cacheline, which is what makes reading
+     * it free: the peer has that line in cache already for the cursor. Ringing
+     * costs one message and happens once per SLEEP, never per frame.
+     *
+     * Hanging and taking are Dekker's two halves with the peer's cursor
+     * publish — see brook_bell_hang() in boxlib brook.c for the fence
+     * argument. A stale pid (peer gone, seat re-let) rings a stranger's
+     * doorbell once and costs it a discarded empty message.
+     *
+     * The kernel rings the survivor's bell when a peer DEPARTS (BrookRingPeer):
+     * a sleeper waiting for a stream whose other end has gone must be told, and
+     * the departure is a store to `*_alive` that no sleeping strand will see. */
+    volatile uint32_t reader_bell;
     uint8_t           _pad_line1[44];
 } BrookHeader;
 
@@ -212,8 +226,10 @@ _Static_assert(__builtin_offsetof(BrookHeader, writer_alive) < 64,
                "writer_alive must share CL0 with tail (UMWAIT correctness)");
 _Static_assert(__builtin_offsetof(BrookHeader, reader_alive) >= 64,
                "reader_alive must share CL1 with head (UMWAIT correctness)");
-_Static_assert(__builtin_offsetof(BrookHeader, bell) >= 64,
-               "bell must share CL1 with head — the line the writer already reads");
+_Static_assert(__builtin_offsetof(BrookHeader, reader_bell) >= 64,
+               "reader_bell must share CL1 with head — the line the writer already reads");
+_Static_assert(__builtin_offsetof(BrookHeader, writer_bell) < 64,
+               "writer_bell must share CL0 with tail — the line the reader already reads");
 
 /* ─────────────────────────────────────────────────────────────────────
  * BrookObject — kernel-side per-tag record. Identified by tag_id.

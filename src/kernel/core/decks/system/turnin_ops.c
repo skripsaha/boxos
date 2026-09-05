@@ -46,6 +46,8 @@
 #include "boxos_decks.h"
 #include "process.h"
 #include "vmm.h"
+#include "kring.h"        /* KResultPush — a bell is a cursor movement */
+#include "result.h"
 #include "result_ring.h"
 #include "touch_ring.h"
 #include "error.h"
@@ -134,15 +136,67 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
     return ERR_WOULD_BLOCK;
 }
 
+/* -------------------------------------------------------------------------
+ * SysBell — params: [u32 pid]  (4 bytes). Move that strand's Result cursor.
+ *
+ * The record carries nothing and is meant to: no sender, no cloakroom token,
+ * ERR_WOULD_BLOCK. Every consumer in boxlib has discarded that shape since the
+ * async-park ack existed, so a bell can never be mistaken for a message or for
+ * somebody's answer — and the cursor it moves is exactly what a turned-in
+ * strand is watching.
+ *
+ * Refusable, and that is correct: KResultPush keeps the tail of a reply ring
+ * for token-carrying ANSWERS, so a bell is dropped when the ring is crowded
+ * with unsolicited traffic. A strand whose ring is that full has plenty to
+ * wake up for already.
+ *
+ * A pid nobody answers to is not an error. The ringer is a peer acting on a
+ * bell it took from a shared page; the strand that hung it may have gone in
+ * the meantime, and telling the ringer so would give it nothing to do. */
+static int SysBell(const ManifestOp *op, Crate *crates,
+                   uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+
+    uint32_t who;
+    memcpy(&who, op->params, sizeof(uint32_t));
+    if (who == 0) return ERR_INVALID_ARGUMENT;
+
+    process_t *target = process_find_ref(who);
+    if (!target) return OK;
+
+    Result r;
+    memset(&r, 0, sizeof(r));
+    r.error_code = ERR_WOULD_BLOCK;
+    (void)KResultPush(target, &r);
+    process_ref_dec(target);
+    return OK;
+}
+
 error_t TurnInOpsRegister(void)
 {
-    error_t rc = OpRegistryRegister(OP_KIND(DECK_SYSTEM, SYSTEM_OP_TURN_IN),
-                                    SysTurnIn, OP_AUTH_APP, "system.turn.in");
-    if (rc != OK && rc != ERR_ALREADY_EXISTS) {
-        kprintf("[TurnIn] register system.turn.in failed: %s\n", ErrorString(rc));
-        return rc;
+    struct {
+        uint16_t    opcode;
+        OpHandler   handler;
+        uint32_t    auth;
+        const char *name;
+    } table[] = {
+        { SYSTEM_OP_TURN_IN, SysTurnIn, OP_AUTH_APP, "system.turn.in" },
+        { SYSTEM_OP_BELL,    SysBell,   OP_AUTH_APP, "system.bell"    },
+    };
+
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
+        error_t rc = OpRegistryRegister(OP_KIND(DECK_SYSTEM, table[i].opcode),
+                                        table[i].handler, table[i].auth,
+                                        table[i].name);
+        if (rc != OK && rc != ERR_ALREADY_EXISTS) {
+            kprintf("[TurnIn] register %s failed: %s\n",
+                    table[i].name, ErrorString(rc));
+            return rc;
+        }
     }
-    debug_printf("[TurnIn] registered system.turn.in (0x%02x)\n",
-                 (unsigned)SYSTEM_OP_TURN_IN);
+    debug_printf("[TurnIn] registered system.turn.in + system.bell\n");
     return OK;
 }

@@ -569,13 +569,15 @@ static void nightwatch_verdict(void)
             tr_tail = __atomic_load_n(&t->tail, __ATOMIC_ACQUIRE);
             touch_ready = (tr_tail != tr_head);
         }
-        /* And the surface that leaves no trace at all. A Brook frame is a
-         * store into a shared page — the kernel never sees it arrive, so a
-         * reader asleep on one has both rings quiet and looks, by every other
-         * measure here, like a strand with simply nothing to do. The bell is
-         * the only mark it leaves — and the mark is that it hung one AT ALL,
-         * not that one is still up: a writer takes the bell before it rings, so
-         * a lost ring leaves the header looking clean. See BrookBellUnrung. */
+        /* And the surface that leaves no trace at all. A Brook push or pop is a
+         * store into a shared page — the kernel never sees it happen, so a
+         * strand asleep on one has both rings quiet and looks, by every other
+         * measure here, like a strand with simply nothing to do. Both ends
+         * qualify: a reader waiting for a frame and a writer waiting for a slot
+         * are one defect in two hats. The bell is the only mark either leaves —
+         * and the mark is that it hung one AT ALL, not that one is still up: the
+         * peer takes the bell before it rings, so a lost ring leaves the header
+         * looking clean. See BrookBellUnrung. */
         bool     bell_unrung = false;
         uint16_t bell_tag    = 0;
         uint64_t bk_head = 0, bk_tail = 0;
@@ -629,10 +631,11 @@ static void nightwatch_verdict(void)
                         "yet this process still waits\n",
                         (unsigned long)tr_head, (unsigned long)tr_tail);
             if (bell_unrung && speak)
-                kprintf("      ‼ BELL UNRUNG — this reader went to sleep with a bell "
-                        "hung out, and brook tag %u holds head=%lu tail=%lu. "
-                        "Frames were written for a strand that is asleep and "
-                        "nothing told it\n",
+                kprintf("      ‼ BELL UNRUNG — this strand went to sleep on a brook "
+                        "with its bell hung out, and tag %u could have served it "
+                        "(head=%lu tail=%lu): either frames it has not read, or "
+                        "room it was never told about. A cursor moved for a "
+                        "sleeper and nothing rang\n",
                         (unsigned)bell_tag,
                         (unsigned long)bk_head, (unsigned long)bk_tail);
             continue;
@@ -679,8 +682,8 @@ static void nightwatch_verdict(void)
             kprintf("      ‼ UNREACHABLE — va now resolves to phys 0x%lx, filed under 0x%lx\n",
                     (unsigned long)phys_now, (unsigned long)e->phys_addr);
         if (bell_unrung)
-            kprintf("      ‼ BELL UNRUNG — asleep with a bell hung out while brook "
-                    "tag %u holds head=%lu tail=%lu\n",
+            kprintf("      ‼ BELL UNRUNG — asleep with a brook bell hung out while "
+                    "tag %u could have served it (head=%lu tail=%lu)\n",
                     (unsigned)bell_tag,
                     (unsigned long)bk_head, (unsigned long)bk_tail);
         }

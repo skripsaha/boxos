@@ -141,35 +141,41 @@ uint32_t brook_free(const Brook *b);
 bool brook_writer_ever_attached(const Brook *b);
 
 /* ─────────────────────────────────────────────────────────────────────
- * The bell — how a reader that goes to sleep can still be reached.
+ * The bell — how a side that goes to sleep can still be reached.
  *
- * A Brook push is a store into a shared page. The kernel never sees it, so
- * nothing exists to wake a reader that has stopped looking: a reader that
- * sleeps on its rings alone will sleep through every frame a writer pushes,
- * and the writer — which does not drop output — ends up standing in
- * brook_push forever. That is not slow output; it is a stopped machine.
+ * A Brook push or pop is a store into a shared page. The kernel never sees it,
+ * so nothing exists to wake a peer that has stopped looking: a reader that
+ * sleeps on its rings alone sleeps through every frame a writer pushes, and a
+ * writer that sleeps sleeps through every slot a reader frees. Neither drops
+ * anything, so what follows is not slow output — it is a stopped machine.
  *
- * So a reader about to sleep HANGS THE BELL OUT: it writes its own pid where
- * the writer already looks. A writer that finds a bell takes it (exactly one
- * writer pays) and rings — an empty message to that pid, which lands in its
+ * So a side about to sleep HANGS ITS BELL OUT: it writes its own pid where the
+ * other side already looks — a writer on the line a reader reads for `tail`, a
+ * reader on the line a writer reads for `head`. The peer takes it (exactly one
+ * taker pays) and rings: an empty message to that pid, which lands in its
  * Result ring and is itself the wake. Once per SLEEP, never per frame; while
- * the reader is awake the bell is 0 and costs the writer one compare against a
- * cacheline it already reads.
+ * the peer is awake the bell is 0 and costs one compare against a cacheline it
+ * already holds. The kernel rings the survivor's bell when the other end of a
+ * stream departs, which is the one wake no cursor can carry.
  *
- * Discipline, and it is not optional:
+ * brook_pop and brook_push do all of this for themselves — a strand blocking
+ * inside Brook needs nothing from its caller. These two are for a reader that
+ * blocks somewhere ELSE: the console daemon try_pops many lanes and then
+ * sleeps once for all of them, so hanging and sleeping happen in different
+ * places and neither belongs to any one stream.
  *
- *     brook_bell_hang(lane, my_pid);   for every brook this strand reads
+ *     for each brook: brook_bell_hang(b, my_pid);
  *     mark = box_mark();
- *     if (look_at_everything()) { brook_bell_take(...); continue; }
+ *     if (look_at_everything()) { for each: brook_bell_take(b); continue; }
  *     box_turn_in(mark);
- *     brook_bell_take(...);
+ *     for each brook: brook_bell_take(b);
  *
- * Hang the bell BEFORE the last look. Hanging it after is the lost wake: a
- * frame that arrives in between is seen by neither side. Both halves carry a
- * full barrier, which is what makes "the writer sees the bell OR the reader
- * sees the frame" true rather than merely likely.
+ * Hang the bell BEFORE the last look. Hanging it after is the lost wake: what
+ * arrives in between is seen by neither side. Both halves carry a full
+ * barrier, which is what makes "the peer sees the bell OR the sleeper sees the
+ * cursor" true rather than merely likely.
  * ───────────────────────────────────────────────────────────────────── */
-int brook_bell_hang(Brook *b, uint32_t reader_pid);
+int brook_bell_hang(Brook *b, uint32_t strand_pid);
 int brook_bell_take(Brook *b);
 
 /* Introspection: the VA the kernel mapped this Brook's header at (diagnostics). */

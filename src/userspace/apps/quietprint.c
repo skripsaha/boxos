@@ -31,18 +31,37 @@
  * alive, so a reader of the log can tell a line that arrived while it ran from
  * a line that arrived when it died.
  *
- * The pause is a real park (touch_await on a tag nobody ever publishes), not a
- * spin: a spinning strand keeps a core hot, and a hot core is exactly the
- * condition this test needs to not exist.
+ * The pause is a real park, not a spin: a spinning strand keeps a core hot, and
+ * a hot core is exactly the condition this test needs to not exist. The two
+ * pauses park in DIFFERENT ways on purpose, because there are two waits worth
+ * proving and each one used to hold a core:
+ *
+ *   the FIRST is a blocked brook_pop. A sibling strand goes quiet, then pushes
+ *   one frame; this strand is asleep in Brook for the whole of that, woken by
+ *   the writer taking its bell. That is the reader half — the wait a Current,
+ *   a console lane, and every stream consumer in this system sits in.
+ *
+ *   the SECOND is a touch_await on a tag nobody publishes to, which ends on
+ *   its own deadline. It keeps the third marker honest about time.
+ *
+ * The line each pause is measured by says which kind it was, so a log reader
+ * can tell a run that proved the brook sleep from one that fell back.
  */
 
 #include "box/print.h"
 #include "box/touch.h"
+#include "box/brook.h"
+#include "box/strand.h"
 #include "box/clock.h"
+#include "box/cpu.h"
+#include "box/string.h"
 #include "box/system.h"
 
-#define QUIET_MS   3000u
-#define QUIET_TAG  "quietprint:nobody"
+#define QUIET_MS    3000u
+#define QUIET_TAG   "quietprint:nobody"
+#define STREAM_TAG  "quietprint:stream"
+#define STREAM_FS   8u
+#define STREAM_FC   4u
 
 /* Say nothing for `ms`, and hold no core while saying it.
  *
@@ -68,16 +87,66 @@ static void be_quiet(uint32_t ms)
     }
 }
 
+/* The sibling: stay quiet exactly as long as the reader expects to sleep, then
+ * put one frame in. Opening the WRITER end only now is deliberate — a stream
+ * with no writer yet is a reader's ordinary starting state, and this proves the
+ * sleep survives it.
+ *
+ * ‼ IT THEN GOES QUIET AGAIN INSTEAD OF LEAVING, and that is not politeness.
+ * A strand that exits publishes process:died, and a strand that releases a
+ * Brook makes the KERNEL ring the survivor's bell — either of which wakes the
+ * console daemon and the reader by a route that has nothing to do with what is
+ * being measured. Doing both the instant it had pushed made this program prove
+ * itself right no matter what: with the bell deliberately broken, output still
+ * reached the screen, on the death. So it stays alive, holding its end, until
+ * everything that had to be observed has been. Measured — the oracle went
+ * green on a build whose bell did nothing at all. */
+static void stream_writer(void *arg)
+{
+    (void)arg;
+    be_quiet(QUIET_MS);
+
+    Brook *w = brook_open(STREAM_TAG, STREAM_FS, STREAM_FC, BROOK_WRITER);
+    if (w) {
+        uint8_t frame[STREAM_FS];
+        memset(frame, 0xA5, sizeof(frame));
+        (void)brook_push(w, frame);
+    }
+
+    be_quiet(QUIET_MS);
+    if (w) brook_release(w);
+    strand_exit();
+}
+
 int main(void)
 {
     uint64_t began = clock_uptime_ms();
 
     printf("[QP] line 1 at %lu ms\n", (unsigned long)(clock_uptime_ms() - began));
     io_flush();
-    be_quiet(QUIET_MS);
 
-    printf("[QP] line 2 at %lu ms\n", (unsigned long)(clock_uptime_ms() - began));
+    /* The reader end first, so the sibling's open finds a stream waiting. */
+    const char *how = "quiet";
+    Brook *r = cpu_has_fsgsbase()
+             ? brook_open(STREAM_TAG, STREAM_FS, STREAM_FC,
+                          BROOK_READER | BROOK_CREATE)
+             : 0;
+    if (r && strand_spawn(stream_writer, 0) != 0) {
+        uint8_t frame[STREAM_FS];
+        if (brook_pop(r, frame) == 0) how = "brook";   /* asleep until the push */
+        brook_release(r);
+    } else {
+        if (r) brook_release(r);
+        /* No strands on this machine (no FSGSBASE): still go quiet, so the
+         * rest of the run measures what it always did. Saying so in the line
+         * below is what keeps the oracle from reading a fallback as a proof. */
+        be_quiet(QUIET_MS);
+    }
+
+    printf("[QP] line 2 at %lu ms (%s)\n",
+           (unsigned long)(clock_uptime_ms() - began), how);
     io_flush();
+
     be_quiet(QUIET_MS);
 
     printf("[QP] done after %lu ms\n", (unsigned long)(clock_uptime_ms() - began));
