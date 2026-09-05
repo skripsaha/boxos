@@ -24,8 +24,12 @@ void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count
  *                   user-vaddr slot to a kernel pointer. The caller must NOT
  *                   advance head; use kpocket_pop after fully processing.
  *   kpocket_pop   — bumps head by one. */
-Pocket  *KPocketPeek(process_t *proc);
-void     KPocketPop(process_t *proc);
+/* Look at the pocket at the head of the ring; `*pos_out` names the position
+ * looked at, and it is the ONLY thing KPocketPopAt will take. */
+Pocket  *KPocketPeek(process_t *proc, uint64_t *pos_out);
+/* Take the ring past exactly `pos`, and only if it is still the head. Returns
+ * false when another consumer already took it — see the note in kring.c. */
+bool     KPocketPopAt(process_t *proc, uint64_t pos);
 bool     KPocketIsEmpty(process_t *proc);
 uint32_t KPocketCount(process_t *proc);
 

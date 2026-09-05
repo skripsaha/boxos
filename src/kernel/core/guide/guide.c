@@ -156,7 +156,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
          * and execute only the copy — a cabin rewriting its slot
          * mid-dispatch can corrupt nothing but its own request. The slot
          * itself cannot be reused under us: the producer may not touch it
-         * until KPocketPop moves head, which happens after this dispatch
+         * until KPocketPopAt moves head, which happens after this dispatch
          * returns. Staging (rather than a guide stack buffer) keeps the
          * dispatch frame small and the manifest lifetime identical to the
          * addressed path. */
@@ -320,23 +320,29 @@ static void guide_process_pocket(process_t *proc)
 {
     if (!proc || !proc->cabin) return;
 
-    Pocket *pocket = KPocketPeek(proc);
+    uint64_t pos;
+    Pocket  *pocket = KPocketPeek(proc, &pos);
     if (!pocket) return;
 
-    /* Kernel sets pid (security: userspace can't forge it). */
-    pocket->pid = proc->pid;
-    pocket->error_code = OK;
-
-    /* Yield: cooperative tick, no work, no Result. */
+    /* Yield: cooperative tick, no work, no Result. Nothing is written into
+     * the slot, and the pop names the position that was looked at: the
+     * syscall gate on the strand's own core may be looking at this very
+     * yield right now (idt.c), and whichever of the two takes it, the other
+     * must find it gone and touch nothing behind it — see KPocketPopAt. */
     if (pocket->flags & POCKET_FLAG_YIELD) {
-        KPocketPop(proc);
+        (void)KPocketPopAt(proc, pos);
         return;
     }
+
+    /* Kernel sets pid (security: userspace can't forge it). Only the guide
+     * ever reads a pocket that is not a yield, so this slot is ours. */
+    pocket->pid = proc->pid;
+    pocket->error_code = OK;
 
     /* All non-yield pockets must carry the Manifest flag in Phase 12. */
     if (pocket->flags & POCKET_FLAG_MANIFEST) {
         guide_process_manifest_pocket(pocket, proc);
-        KPocketPop(proc);
+        (void)KPocketPopAt(proc, pos);
         return;
     }
 
@@ -346,7 +352,7 @@ static void guide_process_pocket(process_t *proc)
     debug_printf("[GUIDE] PID %u sent non-manifest pocket (flags=0x%x)\n",
                  proc->pid, pocket->flags);
     execution_deck_handler(pocket, proc);
-    KPocketPop(proc);
+    (void)KPocketPopAt(proc, pos);
 }
 
 void guide(void)

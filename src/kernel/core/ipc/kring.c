@@ -112,29 +112,54 @@ uint32_t KPocketCount(process_t *proc)
     return n > 0xFFFFFFFFu ? 0xFFFFFFFFu : (uint32_t)n;
 }
 
-Pocket *KPocketPeek(process_t *proc)
+Pocket *KPocketPeek(process_t *proc, uint64_t *pos_out)
 {
     PocketRing *r = kring_pocket_hdr(proc);
     if (!r) return NULL;
     uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
     uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
     if (head == tail) return NULL;
+    if (pos_out) *pos_out = head;
 
     uintptr_t uvaddr = pocket_ring_slot_uvaddr(r, head);
     return (Pocket *)vmm_translate_user_addr(proc->cabin->vmm, uvaddr, sizeof(Pocket));
 }
 
-void KPocketPop(process_t *proc)
+/* Take the ring past ONE named position, and only while it is still the head.
+ *
+ * A strand's pocket ring has one producer and, it turns out, TWO consumers:
+ * the K-Core guide that drains it, and the syscall gate on the strand's own
+ * core, which pops a YIELD pocket it finds at the head so the strand can give
+ * its core away without a K-Core round trip (idt.c). Each is single-threaded
+ * with itself and neither with the other, and the pop that stood here moved
+ * head on from WHATEVER IT READ AT THAT MOMENT. So when both had looked at the
+ * same yield — the K-Core between its peek and its pop, the gate arriving for
+ * the strand's next submit — the second pop did not take the yield, which was
+ * already gone; it took the pocket BEHIND it, which nobody had read.
+ *
+ * MEASURED, on a machine frozen by exactly that (BIOS 16c, bench): head 0xcbf
+ * and tail 0xcbf, four YIELD pockets at 0xcba..0xcbd stamped by the guide,
+ * and at 0xcbe a system.broadcast with token 0x46f, pid still 0 and its
+ * manifest_size still 0x24 — never read — with its owner spinning for an answer
+ * to a question no one had opened. Under a deadline that was a thirty-second
+ * stall and a false "failed" from the shell; without one it is a strand that
+ * never returns, and Nightwatch names it: ANSWER OWED.
+ *
+ * A compare-and-swap from the position the caller actually looked at cannot
+ * step over anything: if head has moved, the other consumer owns that position
+ * and this call takes nothing. Two consumers may still both LOOK at one yield,
+ * and that is harmless — a yield carries no work and produces no Result. Every
+ * other kind of pocket is read only by the guide, so its position is only ever
+ * taken once. The RELEASE keeps the userspace producer's view of "room in the
+ * ring" behind the slot that was consumed. */
+bool KPocketPopAt(process_t *proc, uint64_t pos)
 {
     PocketRing *r = kring_pocket_hdr(proc);
-    if (!r) return;
-    uint64_t head = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
-    uint64_t tail = __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE);
-    if (head == tail) return;
-    /* Publish the new head with RELEASE so the userspace producer's view
-     * of "ring not full" cannot leapfrog ahead of the slot we already
-     * consumed. */
-    __atomic_store_n(&r->hdr.head, head + 1, __ATOMIC_RELEASE);
+    if (!r) return false;
+    uint64_t expected = pos;
+    return __atomic_compare_exchange_n(&r->hdr.head, &expected, pos + 1,
+                                       /*weak=*/false,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
 /* -------------------------------------------------------------------------

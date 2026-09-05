@@ -2834,6 +2834,155 @@ bell_restore() {
     sleep 1; touch src/userspace/boxlib/src/brook.c src/kernel/core/brook/brook.c
 }
 
+# ── yieldrace ────────────────────────────────────────────────────────────────
+#
+# A strand's pocket ring has one producer and two consumers: the K-Core guide
+# that drains it, and the syscall gate on the strand's own core, which pops a
+# YIELD it finds at the head (idt.c). The pop that used to stand in both of them
+# moved head on from whatever it read at that moment, so when both had looked
+# at the same yield — the K-Core between its peek and its pop, the gate arriving
+# for the strand's next submit — the second pop stepped over the pocket behind
+# the yield, unread. Measured on a frozen BIOS 16c machine: bench's
+# system.broadcast at slot 0xcbe with pid still 0, head already past it, and
+# its owner waiting for an answer nobody had opened (ANSWER OWED, token 0x46f).
+#
+# The window is microseconds wide on real silicon and lands maybe once in a
+# two-hour matrix on this bench, which is no way to check anything. So the
+# window is WIDENED: the guide stands on every yield of an APPLICATION (pid >= 3)
+# for two milliseconds before taking it — the display daemon and the shell are
+# left alone, so the machine stays typeable and the harness can drive it.
+# bench's display-ping loop yields while it waits for each reply; those yields
+# queue behind the broadcast the K-Core is still holding (the reply is pushed
+# before the pocket is popped), so the K-Core walks them with the window open,
+# and the next broadcast is pushed while it is standing on one — exactly the
+# interleaving. Under the fix (a pop that names the position it looked at) that
+# costs nothing; under the pop that stood before it (put back by yieldracemut)
+# the broadcast is skipped and Nightwatch says so.
+yieldrace_window_on() {
+    cp src/kernel/core/guide/guide.c "$SCRATCH/guide.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/guide/guide.c"
+s = open(p).read()
+anchor = """    if (pocket->flags & POCKET_FLAG_YIELD) {
+        (void)KPocketPopAt(proc, pos);
+        return;
+    }"""
+assert anchor in s, "yieldrace window anchor missing"
+widened = """    if (pocket->flags & POCKET_FLAG_YIELD) {
+        if (proc->pid >= 3) delay(2);   /* logcheck mutation: the K-Core stands on an app's yield for 2 ms */
+        (void)KPocketPopAt(proc, pos);
+        return;
+    }"""
+open(p, "w").write(s.replace(anchor, widened, 1))
+EOF
+    grep -q "logcheck mutation" src/kernel/core/guide/guide.c || { echo "yieldrace window install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/guide/guide.c
+}
+
+yieldrace_window_off() {
+    [ -f "$SCRATCH/guide.c.bak" ] && cp "$SCRATCH/guide.c.bak" src/kernel/core/guide/guide.c
+    sleep 1; touch src/kernel/core/guide/guide.c
+}
+
+# The pop that stood here before: head moves on from whatever it reads, so long
+# as the ring is not empty. Exactly the old KPocketPop, so the mutation revives
+# exactly the old defect and nothing else.
+blindpop_on() {
+    cp src/kernel/core/ipc/kring.c "$SCRATCH/kring.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/ipc/kring.c"
+s = open(p).read()
+anchor = """    uint64_t expected = pos;
+    return __atomic_compare_exchange_n(&r->hdr.head, &expected, pos + 1,"""
+assert anchor in s, "blindpop anchor missing"
+blind = """    /* logcheck mutation: the blind pop — head moves on from whatever it reads */
+    uint64_t expected = __atomic_load_n(&r->hdr.head, __ATOMIC_RELAXED);
+    if (expected == __atomic_load_n(&r->hdr.tail, __ATOMIC_ACQUIRE)) return false;
+    pos = expected;
+    return __atomic_compare_exchange_n(&r->hdr.head, &expected, pos + 1,"""
+open(p, "w").write(s.replace(anchor, blind, 1))
+EOF
+    grep -q "logcheck mutation" src/kernel/core/ipc/kring.c || { echo "blindpop install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/ipc/kring.c
+}
+
+blindpop_off() {
+    [ -f "$SCRATCH/kring.c.bak" ] && cp "$SCRATCH/kring.c.bak" src/kernel/core/ipc/kring.c
+    sleep 1; touch src/kernel/core/ipc/kring.c
+}
+
+# Sixteen cores, bench three times over. Each run is waited out to the row
+# AFTER the one at risk (the storage row is the last one bench prints), or to
+# Nightwatch speaking — whichever comes first. A verdict ends the whole thing:
+# the shell is parked on a bench that will never return, so nothing typed after
+# it would run.
+yieldrace_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 90 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 4
+    local run=0
+    while [ $run -lt 3 ]; do
+        local MARK
+        MARK=$(wc -l < build/serial.log)
+        # The typer's verdict is read, not thrown away: a line the guest did not
+        # take must stop the run and say so — pressing Enter on it would run
+        # something else and blame the OS (the stress matrix learned this once).
+        if ! ./tools/qemu-input.sh type "bench" 2>"$SCRATCH/yieldrace.typeerr"; then
+            echo "  typing 'bench' failed: $(cat "$SCRATCH/yieldrace.typeerr")"
+            break
+        fi
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        local t=0
+        while [ $t -lt 240 ]; do
+            tail -n +$((MARK + 1)) build/serial.log | grep -q "create+write64+delete" && break
+            grep -q "ANSWER OWED" build/serial.log && break
+            sleep 2; t=$((t+1))
+        done
+        grep -q "ANSWER OWED" build/serial.log && break
+        run=$((run+1))
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+run_yieldrace() {
+    echo "== yieldrace: a yield at the head of the ring while the K-Core still stands on it =="
+    yieldrace_window_on; build
+    yieldrace_boot yieldrace
+    yieldrace_window_off
+    L="$SCRATCH/serial.yieldrace.log"
+
+    local rows
+    rows=$(grep -c "display PING + reply" "$L")
+    [ "$rows" -ge 3 ]
+    chk $? "yieldrace: bench answered its display pings three runs running, the K-Core standing on every yield for 2 ms (rows=$rows)"
+    ! grep -q "ANSWER OWED" "$L";     chk $? "yieldrace: and no answer was owed"
+    ! grep -q "POCKET UNSERVED" "$L"; chk $? "yieldrace: and no pocket went unserved"
+}
+
+# The oracle measured against itself: with the blind pop back, the same run
+# must STOP, and Nightwatch must be the one to say why.
+run_yieldracemut() {
+    echo "== yieldracemut: put the blind pop back and require the machine to stop =="
+    yieldrace_window_on; blindpop_on; build
+    yieldrace_boot yieldracemut
+    blindpop_off; yieldrace_window_off
+    L="$SCRATCH/serial.yieldracemut.log"
+
+    grep -q "ANSWER OWED" "$L"
+    chk $? "yieldracemut: with the blind pop back, Nightwatch named the skipped pocket — ANSWER OWED"
+    local rows
+    rows=$(grep -c "display PING + reply" "$L")
+    [ "$rows" -lt 3 ]
+    chk $? "yieldracemut: and bench did not get through three runs (rows=$rows)"
+}
+
 # And the other half: a box that never turns in. Removing the submit leaves the
 # loop exactly as it was before this work — look, find nothing, look again.
 turnin_off() {
@@ -3138,6 +3287,8 @@ case "${1:-both}" in
     lines)      run_lines ;;
     linesmut)   run_linesmut ;;
     sleepsmut)  run_sleepsmut ;;
+    yieldrace)  run_yieldrace ;;
+    yieldracemut) run_yieldracemut ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
@@ -3150,8 +3301,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_yieldrace; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|yieldrace|yieldracemut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo
