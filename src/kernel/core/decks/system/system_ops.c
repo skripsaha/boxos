@@ -1827,6 +1827,9 @@ error_t SystemDeckRegister(void)
     error_t sync_rc = SyncOpsRegister();
     if (sync_rc != OK) return sync_rc;
 
+    error_t turnin_rc = TurnInOpsRegister();
+    if (turnin_rc != OK) return turnin_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;

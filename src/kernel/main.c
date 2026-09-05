@@ -781,6 +781,18 @@ void kernel_main(void)
     else
     {
         idt_set_syscall_mode(false);
+
+        /* And the watch stands on one core too, now that one core can sleep.
+         *
+         * It used to be armed only for SMP, and the reason was sound at the
+         * time: the verdict runs from cpu_idle, and a uniprocessor never
+         * reached cpu_idle — the strand waiting for a keystroke held the only
+         * core, spinning, so there was never an idle core to look from. Turn In
+         * ended that. A single-core box now genuinely goes to sleep at its
+         * prompt, which is exactly the moment the watch exists for, and leaving
+         * it unarmed here would leave the newest way to sleep unwatched on the
+         * configuration where it is easiest to see. */
+        nightwatch_init();
     }
 
     debug_printf("[INIT] PCI Subsystem...\n");

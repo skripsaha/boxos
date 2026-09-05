@@ -4,6 +4,7 @@
 #include "box/cpu.h"
 #include "box/memory.h"   /* malloc / free — per-strand ferry stash heap backing (Ф26e) */
 #include "box/debug.h"    /* kdbg_print — a deadline-free wait must be able to accuse */
+#include "box/turnin.h"   /* box_turn_in — a deadline-free wait must also be able to SLEEP */
 
 bool result_available(void) {
     ResultRing* rr = result_ring();
@@ -681,9 +682,37 @@ static bool result_wait_ipc_yield(Result* out, uint32_t timeout_ms) {
     }
 }
 
+/* The unbounded wait — and the only one that sleeps.
+ *
+ * A wait with no deadline is a wait that may last a week: the shell's readline
+ * sits here from one prompt to the next keystroke. Every one of those seconds
+ * used to be spent asking the kernel for its core back, over and over, a
+ * hundred thousand times a second per idle strand. Turning in costs one submit
+ * and gives the core away entirely.
+ *
+ * BOUNDED waits deliberately do NOT come through here. Parking a wait that has
+ * a deadline needs a timer to end it, and arming one per wait was measured to
+ * break sixteen-core runs — a child's exit racing its own kill, process:died
+ * lost for three seconds. A bounded wait is also, by construction, short: the
+ * strand that set the deadline expects to be back soon. It keeps its spin.
+ *
+ * The mark is taken BEFORE the look, every round: what arrives after the mark
+ * either turns up in the look (and we return it) or refuses the sleep. */
+static bool result_wait_ipc_turnin(Result* out) {
+    for (;;) {
+        TurnInMark mark = box_mark();
+        __sync_synchronize();
+        if (result_available() || result_ipc_stash_count() > 0) {
+            if (result_pop_ipc(out)) return true;
+        }
+        box_turn_in(mark);
+    }
+}
+
 bool result_wait_ipc(Result* out, uint32_t timeout_ms) {
     if (!out) return false;
     if (result_pop_ipc(out)) return true;
+    if (timeout_ms == 0)   return result_wait_ipc_turnin(out);
     if (cpu_has_waitpkg()) return result_wait_ipc_umwait(out, timeout_ms);
     return result_wait_ipc_yield(out, timeout_ms);
 }

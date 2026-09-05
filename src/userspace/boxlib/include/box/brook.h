@@ -140,6 +140,38 @@ uint32_t brook_free(const Brook *b);
  * writer-to-be is known dead, so the lane is safe to revoke. */
 bool brook_writer_ever_attached(const Brook *b);
 
+/* ─────────────────────────────────────────────────────────────────────
+ * The bell — how a reader that goes to sleep can still be reached.
+ *
+ * A Brook push is a store into a shared page. The kernel never sees it, so
+ * nothing exists to wake a reader that has stopped looking: a reader that
+ * sleeps on its rings alone will sleep through every frame a writer pushes,
+ * and the writer — which does not drop output — ends up standing in
+ * brook_push forever. That is not slow output; it is a stopped machine.
+ *
+ * So a reader about to sleep HANGS THE BELL OUT: it writes its own pid where
+ * the writer already looks. A writer that finds a bell takes it (exactly one
+ * writer pays) and rings — an empty message to that pid, which lands in its
+ * Result ring and is itself the wake. Once per SLEEP, never per frame; while
+ * the reader is awake the bell is 0 and costs the writer one compare against a
+ * cacheline it already reads.
+ *
+ * Discipline, and it is not optional:
+ *
+ *     brook_bell_hang(lane, my_pid);   for every brook this strand reads
+ *     mark = box_mark();
+ *     if (look_at_everything()) { brook_bell_take(...); continue; }
+ *     box_turn_in(mark);
+ *     brook_bell_take(...);
+ *
+ * Hang the bell BEFORE the last look. Hanging it after is the lost wake: a
+ * frame that arrives in between is seen by neither side. Both halves carry a
+ * full barrier, which is what makes "the writer sees the bell OR the reader
+ * sees the frame" true rather than merely likely.
+ * ───────────────────────────────────────────────────────────────────── */
+int brook_bell_hang(Brook *b, uint32_t reader_pid);
+int brook_bell_take(Brook *b);
+
 /* Introspection: the VA the kernel mapped this Brook's header at (diagnostics). */
 uint64_t brook_handle_header_va(const Brook *b);
 

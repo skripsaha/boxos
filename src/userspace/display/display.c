@@ -1,8 +1,15 @@
 /*
  * display.c — the console daemon.
  *
- * One event loop, no blocking calls, no timeouts: a rotation of try-steps
- * (keys → deaths → lanes → IPC) with a yield when a full pass moved nothing.
+ * One event loop, no timeouts: a rotation of try-steps (keys → deaths → lanes
+ * → IPC). A pass that moves nothing does not go round again — the daemon turns
+ * in and stops costing a core until something arrives for it. Its three
+ * delivery surfaces are not alike: the kernel can see a Touch and a Result
+ * land, so the sleep watches those cursors itself, but a lane frame is a store
+ * into a shared page that the kernel never witnesses. That is what the bell is
+ * for: before going down, the daemon hangs its pid on every lane, and a writer
+ * that finds one rings. Hang the bells BEFORE the last look, or a frame that
+ * arrives in between is seen by nobody.
  *
  * Output arrives as ConsoleRun frames on per-strand Brook lanes. A lane is
  * granted over DISP_CMD_LANE checkroom-style: the daemon opens the READER
@@ -36,6 +43,7 @@
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
+#include "box/turnin.h"
 #include "box/display.h"
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -281,6 +289,28 @@ static bool death_step(void)
 /* ─────────────────────────────────────────────────────────────────────────
  * Lane walk — the only place lane nodes are unlinked.
  * ───────────────────────────────────────────────────────────────────────── */
+
+/* Hang this daemon's pid on every open lane, and take them all in again.
+ *
+ * Only lanes that still carry frames matter, but hanging on all of them is one
+ * store each and spares the walk a liveness argument: a lane the daemon is
+ * about to free has its bell taken back before lanes_step ever reaches it,
+ * because taking them in happens the instant the sleep ends. A closed lane's
+ * writer is gone and will never ring; the store is harmless.
+ *
+ * New lanes cannot appear behind the daemon's back — grant_lane runs inside
+ * ipc_step, which only runs while it is awake. */
+static void lanes_bell_hang(uint32_t me)
+{
+    for (ConsoleLane *ln = g_lanes; ln; ln = ln->next)
+        brook_bell_hang(ln->brook, me);
+}
+
+static void lanes_bell_take(void)
+{
+    for (ConsoleLane *ln = g_lanes; ln; ln = ln->next)
+        brook_bell_take(ln->brook);
+}
 
 static bool lanes_step(void)
 {
@@ -531,13 +561,32 @@ int main(void)
         send(ci->spawner_pid, &ready, 1);
     }
 
+    uint32_t me = ci->pid;
+
     for (;;) {
         bool progressed = false;
         progressed |= kb_step();
         progressed |= death_step();
         progressed |= lanes_step();
         progressed |= ipc_step();
-        if (!progressed) yield();
+        if (progressed) continue;
+
+        /* Nothing moved. Hang the bells FIRST, then take the mark, then look
+         * one last time — in that order, and the order is the whole proof.
+         * Anything arriving from here on either finds a bell out (and rings,
+         * which is itself an arrival on the Result ring), or moves a cursor
+         * past the mark, or turns up in the look below. There is no fourth
+         * way for it to arrive and no gap between the three. */
+        lanes_bell_hang(me);
+        TurnInMark mark = box_mark();
+
+        if (kb_step() | death_step() | lanes_step() | ipc_step()) {
+            lanes_bell_take();
+            continue;
+        }
+
+        box_turn_in(mark);
+        lanes_bell_take();
     }
 
     return 0;

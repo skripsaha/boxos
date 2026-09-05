@@ -2666,6 +2666,232 @@ run_isoch() {
     chk $? "and the endpoint-context fields still agree with the specification"
 }
 
+# ===========================================================================
+# sleeps — the box with nothing to do costs nothing, and still hears
+# ===========================================================================
+#
+# Two questions, and they are opposite halves of the same change. Sleeping is
+# easy on its own: stop looking, and a machine goes quiet for ever. Hearing is
+# easy on its own: never stop looking, which is what this box did, at a hundred
+# percent of a core with an empty screen. Only together are they worth
+# anything, and only together can a mutation to either one be seen.
+#
+#   IT SLEEPS   — at an idle prompt, the emulator's own CPU time barely moves.
+#                 Measured on the HOST, deliberately: the guest cannot be asked
+#                 whether it is really idle, because the loop that would answer
+#                 is the loop that would be burning the core.
+#
+#   IT HEARS    — quietprint writes one line into its console lane and then
+#                 says nothing at all for three seconds. Nothing else happens
+#                 in that window: no key, no message, no death. The line must
+#                 be on screen BEFORE the program has finished, and the only
+#                 thing that can put it there is the bell — the sleeping
+#                 daemon's pid, hung on the lane, taken and rung by the writer.
+#                 Without it the line still arrives, but only when the process
+#                 DIES, because a death is a Touch and a Touch wakes the daemon.
+#                 So the check is on WHEN, never on whether.
+#
+# Single core on purpose. It is the configuration where a spinning strand is
+# unmistakable — there is one core, and either it is idle or it is not.
+
+QUIET_SETTLE_S=6      # long enough for boot chatter to stop
+QUIET_SAMPLE_S=8      # window the host CPU is measured over
+
+# Host CPU time (in centiseconds) that the QEMU process has used so far.
+qemu_cpu_cs() {
+    local pid t
+    pid=$(cat build/qemu.pid 2>/dev/null) || return 1
+    [ -n "$pid" ] || return 1
+    t=$(ps -o time= -p "$pid" 2>/dev/null | tr -d ' ') || return 1
+    [ -n "$t" ] || return 1
+    # ps prints [[hh:]mm:]ss[.cc]
+    printf '%s\n' "$t" | awk -F: '
+        { n=NF; sec=$n; m=(n>1)?$(n-1):0; h=(n>2)?$(n-2):0;
+          printf "%d\n", (h*3600 + m*60 + sec) * 100 }'
+}
+
+run_sleeps() {
+    echo "== sleeps: an idle box costs nothing, and a sleeping console still hears =="
+    build
+
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null || { bad "sleeps: never reached a shell"; make run-stop >/dev/null 2>&1; return; }
+
+    # ── IT SLEEPS ───────────────────────────────────────────────────────────
+    sleep $QUIET_SETTLE_S
+    local A B USED
+    A=$(qemu_cpu_cs); sleep $QUIET_SAMPLE_S; B=$(qemu_cpu_cs)
+    USED=$(( (B - A) * 100 / (QUIET_SAMPLE_S * 100) ))   # percent of one core
+    echo "     idle: ${USED}% of one core over ${QUIET_SAMPLE_S}s (was ~100% before Turn In)"
+
+    # 25% is not a target, it is a LINE. A box that turns in measures single
+    # digits and a box that spins measures a hundred; nothing lands in between,
+    # so the threshold only has to be far from both to be immune to a loaded
+    # build host.
+    if [ "$USED" -lt 25 ]; then ok "sleeps: idle box costs ${USED}% of a core"
+    else                        bad "sleeps: idle box costs ${USED}% of a core — it never turned in"; fi
+
+    # ── IT HEARS ────────────────────────────────────────────────────────────
+    local MARK EARLY LATE
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+
+    # quietprint: line 1, three seconds of silence, line 2, three more, done.
+    # Look at two seconds — inside the FIRST silence. Line one must already be
+    # there and the program must still be running.
+    sleep 2
+    EARLY=$(tail -n +$((MARK + 1)) build/serial.log)
+    printf '%s\n' "$EARLY" > "$SCRATCH/serial.sleeps.early.log"
+
+    if printf '%s' "$EARLY" | grep -q "\[QP\] line 1"; then
+        ok "sleeps: the line reached the screen while the writer was still quiet"
+    else
+        bad "sleeps: line 1 had not been rendered two seconds in — the bell never rang"
+    fi
+    if printf '%s' "$EARLY" | grep -q "\[QP\] done"; then
+        bad "sleeps: quietprint had already finished — the window proves nothing, fix the timing"
+    else
+        ok "sleeps: the window was real — the writer had not finished yet"
+    fi
+
+    # And it must all still arrive, in order, and the silences must be the
+    # length they were asked for. 2x here is the touch_await double-deadline.
+    sleep 8
+    LATE=$(tail -n +$((MARK + 1)) build/serial.log)
+    printf '%s\n' "$LATE" > "$SCRATCH/serial.sleeps.log"
+    make run-stop >/dev/null 2>&1
+
+    printf '%s' "$LATE" | grep -q "\[QP\] done" \
+        && ok "sleeps: quietprint ran to the end" \
+        || bad "sleeps: quietprint never finished"
+
+    local T2
+    T2=$(printf '%s' "$LATE" | sed -n 's/.*\[QP\] line 2 at \([0-9]*\) ms.*/\1/p' | head -1)
+    if [ -n "$T2" ] && [ "$T2" -ge 2900 ] && [ "$T2" -le 4200 ]; then
+        ok "sleeps: three seconds of silence took ${T2} ms"
+    else
+        bad "sleeps: three seconds of silence took ${T2:-?} ms — a wait is counting its deadline twice"
+    fi
+}
+
+# The mutation, and it has to be the RING rather than the bell itself: a bell
+# nobody hangs out is also a bell nobody rings, and Nightwatch would then have
+# nothing to describe. Leaving the sign up and refusing to pull the cord is the
+# exact defect the check exists for, and it is the one that leaves evidence.
+bell_off() {
+    cp src/userspace/boxlib/src/brook.c "$SCRATCH/brook.c.bak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/brook.c"
+s = open(p).read()
+anchor = """    if (!brook_cas_u32(&h->bell, who, 0)) return;   /* another writer is ringing */"""
+assert anchor in s, "bell mutation anchor missing"
+s = s.replace(anchor, anchor + "\n    return;   /* logcheck mutation: the bell is never rung */", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/userspace/boxlib/src/brook.c || { echo "bell mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/brook.c
+}
+
+bell_restore() {
+    [ -f "$SCRATCH/brook.c.bak" ] && cp "$SCRATCH/brook.c.bak" src/userspace/boxlib/src/brook.c
+    sleep 1; touch src/userspace/boxlib/src/brook.c
+}
+
+# And the other half: a box that never turns in. Removing the submit leaves the
+# loop exactly as it was before this work — look, find nothing, look again.
+turnin_off() {
+    cp src/userspace/boxlib/src/turnin.c "$SCRATCH/turnin.c.bak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/turnin.c"
+s = open(p).read()
+anchor = "        if (pocket_ring_is_empty(pocket_ring())) turn_in_submit(seen);"
+assert anchor in s, "turnin mutation anchor missing"
+s = s.replace(anchor, "        /* logcheck mutation: never ask to be put down */", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/userspace/boxlib/src/turnin.c || { echo "turn-in mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/turnin.c
+}
+
+turnin_restore() {
+    [ -f "$SCRATCH/turnin.c.bak" ] && cp "$SCRATCH/turnin.c.bak" src/userspace/boxlib/src/turnin.c
+    sleep 1; touch src/userspace/boxlib/src/turnin.c
+}
+
+# sleepsmut — the oracle measured against itself.
+#
+# A check nobody has ever seen go red is a check nobody should believe. This
+# breaks each half in turn, on purpose, and requires the corresponding half of
+# `sleeps` to notice. Neither mutation is subtle and neither is a crash: both
+# leave a machine that boots, runs, and prints everything — which is precisely
+# why an oracle is needed to tell them apart from a healthy one.
+run_sleepsmut() {
+    echo "== sleepsmut: break the bell, then the sleep, and require the oracle to say so =="
+
+    local before_fail
+    before_fail=$FAIL
+
+    bell_off; build
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 4
+    local MARK EARLY
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "quietprint" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 2
+    EARLY=$(tail -n +$((MARK + 1)) build/serial.log)
+    sleep 8
+    cp build/serial.log "$SCRATCH/serial.sleepsmut.bell.log"
+    make run-stop >/dev/null 2>&1
+    bell_restore
+
+    if printf '%s' "$EARLY" | grep -q "\[QP\] line 1"; then
+        bad "sleepsmut: bell disabled and the line STILL arrived on time — the check proves nothing"
+    else
+        ok "sleepsmut: bell disabled — the line was not on screen while the writer lived"
+    fi
+
+    turnin_off; build
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=1 MEM=4G >/dev/null 2>&1
+    i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep $QUIET_SETTLE_S
+    local A B USED
+    A=$(qemu_cpu_cs); sleep $QUIET_SAMPLE_S; B=$(qemu_cpu_cs)
+    USED=$(( (B - A) * 100 / (QUIET_SAMPLE_S * 100) ))
+    make run-stop >/dev/null 2>&1
+    turnin_restore
+
+    echo "     idle without Turn In: ${USED}% of one core"
+    if [ "$USED" -lt 25 ]; then
+        bad "sleepsmut: Turn In removed and the box was STILL idle at ${USED}% — the check proves nothing"
+    else
+        ok "sleepsmut: Turn In removed — the box went back to ${USED}% of a core"
+    fi
+
+    build   # leave the tree built from clean sources either way
+    [ $FAIL -eq $before_fail ] || echo "     (a red line above means the oracle cannot see its own defect)"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -2681,6 +2907,8 @@ case "${1:-both}" in
     slowdisk) run_slowdisk ;;
     gpt)      run_gpt ;;
     stillthere) run_stillthere ;;
+    sleeps)     run_sleeps ;;
+    sleepsmut)  run_sleepsmut ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
@@ -2693,8 +2921,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo
