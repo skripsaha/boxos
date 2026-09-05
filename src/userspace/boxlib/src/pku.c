@@ -66,5 +66,5 @@ int pku_apply_region(uint32_t region_id, uint8_t pkey) {
                    params, sizeof(params),
                    0, 0,
                    0, 0, 0,
-                   BOX_ANSWER_WATCHDOG_MS, 0);
+                   BOX_ANSWER_GUARANTEED, 0);
 }

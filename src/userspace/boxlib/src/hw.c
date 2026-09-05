@@ -11,7 +11,7 @@ int hw_lam_get(void) {
                      0, 0,
                      0, 0,
                      &mode, sizeof(mode), 0,
-                     BOX_ANSWER_WATCHDOG_MS, 0);
+                     BOX_ANSWER_GUARANTEED, 0);
     if (rc != 0) return rc;
     return (int)mode;
 }
@@ -23,7 +23,7 @@ int hw_lam_set(hw_lam_mode_t mode) {
                    params, sizeof(params),
                    0, 0,
                    0, 0, 0,
-                   BOX_ANSWER_WATCHDOG_MS, 0);
+                   BOX_ANSWER_GUARANTEED, 0);
 }
 
 int hw_tme_state(hw_tme_state_t *out) {
@@ -32,5 +32,5 @@ int hw_tme_state(hw_tme_state_t *out) {
                    0, 0,
                    0, 0,
                    out, sizeof(*out), 0,
-                   BOX_ANSWER_WATCHDOG_MS, 0);
+                   BOX_ANSWER_GUARANTEED, 0);
 }

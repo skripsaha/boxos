@@ -15,7 +15,6 @@
 #define HW_RTC_GET_UNIX64  0x16
 #define HW_RTC_GET_UPTIME  0x17
 
-#define TIME_TIMEOUT_MS    BOX_TIMEOUT_FAST_MS
 
 int time_get(BoxTime *out)
 {
@@ -26,7 +25,7 @@ int time_get(BoxTime *out)
     int rc = MfCall1(DECK_HARDWARE, HW_RTC_GET_TIME,
                      NULL, 0, NULL, 0,
                      buf, sizeof(buf), NULL,
-                     TIME_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc;
 
     memcpy(&out->seconds, buf + 0,  8);
@@ -48,7 +47,7 @@ int time_get_secs(uint64_t *out_seconds)
     int rc = MfCall1(DECK_HARDWARE, HW_RTC_GET_UNIX64,
                      NULL, 0, NULL, 0,
                      buf, sizeof(buf), NULL,
-                     TIME_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc;
     memcpy(out_seconds, buf, 8);
     return OK;
@@ -74,7 +73,7 @@ int time_uptime_ms(uint64_t *out_ms)
     int rc = MfCall1(DECK_HARDWARE, HW_TIMER_GET_MS,
                      NULL, 0, NULL, 0,
                      buf, sizeof(buf), NULL,
-                     TIME_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc;
     memcpy(out_ms, buf, 8);
     return OK;
@@ -87,7 +86,7 @@ int time_uptime_ns(uint64_t *out_ns)
     int rc = MfCall1(DECK_HARDWARE, HW_RTC_GET_UPTIME,
                      NULL, 0, NULL, 0,
                      buf, sizeof(buf), NULL,
-                     TIME_TIMEOUT_MS, NULL);
+                     BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return rc;
     memcpy(out_ns, buf, 8);
     return OK;
