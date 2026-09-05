@@ -61,4 +61,8 @@ error_t HwOpsRegister(void);
 /* Strand sync: addr_park / addr_wake. Defined in sync_ops.c. */
 error_t SyncOpsRegister(void);
 
+/* Register SYSTEM_OP_TURN_IN (turnin_ops.c) — the sleep a strand takes when
+ * nothing it waits on has arrived yet. Called from SystemDeckRegister. */
+error_t TurnInOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */

@@ -496,13 +496,33 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
         return -ERR_INVALID_ARGS;
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
+    /* ONE deadline for the whole call, taken before the park.
+     *
+     * The park below consumes real time — up to the whole timeout — and
+     * touch_wait used to be handed the ORIGINAL figure afterwards, starting a
+     * second clock of the same length. touch_await(tag, out, T) therefore took
+     * 2T, and the second T was not a sleep: the kernel park had already ended,
+     * so those milliseconds were spent in touch_wait's pause-and-yield spin,
+     * burning the core this call exists to give away. MEASURED, not deduced —
+     * quietprint asked for 3000 ms of silence and reported 6004.
+     *
+     * So the deadline is fixed here, and what is left of it after the park is
+     * what touch_wait gets. A park that ran to its own deadline leaves nothing
+     * left, and the timeout is reported at once instead of being spun out. */
+    uint64_t began = touch_rdtsc();
+
     int push_rc = ManifestSubmitNoWait((Manifest *)mbuf, NULL, 0, 0);
     if (push_rc != OK) return push_rc;
 
     /* Wait on TouchRing for an event. The kernel will wake us via
      * KTouchPush's PROC_WAITING→PROC_WORKING flip; touch_wait covers
      * both the UMWAIT and pause-spin paths. */
-    if (!touch_wait(out, to)) {
+    uint64_t spent = cpu_tsc_to_ms(touch_rdtsc() - began);
+    uint32_t left  = (spent >= (uint64_t)to) ? 0u : (uint32_t)((uint64_t)to - spent);
+
+    /* left == 0 means the park used the entire deadline. It must NOT reach
+     * touch_wait, where 0 spells "wait forever". */
+    if (left == 0 || !touch_wait(out, left)) {
         __atomic_add_fetch(&g_ta_timeouts, 1, __ATOMIC_RELAXED);
         return -ERR_TIMEOUT;
     }

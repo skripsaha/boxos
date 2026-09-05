@@ -1064,6 +1064,77 @@ void BrookCleanupProcess(struct process_t *proc)
     }
 }
 
+/* See brook.h. Walks every bucket because a brook is keyed by tag, not by
+ * reader — there is no index from a pid to the streams it reads, and building
+ * one to serve a report that runs only when the whole machine has gone quiet
+ * would be a lock in every open and release to save a walk nobody is waiting
+ * on. 256 buckets, single-digit brooks in each.
+ *
+ * ‼ WHAT A LOST RING ACTUALLY LOOKS LIKE, and it is not what it sounds like.
+ * The obvious test — "a bell still hanging over unread frames" — is the wrong
+ * one, and a staged defect proved it: a writer TAKES the bell (the CAS is what
+ * makes exactly one writer pay) and only then rings. Lose the ring and the
+ * bell is already down; the lane sits with one frame and a clean header, and
+ * that test sees nothing at all. Measured, not reasoned: with the ring
+ * disabled the wedged lane read bell=0 head=0 tail=1.
+ *
+ * So the accusation rests on two facts from the same reader:
+ *
+ *   IT WENT TO SLEEP EXPECTING BELLS — at least one of its brooks carries its
+ *   pid. Only a reader that hung one is owed a ring, which is what keeps this
+ *   away from the perfectly legitimate case of a strand parked on something
+ *   else while frames wait for it to come back.
+ *
+ *   AND ONE OF THEM HAS FRAMES IT HAS NOT READ — someone wrote for a strand
+ *   that is asleep.
+ *
+ * Together, with every core idle and the caller having already established
+ * that, they say: output was produced for a sleeper and the sleeper was not
+ * told. Reports the unread brook, since that is the one to go and look at. */
+bool BrookBellUnrung(uint32_t reader_pid, uint16_t *out_tag_id,
+                     uint64_t *out_head, uint64_t *out_tail)
+{
+    if (reader_pid == 0) return false;
+
+    bool     hung   = false;
+    bool     unread = false;
+    uint16_t tag    = 0;
+    uint64_t uhead = 0, utail = 0;
+
+    for (uint32_t i = 0; i < BROOK_BUCKETS; i++) {
+        BrookBucket *b = &g_brook_buckets[i];
+        spin_lock(&b->lock);
+        for (BrookObject *o = b->head; o; o = o->bucket_next) {
+            if (o->reader_pid != reader_pid || !o->header_phys) continue;
+
+            const BrookHeader *h = brook_kernel_header(o);
+            if (!h) continue;
+
+            if (__atomic_load_n(&h->bell, __ATOMIC_ACQUIRE) != 0) hung = true;
+
+            /* head BEFORE tail — same rule as the Result ring: read the
+             * consumer cursor first and the producer cursor cannot be sampled
+             * behind it, so an empty stream can never look full. */
+            uint64_t head = __atomic_load_n(&h->head, __ATOMIC_ACQUIRE);
+            uint64_t tail = __atomic_load_n(&h->tail, __ATOMIC_ACQUIRE);
+            if (!unread && head != tail) {
+                unread = true;
+                tag    = o->tag_id;
+                uhead  = head;
+                utail  = tail;
+            }
+        }
+        spin_unlock(&b->lock);
+        if (hung && unread) break;
+    }
+
+    if (!hung || !unread) return false;
+    if (out_tag_id) *out_tag_id = tag;
+    if (out_head)   *out_head   = uhead;
+    if (out_tail)   *out_tail   = utail;
+    return true;
+}
+
 void BrookStatsSnapshot(uint64_t out[4])
 {
     out[0] = atomic_load_u64(&g_stat_objects);

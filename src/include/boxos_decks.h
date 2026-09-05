@@ -162,4 +162,19 @@
  * alone names a seat, not a passenger, and the seat gets re-let. */
 #define SYSTEM_OP_PROCESS_GONE      0xC5  /* (u32 pid)(u32 generation) -> Result.error_code=OK, data_length = (u32)int32 exit disposition (proc_exit.h); ERR_PROCESS_NOT_FOUND = never issued */
 
+/* ─── Turn In — the strand that has nothing left to do lies down ─────── */
+/* A strand does not wait on a RING; it waits for ANYTHING addressed to it.
+ * This op says "I have looked past these two tails and found nothing — put me
+ * down until one of them moves", and the delivery that moves a tail is the
+ * same one that already flips the sleeper to PROC_WORKING. It answers nothing:
+ * a reply would be a delivery, and a delivery wakes the strand the reply was
+ * meant to put to sleep.
+ *
+ * A CURSOR, never "the ring is empty": between taking the mark and this op
+ * running on a K-Core, an arrival can both land AND be drained by the caller's
+ * own wait loop, and an emptiness test would then bed down a strand that has
+ * the work in its hands. It carries no deadline, because there is no honest
+ * one to guess — the caller loops and asks again. */
+#define SYSTEM_OP_TURN_IN           0xC6  /* (u64 touch_tail_seen)(u64 result_tail_seen) — answers nothing */
+
 #endif // BOXOS_DECKS_H

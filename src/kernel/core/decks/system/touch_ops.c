@@ -308,15 +308,23 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * tick re-runs the caller and lets it drain the slot(s). Memory
      * ordering pairs with KTouchPush's __atomic_fetch_add(tail,
      * ACQ_REL) at touch_ring.c:180; both sides serialise on the same
-     * cacheline. The state write above is RELEASE (via spin_unlock
-     * inside process_set_state), so KTouchPush observing PROC_WAITING
-     * is guaranteed to be sequenced after our state set, and our load
-     * of `tail` here either sees the publisher's update (we undo) or
-     * the publisher sees our PROC_WAITING and wakes us (it wins). No
-     * permanently lost wakeup.
+     * cacheline.
+     *
+     * ‼ The RELEASE of process_set_state's spin_unlock is NOT enough, and this
+     * comment used to claim it was. RELEASE orders the state store after what
+     * precedes it; it does nothing about the load that FOLLOWS. Store-then-load
+     * to different locations is exactly the reordering x86 permits (SDM 3A
+     * 9.2.3.4), so the state can sit in this core's store buffer while the load
+     * of `tail` below already executes — and then the publisher reads
+     * PROC_WORKING, skips the wake, while we read an unmoved tail and sleep on
+     * a slot already in the ring. The publisher needs no fence of its own (its
+     * tail bump is a lock xadd, a full barrier); the sleeper does. One mfence
+     * per park.
      *
      * ERR_WOULD_BLOCK is returned in both branches, and nothing is pushed
      * for it — see the note below on why. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
     if (ctx->proc->touch_ring_phys) {
         TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
         if (rr) {

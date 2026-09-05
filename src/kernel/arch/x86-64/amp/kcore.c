@@ -49,6 +49,14 @@ void kcore_init(void)
 
 uint32_t kcore_queue_depth(uint8_t core_idx)
 {
+    /* There may be no queues at all. kcore_init runs only when the machine has
+     * more than one core, so on a uniprocessor g_kcore_queues is NULL for the
+     * kernel's whole life — and a reader asking how deep a queue is on a
+     * machine with none is asking a fair question with an obvious answer.
+     * It used to be a #PF at 0x8008 from inside Nightwatch's summary, which is
+     * a thing to crash on only if you are certain SMP is the only shape this
+     * kernel runs in. */
+    if (!g_kcore_queues || core_idx >= g_amp.total_cores) return 0;
     return atomic_load_u32(&g_kcore_queues[core_idx].count);
 }
 

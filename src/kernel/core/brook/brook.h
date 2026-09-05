@@ -158,6 +158,7 @@ struct process_t;
  *     - head [reader writes; writer reads]
  *     - reader_alive [kernel writes]
  *     - reader_ever_attached [kernel writes]
+ *     - bell [sleeping reader writes its pid; writer takes it and rings]
  *
  * head/tail are monotonic uint64 counters; modulo against frame_count
  * (power-of-2) gives the slot index.
@@ -181,7 +182,24 @@ typedef struct {
     volatile uint64_t head;                  /* reader writes; writer reads */
     volatile uint32_t reader_alive;
     volatile uint32_t reader_ever_attached;
-    uint8_t           _pad_line1[48];
+    /* THE BELL — the pid of a reader that has gone to sleep, 0 while it is
+     * awake. A Brook is the one delivery surface in this system the kernel
+     * never sees: a push is a store into a shared page, so nothing exists to
+     * wake a reader that has stopped looking. The bell is how the sleeper says
+     * where to reach it, and it sits HERE, on the line the writer already reads
+     * for `head` on every single push — so a reader that is awake costs the
+     * writer one compare against a line already in its cache, and nothing else.
+     *
+     * A writer that finds a bell takes it (CAS to 0, so exactly one writer pays)
+     * and rings: an empty message to that pid, which lands in its Result ring
+     * and is itself the wake. Once per SLEEP, never per frame.
+     *
+     * Hanging it out and taking it in are Dekker's two halves with the writer's
+     * publish — see brook_bell_hang() in boxlib brook.c for the fence argument.
+     * A stale pid (reader gone, seat re-let) rings a stranger's doorbell once
+     * and costs it a discarded empty message. */
+    volatile uint32_t bell;
+    uint8_t           _pad_line1[44];
 } BrookHeader;
 
 _Static_assert(sizeof(BrookHeader) == 128,
@@ -194,6 +212,8 @@ _Static_assert(__builtin_offsetof(BrookHeader, writer_alive) < 64,
                "writer_alive must share CL0 with tail (UMWAIT correctness)");
 _Static_assert(__builtin_offsetof(BrookHeader, reader_alive) >= 64,
                "reader_alive must share CL1 with head (UMWAIT correctness)");
+_Static_assert(__builtin_offsetof(BrookHeader, bell) >= 64,
+               "bell must share CL1 with head — the line the writer already reads");
 
 /* ─────────────────────────────────────────────────────────────────────
  * BrookObject — kernel-side per-tag record. Identified by tag_id.
@@ -305,5 +325,21 @@ void BrookCleanupProcess(struct process_t *proc);
  *   out[2] = total backing pages (4 KiB units)
  *   out[3] = aggregate release events since boot */
 void BrookStatsSnapshot(uint64_t out[4]);
+
+/* Nightwatch's eye on the one delivery surface the kernel never witnesses.
+ *
+ * A Brook push is a store into a shared page: no syscall, no record, nothing
+ * for the watch to find. So a reader asleep on a frame it was never told about
+ * is invisible to every proof the verdict otherwise has — both its rings are
+ * quiet, its pocket ring is empty, and by every kernel measure it is simply a
+ * strand with nothing to do. The bell is what makes it visible: a reader hangs
+ * its pid there before going down, and a writer that publishes a frame is
+ * supposed to take it and ring. A brook found with a bell still hung out AND
+ * frames unread is exactly the ring that never happened.
+ *
+ * Reports the first such brook read by `reader_pid`, or false if there is none.
+ * Takes bucket locks, so it must not be called from interrupt context. */
+bool BrookBellUnrung(uint32_t reader_pid, uint16_t *out_tag_id,
+                     uint64_t *out_head, uint64_t *out_tail);
 
 #endif /* BROOK_H */

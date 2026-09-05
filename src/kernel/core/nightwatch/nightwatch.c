@@ -15,6 +15,7 @@
 #include "kring.h"
 #include "pocket_ring.h"
 #include "touch_ring.h"
+#include "brook.h"       /* BrookBellUnrung — the surface the kernel never sees deliver */
 #include "clockboard.h"
 #include "klib.h"
 
@@ -329,7 +330,16 @@ static void nightwatch_verdict(void)
      * the progress witness sees answers flowing, and touch_await is bounded at
      * 30 s. Closing it properly means the kernel keeping a register of
      * promised answers, which is its own piece of work; until then this
-     * paragraph is the honest edge of what the oracle knows. */
+     * paragraph is the honest edge of what the oracle knows.
+     *
+     * TURN IN is the newest open-ended wait and deliberately not a problem
+     * here: it publishes no cloakroom token, so `awaiting` stays 0 and the
+     * ANSWER OWED oracle below — which convicts only on a token — steps over
+     * an idle sleeper without needing to be told about it. What DOES speak for
+     * a turned-in strand is the delivery evidence: a Result or Touch sitting
+     * unread in its ring, or a Brook frame with its bell still hanging. Those
+     * are facts about a delivery that happened, and they are exactly what a
+     * lost wake in this new sleep looks like. */
     /* Sampled exactly once per look: the call advances its own baseline, so a
      * second call in the same walk would always report "no progress". */
     const bool answers_moving = nightwatch_answers_advanced();
@@ -463,10 +473,16 @@ static void nightwatch_verdict(void)
          * and one SPINNING in userspace for it — and the spinner is on a CPU
          * by definition. Whether the waiter burns a core or sleeps says
          * nothing about whether anyone is producing its answer, which is the
-         * only question here. (The spinner is also why this cannot be the
-         * whole story on a uniprocessor: it holds the one core, so no core
-         * goes idle and this verdict never runs. On a single core a stall of
-         * this shape still needs a person to notice it.) */
+         * only question here.
+         *
+         * On a uniprocessor this oracle stands down of its own accord, and
+         * correctly: nightwatch_all_kcores_idle returns false when the machine
+         * has no K-Cores at all, because "everyone who could be working on it
+         * is asleep" is not a proof of anything when there is nobody in that
+         * set — the one core does the work inline and may simply be busy
+         * elsewhere. The other evidence here (a delivery lying unread, a bell
+         * that went unrung) is about a delivery that HAPPENED and holds on any
+         * number of cores; only this one needs K-Cores to mean what it says. */
         if (e->awaiting != 0 && gone_complete && !answers_moving &&
             e->kcore_pending == 0 &&
             e->state != (uint8_t)PROC_DONE && e->state != (uint8_t)PROC_CRASHED &&
@@ -553,8 +569,22 @@ static void nightwatch_verdict(void)
             tr_tail = __atomic_load_n(&t->tail, __ATOMIC_ACQUIRE);
             touch_ready = (tr_tail != tr_head);
         }
-        if (touch_ready) undelivered++;
+        /* And the surface that leaves no trace at all. A Brook frame is a
+         * store into a shared page — the kernel never sees it arrive, so a
+         * reader asleep on one has both rings quiet and looks, by every other
+         * measure here, like a strand with simply nothing to do. The bell is
+         * the only mark it leaves — and the mark is that it hung one AT ALL,
+         * not that one is still up: a writer takes the bell before it rings, so
+         * a lost ring leaves the header looking clean. See BrookBellUnrung. */
+        bool     bell_unrung = false;
+        uint16_t bell_tag    = 0;
+        uint64_t bk_head = 0, bk_tail = 0;
+        if (e->state == (uint8_t)PROC_WAITING)
+            bell_unrung = BrookBellUnrung(e->pid, &bell_tag, &bk_head, &bk_tail);
+
+        if (touch_ready)  undelivered++;
         if (result_ready) undelivered++;
+        if (bell_unrung)  undelivered++;
 
         if (!e->linked || e->done)
         {
@@ -598,6 +628,13 @@ static void nightwatch_verdict(void)
                 kprintf("      ‼ TOUCH UNDELIVERED — ring holds head=%lu tail=%lu, "
                         "yet this process still waits\n",
                         (unsigned long)tr_head, (unsigned long)tr_tail);
+            if (bell_unrung && speak)
+                kprintf("      ‼ BELL UNRUNG — this reader went to sleep with a bell "
+                        "hung out, and brook tag %u holds head=%lu tail=%lu. "
+                        "Frames were written for a strand that is asleep and "
+                        "nothing told it\n",
+                        (unsigned)bell_tag,
+                        (unsigned long)bk_head, (unsigned long)bk_tail);
             continue;
         }
 
@@ -641,6 +678,11 @@ static void nightwatch_verdict(void)
         if (moved)
             kprintf("      ‼ UNREACHABLE — va now resolves to phys 0x%lx, filed under 0x%lx\n",
                     (unsigned long)phys_now, (unsigned long)e->phys_addr);
+        if (bell_unrung)
+            kprintf("      ‼ BELL UNRUNG — asleep with a bell hung out while brook "
+                    "tag %u holds head=%lu tail=%lu\n",
+                    (unsigned)bell_tag,
+                    (unsigned long)bk_head, (unsigned long)bk_tail);
         }
     }
 

@@ -28,6 +28,7 @@
 #include "box/cpu.h"
 #include "box/core/manifest.h"
 #include "box/core/pocket.h"
+#include "box/ipc.h"      /* send — the bell rings with an empty message */
 #include "boxos_decks.h"  /* SYSTEM_OP_BROOK_* opcodes — single source */
 
 /* Shape limits — mirror kernel brook.h. Caller-side validation gives
@@ -71,7 +72,8 @@ typedef struct {
     volatile uint64_t head;
     volatile uint32_t reader_alive;
     volatile uint32_t reader_ever_attached;
-    uint8_t           _pad_line1[48];
+    volatile uint32_t bell;              /* sleeping reader's pid; 0 = awake */
+    uint8_t           _pad_line1[44];
 } BrookHeaderUser;
 
 STATIC_ASSERT(sizeof(BrookHeaderUser) == 128,
@@ -84,6 +86,8 @@ STATIC_ASSERT(OFFSETOF(BrookHeaderUser, writer_alive) < 64,
               "writer_alive must share CL0 with tail");
 STATIC_ASSERT(OFFSETOF(BrookHeaderUser, reader_alive) >= 64,
               "reader_alive must share CL1 with head");
+STATIC_ASSERT(OFFSETOF(BrookHeaderUser, bell) >= 64,
+              "bell must share CL1 with head — the line the writer already reads");
 
 /* ─────────────────────────────────────────────────────────────────────
  * Brook — opaque user handle. Allocated via malloc on open, freed on
@@ -114,6 +118,42 @@ static inline uint32_t brook_load_acquire_u32(volatile uint32_t *p)
 static inline void brook_cpu_pause(void)
 {
     __asm__ volatile("pause" ::: "memory");
+}
+
+static inline bool brook_cas_u32(volatile uint32_t *p, uint32_t expect, uint32_t want)
+{
+    return __atomic_compare_exchange_n(p, &expect, want, false,
+                                       __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+}
+
+/* Take the bell if one is hung out, and ring it.
+ *
+ * Called by the writer immediately after publishing a frame — and ONLY there,
+ * because a bell means "I looked and there was nothing", so it is a frame
+ * appearing that makes it worth ringing.
+ *
+ * The CAS is what keeps the cost at one ring per sleep no matter how many
+ * writers a reader has: the first to take the bell rings, every other writer
+ * finds 0 and pays a compare. The reader hangs it out again next time it goes
+ * down.
+ *
+ * The message is EMPTY. A bell says nothing; it only says come. An empty
+ * message is still an arrival — it advances the reader's Result ring tail,
+ * which is exactly the cursor its sleep is waiting on — and a reader draining
+ * its mailbox discards it without needing to know what it was. That keeps
+ * Brook from having to learn anybody's wire protocol.
+ *
+ * Best-effort by construction: a ring to a pid that has gone away fails, and a
+ * failure here must never turn a successful push into an error. The bell has
+ * already been taken down, so the next push does not retry it — if the reader
+ * really is alive and merely missed this one, it hangs the bell out again on
+ * its next trip down. */
+static void brook_bell_ring(BrookHeaderUser *h)
+{
+    uint32_t who = brook_load_acquire_u32(&h->bell);
+    if (who == 0) return;
+    if (!brook_cas_u32(&h->bell, who, 0)) return;   /* another writer is ringing */
+    (void)send(who, NULL, 0);
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -233,6 +273,14 @@ static inline bool brook_cas_freeze_peer(volatile uint32_t *peer_alive)
 int brook_release(Brook *b)
 {
     if (!b) return -ERR_INVALID_ARGS;
+    /* Take the bell in on the way out. A reader that leaves with its pid still
+     * hanging leaves a writer a cord to pull for a reader that is not there —
+     * one wasted message per lane, and a stale pid on a page the kernel keeps
+     * for as long as the writer holds it. Nothing depends on this being done;
+     * it is done because leaving it undone is untidy in a way that becomes
+     * confusing evidence later. */
+    if (b->hdr && b->role == BROOK_READER)
+        __atomic_store_n(&b->hdr->bell, 0u, __ATOMIC_RELEASE);
     int rc = brook_sys_release(b->va_header);
     free(b);
     return rc;
@@ -363,7 +411,26 @@ static int brook_push_core(Brook *b, const void *frame,
              * tail publishes the memcpy to the reader. */
             uint8_t *slot = b->slots + ((uint32_t)(tail & cap_mask)) * fs;
             memcpy(slot, frame, fs);
-            brook_store_release_u64(&h->tail, tail + 1);
+
+            /* Publish with a LOCKed exchange rather than a release store.
+             *
+             * The value written is identical; what the locked form buys is the
+             * StoreLoad barrier the bell check below cannot do without. x86
+             * lets a load pass an earlier store to a different location (SDM 3A
+             * 9.2.3.4), so a plain release store here would let this core read
+             * `bell` while its own `tail` was still in the store buffer — and
+             * the sleeping reader, whose own half of the handshake IS fenced,
+             * would read the old tail. Neither side sees the other; the frame
+             * sits in the ring and the reader sleeps on it. Dekker's, in a
+             * console.
+             *
+             * One locked instruction replaces store+mfence, so the whole price
+             * of the bell on the hot path is the difference between a store and
+             * an exchange on a line this core already owns — against a push
+             * that already reads the reader's cacheline for `head`. */
+            __atomic_exchange_n(&h->tail, tail + 1, __ATOMIC_SEQ_CST);
+
+            brook_bell_ring(h);
             return 0;
         }
 
@@ -503,6 +570,35 @@ int brook_pop_timeout(Brook *b, void *frame, uint32_t timeout_ms)
 /* ─────────────────────────────────────────────────────────────────────
  * Query helpers — zero syscalls.
  * ───────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────────
+ * The bell — reader side. See box/brook.h for the discipline.
+ * ───────────────────────────────────────────────────────────────────── */
+int brook_bell_hang(Brook *b, uint32_t reader_pid)
+{
+    if (!b || !b->hdr)           return -ERR_INVALID_ARGS;
+    if (b->role != BROOK_READER) return -ERR_INVALID_ARGS;
+    if (reader_pid == 0)         return -ERR_INVALID_ARGS;
+
+    /* SEQ_CST, and the seq_cst is the whole point: it is a full barrier, so
+     * this store cannot sit in the store buffer while the caller's next act —
+     * looking at `tail` one last time — already executes. Pair it with the
+     * writer's locked publish and one of the two always sees the other. */
+    __atomic_store_n(&b->hdr->bell, reader_pid, __ATOMIC_SEQ_CST);
+    return 0;
+}
+
+int brook_bell_take(Brook *b)
+{
+    if (!b || !b->hdr)           return -ERR_INVALID_ARGS;
+    if (b->role != BROOK_READER) return -ERR_INVALID_ARGS;
+
+    /* Awake again. Taking the bell in needs no ordering of its own — a writer
+     * that reads a stale pid merely rings a reader that is already up, which
+     * costs one empty message and wakes nobody twice. */
+    __atomic_store_n(&b->hdr->bell, 0u, __ATOMIC_RELEASE);
+    return 0;
+}
+
 uint32_t brook_frame_size(const Brook *b)
 {
     return b ? b->frame_size : 0;
