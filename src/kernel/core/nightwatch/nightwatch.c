@@ -87,8 +87,12 @@ typedef struct
 {
     uint32_t pid;
     uint32_t generation;
-    uint64_t mark;      /* pocket head (unserved) or 1 (unscheduled) */
-    uint8_t  kind;      /* 1 = pocket unserved, 2 = runnable unscheduled */
+    uint64_t mark;      /* pocket head (unserved), 1 (unscheduled), the awaited
+                         * token (answer owed), or the consumer cursor that has
+                         * not moved (undelivered) */
+    uint8_t  kind;      /* 1 = pocket unserved, 2 = runnable unscheduled,
+                         * 3 = answer owed, 4 = result unread, 5 = touch unread,
+                         * 6 = brook bell unrung */
 } NightwatchSuspect;
 static NightwatchSuspect g_suspects[NIGHTWATCH_SUSPECTS];
 static uint32_t          g_suspect_count;
@@ -583,6 +587,58 @@ static void nightwatch_verdict(void)
         uint64_t bk_head = 0, bk_tail = 0;
         if (e->state == (uint8_t)PROC_WAITING)
             bell_unrung = BrookBellUnrung(e->pid, &bell_tag, &bk_head, &bk_tail);
+
+        /* ‼ ONE LOOK IS NOT EVIDENCE HERE, and it took a healthy machine to
+         * show it. A delivery is two stores — the record, then the owner's
+         * wake — and a walk that lands between them sees exactly what a lost
+         * wake looks like: a strand asleep with something unread. That gap is
+         * microseconds wide and used to be unreachable, because nothing slept
+         * often enough to be caught in it. Once both ends of every Brook
+         * started sleeping on bells, a print storm put sixteen strands through
+         * it thousands of times a second, and a run that passed cleanly was
+         * accused of five undelivered results.
+         *
+         * So the test is not "unread now" but "unread, and this consumer has
+         * not moved its cursor a whole look later". A delivery in flight
+         * completes in microseconds and cannot survive ten seconds; a lost
+         * wake does, by definition, for ever. The cursor is the mark, so a
+         * strand that woke, drained and went back to sleep is not the same
+         * suspect — it is a different one, and it walks free.
+         *
+         * Nothing is lost by waiting: the second look is the same look. */
+        if (touch_ready) {
+            bool again = nightwatch_was_suspect(e->pid, e->generation, tr_head, 5u);
+            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
+                fresh[fresh_count].pid        = e->pid;
+                fresh[fresh_count].generation = e->generation;
+                fresh[fresh_count].mark       = tr_head;
+                fresh[fresh_count].kind       = 5u;
+                fresh_count++;
+            }
+            touch_ready = again;
+        }
+        if (result_ready) {
+            bool again = nightwatch_was_suspect(e->pid, e->generation, rr_head, 4u);
+            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
+                fresh[fresh_count].pid        = e->pid;
+                fresh[fresh_count].generation = e->generation;
+                fresh[fresh_count].mark       = rr_head;
+                fresh[fresh_count].kind       = 4u;
+                fresh_count++;
+            }
+            result_ready = again;
+        }
+        if (bell_unrung) {
+            bool again = nightwatch_was_suspect(e->pid, e->generation, bk_head, 6u);
+            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
+                fresh[fresh_count].pid        = e->pid;
+                fresh[fresh_count].generation = e->generation;
+                fresh[fresh_count].mark       = bk_head;
+                fresh[fresh_count].kind       = 6u;
+                fresh_count++;
+            }
+            bell_unrung = again;
+        }
 
         if (touch_ready)  undelivered++;
         if (result_ready) undelivered++;

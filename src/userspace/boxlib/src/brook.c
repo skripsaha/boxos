@@ -59,6 +59,14 @@
  * peer-death). CL1 = reader state (watched by writer). See kernel
  * brook.h for the full UMWAIT-correctness rationale.
  * ───────────────────────────────────────────────────────────────────── */
+/* Mirrors kernel brook.h, like the header layout below and for the same
+ * reason: userspace cannot include kernel headers, so the contract is written
+ * twice and held by the static assertions that follow. Taking a bell MARKS it
+ * — only the sleeper clears the word — because a ringer that erased it
+ * destroyed the only evidence that a strand was asleep in a stream, and a ring
+ * that was taken and then lost became invisible. */
+#define BROOK_BELL_RUNG   0x80000000u
+
 typedef struct {
     /* Cacheline 0 — writer state, watched by reader */
     volatile uint64_t tail;
@@ -160,14 +168,30 @@ static inline bool brook_cas_u32(volatile uint32_t *p, uint32_t expect, uint32_t
 static void brook_ring(volatile uint32_t *bell)
 {
     uint32_t who = brook_load_acquire_u32(bell);
-    if (who == 0) return;
-    if (!brook_cas_u32(bell, who, 0)) return;   /* somebody else is ringing */
+    if (who == 0) return;                       /* nobody is asleep here */
+    if (who & BROOK_BELL_RUNG) return;          /* already rung for this sleep */
+    /* MARK it, never erase it — see BROOK_BELL_RUNG in kernel brook.h. The CAS
+     * still makes exactly one peer pay; what it no longer does is destroy the
+     * evidence that this strand went to sleep in a stream. */
+    if (!brook_cas_u32(bell, who, who | BROOK_BELL_RUNG)) return;
+
+    /* Fire and forget. system.bell answers nothing, so there is nothing to
+     * wait for — and waiting would be the wrong thing anyway: a ring is a
+     * favour done for somebody else, and blocking the ringer on it puts one
+     * strand's liveness inside another's, on the hottest path there is. The
+     * Manifest is small enough to ride inside the ring slot, so this frame may
+     * die the moment the push returns. */
+    uint8_t         mbuf[96];
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return;
 
     uint8_t params[4];
     memcpy(params, &who, sizeof(uint32_t));
-    (void)MfCall1(DECK_SYSTEM, SYSTEM_OP_BELL,
-                  params, sizeof(params), NULL, 0, NULL, 0, NULL,
-                  0 /* no deadline — reply guaranteed */, NULL);
+    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_BELL, 0,
+                             CRATE_INDEX_NONE, CRATE_INDEX_NONE,
+                             params, sizeof(params)) != 0) return;
+    if (ManifestBuilderFinalize(&mb) != 0) return;
+    (void)ManifestSubmitNoWait((const Manifest *)mbuf, NULL, 0, 0);
 }
 
 /* This side's own bell — the one it hangs out — and the peer's, which it
