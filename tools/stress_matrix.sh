@@ -28,6 +28,7 @@
 #   - "Unknown command" (first-cmd-no-op race)
 #   - "[*] FAIL" patterns from any test app
 #   - TSC freq outside the 1 GHz band (lines matching "TSC freq: 100")
+#   - a Nightwatch VERDICT — the kernel proving the machine stopped
 #
 # Exit non-zero if any config fails.
 
@@ -270,6 +271,16 @@ run_config() {
     # bare-metal trivially.
     tsc_good=$(grep -cE "TSC freq: 1[0-1][0-9]{5}|TSC source:.*— 1[0-1][0-9]{5} kHz" build/serial.log)
 
+    # Nightwatch speaks only with proof, and until now nobody here listened:
+    # the day matrix of 2026-09-06 was announced 6/6 over a verdict of eleven
+    # lost wakes (a false one, as it turned out — the harness could not have
+    # told either way). A verdict is the kernel saying that the machine has
+    # stopped and on what; it fails the configuration by itself, whatever the
+    # test markers say. The summary line is counted rather than the "‼" lines
+    # under it: a stall is described once per look, and the count of looks is
+    # not the count of stalls.
+    nw=$(grep -c "\[NIGHTWATCH\] VERDICT: .*a defect, not a slow test" build/serial.log)
+
     # Extended-suite counts.
     mtest_p=$(grep -c     "\[mtest\] PASS"            build/serial.log)
     chain_p=$(grep -c     "\[chain\] PASS"            build/serial.log)
@@ -315,7 +326,7 @@ run_config() {
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p"
     echo "  selftest: kernel=$selftest_ok bad=$selftest_bad"
-    echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail TSC=~1GHz:$tsc_good/$bn"
+    echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw TSC=~1GHz:$tsc_good/$bn"
 
     ok=1
     if [ "$MODE" = "fast" ]; then
@@ -354,6 +365,7 @@ run_config() {
     fi
 
     [ "$app_fail" -gt 0 ] && ok=0
+    [ "$nw" -gt 0 ] && ok=0
 
     [ "$selftest_bad" -gt 0 ] && ok=0
     [ "$selftest_ok"  -lt 1 ] && ok=0
