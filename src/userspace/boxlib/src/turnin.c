@@ -34,7 +34,7 @@
  */
 
 #include "box/turnin.h"
-#include "box/core/result.h"
+#include "box/core/result.h"      /* result_published_at_head — the slot, not the claim */
 #include "box/core/touch_ring.h"
 #include "box/core/manifest.h"
 #include "box/core/notify.h"
@@ -90,14 +90,30 @@ static void turn_in_submit(TurnInMark seen)
     (void)ManifestSubmitNoWait((const Manifest *)mbuf, NULL, 0, 0);
 }
 
+/* THE MARK IS NOT ENOUGH. A producer moves `tail` when it claims a slot and
+ * releases the slot's seq later. Take the mark after the claim and before the
+ * release and the mark already covers the arrival: the look finds nothing to
+ * pop (seq unreleased), the ask goes out with that mark, and when the release
+ * lands nothing moves the cursor again — a wake that then only re-checks the
+ * mark re-arms the sleep on top of a delivered message. So the sleep ends on
+ * either fact: the mark moved, OR the slot at a ring's head is released and
+ * unconsumed. The kernel refuses the park on the same second fact
+ * (turnin_ops.c), so the two sides agree on what "nothing waiting" means. */
+static bool turn_in_arrival(TurnInMark seen)
+{
+    return box_mark_moved(seen) ||
+           result_published_at_head() ||
+           touch_ring_published_at_head();
+}
+
 void box_turn_in(TurnInMark seen)
 {
     for (uint32_t spin = 0; spin < TURN_IN_HOT_LOOK; spin++) {
-        if (box_mark_moved(seen)) return;
+        if (turn_in_arrival(seen)) return;
         __asm__ volatile("pause" ::: "memory");
     }
 
-    while (!box_mark_moved(seen)) {
+    while (!turn_in_arrival(seen)) {
         /* Ask only when the last ask has been taken — see the file header. */
         if (pocket_ring_is_empty(pocket_ring())) turn_in_submit(seen);
 

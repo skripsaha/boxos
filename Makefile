@@ -1237,7 +1237,7 @@ run-bg: $(IMAGE)
 		echo "[run-bg] QEMU already running (pid $$(cat $(BUILDDIR)/qemu.pid)). Use 'make run-stop' first."; \
 		exit 1; \
 	fi
-	@rm -f $(BUILDDIR)/qemu.mon $(BUILDDIR)/serial.log $(BUILDDIR)/qemu.pid
+	@rm -f $(BUILDDIR)/qemu.mon $(BUILDDIR)/qemu.qmp $(BUILDDIR)/serial.log $(BUILDDIR)/qemu.pid
 	@touch $(BUILDDIR)/serial.log
 	@echo "=== BoxOS QEMU (background) ==="
 	@echo "  Monitor : $(BUILDDIR)/qemu.mon"
@@ -1264,6 +1264,7 @@ run-bg: $(IMAGE)
 		        -cpu qemu64$(comma)+fsgsbase)) \
 		-m $(MEM) \
 		-monitor unix:$(BUILDDIR)/qemu.mon$(comma)server$(comma)nowait \
+		-qmp unix:$(BUILDDIR)/qemu.qmp$(comma)server$(comma)nowait \
 		-serial file:$(BUILDDIR)/serial.log \
 		-display none \
 		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \

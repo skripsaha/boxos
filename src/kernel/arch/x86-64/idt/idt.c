@@ -1360,9 +1360,11 @@ static void async_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
 
 // Function pointer set at boot — never changes at runtime.
 static void (*g_syscall_dispatch)(process_t *, interrupt_frame_t *) = sync_syscall_dispatch;
+static bool g_gate_async;   /* the same choice, for the yield branch of the gate */
 
 void idt_set_syscall_mode(bool multicore)
 {
+    g_gate_async = multicore;
     if (multicore)
     {
         g_syscall_dispatch = async_syscall_dispatch;
@@ -1399,12 +1401,12 @@ void syscall_handler(interrupt_frame_t *frame)
      * anything else it came for.
      *
      * It stands HERE, at the syscall gate, and not in guide_process_pocket,
-     * because the guide is not the gate — the yield short-circuit below pops
-     * its pocket and schedules without ever entering guide(), and a yield is
-     * precisely how a consumer that has read the `owed` slip comes to ask for
-     * the rest. A door the asking never reaches is not a door. Every other
-     * path into the kernel passes through here too, so one check covers them
-     * all: sync dispatch, async K-Core submit, and the yield hint.
+     * because the guide is not the gate — a yield is answered below without
+     * ever entering guide(), and a yield is precisely how a consumer that has
+     * read the `owed` slip comes to ask for the rest. A door the asking never
+     * reaches is not a door. Every other path into the kernel passes through
+     * here too, so one check covers them all: sync dispatch, async K-Core
+     * submit, and the yield.
      *
      * A strand arriving here has been running, so it has had its chance to
      * drain its ring; what did not fit before may fit now. Handing over BEFORE
@@ -1417,30 +1419,24 @@ void syscall_handler(interrupt_frame_t *frame)
     if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) != 0)
         TouchOwedHandOver(proc);
 
-    /* Yield short-circuit. Cooperative-scheduling hint: pockets tagged
-     * with POCKET_FLAG_YIELD skip guide() — the process stays WORKING
-     * and just gives up its timeslice, returning to the run queue on
-     * the next tick. Must be checked BEFORE the async dispatch path
-     * to avoid a kcore_pending re-arm race.
-     *
-     * ‼ This makes the gate a SECOND consumer of the strand's pocket ring, and
-     * it is not alone in it: on more than one core a K-Core may be draining
-     * the same ring at this moment, and the yield at the head may be the very
-     * pocket it is standing on. The pop therefore names the position that was
-     * looked at and takes it only if it is still the head. The pop that stood
-     * here took "whatever is at the head now" — and when the K-Core had just
-     * taken the yield itself, that was the strand's NEXT pocket, popped
-     * unread; its owner then waited for an answer to a question nobody had
-     * opened. Measured on a frozen 16-core machine — the numbers are on
-     * KPocketPopAt in kring.c. If the K-Core took the yield first, the CAS
-     * fails and nothing is taken; the strand still gives its core away, which
-     * is all a yield ever asked for. */
-    uint64_t peek_pos;
-    Pocket  *peek = KPocketPeek(proc, &peek_pos);
-
-    if (peek && (peek->flags & POCKET_FLAG_YIELD))
+    /* The yield. A strand that says GATE_YIELD in RDI is giving its core
+     * away — that is the whole request, and it is answered here, not by the
+     * guide. It is not a pocket: a yield that entered the ring landed behind
+     * whatever real pocket was waiting at the head, where this gate could not
+     * take it, and a strand yielding for its Turn In to be taken filled its
+     * ring in half a second — every submit after that was refused (BIOS 16c,
+     * 2026-09-06). Pockets that ARE waiting are still handed on first: on one
+     * core the guide runs them here and schedules; on many, the doorbell is
+     * rung (deduplicated by kcore_pending) and then the core is given away. */
+    if (frame->rdi == GATE_YIELD)
     {
-        (void)KPocketPopAt(proc, peek_pos);
+        if (!g_gate_async)
+        {
+            sync_syscall_dispatch(proc, frame);
+            return;
+        }
+        if (!KPocketIsEmpty(proc))
+            async_syscall_dispatch(proc, frame);
         context_save_from_frame(proc, frame);
         schedule(frame);
         return;

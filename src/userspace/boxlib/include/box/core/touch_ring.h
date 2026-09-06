@@ -108,6 +108,10 @@ INLINE uint32_t touch_ring_count(const TouchRing *r) {
  * user-facing `Touch` struct). Implementation: src/core/touch_ring.c. */
 bool touch_ring_pop_slot(TouchSlot *slot_out);
 
+/* The slot at head is released and unconsumed — poppable now. The fact a
+ * sleep may end on (box_turn_in); a moved tail alone is a claim, not a slot. */
+bool touch_ring_published_at_head(void);
+
 /* Diagnostic: snapshot per-return-path counters.
  *   out[0] = calls
  *   out[1] = empty (head == tail)

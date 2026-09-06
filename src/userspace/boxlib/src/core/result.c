@@ -12,6 +12,30 @@ bool result_available(void) {
     return rr->hdr.head != rr->hdr.tail;
 }
 
+/* True when the slot at the ring's head is published and unconsumed — a record
+ * this strand can pop right now. result_available() only says a producer has
+ * CLAIMED past head; the claim is released later, and a sleep that ends on the
+ * claim can be re-armed before the release and never look again. This is the
+ * fact box_turn_in ends on. Same header sanity as result_pop, no side effects. */
+bool result_published_at_head(void) {
+    ResultRing* rr = result_ring();
+    if (!rr) return false;
+    uint32_t cap    = __atomic_load_n(&rr->hdr.slot_count_max, __ATOMIC_RELAXED);
+    uint64_t base   = __atomic_load_n(&rr->hdr.slots_base,     __ATOMIC_RELAXED);
+    uint32_t stride = __atomic_load_n(&rr->hdr.slot_size,      __ATOMIC_RELAXED);
+    if (cap == 0 || base == 0 || stride == 0)        return false;
+    if (base < 0x100000000ULL)                       return false;
+    if (stride != sizeof(ResultSlot))                return false;
+
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    uint64_t pos  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
+    if (pos == tail) return false;
+
+    ResultSlot *slot  = (ResultSlot *)(uintptr_t)(base + (pos % cap) * stride);
+    uint64_t expected = 2u * (pos / (uint64_t)cap) + 1u;
+    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == expected;
+}
+
 uint32_t result_count(void) {
     ResultRing* rr = result_ring();
     __sync_synchronize();

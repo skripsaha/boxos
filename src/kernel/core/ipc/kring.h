@@ -28,7 +28,7 @@ void KRingResultInitAt(ResultRing *hdr, uint64_t slots_base, uint32_t slot_count
  * looked at, and it is the ONLY thing KPocketPopAt will take. */
 Pocket  *KPocketPeek(process_t *proc, uint64_t *pos_out);
 /* Take the ring past exactly `pos`, and only if it is still the head. Returns
- * false when another consumer already took it — see the note in kring.c. */
+ * false when it no longer is — see the note in kring.c. */
 bool     KPocketPopAt(process_t *proc, uint64_t pos);
 bool     KPocketIsEmpty(process_t *proc);
 uint32_t KPocketCount(process_t *proc);
@@ -46,6 +46,13 @@ bool KResultPush(process_t *target, const Result *r);
  * process_set_state consults this before committing PROC_WAITING — a
  * process must never sleep past its own pending reply. */
 bool KResultRingHasPendingReply(process_t *proc);
+
+/* True when the slot at the ring's head is published and unconsumed — any
+ * record, token or not. Turn In refuses a sleep across it: the cursors alone
+ * miss a slot claimed before the sleeper's mark and released after its look.
+ * A claim still in flight at the head does not count (its producer wakes the
+ * sleeper after releasing it). See the definition for the measured case. */
+bool KResultRingHasUnreadAtHead(process_t *proc);
 
 /* Diagnostic: snapshot per-return-path counters
  *   out[0]=null_args, [1]=no_hdr, [2]=zero_cap, [3]=pre_full, [4]=premap_fail,

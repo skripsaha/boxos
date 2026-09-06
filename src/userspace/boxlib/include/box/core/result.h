@@ -98,6 +98,9 @@ INLINE bool result_ring_is_empty(const ResultRing* ring) {
 }
 
 bool result_available(void);
+/* The slot at head is published and unconsumed — poppable now. Unlike
+ * result_available (a claim past head), this is the fact a sleep may end on. */
+bool result_published_at_head(void);
 uint32_t result_count(void);
 bool result_pop(Result* out);
 

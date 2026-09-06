@@ -127,31 +127,17 @@ Pocket *KPocketPeek(process_t *proc, uint64_t *pos_out)
 
 /* Take the ring past ONE named position, and only while it is still the head.
  *
- * A strand's pocket ring has one producer and, it turns out, TWO consumers:
- * the K-Core guide that drains it, and the syscall gate on the strand's own
- * core, which pops a YIELD pocket it finds at the head so the strand can give
- * its core away without a K-Core round trip (idt.c). Each is single-threaded
- * with itself and neither with the other, and the pop that stood here moved
- * head on from WHATEVER IT READ AT THAT MOMENT. So when both had looked at the
- * same yield — the K-Core between its peek and its pop, the gate arriving for
- * the strand's next submit — the second pop did not take the yield, which was
- * already gone; it took the pocket BEHIND it, which nobody had read.
- *
- * MEASURED, on a machine frozen by exactly that (BIOS 16c, bench): head 0xcbf
- * and tail 0xcbf, four YIELD pockets at 0xcba..0xcbd stamped by the guide,
- * and at 0xcbe a system.broadcast with token 0x46f, pid still 0 and its
- * manifest_size still 0x24 — never read — with its owner spinning for an answer
- * to a question no one had opened. Under a deadline that was a thirty-second
- * stall and a false "failed" from the shell; without one it is a strand that
- * never returns, and Nightwatch names it: ANSWER OWED.
- *
- * A compare-and-swap from the position the caller actually looked at cannot
- * step over anything: if head has moved, the other consumer owns that position
- * and this call takes nothing. Two consumers may still both LOOK at one yield,
- * and that is harmless — a yield carries no work and produces no Result. Every
- * other kind of pocket is read only by the guide, so its position is only ever
- * taken once. The RELEASE keeps the userspace producer's view of "room in the
- * ring" behind the slot that was consumed. */
+ * The guide is the ring's only consumer now, but the pop still names the
+ * position the caller looked at and takes nothing else. It learned to on a
+ * machine frozen by a second consumer: the syscall gate used to pop a YIELD
+ * pocket it found at the head, and when the guide had just taken that yield
+ * itself, a pop that moved head from "whatever it reads now" took the pocket
+ * BEHIND it, unread — a system.broadcast whose owner then waited for an
+ * answer to a question nobody had opened (BIOS 16c, head 0xcbf, the pocket at
+ * 0xcbe with pid still 0). The yield no longer enters the ring (GATE_YIELD),
+ * and a compare-and-swap from the position actually seen is the shape that
+ * cannot step over anything, whoever else may ever look. The RELEASE keeps the
+ * userspace producer's view of "room in the ring" behind the consumed slot. */
 bool KPocketPopAt(process_t *proc, uint64_t pos)
 {
     PocketRing *r = kring_pocket_hdr(proc);
@@ -215,6 +201,40 @@ bool KResultRingHasPendingReply(process_t *proc)
         if (KCTX_COOKIE24(slot->r.context) != 0) return true;
     }
     return false;
+}
+
+/* True when the slot at the ResultRing's HEAD is published and unconsumed —
+ * a delivery its owner can pop this instant.
+ *
+ * Turn In asks this before it lets a strand lie down, and again after the
+ * park (turnin_ops.c), because the cursors cannot see it: a producer claims
+ * `tail` first and releases the slot's seq later, and between the two a
+ * strand can take its mark (tail already moved), look (seq not released —
+ * nothing to pop), and ask to sleep with a mark that already covers the
+ * arrival. Nobody publishes that slot twice, so a sleep committed across it
+ * is a sleep nobody ends. Measured on BIOS 16c (2026-09-06): the console
+ * daemon parked at result 36 with pos 35 published and unread, and a printing
+ * child waited for its lane grant for the rest of the run.
+ *
+ * Only the head slot is judged, and only a RELEASED one counts. A claim still
+ * in flight at the head is deliberately not a reason to refuse a sleep: its
+ * producer releases the seq and then reads the owner's state (step 9 above),
+ * so a strand parked across it is woken by that very producer. The released
+ * slot is the one no one comes back for. */
+bool KResultRingHasUnreadAtHead(process_t *proc)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return false;
+    uint32_t cap = rr->hdr.slot_count_max;
+    if (cap == 0) return false;
+
+    uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return false;
+
+    ResultSlot *slot = kring_translate_slot(proc, result_ring_slot_uvaddr(rr, head));
+    if (!slot) return false;
+    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
 }
 
 /* Cross-core wake helper — mirrors touch_wake_remote in touch.c.

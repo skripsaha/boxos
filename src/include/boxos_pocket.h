@@ -16,8 +16,8 @@
 /*
  * Pocket — kernel-bound syscall envelope.
  *
- * Every Pocket either carries POCKET_FLAG_YIELD (cooperative tick, no work)
- * or POCKET_FLAG_MANIFEST (single-shot Manifest dispatch). A Manifest-mode
+ * Every Pocket carries POCKET_FLAG_MANIFEST (single-shot Manifest dispatch);
+ * the yield is not a pocket at all (GATE_YIELD below). A Manifest-mode
  * envelope describes its letter in one of three ways:
  *
  *   enclosed    POCKET_FLAG_ENCLOSED — the Manifest bytes travel INSIDE the
@@ -49,7 +49,14 @@
  * translation reaches the whole Pocket.
  */
 
-#define POCKET_FLAG_YIELD            0x80
+/* The yield is not a pocket. A strand that gives its core away says so in
+ * RDI at the syscall gate (idt.c); nothing enters its ring, nothing is owed
+ * and nothing is answered. It used to be a pocket, and every yield made
+ * while a real pocket waited at the head landed BEHIND it, where the gate
+ * could not take it — a strand yielding for its Turn In to be taken filled
+ * its ring to the brim in half a second and every submit after that was
+ * refused (BIOS 16c, 2026-09-06). */
+#define GATE_YIELD                   1u
 #define POCKET_FLAG_MANIFEST         0x40
 #define POCKET_FLAG_MANIFEST_HANDLE  0x20  /* manifest_addr is a ManifestHandle */
 #define POCKET_FLAG_ENCLOSED         0x10  /* Manifest bytes ride in enclosure[] */

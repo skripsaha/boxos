@@ -204,6 +204,10 @@ bool KTouchPush(process_t *target,
                 uint16_t tag_id, uint16_t flags, uint32_t source_pid,
                 const void *payload, uint32_t payload_len);
 
+/* True when the slot at the ring's head is published and unconsumed. Turn In
+ * refuses a sleep across it — see KResultRingHasUnreadAtHead (kring.h). */
+bool KTouchRingHasUnreadAtHead(process_t *proc);
+
 /* Diagnostic: snapshot per-return-path counters.
  *   out[0] = null/no-hdr/zero-cap rejections
  *   out[1] = refused because the ring was full (the event becomes Owed)

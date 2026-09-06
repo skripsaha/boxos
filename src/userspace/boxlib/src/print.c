@@ -156,9 +156,20 @@ static void lane_fail(StrandPrintState *ps)
  * milliseconds is exactly the timeout class that turns a slow stand into
  * a phantom failure (measured: 16 vCPUs on one TCG thread stretched a
  * grant past five seconds, and the old 2×2500 ms guess declared a live
- * daemon dead). The only watchdog is a fact, not a clock: if the daemon
- * PROCESS is gone, the wait ends. readline blocks on its reply under the
- * same contract. */
+ * daemon dead). What ends the wait is the daemon's ANSWER — a grant or an
+ * honest refusal — or the fact that there is nobody to answer.
+ *
+ * A quiet second is not a verdict; it is the moment to ASK AGAIN. The
+ * daemon's grant is idempotent per requester (it hands the same lane back
+ * to a repeated ask, and refuses the same way), which is precisely what
+ * makes a re-ask a safe liveness probe — and the only one that works
+ * before the daemon is known by pid: a broadcast that finds no subscriber
+ * says so at once (ERR_ROUTE_NO_SUBSCRIBERS), and a send to a pid that is
+ * gone says so too. Measured on BIOS 16c (2026-09-06): the daemon's own
+ * send of a grant had failed (its pocket ring was full of yields — since
+ * fixed at the root), and a writer that only waited, with no question
+ * repeated and nothing to check, stayed in its wait for the rest of the run.
+ * readline blocks on its reply under the same contract. */
 static bool lane_await_grant(char *tag, size_t tag_cap)
 {
     Result  *held     = NULL;
@@ -189,12 +200,11 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
 
         Result r;
         if (!receive_wait(&r, 1000)) {
-            /* A quiet second — not a verdict. Check the fact that would
-             * make further waiting a lie: the daemon process being gone. */
-            if (g_display_pid != 0) {
-                proc_info_t info;
-                if (proc_info((uint16_t)g_display_pid, &info) != 0) break;
-            }
+            /* A quiet second: ask again. The loop's send/broadcast above is
+             * the liveness check — a daemon that is gone refuses the ask
+             * itself (no subscribers / no such process), and a live one
+             * answers a repeated ask exactly as it answered the first. */
+            asked = false;
             continue;
         }
 
