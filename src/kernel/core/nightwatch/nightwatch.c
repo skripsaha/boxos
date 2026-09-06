@@ -16,7 +16,7 @@
 #include "pocket_ring.h"
 #include "touch_ring.h"
 #include "brook.h"       /* BrookBellUnrung — the surface the kernel never sees deliver */
-#include "clockboard.h"
+#include "pit.h"        /* pit_get_uptime_ms — a clock that runs whether or not IRQ0 has reached the BSP yet */
 #include "klib.h"
 
 /*
@@ -68,6 +68,7 @@ typedef struct
     uintptr_t phys_addr;
     uint8_t   wait_reason;
     uint8_t   kcore_pending;
+    uint8_t   served;            /* a K-Core is inside the guide for this strand */
     uint32_t  awaiting;          /* cloakroom token this strand holds out for */
     uint64_t  result_ring_phys;
     uint64_t  touch_ring_phys;
@@ -93,6 +94,8 @@ typedef struct
     uint8_t  kind;      /* 1 = pocket unserved, 2 = runnable unscheduled,
                          * 3 = answer owed, 4 = result unread, 5 = touch unread,
                          * 6 = brook bell unrung */
+    uint64_t seen_ms;   /* when it was FIRST seen in this position; a verdict
+                         * needs that to be a full NIGHTWATCH_LOOK_MS ago */
 } NightwatchSuspect;
 static NightwatchSuspect g_suspects[NIGHTWATCH_SUSPECTS];
 static uint32_t          g_suspect_count;
@@ -136,14 +139,40 @@ static void nightwatch_mark_said(uint32_t pid, uint32_t gen, uint32_t token)
     __atomic_store_n(&g_said_next,     i + 1u, __ATOMIC_RELEASE);
 }
 
-static bool nightwatch_was_suspect(uint32_t pid, uint32_t gen,
-                                   uint64_t mark, uint8_t kind)
+static uint64_t nightwatch_suspect_seen(uint32_t pid, uint32_t gen,
+                                        uint64_t mark, uint8_t kind)
 {
     for (uint32_t i = 0; i < g_suspect_count; i++)
         if (g_suspects[i].pid == pid && g_suspects[i].generation == gen &&
             g_suspects[i].mark == mark && g_suspects[i].kind == kind)
-            return true;
-    return false;
+            return g_suspects[i].seen_ms;
+    return 0;
+}
+
+/* One suspect, one look. It is remembered for the next look (on the silent
+ * pass only, so the speaking pass does not record it twice) together with
+ * the time it was FIRST seen in this position, and it is stuck when that time
+ * is a full NIGHTWATCH_LOOK_MS ago. TIME, not a count of looks. The looks are
+ * rate-limited to that spacing, but the proof must not lean on the limiter:
+ * with a clock that read zero the limiter let every idle turn look, "two
+ * consecutive looks" were microseconds apart, and a shell's very first pocket
+ * — in flight for a moment while the K-Cores were still starting — was named
+ * POCKET UNSERVED ten times on UEFI 16c before the clock began to count. */
+static bool nightwatch_suspect_stuck(uint32_t pid, uint32_t gen, uint64_t mark,
+                                     uint8_t kind, uint64_t now_ms, bool record,
+                                     NightwatchSuspect *fresh, uint32_t *fresh_count)
+{
+    uint64_t since = nightwatch_suspect_seen(pid, gen, mark, kind);
+    if (record && *fresh_count < NIGHTWATCH_SUSPECTS)
+    {
+        NightwatchSuspect *f = &fresh[(*fresh_count)++];
+        f->pid        = pid;
+        f->generation = gen;
+        f->mark       = mark;
+        f->kind       = kind;
+        f->seen_ms    = since ? since : now_ms;
+    }
+    return since != 0 && now_ms - since >= NIGHTWATCH_LOOK_MS;
 }
 
 /* An idle K-Core coexisting with a queued-but-unserved pocket is impossible
@@ -264,6 +293,10 @@ static void nightwatch_verdict(void)
         kprintf("[NIGHTWATCH] STALL: every core idle, and no memory to describe it\n");
         return;
     }
+    /* One reading of the clock for the whole look: every suspect recorded
+     * below is stamped with it and judged against it. Never zero here — the
+     * caller does not look without a running clock. */
+    const uint64_t now_ms = pit_get_uptime_ms();
 
     uint32_t n = 0, skipped = 0;
 
@@ -286,6 +319,7 @@ static void nightwatch_verdict(void)
         e->phys_addr  = p->addr_wait_entry.phys_addr;
         e->wait_reason      = (uint8_t)p->wait_reason;
         e->kcore_pending    = __atomic_load_n(&p->kcore_pending, __ATOMIC_ACQUIRE);
+        e->served           = kcore_is_serving(p) ? 1u : 0u;
         /* What this strand says it is holding out for. The kernel cannot infer
          * it — a strand inside result_wait is PROC_WORKING or parked, and
          * neither says WHAT for — so the waiter publishes it into its own
@@ -383,14 +417,28 @@ static void nightwatch_verdict(void)
         NightwatchProbe *e = &probe[i];
 
         /* POCKET UNSERVED. The submit itself was never taken: the PocketRing
-         * holds published pockets, kcore_pending claims a K-Core owes a
-         * visit, and the strand is not on a CPU — its userspace spins in
-         * result_wait for an answer to a question no one has read. One such
-         * spinner keeps a scheduler ticking, which is exactly what kept the
+         * holds published pockets, no K-Core is serving their owner, and at
+         * least one K-Core is asleep — which a healthy doorbell chain makes
+         * impossible over a queued pocket. One strand waiting for such a
+         * pocket keeps a scheduler ticking, which is exactly what kept the
          * all-quiet clock at zero and this defect invisible — so this proof
          * is judged on PERSISTENCE instead: the same pocket head, unserved,
-         * seen on two consecutive periodic looks. */
-        if (e->pocket_ring_phys && !e->on_cpu && nightwatch_any_kcore_idle() &&
+         * seen on two consecutive periodic looks.
+         *
+         * Whether the owner is on a CPU is deliberately NOT asked. On more
+         * than one core a pocket ring has one consumer, the K-Core guide, and
+         * the strand that filled it cannot drain it however long it runs —
+         * and the shape this exists for is an owner that IS on a CPU:
+         * result_wait without WAITPKG spins on PAUSE and never leaves it,
+         * with kcore_pending set so no notify of its own can ring the bell
+         * again. Gated on being off-CPU, this proof stepped over the very
+         * strand it describes, and a submit lost by the K-Core queue (the
+         * claim taken from under its producer, kcore.c) stopped the machine
+         * without a word from here. What separates "nobody came" from "the
+         * guide is still working on it" (a proc_exec reading its image off a
+         * slow medium keeps the pocket at the head for minutes) is the
+         * K-Core's own record of whom it serves. */
+        if (e->pocket_ring_phys && !e->served && nightwatch_any_kcore_idle() &&
             e->state != (uint8_t)PROC_DONE && e->state != (uint8_t)PROC_CRASHED)
         {
             const PocketRingHeader *ph =
@@ -399,16 +447,8 @@ static void nightwatch_verdict(void)
             uint64_t pk_tail = __atomic_load_n(&ph->tail, __ATOMIC_ACQUIRE);
             if (pk_tail != pk_head)
             {
-                bool stuck = nightwatch_was_suspect(e->pid, e->generation,
-                                                    pk_head, 1u);
-                if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
-                {
-                    fresh[fresh_count].pid        = e->pid;
-                    fresh[fresh_count].generation = e->generation;
-                    fresh[fresh_count].mark       = pk_head;
-                    fresh[fresh_count].kind       = 1u;
-                    fresh_count++;
-                }
+                bool stuck = nightwatch_suspect_stuck(e->pid, e->generation, pk_head, 1u,
+                                                      now_ms, pass == 0, fresh, &fresh_count);
                 if (stuck)
                 {
                     unserved++;
@@ -430,15 +470,8 @@ static void nightwatch_verdict(void)
         if (e->state == (uint8_t)PROC_WORKING && !e->on_cpu &&
             nightwatch_any_core_idle())
         {
-            bool stuck = nightwatch_was_suspect(e->pid, e->generation, 1u, 2u);
-            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
-            {
-                fresh[fresh_count].pid        = e->pid;
-                fresh[fresh_count].generation = e->generation;
-                fresh[fresh_count].mark       = 1u;
-                fresh[fresh_count].kind       = 2u;
-                fresh_count++;
-            }
+            bool stuck = nightwatch_suspect_stuck(e->pid, e->generation, 1u, 2u,
+                                                  now_ms, pass == 0, fresh, &fresh_count);
             if (stuck)
             {
                 unsched++;
@@ -507,16 +540,9 @@ static void nightwatch_verdict(void)
 
             if (!lawful && pocket_empty)
             {
-                bool stuck = nightwatch_was_suspect(e->pid, e->generation,
-                                                    (uint64_t)e->awaiting, 3u);
-                if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS)
-                {
-                    fresh[fresh_count].pid        = e->pid;
-                    fresh[fresh_count].generation = e->generation;
-                    fresh[fresh_count].mark       = (uint64_t)e->awaiting;
-                    fresh[fresh_count].kind       = 3u;
-                    fresh_count++;
-                }
+                bool stuck = nightwatch_suspect_stuck(e->pid, e->generation,
+                                                      (uint64_t)e->awaiting, 3u,
+                                                      now_ms, pass == 0, fresh, &fresh_count);
                 if (stuck)
                 {
                     owed++;
@@ -607,37 +633,16 @@ static void nightwatch_verdict(void)
          *
          * Nothing is lost by waiting: the second look is the same look. */
         if (touch_ready) {
-            bool again = nightwatch_was_suspect(e->pid, e->generation, tr_head, 5u);
-            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
-                fresh[fresh_count].pid        = e->pid;
-                fresh[fresh_count].generation = e->generation;
-                fresh[fresh_count].mark       = tr_head;
-                fresh[fresh_count].kind       = 5u;
-                fresh_count++;
-            }
-            touch_ready = again;
+            touch_ready = nightwatch_suspect_stuck(e->pid, e->generation, tr_head, 5u,
+                                                   now_ms, pass == 0, fresh, &fresh_count);
         }
         if (result_ready) {
-            bool again = nightwatch_was_suspect(e->pid, e->generation, rr_head, 4u);
-            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
-                fresh[fresh_count].pid        = e->pid;
-                fresh[fresh_count].generation = e->generation;
-                fresh[fresh_count].mark       = rr_head;
-                fresh[fresh_count].kind       = 4u;
-                fresh_count++;
-            }
-            result_ready = again;
+            result_ready = nightwatch_suspect_stuck(e->pid, e->generation, rr_head, 4u,
+                                                    now_ms, pass == 0, fresh, &fresh_count);
         }
         if (bell_unrung) {
-            bool again = nightwatch_was_suspect(e->pid, e->generation, bk_head, 6u);
-            if (pass == 0 && fresh_count < NIGHTWATCH_SUSPECTS) {
-                fresh[fresh_count].pid        = e->pid;
-                fresh[fresh_count].generation = e->generation;
-                fresh[fresh_count].mark       = bk_head;
-                fresh[fresh_count].kind       = 6u;
-                fresh_count++;
-            }
-            bell_unrung = again;
+            bell_unrung = nightwatch_suspect_stuck(e->pid, e->generation, bk_head, 6u,
+                                                   now_ms, pass == 0, fresh, &fresh_count);
         }
 
         if (touch_ready)  undelivered++;
@@ -759,7 +764,7 @@ static void nightwatch_verdict(void)
     if (pass == 0)
         kprintf("[NIGHTWATCH] %s at uptime %lu ms — %u process(es):\n",
                 "EVIDENCE",
-                (unsigned long)clockboard_uptime_ms(), n);
+                (unsigned long)now_ms, n);
     }
 
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
@@ -810,7 +815,18 @@ void nightwatch_core_idle(uint8_t core)
     /* Already marked idle: this is a wake-up (a timer tick, or simply the next
      * turn round the idle loop), the natural moment to look without a timer of
      * our own. */
-    uint64_t now = clockboard_uptime_ms();
+    uint64_t now = pit_get_uptime_ms();
+
+    /* No clock, no look. This is the HPET main counter where there is one,
+     * and it runs from hpet_init; without an HPET it is the PIT tick count,
+     * which stands at zero until IRQ0 first reaches the BSP — well after
+     * userspace has started on a big machine. A watch that cannot say how
+     * long something has stood still has no persistence to judge by, and a
+     * zero here also broke the rate limit below, whose "never looked" is
+     * zero: every idle turn looked, and the looks were microseconds apart.
+     * (The ClockBoard's uptime that used to be read here is that same PIT
+     * tick count mirrored for userspace, HPET or not.) */
+    if (now == 0) return;
 
     /* There used to be a second mode here: "are ALL cores asleep?", which
      * printed a description even with no proof to offer. It was removed
