@@ -2998,6 +2998,219 @@ run_kcoreclaimmut() {
     chk $? "kcoreclaimmut: and bench did not complete three runs (rows=$rows)"
 }
 
+# ── lostwake ─────────────────────────────────────────────────────────────────
+#
+# Nightwatch's LOST WAKE used to be judged at a glance: a strand parked on a
+# word, no deadline armed, and the word already changed. Two things make a
+# glance no proof at all. A waker stores first and asks for the wake in a
+# SEPARATE call, so "changed and still asleep" is what every delivery looks
+# like for the length of one syscall; and the watch's own glance is two steps —
+# the park's expectation is copied under the process lock, the word is read
+# later, after the walk and its printing — while the machine goes on. Measured
+# on BIOS 16c (2026-09-06, the day matrix): eleven workers of the
+# std::execution::par brigade accused at once, the printed words climbing along
+# the walk (0xc1, 0xc3, 0xc7 … 0xd3 against one and the same expectation), and
+# cxxtest passing the phase a moment later. The matrix was announced 6/6 over
+# that verdict, because nobody read verdicts.
+#
+# The proof is now persistence, the same as the other six proofs: the same park
+# (pid, generation, park seq), the word still changed, a full look later. A
+# delivery in flight cannot last ten seconds; a lost wake lasts for ever.
+#
+# The glance is WIDENED: the watch waits two seconds between copying the
+# parks and reading the words, and says so — but only on a look that found an
+# application alive, so the witness never lands inside the shell's echo of a
+# typed command (the shell echoes keystroke by keystroke, and a kernel line
+# between two of them breaks the echo the typer verifies) and every witness
+# counted is a look that fell inside the workload. The look's CADENCE is left
+# alone on purpose: a look every second was tried, and it changed what the
+# other proofs mean — ANSWER OWED needs "no answer anywhere for a whole look",
+# which at one second is any sequential stretch of a test (seven brigade
+# workers convicted thirteen seconds into the boot) — and it let two walks
+# overlap and print over each other. So the width comes from the walk and
+# from repetition instead: eight rounds of cxxtest's parallel-algorithm phases
+# (201-202: eleven workers parked and woken thousands of times a second), so
+# that several looks land with the brigade alive. Under the one-glance judge
+# every such look convicts — measured: after three green rounds, all eleven
+# workers named on the first look that found the brigade alive, and two more
+# verdicts before the harness stopped the machine; under the fix none may,
+# and the phases must pass every time.
+slowwalk_on() {
+    cp src/kernel/core/nightwatch/nightwatch.c "$SCRATCH/nightwatch.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/nightwatch/nightwatch.c"
+s = open(p).read()
+anchor = """    process_list_unlock();
+
+    /* Tokens whose silence is LAWFUL."""
+assert anchor in s, "slowwalk anchor missing"
+slow = """    process_list_unlock();
+    if (n > 2)   /* logcheck mutation: the watch walks slowly — 2 s between the parks and the words */
+        kprintf("[MUTATION] the watch walks slowly: 2 s between the parks and the words, %u processes alive\\n", n);
+    delay(2000);
+
+    /* Tokens whose silence is LAWFUL."""
+open(p, "w").write(s.replace(anchor, slow, 1))
+EOF
+    [ "$(grep -c "logcheck mutation" src/kernel/core/nightwatch/nightwatch.c)" = 1 ] || { echo "slowwalk install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/nightwatch/nightwatch.c
+}
+slowwalk_off() {
+    [ -f "$SCRATCH/nightwatch.c.bak" ] && cp "$SCRATCH/nightwatch.c.bak" src/kernel/core/nightwatch/nightwatch.c
+    sleep 1; touch src/kernel/core/nightwatch/nightwatch.c
+}
+
+# The wake that was never rung. The first application wake (pid >= 3 — the
+# console daemon and the shell are left alone, so the harness can still drive
+# the machine) that would have reached a sleeper is dropped: the bucket is
+# walked, a parked strand is found on exactly that word, and the call returns
+# OK having claimed nobody. The word has already moved — the caller stored
+# before it asked — so this is precisely a lost wake, once, and it says so on
+# serial. The brigade's region never completes: the worker sleeps on a ticket
+# that has moved, the caller sleeps on a done-count that never will, and
+# Nightwatch has to be the one to say which strand and why.
+wakedrop_on() {
+    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/decks/system/sync_ops.c"
+s = open(p).read()
+anchor = """    spin_lock(&bucket->lock);
+    AddrWaitEntry *e = bucket->head;
+    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)"""
+assert anchor in s, "wakedrop anchor missing"
+dropped = """    {   /* logcheck mutation: the wake that was never rung */
+        static uint32_t s_rung_short;
+        if (ctx->proc->pid >= 3 && __atomic_load_n(&s_rung_short, __ATOMIC_ACQUIRE) == 0) {
+            bool sleeper = false;
+            spin_lock(&bucket->lock);
+            for (AddrWaitEntry *w = bucket->head; w; w = w->next)
+                if (!w->done && w->phys_addr == phys) { sleeper = true; break; }
+            spin_unlock(&bucket->lock);
+            if (sleeper && __atomic_exchange_n(&s_rung_short, 1u, __ATOMIC_ACQ_REL) == 0) {
+                kprintf("[MUTATION] wake dropped: pid %u asked for 0x%lx and the sleeper was not told\\n",
+                        ctx->proc->pid, (unsigned long)phys);
+                return OK;
+            }
+        }
+    }
+    spin_lock(&bucket->lock);
+    AddrWaitEntry *e = bucket->head;
+    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)"""
+open(p, "w").write(s.replace(anchor, dropped, 1))
+EOF
+    grep -q "logcheck mutation: the wake that was never rung" src/kernel/core/decks/system/sync_ops.c || { echo "wakedrop install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+wakedrop_off() {
+    [ -f "$SCRATCH/sync_ops.c.bak" ] && cp "$SCRATCH/sync_ops.c.bak" src/kernel/core/decks/system/sync_ops.c
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+
+# Sixteen cores. cxxtest's two parallel-algorithm phases are run `rounds`
+# times, each waited out to its SUBSET PASS (or an announced failure), or to
+# Nightwatch naming a lost wake — whichever comes first. A verdict ends the
+# whole thing: the shell is parked on a cxxtest that will never return, so
+# nothing typed after it would run.
+#
+# Between rounds the shell must be back at its prompt, and that is read from
+# the LINES, not from the last two bytes of the file: the watch's witness line
+# lands after a prompt that has no newline yet, so the file ends in the
+# witness and wait_for_prompt would wait its whole ceiling for a shell that
+# was ready all along (measured: the first run of this scenario). A second
+# line beginning "~ " since the round was typed is the shell's next prompt,
+# whatever the kernel appended to it.
+lostwake_prompt_back() {
+    local mark=$1 i=0
+    while [ $i -lt 60 ]; do
+        [ "$(tail -n +$((mark + 1)) build/serial.log | grep -c '^~ ')" -ge 2 ] && { sleep 2; return 0; }
+        sleep 1; i=$((i+1))
+    done
+    echo "  (the shell never came back to its prompt)"
+    return 1
+}
+lostwake_boot() {
+    local rounds=$2
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 90 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 4
+    local run=0
+    while [ $run -lt "$rounds" ]; do
+        local MARK
+        MARK=$(wc -l < build/serial.log)
+        if ! ./tools/qemu-input.sh type "cxxtest 201-202" 2>"$SCRATCH/lostwake.typeerr"; then
+            echo "  typing 'cxxtest 201-202' failed: $(cat "$SCRATCH/lostwake.typeerr")"
+            break
+        fi
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        local t=0
+        while [ $t -lt 150 ]; do
+            tail -n +$((MARK + 1)) build/serial.log | grep -qE "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" && break
+            grep -q "LOST WAKE" build/serial.log && break
+            sleep 2; t=$((t+1))
+        done
+        grep -q "LOST WAKE" build/serial.log && break
+        lostwake_prompt_back "$MARK" || break
+        run=$((run+1))
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+run_lostwake() {
+    echo "== lostwake: the watch walks slowly through a brigade, and must not cry wolf =="
+    slowwalk_on; build
+    lostwake_boot lostwake 8
+    slowwalk_off
+    L="$SCRATCH/serial.lostwake.log"
+
+    local passes looks
+    passes=$(grep -c "\[CXX\] SUBSET PASS" "$L")
+    [ "$passes" -ge 8 ]
+    chk $? "lostwake: cxxtest 201-202 passed eight times over with the watch reading every parked word 2 s late (passes=$passes)"
+    # The witness is printed only on a look that found an application alive,
+    # so its count is the count of looks that fell inside the workload. Fewer
+    # than three and the run proved nothing — the watch hardly looked while
+    # the brigade was running.
+    looks=$(grep -c "the watch walks slowly" "$L")
+    [ "$looks" -ge 3 ]
+    chk $? "lostwake: and the watch looked at least three times while a program was alive (looks=$looks)"
+    ! grep -q "LOST WAKE" "$L";                 chk $? "lostwake: and no wake was called lost"
+    ! grep -q "a defect, not a slow test" "$L"; chk $? "lostwake: and no verdict was spoken"
+
+    build   # leave the tree built from clean sources
+}
+
+# The oracle measured against itself: with one wake dropped for real, the same
+# run must STOP, and Nightwatch must be the one to say on whom.
+run_lostwakemut() {
+    echo "== lostwakemut: one wake is never rung, and the watch must name the sleeper =="
+    wakedrop_on; build
+    lostwake_boot lostwakemut 1
+    wakedrop_off
+    L="$SCRATCH/serial.lostwakemut.log"
+
+    grep -q "\[MUTATION\] wake dropped" "$L"
+    chk $? "lostwakemut: a wake to a sleeping strand was dropped (the mutation bit)"
+    grep -q "LOST WAKE" "$L"
+    chk $? "lostwakemut: Nightwatch named it — LOST WAKE"
+    # The accused must be a worker of the brigade: a strand of cxxtest, pid 4
+    # or above. The line two above the verdict names it.
+    local accused
+    accused=$(grep -B2 "LOST WAKE" "$L" | grep -oE "pid [0-9]+ gen [0-9]+ waiting" | head -1 | awk '{print $2}')
+    [ -n "$accused" ] && [ "$accused" -ge 4 ]
+    chk $? "lostwakemut: and the accused is a brigade worker (pid ${accused:-?})"
+    ! grep -q "\[CXX\] SUBSET PASS" "$L"
+    chk $? "lostwakemut: and cxxtest 201-202 did not pass"
+
+    build   # leave the tree built from clean sources
+}
+
 # ── turnin ───────────────────────────────────────────────────────────────────
 #
 # A producer moves a reply ring's `tail` when it claims a slot and releases the
@@ -3472,6 +3685,8 @@ case "${1:-both}" in
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
+    lostwake)   run_lostwake ;;
+    lostwakemut) run_lostwakemut ;;
     turnin)     run_turnin ;;
     turninmut)  run_turninmut ;;
     twoctrl)  run_twoctrl ;;
@@ -3486,8 +3701,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_kcoreclaim; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|kcoreclaim|kcoreclaimmut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_kcoreclaim; echo; run_lostwake; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

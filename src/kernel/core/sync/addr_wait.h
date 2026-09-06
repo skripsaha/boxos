@@ -38,8 +38,11 @@ typedef struct AddrWaitEntry {
      *              REAL-HW CAVEAT above; until now the kernel kept no evidence
      *              that it had actually happened.
      *   expected — the value the parker waits to see change. If it HAS changed
-     *              while this entry is still linked, a wake was owed and never
-     *              delivered: provable at any instant, no timeout to guess.
+     *              while this entry is still linked — and is still so a full
+     *              look later, for the same seq — a wake was owed and never
+     *              delivered. Not at an instant: the waker stores before it
+     *              asks for the wake, so a look that lands between the two
+     *              sees exactly this on a healthy machine (nightwatch.c).
      *   timed    — a park with a deadline recovers by itself, so it is not a
      *              stall even when everything around it is asleep. */
     uint64_t              user_va;
