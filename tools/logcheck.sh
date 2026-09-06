@@ -2983,6 +2983,174 @@ run_yieldracemut() {
     chk $? "yieldracemut: and bench did not get through three runs (rows=$rows)"
 }
 
+# ── turnin ───────────────────────────────────────────────────────────────────
+#
+# A producer moves a reply ring's `tail` when it claims a slot and releases the
+# slot's seq later. A strand that takes its Turn In mark after the claim and
+# looks before the release finds nothing to pop, asks to sleep with a mark that
+# already covers the arrival, and is put to bed by a kernel that compared only
+# cursors. The release lands a moment later; nobody releases a slot twice; a
+# wake that then re-checks only the mark re-arms the sleep on top of a message
+# already delivered. Measured on BIOS 16c (2026-09-06): the console daemon
+# parked at result 36 with pos 35 (a lane request) released and unread, and the
+# child that asked for the lane waited for the rest of the run.
+#
+# The window is microseconds wide on silicon, so it is WIDENED: every IPC push
+# into the console daemon's ring waits, after its claim and before its release,
+# until the daemon has actually gone to sleep (bounded, so a daemon that never
+# sleeps costs the push a few hundred milliseconds and nothing else). That
+# forces exactly the interleaving above on every lane request. Under the fix —
+# a sleep judged on the slot at the head as well as on the cursor, on both
+# sides — phase 58 of cxxtest, which spawns a printing child per step, runs
+# three times over; under the cursor-only sleep (put back by turninmut) the
+# first lane request that meets the window stops the machine.
+turnin_window_on() {
+    cp src/kernel/core/ipc/kring.c "$SCRATCH/kring.c.turnin.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/ipc/kring.c"
+s = open(p).read()
+anchor = """    slot->r = *r;
+    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
+"""
+assert anchor in s, "turnin window anchor missing"
+widened = """    slot->r = *r;
+    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
+    /* logcheck mutation: an IPC push into pid 1 holds its released-later slot
+     * until the daemon has gone to sleep (or 300 ms), so the claim lands
+     * before the daemon's mark and the release after its look — every time. */
+    if (r->sender_pid != 0 && target->pid == 1) {
+        for (uint32_t w = 0; w < 300 && process_get_state(target) != PROC_WAITING; w++)
+            delay(1);
+    }
+"""
+open(p, "w").write(s.replace(anchor, widened, 1))
+EOF
+    grep -q "logcheck mutation" src/kernel/core/ipc/kring.c || { echo "turnin window install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/ipc/kring.c
+}
+
+turnin_window_off() {
+    [ -f "$SCRATCH/kring.c.turnin.bak" ] && cp "$SCRATCH/kring.c.turnin.bak" src/kernel/core/ipc/kring.c
+    sleep 1; touch src/kernel/core/ipc/kring.c
+}
+
+# The sleep that stood here before: cursors only, on both sides — exactly the
+# old SysTurnIn re-check and the old box_turn_in exit — and the writer that
+# stood with it, which waited for its lane grant without ever asking again.
+# The re-ask (print.c) would otherwise end the mutation's wedge by itself: a
+# second request is a second push, and a push wakes the sleeper.
+cursoronly_on() {
+    cp src/kernel/core/decks/system/turnin_ops.c "$SCRATCH/turnin_ops.c.bak"
+    cp src/userspace/boxlib/src/turnin.c "$SCRATCH/turnin.c.cursor.bak"
+    cp src/userspace/boxlib/src/print.c "$SCRATCH/print.c.cursor.bak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/print.c"
+s = open(p).read()
+anchor = """            asked = false;
+            continue;"""
+assert anchor in s, "cursoronly writer anchor missing"
+blind = """            continue;   /* logcheck mutation: the writer that never asked again */"""
+open(p, "w").write(s.replace(anchor, blind, 1))
+p = "src/kernel/core/decks/system/turnin_ops.c"
+s = open(p).read()
+anchor = """    return turnin_touch_tail(proc)  != touch_seen  ||
+           turnin_result_tail(proc) != result_seen ||
+           KResultRingHasUnreadAtHead(proc)        ||
+           KTouchRingHasUnreadAtHead(proc);"""
+assert anchor in s, "cursoronly kernel anchor missing"
+blind = """    /* logcheck mutation: cursors only, the sleep that stood here before */
+    return turnin_touch_tail(proc)  != touch_seen  ||
+           turnin_result_tail(proc) != result_seen;"""
+open(p, "w").write(s.replace(anchor, blind, 1))
+p = "src/userspace/boxlib/src/turnin.c"
+s = open(p).read()
+anchor = """    return box_mark_moved(seen) ||
+           result_published_at_head() ||
+           touch_ring_published_at_head();"""
+assert anchor in s, "cursoronly boxlib anchor missing"
+blind = """    return box_mark_moved(seen);   /* logcheck mutation: the mark alone */"""
+open(p, "w").write(s.replace(anchor, blind, 1))
+EOF
+    grep -q "logcheck mutation" src/kernel/core/decks/system/turnin_ops.c || { echo "cursoronly install FAILED"; exit 1; }
+    grep -q "logcheck mutation" src/userspace/boxlib/src/print.c || { echo "cursoronly writer install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/turnin_ops.c src/userspace/boxlib/src/turnin.c src/userspace/boxlib/src/print.c
+}
+
+cursoronly_off() {
+    [ -f "$SCRATCH/turnin_ops.c.bak" ] && cp "$SCRATCH/turnin_ops.c.bak" src/kernel/core/decks/system/turnin_ops.c
+    [ -f "$SCRATCH/turnin.c.cursor.bak" ] && cp "$SCRATCH/turnin.c.cursor.bak" src/userspace/boxlib/src/turnin.c
+    [ -f "$SCRATCH/print.c.cursor.bak" ] && cp "$SCRATCH/print.c.cursor.bak" src/userspace/boxlib/src/print.c
+    sleep 1; touch src/kernel/core/decks/system/turnin_ops.c src/userspace/boxlib/src/turnin.c src/userspace/boxlib/src/print.c
+}
+
+# Sixteen cores, `cxxtest 58` three times over. Each run is waited out to its
+# SUBSET PASS or to a frozen serial — a child waiting for a lane it will never
+# be granted prints nothing, and the shell is parked on a cxxtest that will
+# never return, so nothing typed after it would run.
+turnin_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 90 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 4
+    local run=0
+    while [ $run -lt 3 ]; do
+        local before
+        before=$(grep -c "SUBSET PASS" build/serial.log)
+        if ! ./tools/qemu-input.sh type "cxxtest 58" 2>"$SCRATCH/turnin.typeerr"; then
+            echo "  typing 'cxxtest 58' failed: $(cat "$SCRATCH/turnin.typeerr")"
+            break
+        fi
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        local last quiet t
+        last=$(stat -f%z build/serial.log); quiet=0; t=0
+        while [ $t -lt 240 ]; do
+            [ "$(grep -c "SUBSET PASS" build/serial.log)" -gt "$before" ] && break
+            local size
+            size=$(stat -f%z build/serial.log)
+            if [ "$size" -eq "$last" ]; then quiet=$((quiet+1)); else quiet=0; last=$size; fi
+            [ $quiet -ge 45 ] && break        # 90 s of a frozen serial: the wedge
+            sleep 2; t=$((t+1))
+        done
+        [ "$(grep -c "SUBSET PASS" build/serial.log)" -gt "$before" ] || break
+        run=$((run+1))
+    done
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+}
+
+run_turnin() {
+    echo "== turnin: a slot claimed before the sleeper's mark and released after its look =="
+    turnin_window_on; build
+    turnin_boot turnin
+    turnin_window_off
+    L="$SCRATCH/serial.turnin.log"
+
+    local passes
+    passes=$(grep -c "SUBSET PASS" "$L")
+    [ "$passes" -ge 3 ]
+    chk $? "turnin: cxxtest 58 passed three runs running with every lane request released only after the daemon slept (passes=$passes)"
+}
+
+# The oracle measured against itself: with the cursor-only sleep back, the
+# same run must STOP on its first lane request.
+run_turninmut() {
+    echo "== turninmut: put the cursor-only sleep back and require the machine to stop =="
+    turnin_window_on; cursoronly_on; build
+    turnin_boot turninmut
+    cursoronly_off; turnin_window_off
+    L="$SCRATCH/serial.turninmut.log"
+
+    local passes
+    passes=$(grep -c "SUBSET PASS" "$L")
+    [ "$passes" -lt 3 ]
+    chk $? "turninmut: with the cursor-only sleep back, cxxtest 58 did not get through three runs (passes=$passes)"
+}
+
 # And the other half: a box that never turns in. Removing the submit leaves the
 # loop exactly as it was before this work — look, find nothing, look again.
 turnin_off() {
@@ -3289,6 +3457,8 @@ case "${1:-both}" in
     sleepsmut)  run_sleepsmut ;;
     yieldrace)  run_yieldrace ;;
     yieldracemut) run_yieldracemut ;;
+    turnin)     run_turnin ;;
+    turninmut)  run_turninmut ;;
     twoctrl)  run_twoctrl ;;
     manyports) run_manyports ;;
     usbrecover) run_usbrecover ;;
@@ -3301,8 +3471,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_yieldrace; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|yieldrace|yieldracemut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_yieldrace; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|yieldrace|yieldracemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

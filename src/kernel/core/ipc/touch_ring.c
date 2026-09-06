@@ -79,6 +79,26 @@ static TouchSlot *ktr_translate_slot(process_t *target, uintptr_t uvaddr)
                                                 sizeof(TouchSlot));
 }
 
+/* True when the slot at the TouchRing's head is published and unconsumed.
+ * The Touch twin of KResultRingHasUnreadAtHead (kring.c) — same reason, same
+ * rule: only a released slot counts, a claim still in flight is woken by its
+ * own producer (the wake below the publish in KTouchPush). */
+bool KTouchRingHasUnreadAtHead(process_t *proc)
+{
+    TouchRing *rr = ktr_hdr(proc);
+    if (!rr) return false;
+    uint32_t cap = rr->hdr.slot_count_max;
+    if (cap == 0) return false;
+
+    uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    if (head == tail) return false;
+
+    TouchSlot *slot = ktr_translate_slot(proc, touch_ring_slot_uvaddr(rr, head));
+    if (!slot) return false;
+    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == 2u * (head / cap) + 1u;
+}
+
 /* ------------------------------------------------------------------------
  * Cross-core wake helper — mirrors kring_wake_remote and touch_wake_remote.
  *

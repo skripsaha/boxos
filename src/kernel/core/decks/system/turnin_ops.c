@@ -17,7 +17,9 @@
  * test would bed down a strand holding the very work it asked to sleep through.
  * A cursor cannot be fooled that way: the tail is monotonic, so `tail != seen`
  * is the fact "something arrived after I looked", and it stays true no matter
- * who drained it.
+ * who drained it. The cursor is not the whole answer either — a slot claimed
+ * before the mark and released after the look is invisible to it — so the
+ * slot at each ring's head is judged as well; see turnin_arrival_pending.
  *
  * WHY IT HAS NO DEADLINE. There is no honest deadline for "until something
  * happens" — a shell prompt may wait for a keystroke for a week. A guessed one
@@ -73,6 +75,41 @@ static uint64_t turnin_result_tail(process_t *proc)
 }
 
 /* -------------------------------------------------------------------------
+ * A strand may lie down only when nothing addressed to it is waiting. Two
+ * facts decide that, and each covers what the other cannot see:
+ *
+ *   the CURSORS — each ring's `tail` against the mark the caller took before
+ *   its last look. If a tail has moved, something arrived after the look, or
+ *   the ask is a stale one from a look already superseded; either way it must
+ *   not put the strand to bed. Emptiness could not say this: a stale ask can
+ *   meet an empty ring in front of a strand that is busy elsewhere and park it
+ *   in the middle of its work.
+ *
+ *   the HEAD SLOT — published and unconsumed. A producer takes `tail` first
+ *   and releases the slot's seq later, so a strand can take its mark with the
+ *   tail already moved, look while the seq is still unreleased (nothing to
+ *   pop), and ask to sleep with a mark that already covers the arrival. The
+ *   cursors pass; the slot is released a moment later; nobody releases it
+ *   twice. MEASURED on BIOS 16c (2026-09-06): the console daemon refused its
+ *   ask at result 35 (a lane request had just claimed 35), looked, found the
+ *   slot unreleased, and parked at 36 — the request was released right after,
+ *   and the child that sent it waited for its lane for the rest of the run.
+ *   A claim still in flight at the head is deliberately NOT a reason to
+ *   refuse: its producer releases the seq and then reads this strand's state,
+ *   so a park committed across it is undone by that producer (kring.c and
+ *   touch_ring.c, the wake below the publish). Only the slot already released
+ *   is the one no one comes back for.
+ * ------------------------------------------------------------------------- */
+static bool turnin_arrival_pending(process_t *proc,
+                                   uint64_t touch_seen, uint64_t result_seen)
+{
+    return turnin_touch_tail(proc)  != touch_seen  ||
+           turnin_result_tail(proc) != result_seen ||
+           KResultRingHasUnreadAtHead(proc)        ||
+           KTouchRingHasUnreadAtHead(proc);
+}
+
+/* -------------------------------------------------------------------------
  * SysTurnIn — params: [u64 touch_tail_seen][u64 result_tail_seen]  (16 bytes)
  * ------------------------------------------------------------------------- */
 static int SysTurnIn(const ManifestOp *op, Crate *crates,
@@ -91,8 +128,7 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
     /* Look before lying down. Cheap, and it keeps a strand that was overtaken
      * between its own mark and this handler from paying for a park it is about
      * to undo. Not load-bearing — the re-check after the park is. */
-    if (turnin_touch_tail(proc)  != touch_seen ||
-        turnin_result_tail(proc) != result_seen) {
+    if (turnin_arrival_pending(proc, touch_seen, result_seen)) {
         if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
         return ERR_WOULD_BLOCK;
     }
@@ -109,7 +145,8 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
      * KResultPush or KTouchPush — does Store(tail) then Load(state) and is
      * fenced for free, because both publish their tail with a LOCKed
      * instruction (lock cmpxchg on the Result ring's CAS claim, lock xadd on
-     * the Touch ring's reservation).
+     * the Touch ring's reservation), and read the state under a lock taken
+     * with another one after releasing the slot.
      *
      * Without this fence both sides may read stale: the pusher sees a strand
      * still PROC_WORKING and skips the wake, the sleeper sees a tail that has
@@ -118,8 +155,7 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
      * One mfence per SLEEP — not per message — is the whole price. */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    if (turnin_touch_tail(proc)  != touch_seen ||
-        turnin_result_tail(proc) != result_seen) {
+    if (turnin_arrival_pending(proc, touch_seen, result_seen)) {
         process_set_state(proc, PROC_WORKING);
     }
 

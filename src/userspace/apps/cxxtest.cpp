@@ -10995,7 +10995,8 @@ void Phase58()
             box::result<int> r = c->wait(50);
             Check(!r.has_value() && r.error().code() == box::errc::timeout,
                   "phase58.6 wait(50) on eternal child -> errc::timeout");
-            (void)c->kill();   // cleanup
+            box::status k = c->kill();   // cleanup
+            Check(k.has_value(), "phase58.6 kill() reports success");
             (void)c->wait();   // reap so the station entry retires
         }
     }
@@ -11064,7 +11065,8 @@ void Phase58()
                 box::result<int> r = b->wait(200);
                 Check(!r.has_value() && r.error().code() == box::errc::timeout,
                       "phase58.8 stale death of A NOT misrouted to recycled-pid B");
-                (void)b->kill();
+                box::status k = b->kill();
+                Check(k.has_value(), "phase58.8 kill eternal B");
                 (void)b->wait();
             } else {
                 pins.push_back(std::move(*b));   // pin the lower pid, retry
@@ -11076,7 +11078,11 @@ void Phase58()
                    spawn_failed ? "spawn unavailable"
                                 : reap_failed ? "child not reaped in time"
                                               : "no reuse in 40 attempts");
-        for (auto &p : pins) { (void)p.kill(); (void)p.wait(); }   // release pins
+        for (auto &p : pins) {                                     // release pins
+            box::status k = p.kill();
+            Check(k.has_value(), "phase58.8 pin kill");
+            (void)p.wait();
+        }
         drain_inbox();
     }
 

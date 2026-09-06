@@ -324,22 +324,12 @@ static void guide_process_pocket(process_t *proc)
     Pocket  *pocket = KPocketPeek(proc, &pos);
     if (!pocket) return;
 
-    /* Yield: cooperative tick, no work, no Result. Nothing is written into
-     * the slot, and the pop names the position that was looked at: the
-     * syscall gate on the strand's own core may be looking at this very
-     * yield right now (idt.c), and whichever of the two takes it, the other
-     * must find it gone and touch nothing behind it — see KPocketPopAt. */
-    if (pocket->flags & POCKET_FLAG_YIELD) {
-        (void)KPocketPopAt(proc, pos);
-        return;
-    }
-
     /* Kernel sets pid (security: userspace can't forge it). Only the guide
-     * ever reads a pocket that is not a yield, so this slot is ours. */
+     * reads pockets, so this slot is ours. */
     pocket->pid = proc->pid;
     pocket->error_code = OK;
 
-    /* All non-yield pockets must carry the Manifest flag in Phase 12. */
+    /* Every pocket carries the Manifest flag since Phase 12. */
     if (pocket->flags & POCKET_FLAG_MANIFEST) {
         guide_process_manifest_pocket(pocket, proc);
         (void)KPocketPopAt(proc, pos);

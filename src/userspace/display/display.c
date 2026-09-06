@@ -211,7 +211,18 @@ static bool lanes_render(uint32_t budget)
 
 static void lane_free(ConsoleLane *ln)
 {
-    brook_release(ln->brook);
+    /* A release that failed left the reader claim standing in the kernel,
+     * and a number whose Brook is still claimed must not be granted again:
+     * every open of "console:N" as READER would find it busy, and the pool
+     * is a stack — the number would sit at its top and refuse every lane
+     * from then on. Such a number is retired, and said so. */
+    int rc = brook_release(ln->brook);
+    if (rc != 0) {
+        kdbg_print("[display] lane %u of pid %u: release failed (%d); number retired",
+                   ln->number, ln->owner_pid, rc);
+        free(ln);
+        return;
+    }
 
     FreeNumber *fn = (FreeNumber *)malloc(sizeof(FreeNumber));
     if (fn) {
@@ -441,11 +452,14 @@ static void grant_lane(uint32_t requester)
     ConsoleLane *ln = b ? (ConsoleLane *)malloc(sizeof(ConsoleLane)) : NULL;
     if (!b || !ln) {
         if (b) brook_release(b);
-        FreeNumber *fn = (FreeNumber *)malloc(sizeof(FreeNumber));
-        if (fn) { fn->number = number; fn->next = g_free_numbers; g_free_numbers = fn; }
+        /* The number is NOT returned to the pool. An open that failed says
+         * the Brook behind this number is not usable, and a pool that is a
+         * stack would hand the same failure to every requester after this
+         * one. A fresh number replaces it; "console:N" stays interned. */
         uint8_t refusal = DISP_CMD_LANE;      /* 1-byte reply = honest no */
         send(requester, &refusal, 1);
-        kdbg_print("[display] lane grant failed for pid %u", requester);
+        kdbg_print("[display] lane grant failed for pid %u (number %u retired)",
+                   requester, number);
         return;
     }
 

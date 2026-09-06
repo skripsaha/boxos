@@ -38,6 +38,28 @@ void touch_ring_pop_stats(uint64_t out[8]) {
     out[7] = __atomic_load_n(&g_tp_last_tail,     __ATOMIC_RELAXED);
 }
 
+/* The Touch twin of result_published_at_head (result.c): the slot at head is
+ * released and unconsumed. Header sanity as in touch_ring_pop_slot; no side
+ * effects. */
+bool touch_ring_published_at_head(void) {
+    TouchRing *rr = touch_ring();
+    if (!rr) return false;
+    uint32_t cap    = __atomic_load_n(&rr->hdr.slot_count_max, __ATOMIC_RELAXED);
+    uint64_t base   = __atomic_load_n(&rr->hdr.slots_base,     __ATOMIC_RELAXED);
+    uint32_t stride = __atomic_load_n(&rr->hdr.slot_size,      __ATOMIC_RELAXED);
+    if (cap == 0 || base == 0 || stride == 0)        return false;
+    if (base < 0x100000000ULL)                       return false;
+    if (stride != sizeof(TouchSlot))                 return false;
+
+    uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
+    uint64_t pos  = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
+    if (pos == tail) return false;
+
+    TouchSlot *slot   = (TouchSlot *)(uintptr_t)(base + (pos % cap) * stride);
+    uint64_t expected = 2u * (pos / (uint64_t)cap) + 1u;
+    return __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE) == expected;
+}
+
 bool touch_ring_pop_slot(TouchSlot *slot_out) {
     TouchRing *rr = touch_ring();
     if (!rr || !slot_out) return false;
