@@ -22,7 +22,6 @@
 
 _Static_assert((KCORE_QUEUE_CAPACITY & (KCORE_QUEUE_CAPACITY - 1)) == 0,
                "KCORE_QUEUE_CAPACITY must be a power of two (ring mask)");
-#define KCORE_POP_SPIN_LIMIT   1000000
 
 struct process_t;
 
@@ -33,6 +32,12 @@ typedef struct {
     volatile uint32_t count;
     uint8_t           kcore_idx;
     uint8_t           _pad[3];
+    /* The strand this K-Core is serving right now; NULL between two. Held
+     * around guide_process_one and read by Nightwatch: a pocket standing at
+     * its ring's head while a K-Core serves its owner is being worked on,
+     * however long that takes (a proc_exec reads its image inside the call);
+     * one standing there with nobody serving it is unserved. */
+    struct process_t* volatile serving;
 } __attribute__((aligned(64))) KCorePocketQueue;
 
 extern KCorePocketQueue *g_kcore_queues;
@@ -41,5 +46,7 @@ void kcore_init(void);
 error_t kcore_submit(struct process_t* proc);
 void kcore_run_loop(void) __attribute__((noreturn));
 uint32_t kcore_queue_depth(uint8_t core_idx);
+/* True while some K-Core is inside guide_process_one for this strand. */
+bool kcore_is_serving(const struct process_t* proc);
 
 #endif // KCORE_H

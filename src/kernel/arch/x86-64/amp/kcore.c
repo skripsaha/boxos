@@ -60,6 +60,23 @@ uint32_t kcore_queue_depth(uint8_t core_idx)
     return atomic_load_u32(&g_kcore_queues[core_idx].count);
 }
 
+/* One producer protocol, in two steps: a position is CLAIMED (the CAS on
+ * `tail`) and then PUBLISHED (the slot store). Between the two the position
+ * belongs to the producer and to nobody else — and that gap is not small
+ * everywhere: on the board it can hold an SMI, on the stand a descheduled
+ * vCPU. The consumer below is written so that the gap costs it nothing but
+ * a little patience, never a slot. */
+bool kcore_is_serving(const struct process_t* proc)
+{
+    if (!g_kcore_queues || !proc) return false;
+    for (uint8_t c = 0; c < g_amp.total_cores; c++) {
+        if (!g_amp.cores[c].is_kcore) continue;
+        if (__atomic_load_n(&g_kcore_queues[c].serving, __ATOMIC_ACQUIRE) == proc)
+            return true;
+    }
+    return false;
+}
+
 static error_t kcore_queue_push(KCorePocketQueue* q, struct process_t* proc)
 {
     if (!q || !proc)
@@ -87,39 +104,55 @@ static error_t kcore_queue_push(KCorePocketQueue* q, struct process_t* proc)
         spins++;
     }
 
-    __atomic_store_n(&q->slots[old_tail], proc, __ATOMIC_RELEASE);
-    mfence();
+    /* Claimed. `count` rises HERE, before the publish, so it says "claimed
+     * and not yet consumed": the consumer's sleep gate reads it under CLI
+     * and will not lie down over a claim still in flight, and a consumer
+     * that takes the slot the instant it appears cannot drive the count
+     * below zero. It used to rise after the publish, and a pop that beat it
+     * left 0xFFFFFFFF in every depth — the least-loaded choice, the sleep
+     * gate and Nightwatch's summary all read it. */
     atomic_fetch_add_u32(&q->count, 1);
+    __atomic_store_n(&q->slots[old_tail], proc, __ATOMIC_RELEASE);
+    /* Published. The doorbell follows in kcore_submit, and in x2APIC mode
+     * that is a WRMSR to the ICR, which may complete before this store is
+     * globally visible (Intel SDM Vol 3A §10.12.3) — so the fence stays
+     * between the publish and the bell. */
+    mfence();
     return OK;
 }
 
+/* The consumer owns `head` and judges nothing but the slot there.
+ *
+ * An empty slot at the head means one of two things, and the consumer cannot
+ * tell which: nothing has been claimed, or a position has been claimed and
+ * not yet published. The answer is the same either way — there is nothing to
+ * take — and the head stays where it is. The pop that stood here read `tail`
+ * too, and when tail said "claimed" while the slot said "not yet" it waited a
+ * million spins and then MOVED HEAD PAST THE CLAIM: it took the position from
+ * under a producer that was still walking up to it. The pocket was then
+ * published behind the head, where nobody would ever look; its owner kept
+ * kcore_pending set, so no later notify could submit it again; and it waited
+ * for an answer to a question nobody would ever open. The warning it printed
+ * was debug_printf, which the shipped kernel compiles to nothing. And 4096
+ * claims later the head would have come round to that stale pointer and
+ * served a dead entry as a fresh one.
+ *
+ * Nothing waits here. The run loop goes round — the pumps, then the sleep
+ * gate, which reads `count` under CLI: a claim in flight keeps the count up,
+ * so the K-Core stays awake and comes back to this slot; a queue with nothing
+ * claimed lets it sleep, and the producer's IPI, sent after the publish,
+ * wakes it. A stalled producer costs the consumer exactly the stall, and
+ * nothing else. logcheck kcoreclaim widens the gap to two milliseconds on
+ * every application submit and requires the machine to come through;
+ * kcoreclaimmut puts the old pop back and requires the machine to stop. */
 static struct process_t* kcore_queue_pop(KCorePocketQueue* q)
 {
     if (!q)
         return NULL;
 
     uint32_t h = q->head;
-    uint32_t t = atomic_load_u32(&q->tail);
-    
-    if (h == t) {
-        return NULL;
-    }
-
-    struct process_t* proc;
-    uint32_t spin_limit = 0;
-    for (;;) {
-        proc = __atomic_load_n(&q->slots[h], __ATOMIC_ACQUIRE);
-        if (proc != NULL) break;
-        cpu_pause();
-        if (++spin_limit > KCORE_POP_SPIN_LIMIT) {
-            debug_printf("[KCORE] WARNING: slot %u stale after %u spins, resetting\n",
-                         h, spin_limit);
-            q->slots[h] = NULL;
-            q->head = (h + 1) & KCORE_QUEUE_MASK;
-            atomic_fetch_sub_u32(&q->count, 1);
-            return NULL;
-        }
-    }
+    struct process_t* proc = __atomic_load_n(&q->slots[h], __ATOMIC_ACQUIRE);
+    if (!proc) return NULL;
 
     q->slots[h] = NULL;
     mfence();
@@ -205,12 +238,18 @@ static void kcore_process_entry(struct process_t* proc)
     process_ref_inc(proc);
 
     uint8_t core_idx = amp_get_core_index();
-    /* Nightwatch: work arrived, so this K-Core is no longer idle. */
+    KCorePocketQueue* q = &g_kcore_queues[core_idx];
+    /* Nightwatch: work arrived, so this K-Core is no longer idle — and it is
+     * THIS strand's work. Its pocket stays at the head of its ring until the
+     * guide is done with it, which can be minutes; `serving` is what tells
+     * that apart from a pocket nobody came for (POCKET UNSERVED). */
     nightwatch_core_busy(core_idx);
+    __atomic_store_n(&q->serving, proc, __ATOMIC_RELEASE);
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
     guide_process_one(proc);
 
+    __atomic_store_n(&q->serving, NULL, __ATOMIC_RELEASE);
     mfence();
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
