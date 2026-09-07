@@ -594,10 +594,12 @@ static bool result_wait_inner(Result* out, uint32_t expect_cookie, uint32_t time
  * The kernel reads it in Nightwatch's verdict, which walks every process — so
  * this speaks for a strand that is fast asleep just as well as for one burning
  * a core. And it is only ever a HINT: the verdict convicts on facts (the
- * pocket ring empty, the doorbell quiet, every K-Core asleep, and the token
- * unchanged a full look later), never on this token or on a clock. It has to
- * be that way, because a submit may be owed an answer for hours and still be
- * perfectly healthy — process.gone waits out a whole child's life.
+ * pocket ring empty, no K-Core serving it, no chit left for the token by the
+ * handler that put the answer off — the kernel's own half of this token, see
+ * the kernel's chit.h — and the same a full look later), never on this token
+ * or on a clock. It has to be that way, because a submit may be owed an answer
+ * for hours and still be perfectly healthy — process.gone waits out a whole
+ * child's life.
  *
  * Two stores per synchronous submit, in a wrapper rather than edits at each
  * return: this way there is no exit path that can forget, now or later. */

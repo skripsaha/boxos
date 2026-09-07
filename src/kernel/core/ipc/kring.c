@@ -16,6 +16,7 @@
  */
 
 #include "kring.h"
+#include "chit.h"       /* ChitKeep — an answer redeems the chit left for it */
 #include "klib.h"
 #include "vmm.h"
 #include "pmm.h"
@@ -264,29 +265,11 @@ static inline void kring_wake_remote(process_t *target)
     lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }
 
-/* Diagnostic: per-return-path counters. Snapshot via KResultPushStats(). */
-static volatile uint64_t g_krp_null_args;
-static volatile uint64_t g_krp_no_hdr;
-static volatile uint64_t g_krp_zero_cap;
+/* The two refusals that are said out loud are rate-limited by their own
+ * counts; every other outcome of a push is a fact about ONE answer, and the
+ * chit that answer redeems (or fails to) is where it is recorded now. */
 static volatile uint64_t g_krp_full;
-static volatile uint64_t g_krp_map_fail;
-static volatile uint64_t g_krp_translate_fail;
-static volatile uint64_t g_krp_contended;
 static volatile uint64_t g_krp_seq_broken;
-static volatile uint64_t g_krp_success;
-
-void KResultPushStats(uint64_t out[9])
-{
-    out[0] = __atomic_load_n(&g_krp_null_args,      __ATOMIC_RELAXED);
-    out[1] = __atomic_load_n(&g_krp_no_hdr,         __ATOMIC_RELAXED);
-    out[2] = __atomic_load_n(&g_krp_zero_cap,       __ATOMIC_RELAXED);
-    out[3] = __atomic_load_n(&g_krp_full,           __ATOMIC_RELAXED);
-    out[4] = __atomic_load_n(&g_krp_map_fail,       __ATOMIC_RELAXED);
-    out[5] = __atomic_load_n(&g_krp_translate_fail, __ATOMIC_RELAXED);
-    out[6] = __atomic_load_n(&g_krp_contended,      __ATOMIC_RELAXED);
-    out[7] = __atomic_load_n(&g_krp_seq_broken,     __ATOMIC_RELAXED);
-    out[8] = __atomic_load_n(&g_krp_success,        __ATOMIC_RELAXED);
-}
 
 bool KResultPush(process_t *target, const Result *r)
 {
@@ -301,22 +284,13 @@ bool KResultPush(process_t *target, const Result *r)
      * pays for a page walk. */
     nightwatch_core_busy(amp_get_core_index());
 
-    if (!target || !r) {
-        __atomic_add_fetch(&g_krp_null_args, 1, __ATOMIC_RELAXED);
-        return false;
-    }
+    if (!target || !r) return false;
 
     ResultRing *rr = kring_result_hdr(target);
-    if (!rr) {
-        __atomic_add_fetch(&g_krp_no_hdr, 1, __ATOMIC_RELAXED);
-        return false;
-    }
+    if (!rr) return false;
 
     uint32_t cap = rr->hdr.slot_count_max;
-    if (cap == 0) {
-        __atomic_add_fetch(&g_krp_zero_cap, 1, __ATOMIC_RELAXED);
-        return false;
-    }
+    if (cap == 0) return false;
 
     /* ── Claim a position, or refuse. Nothing here waits on the consumer. ──
      *
@@ -392,7 +366,6 @@ bool KResultPush(process_t *target, const Result *r)
 
     ResultSlot *slot    = NULL;
     uintptr_t   ensured = 0;   /* page whose mapping this call has secured */
-    uint32_t    turns   = 0;
     uint64_t    pos     = 0;
 
     for (;;) {
@@ -435,18 +408,13 @@ bool KResultPush(process_t *target, const Result *r)
         uintptr_t page   = uvaddr & ~(uintptr_t)(VMM_PAGE_SIZE - 1);
         if (page != ensured) {
             if (vmm_ensure_user_page(target->cabin->vmm, uvaddr,
-                                     /*writable=*/true) != 0) {
-                __atomic_add_fetch(&g_krp_map_fail, 1, __ATOMIC_RELAXED);
+                                     /*writable=*/true) != 0)
                 return false;
-            }
             ensured = page;
         }
 
         slot = kring_translate_slot(target, uvaddr);
-        if (!slot) {
-            __atomic_add_fetch(&g_krp_translate_fail, 1, __ATOMIC_RELAXED);
-            return false;
-        }
+        if (!slot) return false;
 
         /* The linearisation point. A failure here means ANOTHER PRODUCER won
          * the tail — the ring moved forward, so this is lock-free progress and
@@ -458,7 +426,6 @@ bool KResultPush(process_t *target, const Result *r)
                                         __ATOMIC_RELAXED)) {
             break;
         }
-        if (++turns == 1) __atomic_add_fetch(&g_krp_contended, 1, __ATOMIC_RELAXED);
     }
 
     uint64_t round    = pos / cap;
@@ -479,11 +446,15 @@ bool KResultPush(process_t *target, const Result *r)
     }
 
     slot->r = *r;
-    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
 
     /* Publish — the RELEASE store makes the payload above visible to the
      * consumer's ACQUIRE load of the same word. */
     __atomic_store_n(&slot->seq, expected + 1u, __ATOMIC_RELEASE);
+
+    /* The chit this answer redeems, if one was left for it — BEFORE the wake,
+     * so a strand that wakes and asks again finds its old promise KEPT and not
+     * still DUE, which its next chit would call an answer dropped. */
+    ChitKeep(target, KCTX_COOKIE24(r->context));
 
     /* Wake. The home core may be HLT/MWAIT-idle and would not learn of the
      * reply until the next LAPIC tick; the IPI is the doorbell.

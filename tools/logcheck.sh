@@ -3042,14 +3042,14 @@ p = "src/kernel/core/nightwatch/nightwatch.c"
 s = open(p).read()
 anchor = """    process_list_unlock();
 
-    /* Tokens whose silence is LAWFUL."""
+    /* What each strand was PROMISED is read with the snapshot above (ChitPeek):"""
 assert anchor in s, "slowwalk anchor missing"
 slow = """    process_list_unlock();
     if (n > 2)   /* logcheck mutation: the watch walks slowly — 2 s between the parks and the words */
         kprintf("[MUTATION] the watch walks slowly: 2 s between the parks and the words, %u processes alive\\n", n);
     delay(2000);
 
-    /* Tokens whose silence is LAWFUL."""
+    /* What each strand was PROMISED is read with the snapshot above (ChitPeek):"""
 open(p, "w").write(s.replace(anchor, slow, 1))
 EOF
     [ "$(grep -c "logcheck mutation" src/kernel/core/nightwatch/nightwatch.c)" = 1 ] || { echo "slowwalk install FAILED"; exit 1; }
@@ -3211,6 +3211,211 @@ run_lostwakemut() {
     build   # leave the tree built from clean sources
 }
 
+# ── chit ─────────────────────────────────────────────────────────────────────
+#
+# ANSWER OWED used to rest on two witnesses about the MACHINE — every K-Core
+# asleep, and no answer published anywhere since the last look — rather than
+# on facts about the strand it accused. A brigade of workers parked on their
+# leader while the leader merely computes satisfies both (measured 2026-09-06:
+# seven workers convicted while the phase passed). The kernel now keeps its own
+# half of the cloakroom token, the chit (chit.h): the handler that puts an
+# answer off leaves one naming itself, the event that determines the answer
+# marks it due, the push that delivers it keeps it. ANSWER OWED convicts only
+# a token nobody left a chit for, or one whose chit fell due and was never
+# kept — the same a full look later — and the guide says at once, out of band,
+# when a deferred answer to a waited-for token left no chit at all.
+#
+# Three scenarios, on sixteen cores. The healthy one runs every kind of
+# deferral this machine has (a brigade parked and woken on addr_park, strands
+# parked and joined, files written and read back, children waited out by the
+# shell) and then stands at the prompt: nothing may be convicted and neither
+# guard may speak. The two mutations each break one promise the way a real bug
+# would — the death of a child determined and never delivered; a handler that
+# raised the async flag without leaving its chit — and the watch must name the
+# strand and the holder, and the guide must name the omission at once.
+chit_boot_and_prompt() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 90 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 4
+}
+# Type one command and wait for either its marker, a Nightwatch verdict, or the
+# ceiling. Returns 0 when the marker came.
+chit_command() {
+    local cmd=$1 marker=$2 ceiling=$3
+    CHIT_MARK=$(wc -l < build/serial.log)
+    if ! ./tools/qemu-input.sh type "$cmd" 2>"$SCRATCH/chit.typeerr"; then
+        echo "  typing '$cmd' failed: $(cat "$SCRATCH/chit.typeerr")"
+        return 1
+    fi
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    local t=0
+    while [ $t -lt "$ceiling" ]; do
+        tail -n +$((CHIT_MARK + 1)) build/serial.log | grep -qE "$marker" && return 0
+        grep -q "ANSWER OWED" build/serial.log && return 1
+        sleep 2; t=$((t+1))
+    done
+    return 1
+}
+
+run_chit() {
+    echo "== chit: every deferral leaves its chit, and a healthy machine is convicted of nothing =="
+    build
+    chit_boot_and_prompt
+    local rounds=0 r
+    for r in 1 2; do
+        chit_command "cxxtest 201-202" "\[CXX\] (SUBSET PASS|TOTAL FAILURES)" 150 || break
+        lostwake_prompt_back "$CHIT_MARK" || break
+        rounds=$((rounds+1))
+    done
+    local strands=0 benches=0
+    if chit_command "strandtest" "STRAND|strandtest" 90; then
+        lostwake_prompt_back "$CHIT_MARK" && strands=1
+    fi
+    if chit_command "bench" "create\+write64\+delete" 150; then
+        lostwake_prompt_back "$CHIT_MARK" && benches=1
+    fi
+    sleep 30   # at the prompt: three looks with nothing to accuse
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.chit.log"
+    L="$SCRATCH/serial.chit.log"
+
+    [ "$rounds" -eq 2 ];                        chk $? "chit: cxxtest 201-202 (the brigade) passed twice (rounds=$rounds)"
+    [ "$strands" -eq 1 ];                       chk $? "chit: strandtest ran and the shell came back"
+    [ "$benches" -eq 1 ];                       chk $? "chit: bench wrote and read the volume and the shell came back"
+    ! grep -q "ANSWER OWED" "$L";               chk $? "chit: no answer was called owed"
+    ! grep -q "a defect, not a slow test" "$L"; chk $? "chit: and no verdict was spoken"
+    ! grep -q "\[GUIDE\] DEFECT" "$L";          chk $? "chit: and every deferred answer to a waited-for token left a chit (the guide stayed silent)"
+    ! grep -q "\[CHIT\] DEFECT" "$L";           chk $? "chit: and no strand moved on from an answer the kernel still owed"
+    ! grep -qE "PANIC|\[EXCEPTION\]" "$L";      chk $? "chit: and no panic"
+}
+
+# The death is determined and the answer never delivered. The first delivery
+# of an application's death (pid >= 3) to a waiter marks the chit due — exactly
+# as the real path does — and then throws the Result away instead of pushing
+# it. The shell waits for a child that has already died, for ever; nothing is
+# queued, nobody is serving it, and the only trace is a chit DUE that stays DUE.
+chitwithhold_on() {
+    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.chit.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/decks/system/sync_ops.c"
+s = open(p).read()
+anchor = """        ChitDue(list->waiter, list->submit_cookie);
+        KResultPush(list->waiter, &r);
+"""
+assert anchor in s, "chitwithhold anchor missing"
+held = """        ChitDue(list->waiter, list->submit_cookie);
+        {   /* logcheck mutation: the answer is determined, and never delivered */
+            static uint32_t s_withheld;
+            if (proc->pid >= 3 && list->waiter->pid >= 2 &&
+                __atomic_exchange_n(&s_withheld, 1u, __ATOMIC_ACQ_REL) == 0) {
+                kprintf("[MUTATION] answer withheld: pid %u owed token 0x%06x for the death of pid %u\\n",
+                        list->waiter->pid, list->submit_cookie, proc->pid);
+                process_ref_dec(list->waiter);
+                process_ref_dec(proc);
+                kfree(list);
+                list = next;
+                continue;
+            }
+        }
+        KResultPush(list->waiter, &r);
+"""
+open(p, "w").write(s.replace(anchor, held, 1))
+EOF
+    grep -q "logcheck mutation: the answer is determined" src/kernel/core/decks/system/sync_ops.c || { echo "chitwithhold install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+chit_mutation_off() {
+    [ -f "$SCRATCH/sync_ops.c.chit.bak" ] && cp "$SCRATCH/sync_ops.c.chit.bak" src/kernel/core/decks/system/sync_ops.c
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+
+# The handler that forgot. SysProcessGone raises the async flag the old way,
+# by hand, and leaves no chit — the shape of every future async handler that
+# does not go through ChitGive. The guide must say so the moment the shell's
+# wait for its child is deferred, and Nightwatch must convict the shell two
+# looks later: waiting, nothing queued, nobody serving, no chit.
+chitforgot_on() {
+    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.chit.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/decks/system/sync_ops.c"
+s = open(p).read()
+anchor = """    ChitGive(ctx, "system.process.gone", ((uint64_t)want_gen << 32) | pid);
+"""
+assert anchor in s, "chitforgot anchor missing"
+forgot = """    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;   /* logcheck mutation: the handler forgot its chit */
+"""
+open(p, "w").write(s.replace(anchor, forgot, 1))
+EOF
+    grep -q "logcheck mutation: the handler forgot its chit" src/kernel/core/decks/system/sync_ops.c || { echo "chitforgot install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+
+# Wait for Nightwatch to speak: a verdict takes two looks (>= 20 s) after the
+# stall begins; sixty seconds is three looks and a margin, not a deadline on
+# the machine — a healthy one would simply never speak.
+chit_wait_for_verdict() {
+    local t=0
+    while [ $t -lt 60 ]; do
+        grep -q "ANSWER OWED" build/serial.log && return 0
+        sleep 2; t=$((t+1))
+    done
+    return 1
+}
+
+run_chitmut() {
+    echo "== chitmut: a child's death is determined and its answer withheld — the watch must name the shell and the holder =="
+    chitwithhold_on; build
+    chit_boot_and_prompt
+    chit_command "say hi" "^hi" 30
+    chit_wait_for_verdict
+    make run-stop >/dev/null 2>&1
+    chit_mutation_off
+    cp build/serial.log "$SCRATCH/serial.chitmut.log"
+    L="$SCRATCH/serial.chitmut.log"
+
+    grep -q "\[MUTATION\] answer withheld" "$L"
+    chk $? "chitmut: a determined answer was thrown away (the mutation bit)"
+    grep -q "ANSWER OWED: system.process.gone took the event" "$L"
+    chk $? "chitmut: Nightwatch named it — ANSWER OWED, held by system.process.gone"
+    local accused
+    accused=$(grep "ANSWER OWED" "$L" | grep -oE "pid [0-9]+ gen" | head -1 | awk '{print $2}')
+    [ "${accused:-0}" = 2 ]
+    chk $? "chitmut: and the accused is the shell (pid ${accused:-?})"
+    ! grep -q "\[GUIDE\] DEFECT" "$L"
+    chk $? "chitmut: and the guide had nothing to say — the chit WAS left, it was the delivery that failed"
+
+    build   # leave the tree built from clean sources
+}
+
+run_chitmissmut() {
+    echo "== chitmissmut: a handler raises the async flag and leaves no chit — the guide must say so at once, the watch two looks later =="
+    chitforgot_on; build
+    chit_boot_and_prompt
+    chit_command "cxxtest" "\[GUIDE\] DEFECT" 30     # the child runs for minutes; the omission is said as it is deferred
+    chit_wait_for_verdict
+    make run-stop >/dev/null 2>&1
+    chit_mutation_off
+    cp build/serial.log "$SCRATCH/serial.chitmissmut.log"
+    L="$SCRATCH/serial.chitmissmut.log"
+
+    grep -q "\[GUIDE\] DEFECT: pid 2 deferred the answer to token" "$L"
+    chk $? "chitmissmut: the guide named the omission the moment the shell's wait was deferred"
+    grep -q "ANSWER OWED: waiting on token .* no handler left a chit" "$L"
+    chk $? "chitmissmut: Nightwatch named it — ANSWER OWED, nobody promised the answer"
+    local accused
+    accused=$(grep "ANSWER OWED" "$L" | grep -oE "pid [0-9]+ gen" | head -1 | awk '{print $2}')
+    [ "${accused:-0}" = 2 ]
+    chk $? "chitmissmut: and the accused is the shell (pid ${accused:-?})"
+
+    build   # leave the tree built from clean sources
+}
+
 # ── turnin ───────────────────────────────────────────────────────────────────
 #
 # A producer moves a reply ring's `tail` when it claims a slot and releases the
@@ -3238,11 +3443,11 @@ turnin_window_on() {
 p = "src/kernel/core/ipc/kring.c"
 s = open(p).read()
 anchor = """    slot->r = *r;
-    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
+
+    /* Publish — the RELEASE store makes the payload above visible to the
 """
 assert anchor in s, "turnin window anchor missing"
 widened = """    slot->r = *r;
-    __atomic_add_fetch(&g_krp_success, 1, __ATOMIC_RELAXED);
     /* logcheck mutation: an IPC push into pid 1 holds its released-later slot
      * until the daemon has gone to sleep (or 300 ms), so the claim lands
      * before the daemon's mark and the release after its look — every time. */
@@ -3250,6 +3455,8 @@ widened = """    slot->r = *r;
         for (uint32_t w = 0; w < 300 && process_get_state(target) != PROC_WAITING; w++)
             delay(1);
     }
+
+    /* Publish — the RELEASE store makes the payload above visible to the
 """
 open(p, "w").write(s.replace(anchor, widened, 1))
 EOF
@@ -3687,6 +3894,9 @@ case "${1:-both}" in
     kcoreclaimmut) run_kcoreclaimmut ;;
     lostwake)   run_lostwake ;;
     lostwakemut) run_lostwakemut ;;
+    chit)       run_chit ;;
+    chitmut)    run_chitmut ;;
+    chitmissmut) run_chitmissmut ;;
     turnin)     run_turnin ;;
     turninmut)  run_turninmut ;;
     twoctrl)  run_twoctrl ;;
@@ -3701,7 +3911,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_kcoreclaim; echo; run_lostwake; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

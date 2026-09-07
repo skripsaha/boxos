@@ -270,6 +270,7 @@ static void process_init_strand_fields(process_t *proc)
 
     proc->gone_waiters    = NULL;
     spinlock_init(&proc->gone_lock);
+    ChitInit(&proc->chit);
 
     proc->wait_reason     = WAIT_NONE;
     proc->wait_start_time = 0;

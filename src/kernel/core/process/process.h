@@ -9,6 +9,7 @@
 #include "atomics.h"
 #include "cabin.h"
 #include "addr_wait.h"
+#include "chit.h"
 
 /*
  * Lock ordering:
@@ -16,6 +17,9 @@
  *   2. process_lock    (process.c)   — global list protection
  *   3. cleanup_queue.lock            — deferred cleanup queue
  *   4. process_t->state_lock         — per-process state
+ *   5. process_t->chit.lock          — the innermost leaf: taken under process_lock,
+ *                                     an addr-wait bucket lock, gone_lock, or the PIT
+ *                                     tick; takes nothing itself (chit.h)
  *
  * process_destroy() releases scheduler_lock before any resource cleanup.
  * schedule() handles periodic cleanup of finished processes.
@@ -306,6 +310,11 @@ typedef struct process_t
      * use-after-return.  Zeroed by process_create's memset; linked=0 means
      * not in any bucket chain. */
     AddrWaitEntry     addr_wait_entry;
+
+    /* The kernel's half of the cloakroom token: the answer this strand was
+     * promised, by whom, and whether the event that makes it has come. One
+     * slot — a strand holds out for one token at a time. See chit.h. */
+    Chit              chit;
 
     /* Who is waiting for THIS process to be gone.
      *

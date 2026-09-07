@@ -9,6 +9,7 @@
  */
 
 #include "guide.h"
+#include "chit.h"        /* ChitPeek — a deferred answer must have left a chit */
 #include "execution_deck.h"
 #include "touch.h"
 #include "bay.h"
@@ -294,6 +295,22 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
      * "would block" Result so userspace can retry.
      */
     if (rc == ERR_WOULD_BLOCK && async_owns_crates) {
+        /* A deferred answer to a submit somebody is waiting for MUST have
+         * left a chit (chit.h): that is what lets Nightwatch tell a promise
+         * from a drop. ChitGive is the only writer of the flag, so this can
+         * only fail for a handler that set the flag some other way — a
+         * coding error, said at once rather than found two looks later. A
+         * completion that already outran us has KEPT the chit, not cleared
+         * it, so the token still matches. */
+        if (ctx.submit_cookie != 0) {
+            ChitView cv;
+            ChitPeek(proc, &cv);
+            if (cv.cookie != ctx.submit_cookie)
+                kprintf("[GUIDE] DEFECT: pid %u deferred the answer to token 0x%06x "
+                        "(%u op(s)) without leaving a chit — Nightwatch cannot see "
+                        "who owes it\n",
+                        proc->pid, ctx.submit_cookie, (unsigned)result.total_ops);
+        }
         /* Async handler owns crates_kp; it will commit+free at I/O
          * completion via crate_stage_commit_and_release. */
         if (st)        ManifestStageRelease(st, &grant);

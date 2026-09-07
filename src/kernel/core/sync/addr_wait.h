@@ -94,6 +94,14 @@ void AddrWaitUnlink(AddrWaitBucket *bucket, AddrWaitEntry *entry);
  * unlinks, and unlocks.  No-op if not linked.  Safe to call twice. */
 void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry);
 
+/* The claim itself, for a caller already holding the entry's bucket lock (the
+ * wake loop walks a whole chain under it). Marks the entry done, unlinks it,
+ * and marks the parked strand's chit DUE: from this instant the answer is
+ * determined and the claimer owes its delivery. Every claim — a wake, a
+ * deadline, the parker's own recheck — goes through here, so no claimer can
+ * forget the chit. Returns false if somebody else already claimed. */
+bool AddrWaitClaimLocked(AddrWaitBucket *bucket, AddrWaitEntry *entry);
+
 /* Atomically claim a waiter: if it is still linked and not yet done, set
  * done=1 AND unlink it (all under the bucket lock), then return true. Exactly
  * one caller wins; that caller OWNS the wake and must deliver exactly one

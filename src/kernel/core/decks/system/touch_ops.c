@@ -1,4 +1,5 @@
 #include "system_deck.h"
+#include "chit.h"       /* ChitGive — the only writer of the async flag */
 #include "touch.h"
 #include "touch_queue.h"
 #include "touch_ring.h"
@@ -361,8 +362,10 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * load-bearing as a wake. addr_park has always set this flag, which is why
      * its park is the one that holds. The op stages no crates (touch.c submits
      * it with none), so the flag carries only its other meaning here — the
-     * handler owns the completion, and the completion is the event itself. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+     * handler owns the completion, and the completion is the event itself.
+     * No chit is left: the await is submitted without a token, so nobody is
+     * holding out for a Result to it. */
+    ChitGive(ctx, "system.touch.await", 0);
     return ERR_WOULD_BLOCK;
 }
 

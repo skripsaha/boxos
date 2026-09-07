@@ -12,7 +12,7 @@
 #include "scheduler.h"
 #include "kcore.h"
 #include "result_ring.h"
-#include "kring.h"
+#include "chit.h"       /* ChitPeek — the kernel's half of the cloakroom token */
 #include "pocket_ring.h"
 #include "touch_ring.h"
 #include "brook.h"       /* BrookBellUnrung — the surface the kernel never sees deliver */
@@ -73,6 +73,7 @@ typedef struct
     uint8_t   kcore_pending;
     uint8_t   served;            /* a K-Core is inside the guide for this strand */
     uint32_t  awaiting;          /* cloakroom token this strand holds out for */
+    ChitView  chit;              /* the kernel's record of what was promised for it */
     uint64_t  result_ring_phys;
     uint64_t  touch_ring_phys;
     uint64_t  pocket_ring_phys;
@@ -111,11 +112,6 @@ typedef struct
 #define NIGHTWATCH_KINDS 7u
 static NightwatchSuspect *g_suspects;       /* what the previous look wrote down */
 static uint32_t           g_suspect_count;
-
-/* The lawful death-waits a look can collect (below). Bounded, and honest
- * about it: when the list does not fit, the ANSWER OWED oracle stands down
- * for the look rather than convict a strand it merely failed to look up. */
-#define NIGHTWATCH_GONE_TOKENS 32u
 
 /* Stalls already announced.
  *
@@ -214,51 +210,6 @@ static bool nightwatch_any_kcore_idle(void)
     return false;
 }
 
-/* EVERY K-Core asleep — nobody in the kernel is working on anybody's submit.
- * Deliberately distinct from any_kcore_idle above: one sleeping K-Core proves
- * nothing while another is mid-op, and an op may be honest work of arbitrary
- * length (proc_exec reads the image INSIDE the call — on a throttled stick
- * that is minutes). Accusing on a clock would convict that work; asking
- * whether anyone is working on it convicts only a machine that has stopped. */
-/* Has the machine delivered ANY answer since the last look?
- *
- * Every other fact this watch gathers describes one instant, and an instant is
- * not a stall: a strand can sit on one token for ten seconds while its own
- * process does useful work in other strands, with the pocket ring momentarily
- * empty and the K-Cores momentarily asleep. MEASURED — cxxtest was accused
- * forty-four times while it was passing phase after phase.
- *
- * Answers delivered is the one number that says the machine as a whole is
- * moving. If it has advanced since the previous look, nothing here is stuck,
- * whatever any single snapshot looked like. It is the difference between
- * "this strand is waiting" (ordinary) and "this strand is waiting and nothing
- * anywhere is being answered" (a stall). */
-static bool nightwatch_answers_advanced(void)
-{
-    /* Serialised by the same CAS gate as the rest of the verdict, and spelled
-     * atomically for the same reason: the single writer is not always the same
-     * core. */
-    static volatile uint64_t s_last;
-    uint64_t stats[9];
-    KResultPushStats(stats);
-    uint64_t now  = stats[8];             /* successful publishes since boot */
-    bool advanced = (now != __atomic_load_n(&s_last, __ATOMIC_RELAXED));
-    __atomic_store_n(&s_last, now, __ATOMIC_RELEASE);
-    return advanced;
-}
-
-static bool nightwatch_all_kcores_idle(void)
-{
-    bool any = false;
-    for (uint8_t c = 0; c < g_amp.total_cores; c++)
-        if (g_amp.cores[c].is_kcore)
-        {
-            if (!g_core_idle[c]) return false;
-            any = true;
-        }
-    return any;
-}
-
 static bool nightwatch_any_core_idle(void)
 {
     return __atomic_load_n(&g_idle_cores, __ATOMIC_ACQUIRE) > 0;
@@ -300,6 +251,108 @@ static uint64_t nightwatch_peek(uintptr_t phys)
 {
     volatile uint64_t *p = (volatile uint64_t *)vmm_phys_to_virt(phys);
     return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+/* ANSWER OWED. A strand is holding out for a reply to a submit, and nobody
+ * holds a chit for it — or the one who does let it fall due and never paid.
+ *
+ * This is the one stall the other oracles cannot see. They look for work that
+ * was never taken; this one is about work that WAS taken and never paid for —
+ * the pocket is gone from the ring, no K-Core is serving the strand, and it
+ * waits on a token that will never be answered. Waiting is correct behaviour
+ * here, which is what makes it invisible: there is no deadline to expire and
+ * nothing left queued to notice.
+ *
+ * Judged on FACTS about THIS strand, never on a clock and never on the state
+ * of the machine around it. It used to lean on both — "every K-Core asleep"
+ * and "no answer published anywhere since the last look" — and both are
+ * witnesses, not proofs: a brigade of workers parked on their leader, who is
+ * merely computing for a while, satisfies them completely (MEASURED,
+ * 2026-09-06: seven workers of std::execution::par accused at once while the
+ * test passed). The kernel's own record replaces them — chit.h:
+ *
+ *   awaiting C          the waiter says what it holds out for
+ *   pocket ring empty   the work was taken, not queued (POCKET UNSERVED's domain)
+ *   not served          no K-Core is inside the guide for this strand
+ *   no chit for C       nobody promised the answer: dropped between the pop
+ *                       and the push                                 → OWED
+ *   chit DUE for C      the event came; the delivery never followed  → OWED,
+ *                       and the holder is named
+ *   chit PENDING for C  somebody outside the kernel owes the event — a peer, a
+ *                       child, a device, a deadline. Lawful for as long as it
+ *                       takes; described, never convicted
+ *   chit KEPT for C     the answer is in the ring; a strand still asleep on it
+ *                       is RESULT UNDELIVERED's finding, not this one's
+ *
+ * and all of it still so one full look later: the microseconds between a pop
+ * and its push, or between a keep and the waiter clearing `awaiting`, cannot
+ * span two looks. The mark carries the chit's state, so a promise first seen
+ * unheld and then found due begins its own two looks.
+ *
+ * Deliberately NOT gated on being off-cpu — a strand PARKED on a reply and one
+ * SPINNING in userspace for it are the same stall — nor on the presence of
+ * K-Cores: a one-core machine runs the guide inline, and when the watch looks
+ * no handler is mid-flight, so the same facts hold there. */
+static bool nightwatch_answer_owed(const NightwatchProbe *e, uint64_t now_ms,
+                                   bool record, bool speak,
+                                   NightwatchSuspect *fresh, uint32_t *fresh_count,
+                                   uint32_t fresh_cap)
+{
+    if (e->awaiting == 0 || e->served ||
+        e->state == (uint8_t)PROC_DONE || e->state == (uint8_t)PROC_CRASHED)
+        return false;
+
+    if (e->pocket_ring_phys)
+    {
+        const PocketRingHeader *ph =
+            (const PocketRingHeader *)vmm_phys_to_virt(e->pocket_ring_phys);
+        if (__atomic_load_n(&ph->tail, __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&ph->head, __ATOMIC_ACQUIRE))
+            return false;                            /* still queued */
+    }
+
+    const ChitView *c    = &e->chit;
+    const bool      held = (c->cookie == e->awaiting);
+    if (held && c->state == CHIT_PENDING)
+    {
+        if (speak)
+            kprintf("  pid %u gen %u %s — waits on %s (0x%lx) for token 0x%06x: the "
+                    "event is owed outside the kernel, pending %lu ms — lawful\n",
+                    e->pid, e->generation, nightwatch_state_name(e->state),
+                    c->holder ? c->holder : "?", (unsigned long)c->detail,
+                    (unsigned)e->awaiting, (unsigned long)(now_ms - c->since_ms));
+        return false;
+    }
+    if (held && c->state == CHIT_KEPT) return false;
+
+    const bool due  = held;                          /* held, therefore DUE */
+    uint64_t   mark = (uint64_t)e->awaiting |
+                      ((uint64_t)(due ? CHIT_DUE : CHIT_NONE) << 32);
+    if (!nightwatch_suspect_stuck(e->pid, e->generation, mark, 3u, now_ms, record,
+                                  fresh, fresh_count, fresh_cap))
+        return false;
+
+    /* One line per stall, not one every ten seconds for as long as it lasts: a
+     * watch that repeats itself buries the evidence it just produced. */
+    if (speak && !nightwatch_already_said(e->pid, e->generation, e->awaiting))
+    {
+        nightwatch_mark_said(e->pid, e->generation, e->awaiting);
+        if (due)
+            kprintf("  pid %u gen %u %s — ‼ ANSWER OWED: %s took the event for token "
+                    "0x%06x %lu ms ago (0x%lx) and the answer was never delivered "
+                    "— the kernel owes it and nothing is producing it\n",
+                    e->pid, e->generation, nightwatch_state_name(e->state),
+                    c->holder ? c->holder : "?", (unsigned)e->awaiting,
+                    (unsigned long)(now_ms - c->since_ms), (unsigned long)c->detail);
+        else
+            kprintf("  pid %u gen %u %s — ‼ ANSWER OWED: waiting on token 0x%06x "
+                    "across two looks; its pocket ring is empty, no K-Core serves "
+                    "it, and no handler left a chit for it — the work was taken "
+                    "and nobody promised the answer\n",
+                    e->pid, e->generation, nightwatch_state_name(e->state),
+                    (unsigned)e->awaiting);
+    }
+    return true;
 }
 
 /*
@@ -372,65 +425,24 @@ static void nightwatch_verdict(void)
         e->result_ring_phys = p->result_ring_phys;
         e->touch_ring_phys  = p->touch_ring_phys;
         e->pocket_ring_phys = p->pocket_ring_phys;
+        ChitPeek(p, &e->chit);   /* chit.lock: a leaf under process_list_lock */
     }
     process_list_unlock();
 
-    /* Tokens whose silence is LAWFUL.
+    /* What each strand was PROMISED is read with the snapshot above (ChitPeek):
+     * the handler that put an answer off left a chit naming itself, the event
+     * that made the answer marked it due, the push that delivered it kept it.
+     * The ANSWER OWED oracle below judges on that record and on nothing about
+     * the machine at large — see nightwatch_answer_owed.
      *
-     * A strand parked on process.gone is waiting for another process to die.
-     * That answer is owed by an EVENT, not by anyone working right now, and a
-     * child may legitimately run for hours — the shell waiting out a cxxtest
-     * is exactly this, and a watch that convicts it is a watch nobody will
-     * believe when it is finally right. So these tokens are collected and the
-     * oracle below steps over them.
-     *
-     * Collected AFTER the snapshot and by reference, never under
-     * process_list_lock: gone_lock is documented to nest inside nothing. If
-     * the list does not fit, the oracle stands down for this look rather than
-     * convict a strand it merely failed to look up — an oracle that guesses
-     * when incomplete is worse than one that waits for the next look.
-     *
-     * ‼ KNOWN LIMIT, named rather than left to be rediscovered: process.gone
-     * is the only lawful open-ended wait the kernel can currently RECOGNISE.
-     * Storage reads, addr_park and touch_await also promise their answer for
-     * later (the handlers that set async_owns_crates), and nothing records
-     * that promise anywhere this walk can see it. Such a wait, if it were ever
-     * both open-ended and alone on a sleeping machine, would be accused
-     * wrongly. It has not happened — a full matrix and seven minutes at an
-     * idle prompt both give owed=0, because storage waits run under load where
-     * the progress witness sees answers flowing, and touch_await is bounded at
-     * 30 s. Closing it properly means the kernel keeping a register of
-     * promised answers, which is its own piece of work; until then this
-     * paragraph is the honest edge of what the oracle knows.
-     *
-     * TURN IN is the newest open-ended wait and deliberately not a problem
-     * here: it publishes no cloakroom token, so `awaiting` stays 0 and the
-     * ANSWER OWED oracle below — which convicts only on a token — steps over
-     * an idle sleeper without needing to be told about it. What DOES speak for
-     * a turned-in strand is the delivery evidence: a Result or Touch sitting
-     * unread in its ring, or a Brook frame with its bell still hanging. Those
-     * are facts about a delivery that happened, and they are exactly what a
-     * lost wake in this new sleep looks like. */
-    /* Sampled exactly once per look: the call advances its own baseline, so a
-     * second call in the same walk would always report "no progress". */
-    const bool answers_moving = nightwatch_answers_advanced();
-
-    uint32_t gone_tokens[NIGHTWATCH_GONE_TOKENS];
-    uint32_t gone_count    = 0;
-    bool     gone_complete = true;
-    for (uint32_t i = 0; i < n; i++)
-    {
-        process_t *gp = process_find_ref(probe[i].pid);
-        if (!gp) continue;
-        spin_lock(&gp->gone_lock);
-        for (GoneWaiter *w = gp->gone_waiters; w; w = w->next)
-        {
-            if (gone_count < NIGHTWATCH_GONE_TOKENS) gone_tokens[gone_count++] = w->submit_cookie;
-            else                                     gone_complete = false;
-        }
-        spin_unlock(&gp->gone_lock);
-        process_ref_dec(gp);
-    }
+     * TURN IN is an open-ended wait and deliberately not a problem here: it is
+     * submitted without a cloakroom token, so `awaiting` stays 0 and the oracle
+     * — which convicts only on a token — steps over an idle sleeper without
+     * needing to be told about it. What DOES speak for a turned-in strand is
+     * the delivery evidence: a Result or Touch sitting unread in its ring, or a
+     * Brook frame with its bell still hanging. Those are facts about a delivery
+     * that happened, and they are exactly what a lost wake in this new sleep
+     * looks like. */
 
     uint32_t parked = 0, lost = 0, unreachable = 0, timed = 0, undelivered = 0;
     uint32_t unserved = 0, unsched = 0, owed = 0;
@@ -516,93 +528,9 @@ static void nightwatch_verdict(void)
             }
         }
 
-        /* ANSWER OWED. A strand is holding out for a reply to a submit, and
-         * nobody is producing it.
-         *
-         * This is the one stall the other oracles cannot see. They look for
-         * work that was never taken; this one is about work that WAS taken and
-         * never paid for — the pocket is gone from the ring, the doorbell is
-         * quiet, and the strand waits on a token that will never be answered.
-         * Waiting is correct behaviour here, which is what makes it invisible:
-         * there is no deadline to expire and nothing left queued to notice.
-         *
-         * Judged on FACTS, never on a clock. A clock cannot work here at all:
-         * proc_exec reads its image inside the call (minutes off a throttled
-         * stick) and process.gone waits out a whole child's life (hours), and
-         * both are owed an answer that is simply not due yet. So instead:
-         *
-         *   the pocket ring is empty          — the work was taken, not queued
-         *   the doorbell is quiet             — no K-Core owes this strand a visit
-         *   EVERY K-Core is asleep            — nobody is working on it now
-         *   the token is not a lawful death-wait (above)
-         *   and all of it is still true one full look later
-         *
-         * Together those say: the machine has stopped, and this strand is what
-         * it stopped on. Any one of them alone is an ordinary busy moment. */
-        /* Deliberately NOT gated on being off-cpu. The two shapes this has to
-         * cover are opposites — a strand PARKED on a reply that never came,
-         * and one SPINNING in userspace for it — and the spinner is on a CPU
-         * by definition. Whether the waiter burns a core or sleeps says
-         * nothing about whether anyone is producing its answer, which is the
-         * only question here.
-         *
-         * On a uniprocessor this oracle stands down of its own accord, and
-         * correctly: nightwatch_all_kcores_idle returns false when the machine
-         * has no K-Cores at all, because "everyone who could be working on it
-         * is asleep" is not a proof of anything when there is nobody in that
-         * set — the one core does the work inline and may simply be busy
-         * elsewhere. The other evidence here (a delivery lying unread, a bell
-         * that went unrung) is about a delivery that HAPPENED and holds on any
-         * number of cores; only this one needs K-Cores to mean what it says. */
-        if (e->awaiting != 0 && gone_complete && !answers_moving &&
-            e->kcore_pending == 0 &&
-            e->state != (uint8_t)PROC_DONE && e->state != (uint8_t)PROC_CRASHED &&
-            nightwatch_all_kcores_idle())
-        {
-            bool lawful = false;
-            for (uint32_t g = 0; g < gone_count; g++)
-                if (gone_tokens[g] == e->awaiting) { lawful = true; break; }
-
-            bool pocket_empty = true;
-            if (e->pocket_ring_phys)
-            {
-                const PocketRingHeader *oh =
-                    (const PocketRingHeader *)vmm_phys_to_virt(e->pocket_ring_phys);
-                pocket_empty = (__atomic_load_n(&oh->tail, __ATOMIC_ACQUIRE) ==
-                                __atomic_load_n(&oh->head, __ATOMIC_ACQUIRE));
-            }
-
-            if (!lawful && pocket_empty)
-            {
-                bool stuck = nightwatch_suspect_stuck(e->pid, e->generation,
-                                                      (uint64_t)e->awaiting, 3u,
-                                                      now_ms, pass == 0, fresh, &fresh_count,
-                                                      fresh_cap);
-                if (stuck)
-                {
-                    owed++;
-                    /* One line per stall, not one every ten seconds for as
-                     * long as it lasts: a watch that repeats itself buries the
-                     * evidence it just produced. A different (pid, generation,
-                     * token) is a different stall and speaks for itself. */
-                    bool fresh_stall =
-                        !nightwatch_already_said(e->pid, e->generation, e->awaiting);
-                    if (speak && fresh_stall)
-                    {
-                        nightwatch_mark_said(e->pid, e->generation, e->awaiting);
-                        kprintf("  pid %u gen %u %s — ‼ ANSWER OWED: waiting on "
-                                "submit 0x%06x across two looks; its pocket ring "
-                                "is empty, its K-Core doorbell is quiet, and every "
-                                "K-Core is asleep. The work was taken and the "
-                                "answer was never produced — no deadline can "
-                                "expire on an answer nobody is making\n",
-                                e->pid, e->generation,
-                                nightwatch_state_name(e->state),
-                                (unsigned)e->awaiting);
-                    }
-                }
-            }
-        }
+        if (nightwatch_answer_owed(e, now_ms, pass == 0, speak,
+                                   fresh, &fresh_count, fresh_cap))
+            owed++;
 
         /* PENDING RESULT. Not every block is an addr-park: a process can be
          * waiting for a Result instead. If its ring already holds one — tail

@@ -54,9 +54,5 @@ bool KResultRingHasPendingReply(process_t *proc);
  * sleeper after releasing it). See the definition for the measured case. */
 bool KResultRingHasUnreadAtHead(process_t *proc);
 
-/* Diagnostic: snapshot per-return-path counters
- *   out[0]=null_args, [1]=no_hdr, [2]=zero_cap, [3]=pre_full, [4]=premap_fail,
- *   [5]=crosspg_fail, [6]=translate_fail, [7]=spin_warn, [8]=overflow, [9]=success */
-void KResultPushStats(uint64_t out[9]);
 
 #endif /* KRING_H */

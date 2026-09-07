@@ -12,6 +12,7 @@
  */
 
 #include "addr_wait.h"
+#include "chit.h"     /* ChitDue — a claim makes the answer due */
 #include "klib.h"
 #include "atomics.h"
 
@@ -91,6 +92,15 @@ void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry)
     spin_unlock(&bucket->lock);
 }
 
+bool AddrWaitClaimLocked(AddrWaitBucket *bucket, AddrWaitEntry *entry)
+{
+    if (!entry->linked || entry->done) return false;
+    entry->done = 1;            /* claim — exactly one winner */
+    AddrWaitUnlink(bucket, entry);
+    ChitDue(entry->proc, entry->submit_cookie);
+    return true;
+}
+
 bool AddrWaitClaim(AddrWaitEntry *entry)
 {
     /* Cheap unlocked pre-check: an already-unlinked entry can never be claimed,
@@ -100,13 +110,8 @@ bool AddrWaitClaim(AddrWaitEntry *entry)
     AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
     if (!bucket) return false;
 
-    bool won = false;
     spin_lock(&bucket->lock);
-    if (entry->linked && !entry->done) {
-        entry->done = 1;            /* claim — exactly one winner */
-        AddrWaitUnlink(bucket, entry);
-        won = true;
-    }
+    bool won = AddrWaitClaimLocked(bucket, entry);
     spin_unlock(&bucket->lock);
     return won;
 }
@@ -120,13 +125,8 @@ bool AddrWaitClaimSeq(AddrWaitEntry *entry, uint32_t seq)
     AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
     if (!bucket) return false;
 
-    bool won = false;
     spin_lock(&bucket->lock);
-    if (entry->linked && !entry->done && entry->seq == seq) {
-        entry->done = 1;            /* claim — exactly one winner */
-        AddrWaitUnlink(bucket, entry);
-        won = true;
-    }
+    bool won = (entry->seq == seq) && AddrWaitClaimLocked(bucket, entry);
     spin_unlock(&bucket->lock);
     return won;
 }

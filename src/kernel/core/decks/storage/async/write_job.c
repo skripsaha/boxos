@@ -27,6 +27,7 @@
  */
 
 #include "write_job.h"
+#include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
 #include "boardroom.h"
 #include "storage_completion.h"
 #include "crate_stage.h"
@@ -554,6 +555,9 @@ static void wjob_finalize(WriteJob *j, int rc)
     else            { r.context = KCTX_PACK24(KCTX_GUIDE, j->submit_cookie); }
 
     if (j->target) {
+        /* The answer is determined; only its delivery remains, and that is
+         * the kernel's own debt. Due here, kept by the push. */
+        ChitDue(j->target, j->submit_cookie);
         KResultPush(j->target, &r);
         process_ref_dec(j->target);
     }
@@ -734,10 +738,11 @@ int ObjWriteAsync(uint32_t            file_id,
     j->crates_uaddr  = crates_uaddr;
 
     process_set_state(ctx->proc, PROC_WAITING);
-    /* Signal staged-crates ownership transfer to wjob_finalize so the
-     * dispatcher skips its sync commit_out + kfree — race-safe vs a
-     * very-fast AHCI completion. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    /* The chit, and with it the staged-crates ownership transfer to
+     * wjob_finalize (the dispatcher then skips its sync commit_out + kfree —
+     * race-safe vs a very fast completion). Before the token claim: a job
+     * that gets the token pumps at once, and can finish on another core. */
+    ChitGive(ctx, "storage.write", file_id);
 
     if (token_try_claim(j)) {
         atomic_store_u32((volatile uint32_t *)&j->state, W_LOCATE);
