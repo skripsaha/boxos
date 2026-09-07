@@ -25,6 +25,7 @@
  */
 
 #include "klib.h"
+#include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
 #include "crate_stage.h"
 #include "crate_io.h"
 #include "op_registry.h"
@@ -229,6 +230,9 @@ static void obj_read_finish(ObjReadAsyncCtx *ctx, error_t status, bool partial_o
                                         ctx->crates_uaddr);
     }
 
+    /* The answer is determined; only its delivery remains, and that is the
+     * kernel's own debt. Due here, kept by the push. */
+    ChitDue(ctx->target, ctx->submit_cookie);
     KResultPush(ctx->target, &r);
     process_ref_dec(ctx->target);
     kfree(ctx);
@@ -361,7 +365,9 @@ static int storage_sync_ferry_finalize(const OpContext *ctx, Crate *crates,
     r.context     = KCTX_STORAGE;
     KResultPush(ctx->proc, &r);
 
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    /* A ferry op is submitted without a token — nobody waits on a Result to
+     * it — so this raises the async flag and leaves no chit. */
+    ChitGive(ctx, "storage.ferry", waybill);
     return ERR_WOULD_BLOCK;
 }
 
@@ -472,13 +478,14 @@ static int ObjRead(const ManifestOp *op,
                          * no-op and the wake is lost. Setting WAITING
                          * first makes that transition reliable. */
                         process_set_state(ctx->proc, PROC_WAITING);
-                        /* Signal ownership transfer of the staged crates
-                         * kbuf to the async_ctx. Dispatcher reads this
-                         * flag (instead of process state) to decide
-                         * whether to skip sync cleanup — race-safe vs
-                         * a fast AHCI completion that would have flipped
-                         * state back to PROC_WORKING. */
-                        if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+                        /* The chit, and with it the ownership transfer of
+                         * the staged crates kbuf to the async_ctx (the flag
+                         * the dispatcher reads instead of process state —
+                         * race-safe vs a fast completion that flips state
+                         * back to PROC_WORKING). Given BEFORE the first
+                         * submit: the finish that keeps it may run on
+                         * another core the moment the read is armed. */
+                        ChitGive(ctx, "storage.read", file_id);
                         obj_read_step(async_ctx);
                         return ERR_WOULD_BLOCK;
                     }

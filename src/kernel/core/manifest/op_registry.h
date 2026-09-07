@@ -49,12 +49,14 @@ typedef struct OpContext {
                                     * descriptor mutations back to user memory
                                     * via crate_stage_commit_and_release. */
     bool             *async_owns_crates;
-                                   /* Dispatcher-supplied pointer. Async
-                                    * handlers set *async_owns_crates = true
-                                    * BEFORE returning ERR_WOULD_BLOCK to
-                                    * signal that they've stashed the staged
-                                    * crates kbuf into their async_ctx and
-                                    * will commit+free at I/O completion.
+                                   /* Dispatcher-supplied pointer, written by
+                                    * ChitGive (chit.h) and by nothing else:
+                                    * a handler that puts its answer off calls
+                                    * it BEFORE returning ERR_WOULD_BLOCK,
+                                    * which raises this flag — it has stashed
+                                    * the staged crates kbuf into its async_ctx
+                                    * and will commit+free at completion — and
+                                    * leaves the chit Nightwatch reads.
                                     *
                                     * Using an explicit handler-set flag
                                     * (instead of process_get_state == WAITING)

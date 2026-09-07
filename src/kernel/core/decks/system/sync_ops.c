@@ -41,6 +41,7 @@
  */
 
 #include "system_deck.h"
+#include "chit.h"       /* ChitGive / ChitDue — the promise of an answer, and its falling due */
 #include "sync_ops.h"
 #include "addr_wait.h"
 #include "op_registry.h"
@@ -116,6 +117,14 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * the entry in an inert-linked state. */
     AddrWaitEntry *entry = &ctx->proc->addr_wait_entry;
     AddrWaitUnlinkIfLinked(entry);
+
+    /* The chit BEFORE the link, and before any lock: from the link onward a
+     * waker can claim this entry, and a claim marks due the promise it finds —
+     * so the promise must already be there. This also sets the async flag for
+     * every exit below; a path that answers synchronously (an early error, or
+     * the recheck winning its own claim) is simply pushed by the guide, and
+     * that push keeps the chit. Nothing else here writes the flag. */
+    ChitGive(ctx, "system.addr.park", (uint64_t)phys);
 
     AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
     if (!bucket) return ERR_NO_MEMORY;
@@ -208,9 +217,9 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
 
     if (completed) {
         /* (b) A concurrent addr_wake claimed us and will KResultPush the
-         * completion. Reschedule to WORKING and wait async for it to arrive. */
+         * completion. Reschedule to WORKING and wait async for it to arrive
+         * (the async flag was set with the chit above). */
         process_set_state(ctx->proc, PROC_WORKING);
-        if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
         return ERR_WOULD_BLOCK;
     }
 
@@ -225,9 +234,9 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     }
 
     /* Step 7: go async and return ERR_WOULD_BLOCK. guide does NOT push a reply
-     * now (async_owns_crates set); the parked caller's result_wait blocks until
-     * addr_wake / the park-timeout KResultPushes the real completion. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+     * now (the async flag went up with the chit); the parked caller's
+     * result_wait blocks until addr_wake / the park-timeout KResultPushes the
+     * real completion, which keeps the chit. */
     return ERR_WOULD_BLOCK;
 }
 
@@ -282,9 +291,9 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
          * Wake only waiters on THIS exact address — otherwise a colliding waiter
          * consumes the (count==1) notify_one budget and the intended waiter
          * misses its wake (lost wakeup for a mutex/semaphore handoff). */
-        if (!e->done && e->phys_addr == phys) {
-            e->done = 1;                 /* claim — we now own this waiter */
-            AddrWaitUnlink(bucket, e);   /* unlink under the same lock */
+        if (e->phys_addr == phys && AddrWaitClaimLocked(bucket, e)) {
+            /* Claimed — we own this waiter's one completion, and its chit is
+             * DUE from here (AddrWaitClaimLocked marks it under this lock). */
             process_ref_inc(e->proc);
             to_wake_cookie[wake_count] = e->submit_cookie;
             to_wake[wake_count++]      = e->proc;
@@ -481,6 +490,12 @@ static int SysProcessGone(const ManifestOp *op, Crate *crates,
     w->want_generation = want_gen;
     w->submit_cookie   = ctx->submit_cookie;
 
+    /* The chit before the list, outside gone_lock (ChitGive may speak, and
+     * gone_lock is taken alone). It also raises the async flag; the "death
+     * already committed" exit below then answers synchronously through the
+     * guide, whose push keeps the chit. */
+    ChitGive(ctx, "system.process.gone", ((uint64_t)want_gen << 32) | pid);
+
     spin_lock(&target->gone_lock);
     if (__atomic_load_n(&target->touch_cleaned, __ATOMIC_ACQUIRE)) {
         /* Death already committed — its drain has run or is running, and it
@@ -509,7 +524,6 @@ static int SysProcessGone(const ManifestOp *op, Crate *crates,
     process_set_state(ctx->proc, PROC_WAITING);
 
     /* Async: guide pushes no reply now; the death delivers the real one. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
     return ERR_WOULD_BLOCK;
 }
 
@@ -540,6 +554,9 @@ void ProcessGoneDeliver(process_t *proc, int32_t exit_code)
          * which is what lets a death answer from any core. */
         r.data_length = (uint32_t)exit_code;
         r.context     = KCTX_PACK24(KCTX_GUIDE, list->submit_cookie);
+        /* The death is the event: the answer is determined here and this
+         * delivery is what the kernel owes. */
+        ChitDue(list->waiter, list->submit_cookie);
         KResultPush(list->waiter, &r);
 
         process_ref_dec(list->waiter);  /* the waiter ref taken when it parked */

@@ -9,6 +9,7 @@
  */
 
 #include "touch_queue.h"
+#include "chit.h"     /* ChitDue — a deadline that fires is an answer determined */
 #include "touch.h"
 #include "klib.h"
 #include "atomics.h"
@@ -145,6 +146,15 @@ static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq,
     if (!target) return;
     if (!target->destroying && process_get_state(target) == PROC_WAITING &&
         __atomic_load_n(&target->park_seq, __ATOMIC_ACQUIRE) == park_seq) {
+        /* The deadline is the event: from this tick the answer (ERR_TIMEOUT) is
+         * determined and the kernel owes it — through the deferred delivery
+         * below, which CAN be dropped. Mark it due here, where the strand is
+         * provably still in this park (WAITING, park_seq unchanged, so it has
+         * not re-armed the entry; the ref is held), so a delivery that never
+         * comes is a chit DUE for ever, not a silence. touch_await (wait_seq
+         * 0) owes no Result and carries no token. */
+        if (wait_seq != 0)
+            ChitDue(target, target->addr_wait_entry.submit_cookie);
         process_set_state(target, PROC_WORKING);
         if (g_amp.total_cores > 1) {
             uint8_t core = target->home_core;

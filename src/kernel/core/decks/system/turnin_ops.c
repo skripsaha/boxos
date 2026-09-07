@@ -41,6 +41,7 @@
  */
 
 #include "system_deck.h"
+#include "chit.h"        /* ChitGive — the only writer of the async flag */
 #include "turnin_ops.h"
 #include "op_registry.h"
 #include "manifest_auth.h"
@@ -129,7 +130,7 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
      * between its own mark and this handler from paying for a park it is about
      * to undo. Not load-bearing — the re-check after the park is. */
     if (turnin_arrival_pending(proc, touch_seen, result_seen)) {
-        if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+        ChitGive(ctx, "system.turn.in", 0);
         return ERR_WOULD_BLOCK;
     }
 
@@ -167,8 +168,9 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
         process_set_state(proc, PROC_WORKING);
     }
 
-    /* Answer nothing — see the file header. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    /* Answer nothing — see the file header. Turn In is submitted without a
+     * token, so ChitGive raises the flag and leaves no chit. */
+    ChitGive(ctx, "system.turn.in", 0);
     return ERR_WOULD_BLOCK;
 }
 
@@ -209,7 +211,7 @@ static int SysBell(const ManifestOp *op, Crate *crates,
 
     /* Past this point nothing is answered, so every exit must say so — a
      * silent op that replies on one path is worse than one that always does. */
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
+    ChitGive(ctx, "system.bell", 0);
 
     uint32_t who;
     memcpy(&who, op->params, sizeof(uint32_t));
@@ -223,8 +225,6 @@ static int SysBell(const ManifestOp *op, Crate *crates,
     r.error_code = ERR_WOULD_BLOCK;
     (void)KResultPush(target, &r);
     process_ref_dec(target);
-
-    if (ctx->async_owns_crates) *ctx->async_owns_crates = true;
     return ERR_WOULD_BLOCK;
 }
 

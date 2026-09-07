@@ -15,7 +15,7 @@
  *
  * Nightwatch measures a CONTRADICTION instead, and it only ever reports.
  *
- * Two contradictions it proves — neither on a clock's say-so:
+ * Among the contradictions it proves — none on a clock's say-so:
  *
  *   LOST WAKE     A process is parked on an address, no deadline was armed,
  *                 the value it waits on has ALREADY changed — and one full
@@ -41,6 +41,18 @@
  *                 never be found again. addr_wait.h names this hazard in its
  *                 REAL-HW CAVEAT; until now nothing in the kernel could tell
  *                 that it had actually happened.
+ *
+ *   ANSWER OWED   A strand holds out for the answer to a submit (the token
+ *                 it publishes in its reply-ring header), the submit is no
+ *                 longer queued, no K-Core is serving it, and the kernel's
+ *                 own record of the promise (chit.h) says either that nobody
+ *                 promised the answer or that the one who did let it fall
+ *                 due and never delivered — and the same a full look later.
+ *                 What it is NOT judged on: how many cores sleep, or whether
+ *                 anything else in the machine was answered lately. Both are
+ *                 witnesses to the machine, not facts about this strand, and
+ *                 both were measured convicting a healthy brigade of workers
+ *                 whose leader was merely busy.
  *
  * The spacing of looks (NIGHTWATCH_LOOK_MS in nightwatch.c) is NOT the
  * diagnosis, and it is not a threshold on the machine either. It decides WHEN
