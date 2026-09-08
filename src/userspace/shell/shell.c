@@ -20,7 +20,6 @@
 #include "box/use.h"
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
-#include "box/display.h"
 
 static ShellState    g_state;
 static LineEditState g_editor;
@@ -43,103 +42,21 @@ void ShellInit(void)
 
     CabinInfo *ci = cabin_info();
 
-    /* Display daemon is now an autostart utility (kernel main.c launches
-     * any TagFS file tagged "autostart"+"utility|app" at boot). The root
-     * shell may still come up before display has registered, in which case
-     * we fall back to spawning a private one. Either way, discovery is via
-     * a single PING broadcast rather than an unconditional proc_exec —
-     * spawning a second copy aliases on the "display" tag and the duplicate
-     * page-faults during init.
+    /* The display daemon is an autostart utility the kernel launches from the
+     * volume. The shell never looks for it: its first print asks for a console
+     * lane, the kernel says at once whether anyone wears the display tag, and
+     * a daemon that exists answers when it reaches its loop — or dies, which
+     * the lane wait sees. Either outcome decides IPC or direct VGA in boxlib
+     * (lane_fail), on facts and without a clock. The shell never spawns a
+     * daemon of its own either: a second daemon aliases on the tag.
      *
-     * Nested shells (spawner_pid != 0) skip the parent's args IPC drain
-     * before doing the PING, so they don't consume their first user
-     * notification by mistake. */
+     * A nested shell (spawner_pid != 0) first drains what its spawner left
+     * in the mailbox, so nothing stale is read as a reply later. */
     io_set_mode(IO_MODE_IPC);
 
     if (ci->spawner_pid != 0) {
         ShellDrainStaleIpc();
     }
-
-    /* Discovery: PING the "display" tag and pick up the first responder.
-     *
-     * The original 500 ms timeout was too aggressive — on a heavily-loaded
-     * 16-core boot (each AP racing through init), the autostart display
-     * daemon hadn't yet reached its `receive_wait` loop when this PING
-     * was issued, so PING went unanswered → shell concluded "no display"
-     * → spawned a second daemon → both daemons survived → every later
-     * `broadcast("display", ...)` hit both → the user saw duplicated
-     * banners and interleaved characters in the serial mirror (the
-     * 2026-05-14 STRICT-mode regression).
-     *
-     * Three-stage discovery:
-     *   1. fast PING with a generous wait (covers normal cold boot);
-     *   2. one retry — display may have responded to *another* process'
-     *      broadcast in the meantime, so we re-PING ourselves;
-     *   3. only if both rounds fail and we have no parent that could
-     *      have spawned us a display, fall back to proc_exec — and even
-     *      then we wait for *that* spawn's reply, never assuming the
-     *      original tag is silent forever. */
-    Result entry;
-    bool   discovered   = false;
-    bool   nobody_at_all = false;
-
-    for (int round = 0; !discovered && round < 2; round++) {
-        uint8_t ping = DISP_CMD_PING;
-        int rc = broadcast("display", &ping, 1);
-
-        /*
-         * The kernel already answered the question, on the spot and exactly.
-         *
-         * A broadcast is routed to the processes carrying the tag, so
-         * ERR_ROUTE_NO_SUBSCRIBERS does not mean "nobody has replied yet" —
-         * it means there is no process wearing the display tag for a reply to
-         * come from. Waiting 2500 ms twice for one is waiting on a clock for
-         * an event that cannot happen, and it is exactly the machine that has
-         * no display daemon — one that failed to mount a volume — where those
-         * five seconds are spent, and where somebody is standing in front of
-         * a blank screen wanting to type.
-         *
-         * The wait that remains is the one worth having: the daemon EXISTS
-         * (the broadcast reached it, because the tag is on the process from
-         * the moment it is created) and simply has not reached its receive
-         * loop yet. That is a watchdog on something that is really coming,
-         * which is what the 2500 ms was written for — the 2026-05-14
-         * regression where a 16-core boot had display alive but not yet
-         * listening, and a too-short window made the shell spawn a second one.
-         */
-        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) {
-            nobody_at_all = true;
-            break;
-        }
-
-        if (receive_wait(&entry, 2500) && entry.sender_pid != 0) {
-            io_set_display_pid(entry.sender_pid);
-            discovered = true;
-        }
-    }
-
-    if (!discovered && (nobody_at_all || ci->spawner_pid == 0)) {
-        /* Historical: spawned a "last-resort" display via proc_exec here.
-         * That was the root cause of the post-2026-05-15 "first-command-
-         * no-op" race: the autostart display was actually alive but its
-         * cold-boot init delayed past our PING window, so we spawned a
-         * SECOND daemon. Both daemons answered subsequent PINGs; the
-         * extra reply sat in the shell mailbox and the next
-         * receive_wait() (inside readline) pulled it instead of the
-         * typed-line reply — readline interpreted 4 bytes of display PID
-         * as a length-prefixed line, memcpy'd garbage past the buffer,
-         * and the shell silently dropped the user's first command.
-         *
-         * Fix: never spawn here. If no display answers in 2×2500 ms,
-         * fall back to direct VGA I/O — single-daemon invariant is more
-         * important than the "private display" affordance. */
-        io_set_mode(IO_MODE_VGA);
-    }
-
-    /* Drain any stale messages left over from discovery — second
-     * daemon's PING reply, retried broadcast echoes, etc. Without this
-     * the FIRST readline pulls the stale reply and returns garbage. */
-    ShellDrainStaleIpc();
 
     /* The context this shell was born into — a nested shell inherits the
      * user's `use`, because the context is the machine's, not a shell's. */
@@ -186,17 +103,11 @@ void ShellUpdatePrompt(void)
 /*
  * ShellDrainStaleIpc — drop everything sitting in the IPC mailbox.
  *
- * Used between user-visible operations so the next receive_wait inside
- * readline / executor never pulls a stale message left behind by:
- *   - a duplicate display-daemon PING reply during discovery
- *   - kernel-broadcast Touches the shell isn't subscribed to
- *
- * A spawned child sends the shell NOTHING on exit — its death is observed on
- * the process:died TouchRing, a separate ring — so this only clears stray
- * ResultRing traffic (display PING residue, stray broadcasts).
- *
- * Previously inlined at six call sites; centralised so a future change
- * (e.g. logging dropped traffic) edits one place.
+ * Nothing the shell waits for arrives as IPC any more: a spawned child sends
+ * it NOTHING on exit (its death is a state, process_gone), and the console
+ * grant is awaited by the lane itself. What can still sit in the mailbox is
+ * what a spawner left behind for a nested shell, and that is drained once,
+ * at birth, so it is never read as a reply later.
  */
 void ShellDrainStaleIpc(void)
 {
