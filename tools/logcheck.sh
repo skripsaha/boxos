@@ -3871,6 +3871,159 @@ run_linesmut() {
     build   # leave the tree built from clean sources
 }
 
+# ===========================================================================
+# rollcall — every line said answers with its number, whole, on the wire
+# ===========================================================================
+#
+# Two paths carry a line into the serial account, and each had a way of
+# losing or tearing it that no count of characters could see.
+#
+# printf stages a strand's text in the strand's own frame and pushes it when
+# the frame fills, the colour changes or somebody flushes — so the line a
+# strand said just before returning died with it (MEASURED on BIOS 16c: the
+# last of 400 numbered lines, every printf strand, every run; print_stress
+# hid it with an io_flush of its own). And the daemon drew a line's text in
+# one VGA operation and its newline in the next, with the console lock held
+# per operation, so a kprintf from another core landed between the two:
+#
+#     [ROLLCALL] s=1 n=0 via=printf[6] [ROLLCALL] s=2 n=2 via=kdbg
+#
+# (MEASURED: 184 and 71 such lines of 1600 in two runs.) `lines` can see
+# neither: print_stress flushed by hand, and nothing prints from the kernel
+# while it runs.
+#
+# rollcall is the instrument: four strands, four hundred numbered lines each,
+# two through printf and two through kdbg_print (the kernel's kprintf), all
+# at once. Every number must answer exactly once, and no line may carry
+# another's.
+rollcall_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "rollcall" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        sleep 2
+        tail -n +$((MARK + 1)) build/serial.log | grep -q "\[ROLLCALL\] done" && break
+        i=$((i+1))
+    done
+    sleep 2
+    # CRLF on the wire, and a kdbg line wears the kernel's "[pid] " prefix:
+    # strip both once so the shape below is the line's own.
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' \
+        | sed -E 's/^\[[0-9]+\] //' > "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+# Prints "<answered> <carrying>": numbers that answered as a whole line of
+# their own, and lines that carry more than one record.
+rollcall_count() {
+    local answered=0 s
+    for s in 0 1 2 3; do
+        answered=$(( answered + $(grep -E "^\[ROLLCALL\] s=$s n=[0-9]+ via=(printf|kdbg)$" "$1" | sort -u | wc -l | tr -d ' ') ))
+    done
+    local carrying
+    carrying=$(grep -c "ROLLCALL.*ROLLCALL" "$1" | tr -d ' ')
+    echo "$answered $carrying"
+}
+
+run_rollcall() {
+    echo "== rollcall: 1600 numbered lines from four strands, every one answering, none carrying another =="
+    build
+    if ! rollcall_boot rollcall; then bad "rollcall: never reached a shell"; return; fi
+    L="$SCRATCH/serial.rollcall.log"
+
+    grep -q "\[ROLLCALL\] done: 4 strands x 400 lines" "$L" \
+        && ok "rollcall: all four strands spoke and the utility finished" \
+        || bad "rollcall: the utility did not finish with four strands"
+
+    set -- $(rollcall_count "$L")
+    echo "     $1 of 1600 numbers answered whole; $2 line(s) carrying another record"
+    if [ "$1" -eq 1600 ]; then ok "rollcall: every number answered, whole"
+    else                       bad "rollcall: $((1600 - $1)) number(s) never answered whole"; fi
+    if [ "$2" -eq 0 ]; then ok "rollcall: no line carried another's"
+    else                    bad "rollcall: $2 line(s) carried another record"; fi
+}
+
+# The oracle measured against itself: put both defects back — the strand
+# leaves without handing in its frame, the daemon draws text and newline as
+# two operations — and each symptom above must come back.
+rollcall_defects_on() {
+    cp src/userspace/boxlib/src/strand.c "$SCRATCH/strand.c.rollcall.bak"
+    cp src/userspace/display/display.c "$SCRATCH/display.c.rollcall.bak"
+    python3 - <<'EOF'
+p = "src/userspace/boxlib/src/strand.c"
+s = open(p).read()
+anchor = "    io_flush();\n"
+assert s.count(anchor) == 1, "rollcall strand anchor missing"
+s = s.replace(anchor, "    /* logcheck mutation: the strand leaves without handing in its frame */\n", 1)
+open(p, "w").write(s)
+p = "src/userspace/display/display.c"
+s = open(p).read()
+anchor = """    for (uint32_t i = 0; i < len; i++) {
+        char c = f->text[i];
+        if (c == '\\n' || (unsigned char)c >= 0x20) seg[pos++] = c;
+    }
+    if (pos > 0) {
+        seg[pos] = '\\0';
+        vga_puts(seg);
+    }
+"""
+assert s.count(anchor) == 1, "rollcall display anchor missing"
+mutated = """    for (uint32_t i = 0; i <= len; i++) {   /* logcheck mutation: text and newline as two operations */
+        int at_end = (i == len);
+        char c     = at_end ? '\\0' : f->text[i];
+        if (!at_end && c != '\\n' && (unsigned char)c >= 0x20) { seg[pos++] = c; continue; }
+        if (pos > 0) { seg[pos] = '\\0'; vga_puts(seg); pos = 0; }
+        if (!at_end && c == '\\n') vga_newline();
+    }
+"""
+open(p, "w").write(s.replace(anchor, mutated, 1))
+EOF
+    grep -q "logcheck mutation" src/userspace/boxlib/src/strand.c || { echo "rollcall strand mutation install FAILED"; exit 1; }
+    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "rollcall display mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/strand.c src/userspace/display/display.c
+}
+
+rollcall_defects_off() {
+    [ -f "$SCRATCH/strand.c.rollcall.bak" ] && cp "$SCRATCH/strand.c.rollcall.bak" src/userspace/boxlib/src/strand.c
+    [ -f "$SCRATCH/display.c.rollcall.bak" ] && cp "$SCRATCH/display.c.rollcall.bak" src/userspace/display/display.c
+    sleep 1; touch src/userspace/boxlib/src/strand.c src/userspace/display/display.c
+}
+
+run_rollcallmut() {
+    echo "== rollcallmut: both defects put back, and the roll call must see each =="
+    rollcall_defects_on; build
+    rollcall_boot rollcallmut; local booted=$?
+    rollcall_defects_off
+    if [ $booted -ne 0 ]; then bad "rollcallmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.rollcallmut.log"
+
+    set -- $(rollcall_count "$L")
+    echo "     $1 of 1600 numbers answered whole; $2 line(s) carrying another record"
+    if [ "$1" -lt 1600 ]; then ok "rollcallmut: a strand that leaves without handing in loses lines — $((1600 - $1)) missing, and the oracle sees them"
+    else                       bad "rollcallmut: the flush removed and every number STILL answered — the oracle cannot see that defect"; fi
+    if [ "$2" -gt 0 ]; then ok "rollcallmut: text and newline as two operations let $2 line(s) carry another — and the oracle sees them"
+    else                    bad "rollcallmut: two operations per line and NO line carried another — the oracle cannot see that defect"; fi
+
+    build   # leave the tree built from clean sources
+}
+
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -3889,6 +4042,8 @@ case "${1:-both}" in
     sleeps)     run_sleeps ;;
     lines)      run_lines ;;
     linesmut)   run_linesmut ;;
+    rollcall)   run_rollcall ;;
+    rollcallmut) run_rollcallmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -3911,8 +4066,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

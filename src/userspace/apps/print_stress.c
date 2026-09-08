@@ -59,13 +59,6 @@ static void run_pattern(uint32_t id)
         printf("[PS-%s] %s\n", id_str, iter_str);
     }
 
-    /* Per-strand print state is thread-confined and NOT auto-flushed on
-     * strand exit (strand_exit deliberately skips it — that is whole-cabin
-     * teardown's job). Without this, whatever is still sitting in this
-     * strand's console-lane frame when it exits is lost forever, not just
-     * delayed. */
-    io_flush();
-
     __atomic_fetch_add(&g_done_count, 1u, __ATOMIC_RELEASE);
     addr_wake(&g_done_count, 0);
 }
