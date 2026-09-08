@@ -56,7 +56,6 @@ SRCS = src/core/notify.c \
        src/clock.c \
        src/memory.c \
        src/vga.c \
-       src/keyboard.c \
        src/touch.c \
        src/turnin.c \
        src/bay.c \

@@ -243,7 +243,6 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 #define CONFIG_BROADCAST_TAG_MAX      64    /* max tag chars in a broadcast() */
 #define CONFIG_BROADCAST_TARGETS_MAX  256   /* max recipients per broadcast */
 
-#define CONFIG_KEYBOARD_BUFFER_SIZE 256
 
 /* Software typematic timing. Override at build with -DCONFIG_KB_REPEAT_*.
  *

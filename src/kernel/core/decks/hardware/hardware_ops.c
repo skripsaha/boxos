@@ -663,128 +663,6 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return tagfs_flush_cache();
 }
 
-/* =========================================================================
- *  Keyboard
- * ========================================================================= */
-
-static int HwKbGetChar(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                       const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t blob[4];
-
-    if (!keyboard_has_input()) {
-        blob[0] = 0; blob[1] = 0; blob[2] = 0; blob[3] = HW_KB_NO_DATA;
-        if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
-        return OK;
-    }
-
-    char ch = keyboard_getchar();
-    keyboard_state_t *kbs = keyboard_get_state();
-    /* Atomic loads — kb_state is mutated from PS/2 IRQ (BSP) and xHCI HID
-     * IRQ; this op runs on the calling user-core. */
-    uint8_t mods = 0;
-    if (__atomic_load_n(&kbs->shift_pressed, __ATOMIC_RELAXED)) mods |= 0x01;
-    if (__atomic_load_n(&kbs->ctrl_pressed,  __ATOMIC_RELAXED)) mods |= 0x02;
-    if (__atomic_load_n(&kbs->alt_pressed,   __ATOMIC_RELAXED)) mods |= 0x04;
-
-    blob[0] = (uint8_t)ch;
-    blob[1] = __atomic_load_n(&kbs->last_keycode, __ATOMIC_RELAXED);
-    blob[2] = mods;
-    blob[3] = HW_KB_SUCCESS;
-    if (crate_write(out, ctx, blob, 4) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-static int HwKbReadLine(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 3)                return ERR_INVALID_ARGUMENT;
-
-    uint16_t max_length = (uint16_t)op->params[0] | ((uint16_t)op->params[1] << 8);
-    uint8_t  echo_mode  = op->params[2];
-
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 5) return ERR_BUFFER_TOO_SMALL;
-
-    uint64_t data_capacity = out->capacity - 5;
-    if (max_length == 0 || max_length > data_capacity) {
-        max_length = (uint16_t)(data_capacity > 0xFFFFu ? 0xFFFFu : data_capacity);
-    }
-
-    keyboard_set_echo(echo_mode != 0);
-
-    /* out->capacity is attacker-controlled and this op is OP_AUTH_NONE, so the
-     * kernel bounce is bounded to the head region this op actually produces —
-     * a 4-byte length, the clamped line, and one NUL (<= ~64 KiB) — never the
-     * claimed capacity, which could be gigabytes. The trailing status byte
-     * lives at the ABI's last slot (out->addr + capacity - 1) and is committed
-     * separately below. */
-    uint64_t head_size = 4 + (uint64_t)max_length + 1;
-    uint8_t *kp = crate_out_alloc(out, head_size);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    /* crate_out_alloc zero-fills the bounce, so the length field and the line's
-     * NUL terminator are already 0; readline fills the line slot at +4. */
-    char *line_dst = (char *)(kp + 4);
-    int ready = keyboard_readline_async(line_dst, max_length);
-
-    uint8_t  status;
-    uint64_t head_bytes;
-    if (ready) {
-        size_t len = 0;
-        while (len < max_length && line_dst[len] != '\0') len++;
-        uint32_t len32 = (uint32_t)len;
-        memcpy(kp, &len32, sizeof(uint32_t));
-        status     = HW_KB_SUCCESS;
-        head_bytes = 4 + (uint64_t)len + 1;
-    } else {
-        status     = HW_KB_WOULD_BLOCK;
-        head_bytes = 5;
-    }
-
-    /* Commit the head region (length + line + NUL) at offset 0 (out->addr). */
-    int crc = crate_out_commit(out, ctx, kp, head_bytes);
-    crate_buf_free(kp);
-    if (crc != OK) return ERR_INVALID_ADDRESS;
-
-    /* Stamp the single status byte at its ABI slot, out->addr + capacity - 1,
-     * which the head commit does not cover. crate_write targets offset 0, so
-     * retarget a one-byte view of the crate at that exact address — same
-     * page-walked write (and no-cabin memcpy) path as the head commit. */
-    Crate status_slot    = *out;
-    status_slot.addr     = out->addr + out->capacity - 1;
-    status_slot.capacity = 1;
-    if (crate_write(&status_slot, ctx, &status, 1) != OK) return ERR_INVALID_ADDRESS;
-
-    out->size = head_bytes;
-    return ready ? OK : ERR_WOULD_BLOCK;
-}
-
-/* HW_KEYBOARD_STATUS  out_crate:[u32 available][u32 buffer_size] */
-static int HwKbStatus(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crate_count;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
-
-    uint32_t available = keyboard_available();
-    uint32_t buf_size  = KEYBOARD_LINE_BUFFER_SIZE;
-
-    uint8_t blob[8];
-    memcpy(blob,     &available, sizeof(uint32_t));
-    memcpy(blob + 4, &buf_size,  sizeof(uint32_t));
-    if (crate_write(out, ctx, blob, 8) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
 
 /* =========================================================================
  *  System power (reboot / shutdown — noreturn)
@@ -1241,9 +1119,6 @@ error_t HardwareDeckRegister(void)
         { HW_DISK_INFO,          HwDiskInfo,         OP_AUTH_NONE,   "hw.disk.info"     },
         { HW_DISK_FLUSH,         HwDiskFlush,        OP_AUTH_NONE,   "hw.disk.flush"    },
         /* Keyboard: anyone reading their own focused input. */
-        { HW_KEYBOARD_GETCHAR,   HwKbGetChar,        OP_AUTH_NONE,   "hw.kb.getchar"    },
-        { HW_KEYBOARD_READLINE,  HwKbReadLine,       OP_AUTH_NONE,   "hw.kb.readline"   },
-        { HW_KEYBOARD_STATUS,    HwKbStatus,         OP_AUTH_NONE,   "hw.kb.status"     },
         /* VGA: cosmetic, anyone. */
         { HW_VGA_PUTCHAR,        HwVgaPutChar,       OP_AUTH_NONE,   "hw.vga.putchar"   },
         { HW_VGA_PUTSTRING,      HwVgaPutString,     OP_AUTH_NONE,   "hw.vga.putstring" },

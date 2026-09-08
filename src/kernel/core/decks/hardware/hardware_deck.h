@@ -35,18 +35,6 @@
 #define HW_DISK_FLUSH         0x52
 #define HW_DISK_INFO          0x53
 
-#define HW_KEYBOARD_GETCHAR   0x60
-#define HW_KEYBOARD_READLINE  0x61
-#define HW_KEYBOARD_STATUS    0x62
-
-/* Keyboard status bytes written into out_crate by GETCHAR/READLINE. */
-#define HW_KB_SUCCESS         0x00
-#define HW_KB_NO_DATA         0x01
-#define HW_KB_ACCESS_DENIED   0x02
-#define HW_KB_WOULD_BLOCK     0x03
-#define HW_KB_INTERRUPTED     0x04
-#define HW_KB_INVALID_PARAM   0x05
-
 #define HW_VGA_PUTCHAR          0x70
 #define HW_VGA_PUTSTRING        0x71
 #define HW_VGA_CLEAR_SCREEN     0x72
