@@ -9,7 +9,7 @@
 
 #include "storage_deck.h"
 #include "tagfs.h"
-#include "tagfs_context.h"
+#include "use_context.h"
 #include "klib.h"
 #include "touch.h"
 
@@ -42,7 +42,11 @@ void storage_deck_init(void)
         return;
     }
 
-    tagfs_context_init();
+    /* The volume is up: give the Use Context the numbers this volume has for
+     * its tags, so the scheduler's tier and TagFS's narrowing agree with it
+     * from the first strand dispatched. Said on every road to a mounted
+     * volume — this one, the late arrival, the return. */
+    UseContextRebind();
     kprintf("[Storage Deck] Initialization complete\n");
 
     /* Said on both roads to a mounted volume, this one and the late one, so

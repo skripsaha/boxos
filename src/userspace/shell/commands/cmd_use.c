@@ -1,38 +1,64 @@
+/*
+ * use — say what the person at this machine is doing, in tags.
+ *
+ *   use code cpp      the Use Context is now {code, cpp}: files are seen and
+ *                     created inside it, programs wearing both tags run in the
+ *                     scheduler's context tier
+ *   use               the context is cleared
+ *
+ * The context is the kernel's, one per machine; the shell only speaks for the
+ * user. The prompt is rebuilt from what the kernel holds, never from a copy
+ * of what was typed, so a nested shell shows the context it was born into.
+ */
+
 #include "commands.h"
 #include "../shell.h"
 #include "box/print.h"
-#include "box/file.h"
+#include "box/use.h"
+#include "box/memory.h"
 #include "box/string.h"
+#include "box/error.h"
 
 int cmd_use(int argc, char *argv[])
 {
-    ShellState *state = ShellGetState();
+    int rc;
 
     if (argc == 1) {
-        state->context_tag_count = 0;
-        memset(state->context_tags, 0, sizeof(state->context_tags));
-        context_clear();
-        ShellUpdatePrompt();
-        println("Context cleared");
-        return 0;
-    }
+        rc = use_clear();
+    } else {
+        /* One comma-joined list, sized to what was typed. */
+        size_t total = 0;
+        for (int i = 1; i < argc; i++) total += strlen(argv[i]) + 1;
 
-    context_clear();
-    state->context_tag_count = 0;
-
-    for (int i = 1; i < argc && state->context_tag_count < SHELL_MAX_CONTEXT_TAGS; i++) {
-        size_t tag_len = strlen(argv[i]);
-        if (tag_len > SHELL_CONTEXT_TAG_LEN - 1)
-            tag_len = SHELL_CONTEXT_TAG_LEN - 1;
-
-        memcpy(state->context_tags[state->context_tag_count], argv[i], tag_len);
-        state->context_tags[state->context_tag_count][tag_len] = '\0';
-        state->context_tag_count++;
-
-        context_set(argv[i]);
+        char *list = malloc(total);
+        if (!list) {
+            println("use: no memory for the tag list");
+            return 1;
+        }
+        size_t pos = 0;
+        for (int i = 1; i < argc; i++) {
+            size_t len = strlen(argv[i]);
+            if (i > 1) list[pos++] = ',';
+            memcpy(list + pos, argv[i], len);
+            pos += len;
+        }
+        list[pos] = '\0';
+        rc = use_set(list);
+        free(list);
     }
 
     ShellUpdatePrompt();
-    println("Context set");
+
+    if (rc < 0) {
+        error_t why = box_errno_of(rc);
+        if (why == ERR_ACCESS_DENIED)
+            println("use: only the shell and system programs may set the Use Context");
+        else if (why == ERR_INVALID_ARGUMENT)
+            println("use: a tag is longer than a tag may be");
+        else
+            printf("use: refused (error %d)\n", (int)why);
+        return 1;
+    }
+    println(argc == 1 ? "Context cleared" : "Context set");
     return 0;
 }

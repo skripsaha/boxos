@@ -9,6 +9,7 @@
 #include "aslr.h"
 #include "cabin_layout.h"
 #include "tagfs.h"
+#include "use_context.h"
 #include "auth_tags.h"
 #include "atomics.h"
 
@@ -143,6 +144,9 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
                 uint16_t tid = tagfs_tag_intern(tag_buf);
                 if (tid != TAGFS_INVALID_TAG_ID)
                 {
+                    /* The user's context may name this tag without yet having
+                     * a number for it; this is the number. */
+                    UseContextBindTag(tag_buf, tid);
                     cabin_set_tag_bit(cabin, tid);
                     /* Mirror the fixed auth bit for a bare auth key. Plain
                      * OR: the cabin is not published to any core yet. */

@@ -148,25 +148,5 @@ int receive_args(int* argc, char argv[][64], int max_args) {
         pos += len + 1;
     }
 
-    /* Apply context tags if present after args.
-     *
-     * The wire format is `[count][tag\0][tag\0]…`. We must verify each tag
-     * is actually NUL-terminated *inside* the buffer before handing the
-     * pointer to context_set() — that helper calls strlen() and would
-     * scan past the end of the IPC payload if the producer happened to
-     * cut us off at the boundary. */
-    if (pos < total) {
-        uint8_t ctx_count = (uint8_t)buf[pos++];
-        for (uint8_t i = 0; i < ctx_count && pos < total; i++) {
-            size_t tag_len = 0;
-            while (pos + tag_len < total && buf[pos + tag_len] != '\0') tag_len++;
-            bool terminated = (pos + tag_len < total) && (buf[pos + tag_len] == '\0');
-            if (terminated && tag_len > 0 && tag_len < 32) {
-                context_set(buf + pos);
-            }
-            pos += tag_len + 1;
-        }
-    }
-
     return 0;
 }

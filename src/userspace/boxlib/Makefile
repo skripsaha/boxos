@@ -47,6 +47,7 @@ SRCS = src/core/notify.c \
        src/print.c \
        src/current.c \
        src/file.c \
+       src/use.c \
        src/system.c \
        src/ipc.c \
        src/time.c \

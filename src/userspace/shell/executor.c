@@ -26,7 +26,7 @@ static char g_error[SHELL_ERROR_MAX];
 
 const ShellCommand g_commands[] = {
     {"help",  cmd_help,  "help",       "Show available commands"},
-    {"use",   cmd_use,   "use [tags]", "Set/clear context tags"},
+    {"use",   cmd_use,   "use [tags]", "Set/clear the Use Context"},
     {"exit",  cmd_exit,  "exit",       "Exit shell (or Ctrl+Q)"},
     {"clear", cmd_clear, "clear",      "Clear screen"},
     /* Built in, and that is the whole point of it: the board failure being
@@ -70,11 +70,10 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
         return (pid == 0) ? -ERR_SPAWN_FAILED : pid;
     }
 
-    /* Build args + context tags into IPC buffer. SHELL_ARGS_BUF_MAX
-     * (240 B) bounds the legacy send() payload; if the user's command
-     * + tags exceeds that, we ship a partial argv to the child and
-     * warn the user rather than silently corrupting their input. */
-    ShellState *state = ShellGetState();
+    /* Build args into the IPC buffer. SHELL_ARGS_BUF_MAX (240 B) bounds the
+     * legacy send() payload; if the user's command exceeds that, we ship a
+     * partial argv to the child and warn the user rather than silently
+     * corrupting their input. */
     char buf[SHELL_ARGS_BUF_MAX];
     int pos = 0;
     int args_sent = 0;
@@ -95,24 +94,6 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
     if (args_sent < cmd->argc) {
         printf("%colorWarning:%color shell IPC buffer full, sent %d/%d args\n",
                COLOR_YELLOW, COLOR_DEFAULT, args_sent, cmd->argc);
-    }
-
-    /* Append context tags */
-    int tags_sent = 0;
-    if (pos < SHELL_ARGS_BUF_MAX)
-        buf[pos++] = (char)state->context_tag_count;
-    for (uint32_t ci = 0; ci < state->context_tag_count; ci++) {
-        size_t len = strlen(state->context_tags[ci]);
-        if (pos + (int)len + 1 > SHELL_ARGS_BUF_MAX) break;
-        memcpy(buf + pos, state->context_tags[ci], len);
-        pos += (int)len;
-        buf[pos++] = '\0';
-        tags_sent++;
-    }
-    if (tags_sent < (int)state->context_tag_count) {
-        printf("%colorWarning:%color sent %d/%u context tags\n",
-               COLOR_YELLOW, COLOR_DEFAULT,
-               tags_sent, state->context_tag_count);
     }
 
     send((uint32_t)pid, buf, (uint16_t)pos);

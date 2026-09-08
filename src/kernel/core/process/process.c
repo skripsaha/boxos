@@ -28,6 +28,7 @@
 #include "bay.h"
 #include "brook.h"
 #include "tagfs.h"
+#include "use_context.h"    /* UseContextBindTag — a tag the user's context waited for */
 #include "per_core.h"
 #include "amp.h"
 #include "cet_lifecycle.h"  /* Phase 2K+ per-process shadow-stack hooks */
@@ -844,15 +845,6 @@ void process_destroy(process_t *proc)
     BayCleanupProcess(proc);
 
     BrookCleanupProcess(proc);
-
-    /* Destroy this pid's TagFS query-context so its context tags cannot leak
-     * into a process that later recycles the pid. tagfs_context_destroy was
-     * defined but never called — the leaked per-pid tags made ObjQuery merge a
-     * recycled child's stale context and route it through the FILTERED query,
-     * hiding a file it should have found (the write_concurrent "file not found"
-     * -> torn-slice failure, reproducible even single-core). Idempotent no-op
-     * for the common case of a process that never set a context. */
-    tagfs_context_destroy(proc->pid);
 
     cet_process_destroy(proc);
     cet_process_destroy_kernel_ssp(proc);
@@ -1740,6 +1732,11 @@ int process_add_tag(process_t *proc, const char *tag)
         spin_unlock(&process_lock);
         return -1;
     }
+
+    /* The user's context may name this tag without yet having a number for
+     * it; this is the number, so a strand tagged after `use` still lands in
+     * the context tier. */
+    UseContextBindTag(tag, tid);
 
     int ret = process_set_tag_bit(proc, tid);
     /* Mirror the fixed auth bit for a bare auth key (no-op for any other key),

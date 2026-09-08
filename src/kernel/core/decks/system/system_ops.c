@@ -5,7 +5,7 @@
  *
  *   IPC                 route, broadcast, listen
  *   Process lifecycle   spawn, kill, info, exec
- *   Context             ctx.use
+ *   Use Context         use.set, use.get, use.clear
  *   Buffers             buf.alloc, buf.free, buf.resize
  *   Tags                tag.add, tag.remove, tag.check
  *   Filesystem          defrag, frag_score
@@ -60,9 +60,6 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
 #define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
 
-#define MAX_CTX_USE_TAGS       3u
-#define CTX_TAG_LENGTH         64u
-#define CTX_USE_PARSE_BUF      512u
 
 /* -------------------------------------------------------------------------
  * Crate I/O
@@ -1063,73 +1060,107 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
 }
 
 /* =========================================================================
- *  Context (use)
+ *  Use Context (use) — what the user is doing, said in tags
  * ========================================================================= */
 
-static int ctx_use_parse(const char *input, char tags[][CTX_TAG_LENGTH],
-                         uint32_t *count_out)
-{
-    *count_out = 0;
-    if (input[0] == '\0') return OK;
-
-    char buf[CTX_USE_PARSE_BUF];
-    size_t ilen = strlen(input);
-    if (ilen >= sizeof(buf)) return ERR_INVALID_ARGUMENT;
-    memcpy(buf, input, ilen + 1);
-
-    char *saveptr = NULL;
-    char *tok = strtok_r(buf, ",", &saveptr);
-    while (tok) {
-        while (*tok == ' ' || *tok == '\t') tok++;
-        char *end = tok + strlen(tok);
-        while (end > tok && (end[-1] == ' ' || end[-1] == '\t')) *(--end) = '\0';
-        if (*tok == '\0') { tok = strtok_r(NULL, ",", &saveptr); continue; }
-
-        if (*count_out >= MAX_CTX_USE_TAGS)        return ERR_TAG_LIMIT_EXCEEDED;
-        if (strlen(tok) >= CTX_TAG_LENGTH)         return ERR_INVALID_ARGUMENT;
-
-        memcpy(tags[*count_out], tok, strlen(tok) + 1);
-        (*count_out)++;
-        tok = strtok_r(NULL, ",", &saveptr);
-    }
-    return OK;
-}
-
-/* SYSTEM_OP_CTX_USE  in_crate: context string (NUL-bounded).
- * Empty string clears the current context. */
-static int SysCtxUse(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+/* SYSTEM_OP_USE_SET  in_crate: comma-separated tag list. No crate, or an
+ * empty one, clears — the same thing use.clear says. The list rides whole:
+ * copied off the caller's pages at its own length, no ceiling of this deck's
+ * choosing, and handed to the context, which spells every tag canonically
+ * and refuses one the volume registry could not hold. */
+static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
     (void)crate_count;
-    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
-    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
 
-    char input[CTX_USE_PARSE_BUF];
+    if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size == 0) {
+        UseContextClear();
+        return OK;
+    }
+
     Crate *src = &crates[op->in_crate];
-    if (src->size == 0) {
-        UseContextClear();
-        return OK;
+    void  *raw = crate_in_buf(src, ctx);
+    if (!raw) return ERR_INVALID_ADDRESS;
+
+    /* The crate carries bytes; the context reads a string. */
+    char *list = kmalloc(src->size + 1);
+    if (!list) {
+        crate_buf_free(raw);
+        return ERR_NO_MEMORY;
     }
-    if (src->size >= sizeof(input)) return ERR_INVALID_ARGUMENT;
-    error_t read_rc = crate_read(src, ctx, input, src->size);
-    if (read_rc != OK) return read_rc;
-    input[src->size] = '\0';
+    memcpy(list, raw, src->size);
+    list[src->size] = '\0';
+    crate_buf_free(raw);
 
-    char     parsed[MAX_CTX_USE_TAGS][CTX_TAG_LENGTH];
-    uint32_t count = 0;
-    memset(parsed, 0, sizeof(parsed));
+    error_t rc = UseContextSet(list, true);
+    kfree(list);
+    return rc;
+}
 
-    int parse_rc = ctx_use_parse(input, parsed, &count);
-    if (parse_rc != OK) return parse_rc;
+/* SYSTEM_OP_USE_CLEAR  nothing in, nothing out. */
+static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                       const OpContext *ctx)
+{
+    (void)op; (void)crates; (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    UseContextClear();
+    return OK;
+}
 
-    if (count == 0) {
-        UseContextClear();
-        return OK;
+/* SYSTEM_OP_USE_GET  out_crate: [u32 count][u32 needed][(u16 len)(char tag[len])]*
+ * Every tag that fits, in the context's order. count is what was written, so
+ * a caller whose crate was too small sees fewer tags rather than torn ones;
+ * needed is the byte length of the whole context comma-joined, NUL included,
+ * so that caller can tell a short answer from a full one and size a buffer. */
+static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                     const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
+
+    char        *block = NULL;
+    const char **names = NULL;
+    uint32_t     count = 0;
+    error_t arc = UseContextTagArray(&block, &names, &count);
+    if (arc != OK) return arc;
+
+    uint8_t *kp = crate_out_alloc(out, out->capacity);
+    if (!kp) {
+        kfree(block);
+        kfree(names);
+        return ERR_INVALID_ADDRESS;
     }
 
-    const char *ptrs[MAX_CTX_USE_TAGS];
-    for (uint32_t i = 0; i < count; i++) ptrs[i] = parsed[i];
-    return UseContextSet(ptrs, count);
+    /* Comma-joined, every tag costs its length plus one — a comma between
+     * tags, the NUL after the last; an empty context is one NUL. */
+    uint32_t needed  = 1;
+    uint64_t pos     = 8;
+    uint32_t written = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        size_t l = strlen(names[i]);
+        needed += (uint32_t)l + (i ? 1u : 0u);
+        if (pos + 2u + l > out->capacity) continue;   /* no room: still counted */
+        if (written != i) continue;                    /* keep the order whole */
+        uint16_t l16 = (uint16_t)l;
+        memcpy(kp + pos, &l16, 2);       pos += 2;
+        memcpy(kp + pos, names[i], l);   pos += l;
+        written++;
+    }
+    memcpy(kp,     &written, 4);
+    memcpy(kp + 4, &needed,  4);
+    kfree(block);
+    kfree(names);
+
+    int crc = crate_out_commit(out, ctx, kp, pos);
+    crate_buf_free(kp);
+    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    out->size = pos;
+    return OK;
 }
 
 /* =========================================================================
@@ -1768,8 +1799,14 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_STRAND_RELEASE, SysStrandRelease, OP_AUTH_APP, "system.strand.release"},
         { SYSTEM_OP_STRAND_POOL_BIND, SysStrandPoolBind, OP_AUTH_APP, "system.strand.pool.bind"},
         { SYSTEM_OP_INFO,         SysInfo,        OP_AUTH_NONE,   "system.info"       },
-        /* Context, tags, buffers: app+. */
-        { SYSTEM_OP_CTX_USE,      SysCtxUse,      OP_AUTH_APP,    "system.ctx.use"    },
+        /* Use Context: what the user is doing, said in tags. set and clear
+         * speak for the user, so they take system authority — the shell, or a
+         * program wearing `system`. get is anyone's: any program may ask what
+         * the user is doing. */
+        { SYSTEM_OP_USE_SET,      SysUseSet,      OP_AUTH_SYSTEM, "system.use.set"    },
+        { SYSTEM_OP_USE_GET,      SysUseGet,      OP_AUTH_NONE,   "system.use.get"    },
+        { SYSTEM_OP_USE_CLEAR,    SysUseClear,    OP_AUTH_SYSTEM, "system.use.clear"  },
+        /* Tags, buffers: app+. */
         { SYSTEM_OP_BUF_ALLOC,    SysBufAlloc,    OP_AUTH_APP,    "system.buf.alloc"  },
         { SYSTEM_OP_BUF_FREE,     SysBufFree,     OP_AUTH_APP,    "system.buf.free"   },
         { SYSTEM_OP_BUF_RESIZE,   SysBufResize,   OP_AUTH_APP,    "system.buf.resize" },
