@@ -494,10 +494,13 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
         len   -= off;
     }
 
-    /* VGA direct: set colour only when it actually changed; emit text
-     * honouring newlines. vga_puts() takes a NUL-terminated string of
-     * arbitrary length, but the underlying syscall packs into a kernel
-     * buffer; for large segments we stream in 192-byte chunks. */
+    /* VGA direct: set colour only when it actually changed, then the text in
+     * as few PUTSTRING operations as it takes, newlines INSIDE them. The
+     * console lock is held per operation, so a line's text in one operation
+     * and its newline in the next left a gap for another core's kprintf to
+     * land in (the daemon's render had the same shape; measured there). A
+     * chunk is cut at the last newline that fits, so only a line longer than
+     * a chunk is ever split, and then by nobody else's. */
     bool changed = !ps->last_set || ps->last_fg != fg || ps->last_bg != bg;
     if (changed) {
         vga_setcolor_rgb(fg, bg);
@@ -505,25 +508,20 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
         ps->last_bg  = bg;
         ps->last_set = true;
     }
-    char tmp[192];
-    int  seg_start = 0;
-    for (int i = 0; i <= len; i++) {
-        int at_end = (i == len);
-        int is_nl  = !at_end && bytes[i] == '\n';
-        if (at_end || is_nl) {
-            int seg_len = i - seg_start;
-            int off     = 0;
-            while (off < seg_len) {
-                int copy = seg_len - off;
-                if (copy > (int)sizeof(tmp) - 1) copy = (int)sizeof(tmp) - 1;
-                memcpy(tmp, bytes + seg_start + off, (size_t)copy);
-                tmp[copy] = '\0';
-                vga_puts(tmp);
-                off += copy;
+    char tmp[256];
+    int  off = 0;
+    while (off < len) {
+        int take = len - off;
+        if (take > (int)sizeof(tmp) - 1) {
+            take = (int)sizeof(tmp) - 1;
+            for (int k = off + take - 1; k >= off; k--) {
+                if (bytes[k] == '\n') { take = k - off + 1; break; }
             }
-            if (is_nl) vga_newline();
-            seg_start = i + 1;
         }
+        memcpy(tmp, bytes + off, (size_t)take);
+        tmp[take] = '\0';
+        vga_puts(tmp);
+        off += take;
     }
 }
 
@@ -537,15 +535,19 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
  * =========================================================================== */
 /* Stream `len` bytes through the UTF-8 filter (ASCII pass-through; each
  * multi-byte sequence collapses to one '?') into fixed-size chunks, handing
- * each chunk to emit_run with the current colours. Shared by print() and
- * print_bytes() so the filter lives in exactly one place. */
-static void emit_filtered(StrandPrintState *ps, const char* data, size_t len)
+ * each chunk to emit_run with the current colours. Shared by print(),
+ * print_bytes() and println() so the filter lives in exactly one place.
+ * `newline` rides in the LAST chunk rather than in an emit of its own: a
+ * newline emitted separately is a separate operation on the direct path, and
+ * the gap between the two is where another core's line lands. */
+static void emit_filtered(StrandPrintState *ps, const char* data, size_t len,
+                          bool newline)
 {
     char   chunk[256];
     size_t src = 0;
-    while (src < len) {
+    do {
         int chunk_pos = 0;
-        while (chunk_pos < (int)sizeof(chunk) && src < len) {
+        while (chunk_pos < (int)sizeof(chunk) - 1 && src < len) {
             unsigned char b = (unsigned char)data[src];
             if (b < 0x80) {
                 chunk[chunk_pos++] = (char)b;
@@ -565,9 +567,10 @@ static void emit_filtered(StrandPrintState *ps, const char* data, size_t len)
                 }
             }
         }
+        if (newline && src >= len) chunk[chunk_pos++] = '\n';
         if (chunk_pos == 0) break;
         emit_run(ps, chunk, chunk_pos, ps->color_fg, ps->color_bg);
-    }
+    } while (src < len);
 }
 
 void print(const char* str)
@@ -577,13 +580,13 @@ void print(const char* str)
 
     /* IO_MODE_IPC batches into the lane frame and flushes lazily;
      * IO_MODE_VGA wins a syscall reduction by feeding every internal
-     * vga_setcolor/vga_puts/vga_newline into a single Manifest. The
-     * nested vga_begin/vga_commit composes with an outer caller that may
-     * itself be batching (printf, shell renderer). */
+     * vga_setcolor/vga_puts into a single Manifest. The nested
+     * vga_begin/vga_commit composes with an outer caller that may itself be
+     * batching (printf, shell renderer). */
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
-    emit_filtered(ps, str, strlen(str));
+    emit_filtered(ps, str, strlen(str), false);
 
     if (we_began) vga_commit();
 }
@@ -596,25 +599,24 @@ void print_bytes(const char* data, size_t len)
     bool we_began = false;
     if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
 
-    emit_filtered(ps, data, len);
+    emit_filtered(ps, data, len, false);
 
     if (we_began) vga_commit();
 }
 
 void println(const char* str)
 {
-    if (g_io_mode == IO_MODE_IPC) {
-        StrandPrintState *ps = print_state_self();
-        if (str) print(str);
-        emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
-        return;
-    }
-    /* VGA mode: wrap the print + newline in one batch so both fire as a
-     * single multi-op syscall. */
-    vga_begin();
-    if (str) print(str);
-    vga_newline();
-    vga_commit();
+    StrandPrintState *ps = print_state_self();
+
+    /* The newline goes with the text — same frame on the lane, same
+     * operation on the direct path — never as an emit of its own. */
+    bool we_began = false;
+    if (g_io_mode == IO_MODE_VGA) { vga_begin(); we_began = true; }
+
+    if (str) emit_filtered(ps, str, strlen(str), true);
+    else     emit_run(ps, "\n", 1, ps->color_fg, ps->color_bg);
+
+    if (we_began) vga_commit();
 }
 
 void clear(void)

@@ -134,23 +134,22 @@ static void render_run(const ConsoleRun *f)
     uint32_t len = f->len;
     if (len > CONSOLE_RUN_TEXT_MAX) len = CONSOLE_RUN_TEXT_MAX;
 
-    /* '\n' is content; other control bytes are dropped (the writer's UTF-8
+    /* One VGA operation for the whole run, newlines inside it. The console
+     * lock is held per operation, so a line's text in one operation and its
+     * newline in the next left a gap for a kprintf from another core to land
+     * in, and the serial account read `…via=printf[6] [ROLLCALL] …` —
+     * MEASURED on BIOS 16c: 184 and 71 lines of 1600 carried somebody else's.
+     * '\n' is content; other control bytes are dropped (the writer's UTF-8
      * filter never emits them, so anything else here is line noise). */
     char     seg[CONSOLE_RUN_TEXT_MAX + 1];
     uint32_t pos = 0;
-    for (uint32_t i = 0; i <= len; i++) {
-        int at_end = (i == len);
-        char c     = at_end ? '\0' : f->text[i];
-        if (!at_end && c != '\n' && (unsigned char)c >= 0x20) {
-            seg[pos++] = c;
-            continue;
-        }
-        if (pos > 0) {
-            seg[pos] = '\0';
-            vga_puts(seg);
-            pos = 0;
-        }
-        if (!at_end && c == '\n') vga_newline();
+    for (uint32_t i = 0; i < len; i++) {
+        char c = f->text[i];
+        if (c == '\n' || (unsigned char)c >= 0x20) seg[pos++] = c;
+    }
+    if (pos > 0) {
+        seg[pos] = '\0';
+        vga_puts(seg);
     }
 }
 

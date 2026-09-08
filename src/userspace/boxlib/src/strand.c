@@ -10,6 +10,7 @@
 
 #include "box/strand.h"
 #include "box/core/manifest.h"   /* MfCall1 */
+#include "box/print.h"           /* io_flush — hand in the staged run */
 #include "box/memory.h"          /* malloc / free */
 #include "box/debug.h"           /* kdbg_print — loud spawn refusal */
 #include "box/touch.h"           /* touch_stash_free_self */
@@ -105,6 +106,15 @@ void strand_release(uint32_t pid)
 
 void strand_exit(void)
 {
+    /* This strand's own console run first. printf stages text in the strand's
+     * frame and pushes it only when the frame fills, the colour changes or
+     * somebody flushes — a line said just before fn returned would otherwise
+     * die with the strand (MEASURED on BIOS 16c: the last of 400 numbered
+     * lines, every printf strand, every run). The frame is the strand's, not
+     * the cabin's, so it is the strand's to hand in; exit() does the same for
+     * the main strand. */
+    io_flush();
+
     /* Ф20e — return this strand's StrandPool cache to the global heap and free
      * its slab slot BEFORE we ask the kernel to terminate the strand. The slot's
      * generation is bumped here, so even if the kernel were to race the orphan
@@ -117,10 +127,11 @@ void strand_exit(void)
     touch_stash_free_self();
 
     /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
-     * No __box_runtime_fini / io_flush / spawner-notify — those are exit()'s
-     * job for the whole cabin and would wrongly run global teardown on a
-     * per-strand exit.  Retry briefly, then park forever; must never fall
-     * through to a return on the trampoline's caller-less stack. */
+     * No __box_runtime_fini / spawner-notify — those are exit()'s job for the
+     * whole cabin and would wrongly run global teardown on a per-strand exit
+     * (this strand's own console run was handed in above). Retry briefly, then
+     * park forever; must never fall through to a return on the trampoline's
+     * caller-less stack. */
     uint32_t target = 0;
     for (int attempt = 0; attempt < 3; attempt++) {
         int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
