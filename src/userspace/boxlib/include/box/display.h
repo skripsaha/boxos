@@ -28,8 +28,17 @@ extern "C" {
  * alone) is an honest refusal. */
 #define DISP_CMD_LANE     0x30
 
-#define DISP_CMD_READLINE 0x10
-#define DISP_CMD_GETCHAR  0x11
+/* Listen: [DISP_CMD_LISTEN][u32 generation][u8 listening] — with 1 the lane
+ * of (sender, generation) hears the keyboard from now on: the daemon says
+ * each key again as a Touch on that lane's own tag ("console:N"), payload
+ * kb_event_t, and the program edits its line and echoes through the lane.
+ * Listening pushes the lane to the top of the daemon's ear stack; 0 gives the
+ * ear back, and so does the lane closing — the one beneath hears again, and
+ * with nobody listening the keys wait at the daemon for the next reader. No
+ * reply: the keys are the answer. */
+#define DISP_CMD_LISTEN   0x13
+/* Ping: the daemon answers with its pid. Kept for bench's IPC round trip;
+ * nothing discovers the daemon by it. */
 #define DISP_CMD_PING     0x12
 
 /* ConsoleRun — one frame of a console lane. 128 bytes: 20-byte header +
@@ -46,6 +55,7 @@ extern "C" {
  * writers are the same "no cross-writer promise" the console always had. */
 #define CONSOLE_RUN_TEXT      0x01  /* render text[0..len) in (fg, bg) */
 #define CONSOLE_RUN_CLEAR     0x02  /* clear the screen to (fg, bg) */
+#define CONSOLE_RUN_STEP      0x03  /* move the cursor: text[0..4) = int32 cells, len 4 */
 
 #define CONSOLE_RUN_TEXT_MAX  108u
 

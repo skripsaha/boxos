@@ -18,15 +18,21 @@
  * a free pool — the tag registry grows to the peak number of simultaneous
  * lanes and no further.
  *
- * Input is a state machine fed by "keyboard" Touch events. READLINE echoes
- * and edits; GETCHAR hands over the next character raw. While nobody asks
- * for input, keys are deliberately NOT consumed — the kernel TouchRing and
- * the per-strand tag stash bank them, so type-ahead needs no third buffer.
+ * Input: the daemon is the cabin's ear at the keyboard. It consumes
+ * "keyboard" Touch events only while some lane LISTENS, and says each key
+ * again as a Touch on the tag of the lane at the top of the listening stack
+ * — the program edits its own line and echoes through its own lane. A lane
+ * listens for exactly as long as its program reads (DISP_CMD_LISTEN with 1
+ * pushes it to the top, with 0 gives the ear back); a lane that closes is
+ * dropped wherever it stands, and the one beneath hears again. Keys typed
+ * while nobody listens are NOT consumed — the kernel TouchRing and the
+ * per-strand tag stash bank them for whoever reads next, so type-ahead
+ * needs no third buffer.
  *
  * process:died closes what the dead leave behind: granted-but-never-
  * attached lanes are revoked, attached lanes are drained to the last frame
  * (a dying process' final words reach the screen) and closed on
- * STREAM_CLOSED, pending input requests of the dead are dropped.
+ * STREAM_CLOSED.
  */
 
 #include "box/print.h"
@@ -55,6 +61,7 @@ typedef struct ConsoleLane {
     uint32_t            owner_pid;   /* the strand the lane was granted to … */
     uint32_t            owner_gen;   /* … in this incarnation: (pid, generation) */
     uint32_t            number;      /* N of "console:N" */
+    TouchTagPair        ear;         /* "console:N" as a Touch tag: where its keys are said */
     bool                closed;      /* drained to STREAM_CLOSED / revoked */
     bool                has_pending; /* `pending` holds the lane's head frame */
     ConsoleRun          pending;     /* popped but not yet rendered (merge) */
@@ -70,6 +77,10 @@ static ConsoleLane *g_lanes;         /* append at tail — grant order */
 static FreeNumber  *g_free_numbers;  /* reuse pool for lane numbers */
 static uint32_t     g_next_number;   /* fresh numbers when the pool is dry */
 
+/* Screen geometry, asked once: STEP frames move the cursor in cells. */
+static uint32_t g_cols;
+static uint32_t g_rows;
+
 /* The daemon's current on-screen pair — frames set it only when it differs. */
 static uint32_t g_cur_fg;
 static uint32_t g_cur_bg;
@@ -80,32 +91,53 @@ static TouchTag g_kb    = TOUCH_TAG_INVALID;
 static TouchTag g_pdied = TOUCH_TAG_INVALID;
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Pending input — FIFO of READLINE/GETCHAR requests; the head is active.
+ * The ear — which lane hears the keyboard
+ *
+ * A stack of listening lanes; the top hears. Listening pushes a lane to the
+ * top (or moves it there), a lane that closes is dropped wherever it stands,
+ * and whoever is left on top hears next. Nothing here consults a clock or a
+ * pid: a lane is (pid, generation) already.
  * ───────────────────────────────────────────────────────────────────────── */
 
-enum { INPUT_READLINE = 1, INPUT_GETCHAR = 2 };
+typedef struct Ear {
+    ConsoleLane *lane;
+    struct Ear  *below;
+} Ear;
 
-typedef struct PendingInput {
-    uint8_t              kind;       /* INPUT_* */
-    uint8_t              echo;
-    uint16_t             cap;        /* line capacity incl. NUL (READLINE) */
-    uint16_t             len;        /* typed so far */
-    uint32_t             requester;
-    char                *buf;        /* cap bytes (READLINE), NULL (GETCHAR) */
-    struct PendingInput *next;
-} PendingInput;
+static Ear *g_ear;   /* top of the stack, NULL when nobody listens */
 
-static PendingInput *g_input_head;
-static PendingInput *g_input_tail;
-
-static void input_pop_head(void)
+static void EarListen(ConsoleLane *lane)
 {
-    PendingInput *pi = g_input_head;
-    if (!pi) return;
-    g_input_head = pi->next;
-    if (!g_input_head) g_input_tail = NULL;
-    if (pi->buf) free(pi->buf);
-    free(pi);
+    Ear **pp = &g_ear;
+    while (*pp) {
+        if ((*pp)->lane == lane) {
+            Ear *e = *pp;
+            *pp = e->below;
+            e->below = g_ear;
+            g_ear = e;
+            return;
+        }
+        pp = &(*pp)->below;
+    }
+    Ear *e = (Ear *)malloc(sizeof(Ear));
+    if (!e) return;   /* nobody listens harder than memory allows; asked again, it is pushed then */
+    e->lane  = lane;
+    e->below = g_ear;
+    g_ear    = e;
+}
+
+static void EarDrop(ConsoleLane *lane)
+{
+    Ear **pp = &g_ear;
+    while (*pp) {
+        if ((*pp)->lane == lane) {
+            Ear *e = *pp;
+            *pp = e->below;
+            free(e);
+            return;
+        }
+        pp = &(*pp)->below;
+    }
 }
 
 static bool kb_step(void);
@@ -121,6 +153,20 @@ static void render_run(const ConsoleRun *f)
         g_cur_fg  = f->fg;
         g_cur_bg  = f->bg;
         g_cur_set = true;
+        return;
+    }
+    if (f->kind == CONSOLE_RUN_STEP) {
+        /* Move the cursor by a signed count of cells, across line ends:
+         * the position is linear, row * cols + col. */
+        int32_t delta;
+        memcpy(&delta, f->text, sizeof(delta));
+        vga_pos_t pos;
+        if (delta == 0 || g_cols == 0 || vga_getcursor(&pos) != 0) return;
+        int64_t linear = (int64_t)pos.row * g_cols + pos.col + delta;
+        int64_t last   = (int64_t)g_rows * g_cols - 1;
+        if (linear < 0)    linear = 0;
+        if (linear > last) linear = last;
+        vga_setcursor((uint8_t)(linear / g_cols), (uint8_t)(linear % g_cols));
         return;
     }
     if (f->kind != CONSOLE_RUN_TEXT) return;
@@ -140,13 +186,14 @@ static void render_run(const ConsoleRun *f)
      * newline in the next left a gap for a kprintf from another core to land
      * in, and the serial account read `…via=printf[6] [ROLLCALL] …` —
      * MEASURED on BIOS 16c: 184 and 71 lines of 1600 carried somebody else's.
-     * '\n' is content; other control bytes are dropped (the writer's UTF-8
-     * filter never emits them, so anything else here is line noise). */
+     * '\n' and '\b' are content (a line end, an erased cell); other control
+     * bytes are dropped (the writer's UTF-8 filter never emits them, so
+     * anything else here is line noise). */
     char     seg[CONSOLE_RUN_TEXT_MAX + 1];
     uint32_t pos = 0;
     for (uint32_t i = 0; i < len; i++) {
         char c = f->text[i];
-        if (c == '\n' || (unsigned char)c >= 0x20) seg[pos++] = c;
+        if (c == '\n' || c == '\b' || (unsigned char)c >= 0x20) seg[pos++] = c;
     }
     if (pos > 0) {
         seg[pos] = '\0';
@@ -166,7 +213,10 @@ static bool lane_refill(ConsoleLane *ln)
         ln->has_pending = true;
         return true;
     }
-    if (rc == -ERR_STREAM_CLOSED) ln->closed = true;
+    if (rc == -ERR_STREAM_CLOSED) {
+        ln->closed = true;
+        EarDrop(ln);
+    }
     return false;
 }
 
@@ -211,6 +261,7 @@ static bool lanes_render(uint32_t budget)
 
 static void lane_free(ConsoleLane *ln)
 {
+    EarDrop(ln);
     /* A release that failed left the reader claim standing in the kernel,
      * and a number whose Brook is still claimed must not be granted again:
      * every open of "console:N" as READER would find it busy, and the pool
@@ -265,28 +316,12 @@ static bool death_step(void)
             if (ln->owner_pid != d.pid || ln->owner_gen != d.generation ||
                 ln->closed)
                 continue;
-            if (!brook_writer_ever_attached(ln->brook)) ln->closed = true;
+            if (!brook_writer_ever_attached(ln->brook)) {
+                ln->closed = true;
+                EarDrop(ln);
+            }
         }
 
-        /* Input requests of the dead: nobody is left to answer. */
-        PendingInput **pp = &g_input_head;
-        while (*pp) {
-            PendingInput *pi = *pp;
-            if (pi->requester == d.pid) {
-                proc_info_t info;
-                if (proc_info((uint16_t)d.pid, &info) == 0) { pp = &pi->next; continue; }
-                *pp = pi->next;
-                if (g_input_tail == pi) {
-                    g_input_tail = NULL;
-                    for (PendingInput *q = g_input_head; q; q = q->next)
-                        g_input_tail = q;
-                }
-                if (pi->buf) free(pi->buf);
-                free(pi);
-                continue;
-            }
-            pp = &pi->next;
-        }
     }
     return did;
 }
@@ -337,65 +372,22 @@ static bool lanes_step(void)
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
- * Input machine
+ * Keys — said again on the lane that listens
  * ───────────────────────────────────────────────────────────────────────── */
 
-static void input_reply_line(PendingInput *pi)
-{
-    static uint8_t reply[4 + 1024];
-
-    uint32_t len = pi->len;
-    memcpy(reply, &len, 4);
-    memcpy(reply + 4, pi->buf, len);
-    send(pi->requester, reply, (uint16_t)(4 + len));
-}
-
-static void feed_key(char ch)
-{
-    PendingInput *pi = g_input_head;
-    if (!pi || ch == 0) return;
-
-    if (pi->kind == INPUT_GETCHAR) {
-        uint8_t b = (uint8_t)ch;
-        send(pi->requester, &b, 1);
-        input_pop_head();
-        return;
-    }
-
-    /* READLINE line discipline — same rules kb_readline always had. */
-    if (ch == '\b' || ch == 0x7F) {
-        if (pi->len > 0) {
-            pi->len--;
-            if (pi->echo) vga_puts("\b \b");
-        }
-        return;
-    }
-    if (ch == '\r' || ch == '\n') {
-        pi->buf[pi->len] = '\0';
-        if (pi->echo) vga_puts("\n");
-        input_reply_line(pi);
-        input_pop_head();
-        return;
-    }
-    if (pi->len < pi->cap - 1) {
-        pi->buf[pi->len++] = ch;
-        if (pi->echo) vga_putchar(ch);
-    }
-}
-
-/* Consume keys ONLY while someone is asking — otherwise they stay banked
- * on the TouchRing/stash as type-ahead for the next request. (The stash
+/* Consume keys ONLY while someone listens — otherwise they stay banked on
+ * the TouchRing/stash as type-ahead for whoever listens next. (The stash
  * matters: death_step's tag-selective pop parks any keys it runs into
- * there, so this must always pull by tag, never gate on ring emptiness.) */
+ * there, so this must always pull by tag, never gate on ring emptiness.)
+ * Each key is the daemon's own Touch on the lane's tag, payload as heard. */
 static bool kb_step(void)
 {
     bool  did = false;
     Touch t;
-    while (g_input_head && touch_try_pop_tag(g_kb, &t)) {
+    while (g_ear && touch_try_pop_tag(g_kb, &t)) {
         did = true;
         if (t.payload_len < sizeof(kb_event_t)) continue;
-        const kb_event_t *kp = (const kb_event_t *)t.payload;
-        feed_key(kp->ascii);
+        touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);
     }
     return did;
 }
@@ -463,6 +455,7 @@ static void grant_lane(uint32_t requester, uint32_t generation)
     ln->owner_pid = requester;
     ln->owner_gen = generation;
     ln->number    = number;
+    ln->ear       = touch_intern(tag);
     ln->closed    = false;
     ln->next      = NULL;
     if (g_lanes) {
@@ -480,30 +473,6 @@ static void grant_lane(uint32_t requester, uint32_t generation)
     send(requester, reply, (uint16_t)(2 + tlen));
 }
 
-static void queue_input(uint8_t kind, uint32_t requester, uint16_t cap, uint8_t echo)
-{
-    PendingInput *pi = (PendingInput *)malloc(sizeof(PendingInput));
-    if (!pi) return;
-    memset(pi, 0, sizeof(*pi));
-    pi->kind      = kind;
-    pi->echo      = echo;
-    pi->requester = requester;
-    if (kind == INPUT_READLINE) {
-        pi->cap = cap > 0 ? cap : 128;
-        if (pi->cap > 1024) pi->cap = 1024;
-        pi->buf = (char *)malloc(pi->cap);
-        if (!pi->buf) { free(pi); return; }
-    }
-
-    if (g_input_tail) g_input_tail->next = pi;
-    else              g_input_head       = pi;
-    g_input_tail = pi;
-
-    /* The requester's prompt was pushed on its lane BEFORE this request was
-     * sent; render everything pending now (in global order) so the prompt
-     * is on screen before the echo of the first key. */
-    lanes_render(2u * CONSOLE_LANE_FRAMES);
-}
 
 static bool ipc_step(void)
 {
@@ -528,14 +497,23 @@ static bool ipc_step(void)
                 grant_lane(entry.sender_pid, gen);
             }
             break;
-        case DISP_CMD_READLINE:
-            if (len >= 4) {
-                uint16_t cap = (uint16_t)data[1] | ((uint16_t)data[2] << 8);
-                queue_input(INPUT_READLINE, entry.sender_pid, cap, data[3]);
+        case DISP_CMD_LISTEN:
+            /* [cmd][u32 generation][u8 listening]: the lane of (sender,
+             * generation) takes the ear or gives it back. A lane must exist
+             * and be open: listening is a property of a lane, and a closed
+             * one cannot hear. */
+            if (len >= 6) {
+                uint32_t gen;
+                memcpy(&gen, data + 1, sizeof(gen));
+                for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
+                    if (ln->owner_pid == entry.sender_pid &&
+                        ln->owner_gen == gen && !ln->closed) {
+                        if (data[5]) EarListen(ln);
+                        else         EarDrop(ln);
+                        break;
+                    }
+                }
             }
-            break;
-        case DISP_CMD_GETCHAR:
-            queue_input(INPUT_GETCHAR, entry.sender_pid, 0, 0);
             break;
         case DISP_CMD_PING: {
             uint32_t my_pid = cabin_info()->pid;
@@ -566,6 +544,9 @@ static bool ipc_step(void)
 int main(void)
 {
     io_set_mode(IO_MODE_VGA);
+
+    vga_dimensions_t dims;
+    if (vga_getdimensions(&dims) == 0) { g_cols = dims.cols; g_rows = dims.rows; }
 
     g_kb    = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
     g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));

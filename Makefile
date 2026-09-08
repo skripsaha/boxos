@@ -935,7 +935,8 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(UTILS_DIR)/logsave.elf "utility,system,log" \
 		$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
 		$(UTILS_DIR)/rgbtest.elf "utility,test,display" \
-		$(UTILS_DIR)/rollcall.elf "utility,test"
+		$(UTILS_DIR)/rollcall.elf "utility,test" \
+		$(UTILS_DIR)/handset.elf "utility,test"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

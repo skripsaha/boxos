@@ -45,6 +45,7 @@ SRCS = src/core/notify.c \
        src/core/touch_ring.c \
        src/core/manifest.c \
        src/print.c \
+       src/readline.c \
        src/current.c \
        src/file.c \
        src/use.c \

@@ -3,13 +3,12 @@
  *
  * Architecture: output rides the shell's console lane (Brook "console:N")
  * to the display daemon; input requests (READLINE) still travel as IPC.
- * Input: line editor with cursor movement and history
+ * Input: readline — boxlib's line editor over the console's ear
  * Commands: built-in table + external utilities via proc_exec
  * Use Context: the user's tag-based focus via `use`, kept by the kernel
  */
 
 #include "shell.h"
-#include "line_edit.h"
 #include "parser.h"
 #include "executor.h"
 #include "box/print.h"
@@ -22,7 +21,6 @@
 #include "box/core/cabin.h"
 
 static ShellState    g_state;
-static LineEditState g_editor;
 
 /* Implementation lives in the main-loop section so the body is next
  * to its primary user; the prototype in shell.h makes it visible to
@@ -38,7 +36,6 @@ void ShellInit(void)
     g_state.running = true;
     memcpy(g_state.prompt, "~ ", 3);
 
-    LineEditInit(&g_editor);
 
     CabinInfo *ci = cabin_info();
 
@@ -120,11 +117,11 @@ void ShellMainLoop(void)
     char input[SHELL_LINE_MAX];
 
     while (g_state.running) {
-        ShellDrainStaleIpc();
+        print(g_state.prompt);
+        io_flush();
 
-        int rc = LineEditRead(&g_editor, g_state.prompt, input, SHELL_LINE_MAX);
-
-        if (rc == LINE_EMPTY || rc == LINE_ERROR)
+        int len = readline(input, SHELL_LINE_MAX);
+        if (len <= 0)
             continue;
 
         /* Parse */

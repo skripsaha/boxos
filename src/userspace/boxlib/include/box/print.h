@@ -7,6 +7,7 @@ extern "C" {
 
 #include "box/defs.h"
 #include "box/color.h"
+#include "box/touch.h"
 
 #define IO_MODE_VGA 0
 #define IO_MODE_IPC 1
@@ -49,9 +50,24 @@ void io_flush(void);
  */
 int printf(const char* fmt, ...);
 
+/* Input — the line editor (readline.c), event-driven over the console's ear. */
 int readline(char* buffer, size_t max_len);
 int getchar(void);
 int input(const char* prompt, char* buffer, size_t max_len);
+
+/* The tag this strand's keys arrive on. With a display daemon it is the
+ * strand's own lane tag and the daemon is told to listen (DISP_CMD_LISTEN);
+ * without one it is "keyboard" itself. TOUCH_TAG_INVALID when there is no
+ * way to hear at all. */
+TouchTag console_listen(void);
+
+/* The reading is over: the ear goes back to the daemon. Whoever reads next
+ * hears; a key typed while nobody reads waits at the daemon for that reader. */
+void console_unlisten(void);
+
+/* Move the cursor `delta` cells along the console (negative = back), across
+ * line ends, erasing nothing — the editor's step inside a line. */
+void console_step(int32_t delta);
 
 void print_int(int num);
 void print_hex(uint32_t num);
