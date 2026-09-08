@@ -210,7 +210,7 @@ bool strand_rings_create(process_t *proc)
     si->tcb_reserved    = 0;
     si->magic           = STRAND_INFO_MAGIC;
     si->strand_pid      = proc->pid;
-    si->is_main         = 0;
+    si->generation      = proc->generation;
     si->pocket_ring_va  = pocket_hdr_va;
     si->result_ring_va  = result_hdr_va;
     si->touch_ring_va   = touch_hdr_va;

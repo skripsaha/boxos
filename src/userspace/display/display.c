@@ -52,7 +52,8 @@
 
 typedef struct ConsoleLane {
     Brook              *brook;
-    uint32_t            owner_pid;   /* the strand the lane was granted to */
+    uint32_t            owner_pid;   /* the strand the lane was granted to … */
+    uint32_t            owner_gen;   /* … in this incarnation: (pid, generation) */
     uint32_t            number;      /* N of "console:N" */
     bool                closed;      /* drained to STREAM_CLOSED / revoked */
     bool                has_pending; /* `pending` holds the lane's head frame */
@@ -244,14 +245,10 @@ static void lane_free(ConsoleLane *ln)
  * dead writer's banked tail before anything a survivor pushes in reaction
  * to the death (the tail's frames carry strictly older stamps).
  *
- * The revoke is guarded by liveness: a recycled pid (the death event names
- * an earlier incarnation) must not cost the CURRENT incarnation a lane it
- * was just granted and is about to attach to. If proc_info says the pid is
- * alive, the grant stays; the stale lane then lives at most until the new
- * incarnation's own death. The guard's own race window (the pid recycling
- * between the event and the query) is micro-seconds wide and fails SAFE —
- * a revoked-too-early lane makes the writer's open fail, which it reports
- * and survives by falling back to direct VGA. */
+ * A death names (pid, generation), and so does a lane: the match is exact.
+ * A recycled pid is a different generation and matches nothing here, so the
+ * CURRENT incarnation keeps the lane it was just granted, and no guess about
+ * liveness (proc_info) stands between an event and its lane any more. */
 static bool death_step(void)
 {
     bool  did = false;
@@ -265,12 +262,10 @@ static bool death_step(void)
         memcpy(&d, t.payload, sizeof(d));
 
         for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
-            if (ln->owner_pid != d.pid || ln->closed) continue;
-            if (!brook_writer_ever_attached(ln->brook)) {
-                proc_info_t info;
-                if (proc_info((uint16_t)d.pid, &info) == 0) continue;
-                ln->closed = true;
-            }
+            if (ln->owner_pid != d.pid || ln->owner_gen != d.generation ||
+                ln->closed)
+                continue;
+            if (!brook_writer_ever_attached(ln->brook)) ln->closed = true;
         }
 
         /* Input requests of the dead: nobody is left to answer. */
@@ -409,18 +404,20 @@ static bool kb_step(void)
  * IPC — grants, input requests, ping.
  * ───────────────────────────────────────────────────────────────────────── */
 
-static void grant_lane(uint32_t requester)
+static void grant_lane(uint32_t requester, uint32_t generation)
 {
     /* Idempotent per requester. A strand IS a process here, so one lane per
-     * pid is the whole rule — and a writer whose grant reply was lost (or
-     * who simply asked again while the answer was in flight) must get the
-     * SAME lane back, never a second one. Granting twice would strand the
-     * first Brook: the daemon would hold a reader nobody writes to and the
-     * writer would push into whichever tag it learned last, leaking a lane
-     * per re-ask. Re-answering makes the writer's re-ask safe, which is what
-     * lets its wait use a re-ask as its liveness probe. */
+     * (pid, generation) is the whole rule — and a writer whose grant reply
+     * was lost (or who simply asked again while the answer was in flight)
+     * must get the SAME lane back, never a second one. Granting twice would
+     * strand the first Brook: the daemon would hold a reader nobody writes
+     * to and the writer would push into whichever tag it learned last,
+     * leaking a lane per re-ask. A recycled pid carries a new generation and
+     * matches no lane of its predecessor. */
     for (ConsoleLane *ln = g_lanes; ln; ln = ln->next) {
-        if (ln->owner_pid != requester || ln->closed) continue;
+        if (ln->owner_pid != requester || ln->owner_gen != generation ||
+            ln->closed)
+            continue;
         char     again[32];
         uint8_t  reply[2 + sizeof(again)];
         memcpy(again, "console:", 8);
@@ -464,6 +461,7 @@ static void grant_lane(uint32_t requester)
 
     ln->brook     = b;
     ln->owner_pid = requester;
+    ln->owner_gen = generation;
     ln->number    = number;
     ln->closed    = false;
     ln->next      = NULL;
@@ -522,7 +520,13 @@ static bool ipc_step(void)
 
         switch (data[0]) {
         case DISP_CMD_LANE:
-            grant_lane(entry.sender_pid);
+            /* [cmd][u32 generation]: a request without its generation names
+             * nobody and gets nothing. */
+            if (len >= 5) {
+                uint32_t gen;
+                memcpy(&gen, data + 1, sizeof(gen));
+                grant_lane(entry.sender_pid, gen);
+            }
             break;
         case DISP_CMD_READLINE:
             if (len >= 4) {

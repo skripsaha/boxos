@@ -20,7 +20,7 @@ typedef struct PACKED {
     uint32_t magic;           /* CABIN_INFO_MAGIC ("CABN") */
     uint32_t pid;
     uint32_t spawner_pid;
-    uint32_t reserved;
+    uint32_t generation;      /* pid_generation at creation: (pid, generation) is who this is */
     uint64_t heap_base;
     uint64_t heap_max_size;
     uint64_t buf_heap_base;

@@ -1019,7 +1019,7 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     ci->magic       = CABIN_INFO_MAGIC;
     ci->pid         = proc->pid;
     ci->spawner_pid = proc->cabin->spawner_pid;
-    ci->reserved    = 0;
+    ci->generation  = proc->generation;
     ci->heap_base   = heap_start;
     ci->heap_max_size = CABIN_HEAP_MAX_SIZE;
     ci->buf_heap_base = proc->cabin->aslr_buf_heap_base;

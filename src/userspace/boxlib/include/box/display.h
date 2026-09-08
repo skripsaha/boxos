@@ -20,9 +20,12 @@ extern "C" {
  * The ResultRing wire keeps only the request/reply commands below.
  */
 
-/* Request a console lane. Reply: [DISP_CMD_LANE]["console:N" NUL] — the tag
- * of a Brook the daemon is already reading (writer arrives at a laid table).
- * A 1-byte reply (command echo alone) is an honest refusal. */
+/* Request a console lane: [DISP_CMD_LANE][u32 generation] — the asker's own
+ * generation (strand_self_generation), because a pid is reused and a lane
+ * must belong to (pid, generation), never to a number. Reply:
+ * [DISP_CMD_LANE]["console:N" NUL] — the tag of a Brook the daemon is already
+ * reading (writer arrives at a laid table). A 1-byte reply (command echo
+ * alone) is an honest refusal. */
 #define DISP_CMD_LANE     0x30
 
 #define DISP_CMD_READLINE 0x10
