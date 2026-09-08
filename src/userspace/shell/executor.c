@@ -98,9 +98,6 @@ static int RunExternal(const char *name, const char *line)
                    name, pid, gen, gone_rc);
     }
 
-    /* Drain stray ResultRing residue (display PING replies, stray broadcasts). */
-    ShellDrainStaleIpc();
-
     return 0;
 }
 
@@ -111,10 +108,6 @@ static int RunExternal(const char *name, const char *line)
 int ExecutorRun(ParsedCommand *cmd, const char *line)
 {
     g_error[0] = '\0';
-
-    /* Drain stale IPC before dispatching so a leftover child-exit
-     * sentinel cannot be mis-routed to the new command. */
-    ShellDrainStaleIpc();
 
     if (!cmd || cmd->argc == 0 || !line) {
         memcpy(g_error, "No command", 11);

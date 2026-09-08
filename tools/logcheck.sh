@@ -4024,6 +4024,136 @@ run_rollcallmut() {
 }
 
 
+# ===========================================================================
+# handset — who holds the handset hears the keys
+# ===========================================================================
+#
+# The console's ear: the display daemon consumes keyboard Touches only while
+# some lane listens, and republishes each key as a Touch on the tag of the
+# lane at the top of the listening stack. A program that asks for input takes
+# the top; a lane that closes — its owner died or left — is dropped, and the
+# one beneath hears again. Nothing is asked of a clock, and nothing typed is
+# lost: keys pressed before anybody listens stay banked in the daemon's ring
+# until somebody does.
+#
+# Three facts, one boot:
+#   1. a child (handset) hears the line typed AFTER it asked;
+#   2. the shell hears again once the child is gone (it runs `hw`);
+#   3. a child hears the line typed BEFORE it asked (type-ahead banked).
+handset_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+
+    # 1 + 2: ask, then the line; then `hw` for the shell.
+    ./tools/qemu-input.sh type "handset" >/dev/null 2>&1; sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] ask" build/serial.log && break; sleep 1; i=$((i+1)); done
+    sleep 1
+    ./tools/qemu-input.sh type "after the ask" >/dev/null 2>&1; sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] got: after the ask" build/serial.log && break; sleep 1; i=$((i+1)); done
+    sleep 2
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1; sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0; while [ $i -lt 30 ]; do grep -q "TSC freq" build/serial.log && break; sleep 1; i=$((i+1)); done
+    sleep 2
+
+    # 3: the line typed before the ask — `handset`, Enter, then the words at
+    # once, before "[HANDSET] ask" can possibly have been printed. The words go
+    # as RAW keystrokes: `type` waits for each character's echo and retypes
+    # what was not echoed, and a key that nobody echoes because nobody listens
+    # is exactly the key this case is about — a witness would type it again
+    # once the child listens and hide the loss.
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "handset" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    local k
+    for k in b e f o r e spc t h e spc a s k ret; do
+        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        sleep 0.03
+    done
+    i=0; while [ $i -lt 30 ]; do tail -n +$((MARK + 1)) build/serial.log | grep -q "\[HANDSET\] got:" && break; sleep 1; i=$((i+1)); done
+    sleep 2
+
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_handset() {
+    echo "== handset: the child hears, the shell hears again, nothing typed early is lost =="
+    build
+    if ! handset_boot handset; then bad "handset: never reached a shell"; return; fi
+    L="$SCRATCH/serial.handset.log"
+
+    grep -q "\[HANDSET\] got: after the ask" "$L" \
+        && ok "handset: the child heard the line typed after it asked" \
+        || bad "handset: the child never got the line typed after it asked"
+
+    # The shell heard again: `hw` ran after the first handset was gone.
+    sed -n '/\[HANDSET\] got: after the ask/,$p' "$L" | grep -q "TSC freq" \
+        && ok "handset: the shell heard again once the child was gone (hw ran)" \
+        || bad "handset: after the child died the shell never heard hw"
+
+    grep -q "\[HANDSET\] got: before the ask" "$L" \
+        && ok "handset: the line typed before the ask was banked and heard" \
+        || bad "handset: the line typed before the ask was lost"
+}
+
+# The oracle measured against itself: the daemon consumes keys while nobody
+# listens — the very thing "keys wait at the daemon for the next reader"
+# forbids — so the line typed before the child asked is gone.
+handset_deaf_on() {
+    cp src/userspace/display/display.c "$SCRATCH/display.c.handset.bak"
+    python3 - <<'EOF'
+p = "src/userspace/display/display.c"
+s = open(p).read()
+anchor = "    while (g_ear && touch_try_pop_tag(g_kb, &t)) {\n"
+assert s.count(anchor) == 1, "handset mutation anchor missing"
+s = s.replace(anchor, "    while (touch_try_pop_tag(g_kb, &t)) {   /* logcheck mutation: consumed while nobody listens */\n", 1)
+anchor2 = "        touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);\n"
+assert s.count(anchor2) == 1, "handset mutation anchor 2 missing"
+s = s.replace(anchor2, "        if (g_ear) touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);\n", 1)
+open(p, "w").write(s)
+EOF
+    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "handset mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/display/display.c
+}
+
+handset_deaf_off() {
+    [ -f "$SCRATCH/display.c.handset.bak" ] && cp "$SCRATCH/display.c.handset.bak" src/userspace/display/display.c
+    sleep 1; touch src/userspace/display/display.c
+}
+
+run_handsetmut() {
+    echo "== handsetmut: keys consumed while nobody listens, and the early line must be lost =="
+    handset_deaf_on; build
+    handset_boot handsetmut; local booted=$?
+    handset_deaf_off
+    if [ $booted -ne 0 ]; then bad "handsetmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.handsetmut.log"
+
+    if grep -q "\[HANDSET\] got: before the ask" "$L"; then
+        bad "handsetmut: keys consumed while nobody listened and the early line STILL arrived — the oracle cannot see that defect"
+    else
+        ok "handsetmut: keys consumed while nobody listened lost the early line — and the oracle sees it"
+    fi
+
+    build   # leave the tree built from clean sources
+}
+
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -4044,6 +4174,8 @@ case "${1:-both}" in
     linesmut)   run_linesmut ;;
     rollcall)   run_rollcall ;;
     rollcallmut) run_rollcallmut ;;
+    handset)    run_handset ;;
+    handsetmut) run_handsetmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4066,8 +4198,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

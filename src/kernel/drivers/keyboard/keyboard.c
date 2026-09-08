@@ -62,6 +62,28 @@ static volatile uint8_t kb_e0_pending = 0;
 
 static uint8_t kb_led_state = 0;
 
+/* ─── Publishing a key ──────────────────────────────────────────────────── */
+
+static uint8_t kb_mods_now(void)
+{
+    return (uint8_t)(
+        (__atomic_load_n(&kb_state.shift_pressed, __ATOMIC_RELAXED) ? KB_MOD_SHIFT : 0) |
+        (__atomic_load_n(&kb_state.ctrl_pressed,  __ATOMIC_RELAXED) ? KB_MOD_CTRL  : 0) |
+        (__atomic_load_n(&kb_state.alt_pressed,   __ATOMIC_RELAXED) ? KB_MOD_ALT   : 0));
+}
+
+/* Every key the machine hears leaves here as one Touch on the "keyboard"
+ * tag. IRQ context (PS/2 IRQ1, xHCI HID, PIT IRQ0 for repeats): the publish
+ * is deferred through the static ring + irq_defer, because TouchPublish
+ * would take the TagFS registry lock and per-bucket spinlocks with IF=0 —
+ * the deadlock pattern irq_defer exists to break. */
+static void kb_publish_event(const kb_event_t *ev)
+{
+    TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
+    TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
+    TouchPublishIrqPair(full, bare, ev, sizeof(*ev), 0, TOUCH_FLAG_KERNEL);
+}
+
 /* ─── Software key repeat state ─────────────────────────────────────────── */
 
 typedef struct {
@@ -70,6 +92,7 @@ typedef struct {
     uint8_t  char_count;              /* 1 for normal, 3-4 for esc seqs  */
     uint8_t  held_key;               /* bare scancode of held key        */
     uint8_t  held_is_extended;       /* 1 if the held key was 0xE0-prefixed */
+    kb_event_t held_event;           /* the Touch a repeat says again    */
     uint64_t next_repeat_tick;       /* g_global_tick when next repeat fires */
     uint8_t  delay_passed;           /* 1 after initial delay elapsed    */
 } KbRepeatState;
@@ -145,12 +168,14 @@ static char translate_key(uint8_t key)
 
 /* Arm the software repeat timer for the given key. */
 static void kb_arm_repeat(const char* chars, uint8_t count,
-                           uint8_t key, uint8_t is_extended)
+                           uint8_t key, uint8_t is_extended,
+                           const kb_event_t *event)
 {
     kb_repeat.active         = 1;
     kb_repeat.char_count     = count;
     kb_repeat.held_key       = key;
     kb_repeat.held_is_extended = is_extended;
+    kb_repeat.held_event     = *event;
     kb_repeat.delay_passed   = 0;
     for (uint8_t i = 0; i < count && i < KB_SEQ_MAX; i++)
         kb_repeat.chars[i] = chars[i];
@@ -341,11 +366,17 @@ void keyboard_handle_scancode(uint8_t scancode)
             return;
         }
 
-        /* Look up extended key sequence */
+        /* An extended key is a KEY, not a character: it is published as
+         * its scancode with ascii 0 and KB_MOD_EXTENDED, and an editor
+         * answers it by name (arrows, Home/End, Delete). The escape
+         * sequence below feeds only the legacy poll ring. */
         if (key < 128 && ext_key_table[key].len > 0) {
             const ExtKeySeq* ek = &ext_key_table[key];
             kb_push_chars(ek->seq, ek->len);
-            kb_arm_repeat(ek->seq, ek->len, key, 1);
+            kb_event_t kb_ev = { .scancode = key, .ascii = 0,
+                                 .mods = (uint8_t)(kb_mods_now() | KB_MOD_EXTENDED) };
+            kb_arm_repeat(ek->seq, ek->len, key, 1, &kb_ev);
+            kb_publish_event(&kb_ev);
         }
         return;
     }
@@ -414,26 +445,9 @@ void keyboard_handle_scancode(uint8_t scancode)
          * passthrough needs time-based debounce or per-environment
          * policy, not unconditional same-key suppression.) */
         kb_push_chars(&ascii, 1);
-        kb_arm_repeat(&ascii, 1, key, 0);
-
-        kb_event_t kb_ev = {
-            .scancode = key,
-            .ascii    = ascii,
-            .mods     = (uint8_t)(
-                (__atomic_load_n(&kb_state.shift_pressed, __ATOMIC_RELAXED) ? KB_MOD_SHIFT : 0) |
-                (__atomic_load_n(&kb_state.ctrl_pressed,  __ATOMIC_RELAXED) ? KB_MOD_CTRL : 0) |
-                (__atomic_load_n(&kb_state.alt_pressed,   __ATOMIC_RELAXED) ? KB_MOD_ALT : 0)
-            ),
-        };
-        /* IRQ context (PS/2 IRQ1 / xHCI HID IRQ): defer the publish via
-         * the static-ring + irq_defer path. TouchPublish from here would
-         * touch the TagFS registry lock and per-bucket spinlocks while
-         * the CPU has IF=0, which is the deadlock pattern that
-         * irq_defer was created to break (memory `irq_defer_done_2026_05_17`). */
-        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
-        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
-        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev),
-                            0, TOUCH_FLAG_KERNEL);
+        kb_event_t kb_ev = { .scancode = key, .ascii = ascii, .mods = kb_mods_now() };
+        kb_arm_repeat(&ascii, 1, key, 0, &kb_ev);
+        kb_publish_event(&kb_ev);
     }
 }
 
@@ -449,19 +463,10 @@ void keyboard_timer_tick(void)
     /* Fire repeat */
     kb_push_chars(kb_repeat.chars, kb_repeat.char_count);
 
-    if (kb_repeat.char_count > 0 && kb_repeat.chars[0] != 0) {
-        kb_event_t kb_ev = {
-            .scancode = kb_repeat.held_key,
-            .ascii    = kb_repeat.chars[0],
-            .mods     = 0,  /* repeat carries no modifier state */
-        };
-        /* PIT IRQ0 context — defer via static ring + irq_defer (same
-         * rationale as the PS/2 IRQ1 site above). */
-        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
-        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
-        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev),
-                            0, TOUCH_FLAG_KERNEL);
-    }
+    /* A repeat says the same key again — the same event, an arrow included.
+     * Building it afresh from the poll-ring bytes once turned a held arrow
+     * into a stream of ESC characters. */
+    kb_publish_event(&kb_repeat.held_event);
 
     /* After initial delay, switch to fast repeat rate */
     if (!kb_repeat.delay_passed) {

@@ -25,6 +25,9 @@
 #define KB_MOD_SHIFT  0x01u
 #define KB_MOD_CTRL   0x02u
 #define KB_MOD_ALT    0x04u
+/* The key is one of the 0xE0-prefixed set (arrows, Home/End, Delete, …):
+ * `scancode` names it and `ascii` is 0 — it is a key, not a character. */
+#define KB_MOD_EXTENDED 0x08u
 
 typedef struct __packed {
     uint8_t scancode;

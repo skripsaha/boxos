@@ -64,11 +64,15 @@ typedef struct StrandPrintState {
     uint32_t   last_bg;
     uint32_t   color_fg;    /* current colours (may hold sentinels) */
     uint32_t   color_bg;
+    uint16_t   ear;         /* the lane's tag as a Touch tag (valid with EAR_CLAIMED) */
+    uint16_t   kb;          /* "keyboard" tag (valid with KB_CLAIMED) */
     uint8_t    lane_state;  /* LANE_* */
     uint8_t    last_set;    /* last_fg/last_bg carry a sent pair */
     uint8_t    initialized;
-    uint8_t    _pad[5];
+    uint8_t    ear_flags;   /* EAR_* */
 } StrandPrintState;
+
+enum { EAR_CLAIMED = 1u, KB_CLAIMED = 2u };
 _Static_assert(sizeof(StrandPrintState) == STRAND_PRINT_BYTES,
               "StrandPrintState must match strand_info.h STRAND_PRINT_BYTES");
 
@@ -291,6 +295,9 @@ static bool lane_ensure(StrandPrintState *ps)
     }
     ps->lane       = b;
     ps->lane_state = LANE_OPEN;
+    /* The lane's tag is also where this strand's keys will be said. */
+    ps->ear        = touch_pair_choose(touch_intern(tag));
+    ps->ear_flags &= (uint8_t)~EAR_CLAIMED;
     return true;
 }
 
@@ -509,6 +516,14 @@ static void emit_run(StrandPrintState *ps, const char *bytes, int len, Color fg,
             ps->run.len = (uint8_t)(ps->run.len + chunk);
             off += chunk;
         }
+        /* A finished line leaves NOW; only an unfinished tail stays staged.
+         * A strand's completed lines must never sit in its frame waiting for
+         * the frame to fill: measured, a worker's last two lines stayed
+         * behind while the main strand exited the cabin, the push then found
+         * the lane closed and the lines fell through to direct VGA — after
+         * the shell's next prompt, glued to it. */
+        if (ps->lane_state == LANE_OPEN && memchr(ps->run.text, '\n', ps->run.len))
+            lane_flush_lines(ps);
         if (off >= len) return;
 
         /* The daemon died mid-run (lane_flush_run above fell back); the
@@ -937,112 +952,104 @@ __attribute__((weak)) int printf(const char *fmt, ...)
 }
 
 /* ===========================================================================
- * Input
+ * The ear — where this strand's keys arrive (the editor is readline.c)
+ *
+ * With a daemon: the strand's own lane tag. The lane is ensured, the tag is
+ * claimed once, and the daemon is told to listen on EVERY call — its ear
+ * stack moves the lane to the top, which is idempotent and exactly right
+ * after a child took the ear and died. Claim BEFORE the ask, so a key the
+ * daemon has banked is said to a claimant that already exists.
+ *
+ * Without a daemon: "keyboard" itself, claimed once per strand.
  * =========================================================================== */
-int readline(char* buffer, size_t max_len)
+TouchTag console_listen(void)
 {
     StrandPrintState *ps = print_state_self();
     io_flush_state(ps);
-    if (!buffer || max_len < 2) return -1;
 
-    /* The daemon is met through the lane and nowhere else: a grant names
-     * it by pid, a refusal or its absence flips the cabin to direct VGA
-     * (lane_fail). No probe of its own, no clock. */
-    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) lane_ensure(ps);
-
-    if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {
-        uint16_t capped = (uint16_t)(max_len > 1024 ? 1024 : max_len);
-        uint8_t  req[4] = { DISP_CMD_READLINE,
-                            (uint8_t)(capped & 0xFF),
-                            (uint8_t)(capped >> 8),
-                            1 };
-        send(g_display_pid, req, 4);
-
-        /* Block indefinitely. readline is conceptually a blocking primitive
-         * — a finite timeout here was a leftover defence from earlier IPC
-         * race investigations.  With reliable cross-core delivery (K-Core
-         * fix 2026-05-03), waking on the user's first keypress is the only
-         * correct exit; timing out and re-prompting created phantom prompts
-         * + stash-poisoned input where the line typed at one prompt would
-         * appear at the next. */
-        /* Accept only the display daemon's reply to OUR request.
-         *
-         * This used to take whatever arrived: the first four bytes of ANY
-         * message became the line length and the rest of it became the line.
-         * That is exactly the failure shell.c:96-106 describes — a second
-         * daemon's PING reply read as a length-prefixed line — and
-         * ShellDrainStaleIpc() exists to drain such messages BEFORE they can
-         * be misread, not because readline could tell them apart. Filtering by
-         * sender closes the class at the point of use. Bounded, so a mailbox
-         * someone else keeps filling cannot hold readline here forever. */
-        Result result;
-        int foreign = 0;
-        for (;;) {
-            if (!receive_wait(&result, 0))                        return -1;
-            if (result.sender_pid == g_display_pid)               break;
-            if (++foreign > 64)                                   return -1;
+    if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
+        if (!(ps->ear_flags & EAR_CLAIMED)) {
+            if (ps->ear == TOUCH_TAG_INVALID ||
+                touch_claim(ps->ear, TOUCH_REST, 0, 0) != 0)
+                return TOUCH_TAG_INVALID;
+            ps->ear_flags |= EAR_CLAIMED;
         }
-        if (result.error_code != OK)                              return -1;
-        if (result.data_addr == 0 || result.data_length < 4)      return -1;
+        uint8_t  req[6];
+        uint32_t gen = strand_self_generation();
+        req[0] = DISP_CMD_LISTEN;
+        memcpy(req + 1, &gen, sizeof(gen));
+        req[5] = 1;
+        if (send(g_display_pid, req, sizeof(req)) == 0) return ps->ear;
 
-        const uint8_t* resp = (const uint8_t*)(uintptr_t)result.data_addr;
-        uint32_t len;
-        memcpy(&len, resp, 4);
-        /* Bound by what actually ARRIVED as well as by the destination: the
-         * length lives in the message body, so a short message carrying a
-         * large prefix would otherwise copy from past the received payload. */
-        uint32_t avail = (uint32_t)(result.data_length - 4);
-        if (len > avail)             len = avail;
-        if (len > max_len - 1)       len = (uint32_t)(max_len - 1);
-        memcpy(buffer, resp + 4, len);
-        buffer[len] = '\0';
-        return (int)len;
+        /* Nobody at that pid any more: the daemon is gone. Say so the way a
+         * failed push would, and hear the keyboard directly from here on. */
+        Brook *dead = (Brook *)ps->lane;
+        ps->lane = NULL;
+        lane_fail(ps);
+        if (dead) brook_release(dead);
     }
 
-    int len = kb_readline(buffer, max_len, true);
-    return len < 0 ? -1 : len;
+    if (!(ps->ear_flags & KB_CLAIMED)) {
+        TouchTag kb = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
+        if (kb == TOUCH_TAG_INVALID || touch_claim(kb, TOUCH_REST, 0, 0) != 0)
+            return TOUCH_TAG_INVALID;
+        ps->kb         = kb;
+        ps->ear_flags |= KB_CLAIMED;
+    }
+    return ps->kb;
 }
 
-/* WEAK for the same reason as printf above: boxcxx's getchar reads through the
- * same FILE as fgetc(stdin), so a byte pushed back with ungetc comes back to
- * it. This one cannot see that pushback, which is correct for a C program that
- * has no FILE and wrong for a C++ one that does. */
-__attribute__((weak)) int getchar(void)
+/* The reading is over: give the ear back, so whoever reads next hears, and a
+ * key typed while nobody reads stays banked at the daemon for that reader
+ * rather than landing in this strand's ring. Nothing to tell when the strand
+ * hears the keyboard itself. */
+void console_unlisten(void)
 {
     StrandPrintState *ps = print_state_self();
-    io_flush_state(ps);
-    /* The daemon is met through the lane and nowhere else: a grant names
-     * it by pid, a refusal or its absence flips the cabin to direct VGA
-     * (lane_fail). No probe of its own, no clock. */
-    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) lane_ensure(ps);
-
-    if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {
-        uint8_t req = DISP_CMD_GETCHAR;
-        send(g_display_pid, &req, 1);
-
-        /* Same rationale as readline above: block until display delivers a
-         * keypress.  No timeout — getchar is blocking by definition. */
-        /* Same sender filter as readline: a foreign message's first byte
-         * would otherwise be handed back as the user's keypress. */
-        Result result;
-        int foreign = 0;
-        for (;;) {
-            if (!receive_wait(&result, 0))                        return -1;
-            if (result.sender_pid == g_display_pid)               break;
-            if (++foreign > 64)                                   return -1;
-        }
-        if (result.error_code != OK)                              return -1;
-        if (result.data_addr == 0 || result.data_length < 1)      return -1;
-        return *(const uint8_t*)(uintptr_t)result.data_addr;
-    }
-
-    return kb_getchar();
+    if (g_io_mode != IO_MODE_IPC || ps->lane_state != LANE_OPEN ||
+        !(ps->ear_flags & EAR_CLAIMED))
+        return;
+    uint8_t  req[6];
+    uint32_t gen = strand_self_generation();
+    req[0] = DISP_CMD_LISTEN;
+    memcpy(req + 1, &gen, sizeof(gen));
+    req[5] = 0;
+    (void)send(g_display_pid, req, sizeof(req));
 }
 
-int input(const char* prompt, char* buffer, size_t max_len)
+/* A cursor step is a frame on the lane, after whatever text is pending, so
+ * it lands in the order it was said; without a daemon it is the cursor op
+ * itself, with the same linear arithmetic the daemon does. */
+void console_step(int32_t delta)
 {
-    if (prompt) print(prompt);
-    return readline(buffer, max_len);
+    if (delta == 0) return;
+    StrandPrintState *ps = print_state_self();
+
+    if (g_io_mode == IO_MODE_IPC && lane_ensure(ps)) {
+        lane_flush_run(ps);
+        if (ps->lane_state == LANE_OPEN) {
+            ConsoleRun f;
+            memset(&f, 0, sizeof(f));
+            f.kind = CONSOLE_RUN_STEP;
+            f.len  = sizeof(delta);
+            memcpy(f.text, &delta, sizeof(delta));
+            f.fg   = BoxColorResolveFg(ps->color_fg);
+            f.bg   = BoxColorResolveBg(ps->color_bg);
+            f.tsc  = cpu_rdtsc();
+            if (lane_push(ps, &f)) return;
+        }
+        /* The daemon died on the way — the fallback below still steps. */
+    }
+
+    vga_pos_t        pos;
+    vga_dimensions_t dims;
+    if (vga_getcursor(&pos) != 0 || vga_getdimensions(&dims) != 0 || dims.cols == 0)
+        return;
+    int64_t linear = (int64_t)pos.row * dims.cols + pos.col + delta;
+    int64_t last   = (int64_t)dims.rows * dims.cols - 1;
+    if (linear < 0)    linear = 0;
+    if (linear > last) linear = last;
+    vga_setcursor((uint8_t)(linear / dims.cols), (uint8_t)(linear % dims.cols));
 }
 
 /* ===========================================================================
