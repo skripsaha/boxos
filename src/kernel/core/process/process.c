@@ -1024,6 +1024,11 @@ int process_load_binary(process_t *proc, const void *binary_data, size_t size)
     ci->heap_max_size = CABIN_HEAP_MAX_SIZE;
     ci->buf_heap_base = proc->cabin->aslr_buf_heap_base;
     ci->stack_top   = stack_top;
+    /* No luggage until the spawner hands some over (system.proc.exec does,
+     * after this load and before the first dispatch); autostart never does. */
+    ci->luggage_addr     = 0;
+    ci->luggage_length   = 0;
+    ci->luggage_reserved = 0;
 
     proc->cabin->code_size = size;
     proc->context.rip = entry_point;

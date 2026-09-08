@@ -29,6 +29,12 @@ void system_deck_cleanup_process_buffers(uint32_t pid);
 uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
                           uint64_t src_addr, uint32_t length);
 
+/* The second half of the same: allocate target->buf_heap pages and copy
+ * `length` bytes from a KERNEL buffer into them. Returns the target user
+ * vaddr or 0 on failure. What system.proc.exec uses to hand a cabin Luggage
+ * too long for its CabinInfo page. */
+uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length);
+
 /* Register Manifest-native System Deck ops. Defined in system_ops.c. */
 error_t SystemDeckRegister(void);
 

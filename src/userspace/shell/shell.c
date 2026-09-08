@@ -226,8 +226,9 @@ void ShellMainLoop(void)
         if (cmd.argc == 0)
             continue;
 
-        /* Execute */
-        int result = ExecutorRun(&cmd);
+        /* Execute — the cut words for a built-in, the line itself for a
+         * program, which carries it as its Luggage. */
+        int result = ExecutorRun(&cmd, input);
         if (result != 0) {
             const char *err = ExecutorGetError();
             if (err && err[0] != '\0') {

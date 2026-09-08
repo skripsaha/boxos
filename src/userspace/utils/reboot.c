@@ -1,11 +1,7 @@
 #include "box/print.h"
-#include "box/ipc.h"
 #include "box/system.h"
 
 int main(void) {
-    int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
 
     println("Rebooting system...");
     reboot();

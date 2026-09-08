@@ -1,41 +1,14 @@
+/*
+ * parser.c — cut a typed line into words for the built-in commands.
+ *
+ * The cut is the luggage's cut (box/luggage.h): blanks separate, "double
+ * quotes" group. One rule, so a built-in sees the same words an external
+ * program finds in its Luggage.
+ */
+
 #include "parser.h"
 #include "box/string.h"
-
-static char *Tokenize(char *str, char **saveptr)
-{
-    if (!str && !*saveptr) return NULL;
-
-    char *start = str ? str : *saveptr;
-
-    while (*start == ' ' || *start == '\t')
-        start++;
-
-    if (*start == '\0') {
-        *saveptr = NULL;
-        return NULL;
-    }
-
-    char *end;
-    if (*start == '"') {
-        start++;
-        end = start;
-        while (*end != '\0' && *end != '"')
-            end++;
-    } else {
-        end = start;
-        while (*end != '\0' && *end != ' ' && *end != '\t')
-            end++;
-    }
-
-    if (*end != '\0') {
-        *end = '\0';
-        *saveptr = end + 1;
-    } else {
-        *saveptr = NULL;
-    }
-
-    return start;
-}
+#include "box/luggage.h"
 
 int ParserParse(const char *input, ParsedCommand *cmd)
 {
@@ -45,17 +18,10 @@ int ParserParse(const char *input, ParsedCommand *cmd)
 
     size_t input_len = strlen(input);
     if (input_len >= SHELL_LINE_MAX) return -1;
-
     memcpy(cmd->storage, input, input_len);
     cmd->storage[input_len] = '\0';
 
-    char *saveptr = NULL;
-    char *token = Tokenize(cmd->storage, &saveptr);
-
-    while (token != NULL && cmd->argc < SHELL_MAX_ARGS) {
-        cmd->argv[cmd->argc++] = token;
-        token = Tokenize(NULL, &saveptr);
-    }
-
+    uint32_t words = luggage_cut(cmd->storage, cmd->argv, SHELL_MAX_ARGS);
+    cmd->argc = (int)(words > SHELL_MAX_ARGS ? SHELL_MAX_ARGS : words);
     return 0;
 }

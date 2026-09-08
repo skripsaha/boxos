@@ -101,10 +101,10 @@ run_config() {
     # and the long-tail tests (write_stress ~30 s, touch_stress ~30 s
     # plus historical flakiness — see memory:touch_stress_complete*).
     if [ "$MODE" = "fast" ]; then
-        burst="memtest files bench mtest chain cow_test lifecycle usetest write_observer decks htest cxxtest current_test strandtest"
+        burst="memtest files bench mtest chain cow_test lifecycle usetest luggagetest write_observer decks htest cxxtest current_test strandtest"
     else
         burst="memtest files bench memtest files bench memtest \
-               mtest chain htest cxxtest current_test strandtest cow_test lifecycle usetest write_observer \
+               mtest chain htest cxxtest current_test strandtest cow_test lifecycle usetest luggagetest write_observer \
                write_concurrent write_stress touch_test decks touch_stress"
     fi
     for c in $burst
@@ -164,6 +164,7 @@ run_config() {
             cow_test)         pat="\[COW\] PASS";             want=1 ;;
             lifecycle)        pat="\[LIFECYCLE\] PASS";       want=1 ;;
             usetest)          pat="\[USE\] PASS";             want=1 ;;
+            luggagetest)      pat="\[LUGGAGE\] PASS";         want=1 ;;
             write_observer)   pat="\[WO\] PASS";              want=1 ;;
             write_concurrent) pat="\[WC\] PASS";              want=1 ;;
             write_stress)     pat="\[WS SUMMARY\] all 3 PASS";want=1 ;;
@@ -308,6 +309,9 @@ run_config() {
     # The Use Context end to end: use.set from a system utility, create stamped
     # inside it, query narrowed to it, _everywhere unaffected, clear restores.
     use_p=$(grep -c       "\[USE\] PASS"              build/serial.log)
+    # The Luggage end to end: a child gets the typed line whole — short (in the
+    # CabinInfo page) and thousands of bytes (in its buffer heap).
+    luggage_p=$(grep -c   "\[LUGGAGE\] PASS"          build/serial.log)
 
     # Aggregate any negative-FAIL marker emitted by an app.
     # The prefix may have a sub-tag inside the brackets:
@@ -317,7 +321,7 @@ run_config() {
     # so the pattern accepts "[KEY any-non-]]\]" followed by "FAIL" or "fail"
     # anywhere on the same line. Tightened to FAIL as a word so substrings
     # inside legitimate identifiers don't trip it.
-    app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest|USE)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
+    app_fail=$(grep -cE  "\[(mtest|chain|COW|LIFECYCLE|WO|WC|WS|TT|decks|STRESS|CXX|CURRENT|STRAND|htest|USE|LUGGAGE)[^]]*\].*(\\bFAIL\\b|\\bfail\\b)" build/serial.log)
 
     # The kernel's own boot self-test (TagFS core, BCDC, journal, snapshot,
     # CoW, BoxHash, integrity, dedup). It runs on EVERY boot in EVERY config
@@ -328,7 +332,7 @@ run_config() {
 
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
-    echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p"
+    echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p luggage=$luggage_p"
     echo "  selftest: kernel=$selftest_ok bad=$selftest_bad"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw TSC=~1GHz:$tsc_good/$bn"
 
@@ -360,6 +364,7 @@ run_config() {
     [ "$strand_p"  -lt 1 ] && ok=0
     [ "$htest_p"   -lt 1 ] && ok=0
     [ "$use_p"     -lt 1 ] && ok=0
+    [ "$luggage_p" -lt 1 ] && ok=0
     if [ "$MODE" != "fast" ]; then
         [ "$wc_p"    -lt 1 ] && ok=0
         [ "$ws_p"    -lt 1 ] && ok=0

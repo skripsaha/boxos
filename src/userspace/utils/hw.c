@@ -13,7 +13,7 @@
  */
 
 #include "box/print.h"
-#include "box/ipc.h"
+#include "box/luggage.h"
 #include "box/string.h"
 #include "box/cpu.h"
 #include "box/pku.h"
@@ -215,23 +215,21 @@ static void print_help(void)
 
 int main(void)
 {
-    int  argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
+    int argc = (int)luggage_word_count();
 
     if (argc < 2) { do_cpu(); exit(0); return 0; }
 
-    const char *cmd = argv[1];
+    const char *cmd = luggage_word(1);
 
     if (strcmp(cmd, "cpu") == 0) {
         do_cpu();
     } else if (strcmp(cmd, "pku") == 0) {
         if (argc < 3) { print_help(); exit(1); return 1; }
-        const char *sub = argv[2];
+        const char *sub = luggage_word(2);
         if (strcmp(sub, "get") == 0) {
             if (argc >= 4) {
                 uint32_t pkey;
-                if (parse_uint(argv[3], &pkey) != 0 || pkey >= 16) {
+                if (parse_uint(luggage_word(3), &pkey) != 0 || pkey >= 16) {
                     println("pkey must be 0..15"); exit(1); return 1;
                 }
                 do_pku_get_one((uint8_t)pkey);
@@ -241,13 +239,13 @@ int main(void)
         } else if (strcmp(sub, "set") == 0) {
             if (argc < 6) { println("usage: hw pku set <pkey> <ad> <wd>"); exit(1); return 1; }
             uint32_t pkey, ad, wd;
-            if (parse_uint(argv[3], &pkey) != 0 || pkey >= 16) {
+            if (parse_uint(luggage_word(3), &pkey) != 0 || pkey >= 16) {
                 println("pkey must be 0..15"); exit(1); return 1;
             }
-            if (parse_uint(argv[4], &ad) != 0 || ad > 1) {
+            if (parse_uint(luggage_word(4), &ad) != 0 || ad > 1) {
                 println("ad must be 0 or 1"); exit(1); return 1;
             }
-            if (parse_uint(argv[5], &wd) != 0 || wd > 1) {
+            if (parse_uint(luggage_word(5), &wd) != 0 || wd > 1) {
                 println("wd must be 0 or 1"); exit(1); return 1;
             }
             do_pku_set((uint8_t)pkey, (int)ad, (int)wd);
@@ -258,12 +256,12 @@ int main(void)
         do_tme();
     } else if (strcmp(cmd, "lam") == 0) {
         if (argc < 3) { print_help(); exit(1); return 1; }
-        const char *sub = argv[2];
+        const char *sub = luggage_word(2);
         if (strcmp(sub, "get") == 0) {
             do_lam_get();
         } else if (strcmp(sub, "set") == 0) {
             if (argc < 4) { println("usage: hw lam set none|u48|u57"); exit(1); return 1; }
-            do_lam_set(argv[3]);
+            do_lam_set(luggage_word(3));
         } else {
             print_help(); exit(1); return 1;
         }

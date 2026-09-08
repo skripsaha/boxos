@@ -13,9 +13,10 @@
 ;   - CabinInfo (PID, heap layout, stack_top, spawner_pid) at CABIN_INFO_ADDR
 ;     (0x1000), already populated by process.c::process_load.
 ;
-; BoxOS user programs do NOT take argv via the entry point — argv is delivered
-; over IPC via send_args()/receive_args() so the spawner can supply it as
-; structured data rather than packed strings on the stack. We pass argc=0 /
+; BoxOS user programs do NOT take argv via the entry point. What the spawner
+; said to the program — the command line as typed — is its Luggage, written by
+; the kernel into the CabinInfo page before this instruction runs and read
+; through box/luggage.h (luggage_word / luggage_tail). We pass argc=0 /
 ; argv=NULL here for source-compat with C main() signatures.
 
 [BITS 64]

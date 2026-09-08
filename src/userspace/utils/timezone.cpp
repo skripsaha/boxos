@@ -17,7 +17,7 @@
 // can redraw without polling.
 
 #include <box/cxx/clock.h>
-#include <box/cxx/message.h>   // box::receive_args — how BoxOS delivers arguments
+#include <box/cxx/luggage.h>   // box::luggage — how BoxOS delivers arguments
 
 #include <chrono>
 #include <cstdio>
@@ -119,19 +119,19 @@ int List(std::string_view want)
 // ‼ No (argc, argv), and that is the point rather than an omission. BoxOS does
 // not deliver arguments through the entry point at all: boxlib_start.asm passes
 // argc=0 and argv=NULL purely so a C main() signature still compiles, and the
-// real arguments arrive as structured data over IPC. Writing the POSIX shape
-// here does not fail to find the arguments — it reads argv[1] through a null
-// pointer and takes a #PF at address 8, which is exactly what this command did
-// the first time it was run in the guest.
+// real arguments are the program's Luggage — the line as typed, in its cabin
+// before main runs (box/cxx/luggage.h). Writing the POSIX shape here does not
+// fail to find the arguments — it reads argv[1] through a null pointer and
+// takes a #PF at address 8, which is exactly what this command did the first
+// time it was run in the guest.
 int main()
 {
-    const auto received = box::receive_args();
-    if (!received || received->size() <= 1) return Show();
+    const std::size_t words = box::luggage::size();   // word 0 is the command's name
+    if (words <= 1) return Show();
 
-    const box::args<> &args = *received;      // args[0] is the command's name
-    if (args[1] == "list")
-        return List(args.size() > 2 ? args[2] : std::string_view{});
-    if (args.size() == 2) return Set(args[1]);
+    if (box::luggage::word(1) == "list")
+        return List(words > 2 ? box::luggage::word(2) : std::string_view{});
+    if (words == 2) return Set(box::luggage::word(1));
 
     std::printf("usage: timezone [<name> | list [prefix]]\n");
     return 1;
