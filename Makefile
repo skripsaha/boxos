@@ -518,6 +518,12 @@ KERNEL_ELF   = $(BUILDDIR)/kernel.elf
 STAGE1_BIN   = $(BUILDDIR)/stage1.bin
 STAGE2_BIN   = $(BUILDDIR)/stage2.bin
 IMAGE        = $(BUILDDIR)/boxos.img
+
+# An empty file the volume carries as a fixture (tags: emptyfile, test:forerror).
+# It is zero bytes and therefore not a source file: the repository ignores *.bin,
+# and a fresh clone used to fail with "Failed to open: src/userspace/testbin.bin".
+# Made where every other build product is made.
+TESTBIN_EMPTY = $(BUILDDIR)/testbin.bin
 # Defined here, with the other image paths, and not down beside the UEFI build
 # rules: Make expands a prerequisite list when it READS the rule, so a variable
 # defined below the rule that names it expands to nothing and the dependency
@@ -563,6 +569,13 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
 CLANG_AVAILABLE := $(shell command -v lld-link 2>/dev/null)
 
 .PHONY: all clean run run-bg run-stop bochs-bg bochs-stop debug info check-deps install-deps uefi usb check-endbr64
+
+# A recipe that fails leaves its target on disk otherwise, and the next make
+# takes that half-written file for a finished one. Measured on a fresh clone:
+# the volume tool failed, a partial boxos.img stayed behind, and QEMU booted it
+# into SeaBIOS with an empty serial log — the matrix then blamed "keystrokes
+# dropped". Delete what a failed recipe left, always.
+.DELETE_ON_ERROR:
 
 # ==== MAIN TARGET ====
 all: check-deps check-error-parity check-no-exit-sentinel $(IMAGE) $(KERNEL_ELF) $(VBOX_VDI) uefi check-endbr64
@@ -857,7 +870,11 @@ $(KERNEL_ELF): $(KERNEL_ENTRY_OBJ) $(C_OBJS) $(ASM_OBJS) $(SHELL_EMBED)
 
 
 # ==== DISK IMAGES ====
-$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TAGFS_TOOL)
+$(TESTBIN_EMPTY):
+	@mkdir -p $(@D)
+	@: > $@
+
+$(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
 	@echo "Creating disk image ($$(( $(BOXOS_SECTORS) / 2048 ))MB BoxOS region)..."
 	@dd if=/dev/zero of=$@ bs=512 count=$(BOXOS_SECTORS) status=none
 	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
@@ -926,7 +943,7 @@ $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN)
 		$(UTILS_DIR)/timezone.elf "utility,system,clock" \
 		$(USERSPACE_DIR)/hello.txt   "message,text" \
 		$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
-		$(USERSPACE_DIR)/testbin.bin "binary, test:forerror, emptyfile" \
+		$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 		$(UTILS_DIR)/ipc_test.elf "utility" \
 		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
 		$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
