@@ -16,6 +16,8 @@
 #include "box/core/strand_self.h"
 #include "box/memory.h"
 #include "box/display.h"
+#include "box/touch.h"
+#include "box/turnin.h"
 
 /* ===========================================================================
  * Per-strand print state — thread-confined, NO lock.
@@ -152,97 +154,114 @@ static void lane_fail(StrandPrintState *ps)
  * application is owed (spawn args arrive before a utility's first print).
  * The hold grows on demand so no flood can force a drop.
  *
- * The wait carries NO wall-clock deadline — a guessed number of
- * milliseconds is exactly the timeout class that turns a slow stand into
- * a phantom failure (measured: 16 vCPUs on one TCG thread stretched a
- * grant past five seconds, and the old 2×2500 ms guess declared a live
- * daemon dead). What ends the wait is the daemon's ANSWER — a grant or an
- * honest refusal — or the fact that there is nobody to answer.
+ * There is no clock in this wait and no asking on a schedule. Two facts
+ * end it, and nothing else:
  *
- * A quiet second is not a verdict; it is the moment to ASK AGAIN. The
- * daemon's grant is idempotent per requester (it hands the same lane back
- * to a repeated ask, and refuses the same way), which is precisely what
- * makes a re-ask a safe liveness probe — and the only one that works
- * before the daemon is known by pid: a broadcast that finds no subscriber
- * says so at once (ERR_ROUTE_NO_SUBSCRIBERS), and a send to a pid that is
- * gone says so too. Measured on BIOS 16c (2026-09-06): the daemon's own
- * send of a grant had failed (its pocket ring was full of yields — since
- * fixed at the root), and a writer that only waited, with no question
- * repeated and nothing to check, stayed in its wait for the rest of the run.
- * readline blocks on its reply under the same contract. */
+ *   - the ANSWER: a grant, or the daemon's honest one-byte refusal. The
+ *     kernel says at once whether anyone wears the display tag at all
+ *     (ERR_ROUTE_NO_SUBSCRIBERS), and a request that was delivered sits in
+ *     a living daemon's ring until it gets there — a daemon that has not
+ *     reached its loop yet on a crowded boot is worth waiting for
+ *     (measured: 16 vCPUs on one host thread stretched a grant past five
+ *     seconds, which is what a guessed deadline once called "no display");
+ *   - the DEATH of whoever owes it: process:died is claimed before the
+ *     ask. Once the daemon is known by pid, its own death ends the wait.
+ *     Before it is known, any death makes the kernel the question again —
+ *     an EMPTY broadcast, which a daemon ignores without replying (nothing
+ *     to misread later) and which the kernel refuses when nobody wears the
+ *     tag.
+ *
+ * Between the two the strand turns in — the same mark, look, sleep the
+ * daemon itself lives by — so a writer waiting for its lane costs nothing. */
 static bool lane_await_grant(char *tag, size_t tag_cap)
 {
     Result  *held     = NULL;
     uint32_t held_n   = 0;
     uint32_t held_cap = 0;
     bool     got      = false;
-    bool     asked    = false;
+    bool     done     = false;
 
-    for (;;) {
-        if (!asked) {
-            /* [cmd][u32 generation]: the lane is granted to (pid, generation),
-             * so a recycled pid can never be handed its predecessor's lane. */
-            uint8_t  req[5];
-            uint32_t gen = strand_self_generation();
-            req[0] = DISP_CMD_LANE;
-            memcpy(req + 1, &gen, sizeof(gen));
-            if (g_display_pid != 0) {
-                if (send(g_display_pid, req, sizeof(req)) < 0) break;
-                asked = true;
-            } else {
-                /* The kernel answers "is anyone wearing the tag" on the
-                 * spot: ERR_ROUTE_NO_SUBSCRIBERS means there is no daemon
-                 * to wait for, so waiting would be watching a clock for an
-                 * event that cannot happen. A daemon that exists but has
-                 * not reached its loop yet banks the broadcast and answers
-                 * when it gets there — that is worth waiting out. */
-                int rc = broadcast("display", req, sizeof(req));
-                if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS)
-                    break;
-                asked = true;
-            }
-        }
+    TouchTag pdied    = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));
+    bool     watching = (pdied != TOUCH_TAG_INVALID) &&
+                        touch_claim(pdied, TOUCH_REST, 0, 0) == 0;
+
+    /* [cmd][u32 generation]: the lane is granted to (pid, generation),
+     * so a recycled pid can never be handed its predecessor's lane. */
+    uint8_t  req[5];
+    uint32_t gen = strand_self_generation();
+    req[0] = DISP_CMD_LANE;
+    memcpy(req + 1, &gen, sizeof(gen));
+
+    if (g_display_pid != 0) {
+        if (send(g_display_pid, req, sizeof(req)) < 0) done = true;
+    } else {
+        int rc = broadcast("display", req, sizeof(req));
+        if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) done = true;
+    }
+
+    while (!done) {
+        TurnInMark mark  = box_mark();
+        bool       moved = false;
 
         Result r;
-        if (!receive_wait(&r, 1000)) {
-            /* A quiet second: ask again. The loop's send/broadcast above is
-             * the liveness check — a daemon that is gone refuses the ask
-             * itself (no subscribers / no such process), and a live one
-             * answers a repeated ask exactly as it answered the first. */
-            asked = false;
-            continue;
-        }
-
-        const uint8_t *d = (const uint8_t *)(uintptr_t)r.data_addr;
-        if (r.sender_pid != 0 && r.data_addr != 0 &&
-            r.data_length >= 1 && d[0] == DISP_CMD_LANE) {
-            if (r.data_length >= 2) {
-                uint32_t n = r.data_length - 1;
-                if (n >= tag_cap) n = (uint32_t)tag_cap - 1;
-                memcpy(tag, d + 1, n);
-                tag[n] = '\0';
-                if (tag[0] != '\0') {
-                    __sync_bool_compare_and_swap(&g_display_pid, 0,
-                                                 r.sender_pid);
-                    got = true;
+        while (!done && receive(&r)) {
+            moved = true;
+            const uint8_t *d = (const uint8_t *)(uintptr_t)r.data_addr;
+            if (r.sender_pid != 0 && r.data_addr != 0 &&
+                r.data_length >= 1 && d[0] == DISP_CMD_LANE) {
+                if (r.data_length >= 2) {
+                    uint32_t n = r.data_length - 1;
+                    if (n >= tag_cap) n = (uint32_t)tag_cap - 1;
+                    memcpy(tag, d + 1, n);
+                    tag[n] = '\0';
+                    if (tag[0] != '\0') {
+                        __sync_bool_compare_and_swap(&g_display_pid, 0,
+                                                     r.sender_pid);
+                        got = true;
+                    }
                 }
+                done = true;   /* grant, or the daemon's explicit refusal */
+                break;
             }
-            break;   /* grant, or the daemon's explicit refusal */
+
+            if (held_n == held_cap) {
+                uint32_t cap = held_cap ? held_cap * 2 : 8;
+                Result *grown = (Result *)malloc(cap * sizeof(Result));
+                if (!grown) { result_restash(&r); break; }
+                if (held) {
+                    memcpy(grown, held, held_n * sizeof(Result));
+                    free(held);
+                }
+                held = grown;
+                held_cap = cap;
+            }
+            held[held_n++] = r;
+        }
+        if (done) break;
+
+        bool  ask_again = false;
+        Touch t;
+        while (watching && touch_try_pop_tag(pdied, &t)) {
+            moved = true;
+            if (t.payload_len < sizeof(TouchProcessDied)) continue;
+            TouchProcessDied dd;
+            memcpy(&dd, t.payload, sizeof(dd));
+            if (g_display_pid != 0) {
+                if (dd.pid == g_display_pid) { done = true; break; }
+            } else {
+                ask_again = true;
+            }
+        }
+        if (done) break;
+        if (ask_again) {
+            int rc = broadcast("display", NULL, 0);
+            if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) break;
         }
 
-        if (held_n == held_cap) {
-            uint32_t cap = held_cap ? held_cap * 2 : 8;
-            Result *grown = (Result *)malloc(cap * sizeof(Result));
-            if (!grown) { result_restash(&r); break; }
-            if (held) {
-                memcpy(grown, held, held_n * sizeof(Result));
-                free(held);
-            }
-            held = grown;
-            held_cap = cap;
-        }
-        held[held_n++] = r;
+        if (!moved) box_turn_in(mark);
     }
+
+    if (watching) touch_release(pdied);
 
     /* Give every held message back in arrival order — the stash is
      * consulted before the ring, so later consumers see them first. */
@@ -926,13 +945,10 @@ int readline(char* buffer, size_t max_len)
     io_flush_state(ps);
     if (!buffer || max_len < 2) return -1;
 
-    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) {
-        uint8_t ping = DISP_CMD_PING;
-        broadcast("display", &ping, 1);
-        Result ping_result;
-        if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0)
-            __sync_bool_compare_and_swap(&g_display_pid, 0, ping_result.sender_pid);
-    }
+    /* The daemon is met through the lane and nowhere else: a grant names
+     * it by pid, a refusal or its absence flips the cabin to direct VGA
+     * (lane_fail). No probe of its own, no clock. */
+    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) lane_ensure(ps);
 
     if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {
         uint16_t capped = (uint16_t)(max_len > 1024 ? 1024 : max_len);
@@ -995,13 +1011,10 @@ __attribute__((weak)) int getchar(void)
 {
     StrandPrintState *ps = print_state_self();
     io_flush_state(ps);
-    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) {
-        uint8_t ping = DISP_CMD_PING;
-        broadcast("display", &ping, 1);
-        Result ping_result;
-        if (receive_wait(&ping_result, 2000) && ping_result.sender_pid != 0)
-            __sync_bool_compare_and_swap(&g_display_pid, 0, ping_result.sender_pid);
-    }
+    /* The daemon is met through the lane and nowhere else: a grant names
+     * it by pid, a refusal or its absence flips the cabin to direct VGA
+     * (lane_fail). No probe of its own, no clock. */
+    if (g_io_mode == IO_MODE_IPC && g_display_pid == 0) lane_ensure(ps);
 
     if (g_io_mode == IO_MODE_IPC && g_display_pid != 0) {
         uint8_t req = DISP_CMD_GETCHAR;
