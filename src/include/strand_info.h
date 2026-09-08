@@ -60,7 +60,7 @@ typedef struct StrandInfo {
     uint64_t tcb_reserved;    /* @8  — TCB DTV slot (reserved, unused in P5a) */
     uint64_t magic;           /* @16 — STRAND_INFO_MAGIC; discriminates from a C++ TCB */
     uint32_t strand_pid;      /* @24 — this strand's pid (strand_self) */
-    uint32_t is_main;         /* @28 — always 0 for a spawned strand */
+    uint32_t generation;      /* @28 — pid_generation at spawn: (pid, generation) is who this strand is */
     uint64_t pocket_ring_va;  /* @32 — per-strand PocketRing header VA */
     uint64_t result_ring_va;  /* @40 — per-strand ResultRing header VA */
     uint64_t touch_ring_va;   /* @48 — per-strand TouchRing header VA */
@@ -101,7 +101,7 @@ typedef struct StrandInfo {
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, tcb_self)       == 0,  "StrandInfo.tcb_self @0");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, magic)          == 16, "StrandInfo.magic @16 (fs-base probe offset)");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pid)     == 24, "StrandInfo.strand_pid @24");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, is_main)        == 28, "StrandInfo.is_main @28");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, generation)     == 28, "StrandInfo.generation @28");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, pocket_ring_va) == 32, "StrandInfo.pocket_ring_va @32");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, result_ring_va) == 40, "StrandInfo.result_ring_va @40");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_ring_va)  == 48, "StrandInfo.touch_ring_va @48");

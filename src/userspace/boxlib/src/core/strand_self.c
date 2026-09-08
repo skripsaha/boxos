@@ -88,3 +88,9 @@ uint32_t strand_self(void)
         return si->strand_pid;
     return cabin_info()->pid;
 }
+
+uint32_t strand_self_generation(void)
+{
+    StrandInfo *si = strand_info_or_null();
+    return si ? si->generation : cabin_info()->generation;
+}

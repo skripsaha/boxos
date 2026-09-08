@@ -42,6 +42,10 @@ strand_rings_t strand_rings(void);
 /* The calling strand's pid (main strand → cabin pid via CabinInfo). */
 uint32_t strand_self(void);
 
+/* The calling strand's generation — the other half of who it is. A pid is
+ * reused; (pid, generation) never is, and it is what process:died names. */
+uint32_t strand_self_generation(void);
+
 #ifdef __cplusplus
 }
 #endif

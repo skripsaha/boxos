@@ -180,9 +180,14 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
 
     for (;;) {
         if (!asked) {
-            uint8_t req = DISP_CMD_LANE;
+            /* [cmd][u32 generation]: the lane is granted to (pid, generation),
+             * so a recycled pid can never be handed its predecessor's lane. */
+            uint8_t  req[5];
+            uint32_t gen = strand_self_generation();
+            req[0] = DISP_CMD_LANE;
+            memcpy(req + 1, &gen, sizeof(gen));
             if (g_display_pid != 0) {
-                if (send(g_display_pid, &req, 1) < 0) break;
+                if (send(g_display_pid, req, sizeof(req)) < 0) break;
                 asked = true;
             } else {
                 /* The kernel answers "is anyone wearing the tag" on the
@@ -191,7 +196,7 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
                  * event that cannot happen. A daemon that exists but has
                  * not reached its loop yet banks the broadcast and answers
                  * when it gets there — that is worth waiting out. */
-                int rc = broadcast("display", &req, 1);
+                int rc = broadcast("display", req, sizeof(req));
                 if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS)
                     break;
                 asked = true;
