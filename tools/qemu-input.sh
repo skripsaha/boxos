@@ -25,14 +25,25 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-MON=${QEMU_MON:-$ROOT/build/qemu.mon}
-LOG=${QEMU_LOG:-$ROOT/build/serial.log}
-PID=${QEMU_PID:-$ROOT/build/qemu.pid}
+cd "$ROOT"
+# The socket path is RELATIVE, and this script runs from the tree root so it
+# resolves. QEMU itself makes the socket at build/qemu.mon relative to its own
+# cwd (`make run-bg` runs there too), and a Unix socket path is limited to
+# sun_path — 104 bytes on macOS. An absolute path from a deep checkout crossed
+# that limit and `type`/`alive`/`shot` failed to connect without a word,
+# which the matrix reported as "keystrokes dropped". The limit is checked
+# below so a path that cannot work says so.
+MON=${QEMU_MON:-build/qemu.mon}
+LOG=${QEMU_LOG:-build/serial.log}
+PID=${QEMU_PID:-build/qemu.pid}
 NC_TIMEOUT=${NC_TIMEOUT:-1}
+SUN_PATH_MAX=103
 
 die() { echo "qemu-input: $*" >&2; exit 1; }
 
 require_socket() {
+    [ "${#MON}" -le "$SUN_PATH_MAX" ] || \
+        die "monitor socket path is ${#MON} bytes, sun_path allows $SUN_PATH_MAX: $MON"
     [ -S "$MON" ] || die "monitor socket not found: $MON (start QEMU with 'make run-bg')"
 }
 
