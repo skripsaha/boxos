@@ -3,17 +3,9 @@
 
 #include "ktypes.h"
 
-#define KB_SEQ_MAX 4
-
 typedef struct {
-    char    seq[KB_SEQ_MAX];
-    uint8_t len;
-} ExtKeySeq;
-
-typedef struct {
-    uint8_t usb_code;
-    char    seq[KB_SEQ_MAX];
-    uint8_t seq_len;
+    uint8_t usb_code;   /* USB HID usage */
+    uint8_t scancode;   /* set-1 scancode after the 0xE0 prefix */
 } UsbExtKey;
 
 static const char scancode_to_ascii[128] = {
@@ -72,20 +64,6 @@ static const char scancode_to_ascii_shifted[128] = {
     [0x3A] = 0,    /* Caps Lock */
 };
 
-static const ExtKeySeq ext_key_table[128] = {
-    [0x1D] = {{0}, 0},                          /* Right Ctrl  (modifier) */
-    [0x38] = {{0}, 0},                          /* Right Alt   (modifier) */
-    [0x48] = {{'\033', '[', 'A', 0}, 3},        /* Up arrow    */
-    [0x50] = {{'\033', '[', 'B', 0}, 3},        /* Down arrow  */
-    [0x4D] = {{'\033', '[', 'C', 0}, 3},        /* Right arrow */
-    [0x4B] = {{'\033', '[', 'D', 0}, 3},        /* Left arrow  */
-    [0x47] = {{'\033', '[', 'H', 0}, 3},        /* Home        */
-    [0x4F] = {{'\033', '[', 'F', 0}, 3},        /* End         */
-    [0x49] = {{'\033', '[', '5', '~'}, 4},      /* Page Up     */
-    [0x51] = {{'\033', '[', '6', '~'}, 4},      /* Page Down   */
-    [0x52] = {{'\033', '[', '2', '~'}, 4},      /* Insert      */
-    [0x53] = {{'\033', '[', '3', '~'}, 4},      /* Delete      */
-};
 
 static const uint8_t usb_to_ps2[256] = {
     [0x04] = 0x1E, [0x05] = 0x30, [0x06] = 0x2E, [0x07] = 0x20,
@@ -107,18 +85,20 @@ static const uint8_t usb_to_ps2[256] = {
     [0x42] = 0x43, [0x43] = 0x44, [0x44] = 0x57, [0x45] = 0x58,
 };
 
+/* USB HID usage → set-1 extended (0xE0-prefixed) scancode, so a USB arrow
+ * takes the very path a PS/2 arrow takes and is published the same way. */
 static const UsbExtKey usb_ext_keys[] = {
-    {0x4F, {'\033', '[', 'C', 0}, 3},      /* Right arrow */
-    {0x50, {'\033', '[', 'D', 0}, 3},      /* Left arrow  */
-    {0x51, {'\033', '[', 'B', 0}, 3},      /* Down arrow  */
-    {0x52, {'\033', '[', 'A', 0}, 3},      /* Up arrow    */
-    {0x4A, {'\033', '[', 'H', 0}, 3},      /* Home        */
-    {0x4D, {'\033', '[', 'F', 0}, 3},      /* End         */
-    {0x4B, {'\033', '[', '5', '~'}, 4},    /* Page Up     */
-    {0x4E, {'\033', '[', '6', '~'}, 4},    /* Page Down   */
-    {0x49, {'\033', '[', '2', '~'}, 4},    /* Insert      */
-    {0x4C, {'\033', '[', '3', '~'}, 4},    /* Delete      */
-    {0x00, {0, 0, 0, 0}, 0}                /* sentinel    */
+    {0x4F, 0x4D},   /* Right arrow */
+    {0x50, 0x4B},   /* Left arrow  */
+    {0x51, 0x50},   /* Down arrow  */
+    {0x52, 0x48},   /* Up arrow    */
+    {0x4A, 0x47},   /* Home        */
+    {0x4D, 0x4F},   /* End         */
+    {0x4B, 0x49},   /* Page Up     */
+    {0x4E, 0x51},   /* Page Down   */
+    {0x49, 0x52},   /* Insert      */
+    {0x4C, 0x53},   /* Delete      */
+    {0x00, 0x00}    /* sentinel    */
 };
 
 #endif /* KEYMAPS_H */

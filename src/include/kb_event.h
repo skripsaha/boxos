@@ -20,8 +20,7 @@
 #define __packed __attribute__((packed))
 #endif
 
-/* Modifier bits carried in kb_event_t.mods (and kb_char_t.flags, the ring
- * variant of a key read via HW_KB_GETCHAR). */
+/* Modifier bits carried in kb_event_t.mods. */
 #define KB_MOD_SHIFT  0x01u
 #define KB_MOD_CTRL   0x02u
 #define KB_MOD_ALT    0x04u

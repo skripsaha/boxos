@@ -35,7 +35,7 @@ extern "C" {
  *
  * A deadline belongs where SILENCE IS POSSIBLE, and only there — an event that
  * may never happen. Those are named by the caller who chose to wait a bounded
- * time (brook_pop_timeout, kb_getchar_timeout, a timed addr_park), never by
+ * time (brook_pop_timeout, a timed touch_await, a timed addr_park), never by
  * this file on behalf of an answer the kernel owes. An answer that never comes
  * is a kernel defect, and Nightwatch names it on facts (ANSWER OWED); a clock
  * in front of it is how it stayed unnamed.

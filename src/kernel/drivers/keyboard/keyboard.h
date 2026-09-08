@@ -36,14 +36,6 @@ typedef struct {
     _Atomic uint8_t last_keycode;
 } keyboard_state_t;
 
-typedef struct {
-    char     buffer[KEYBOARD_LINE_BUFFER_SIZE];
-    uint16_t length;
-    uint16_t cursor;
-    uint8_t  line_ready;
-    uint8_t  echo_enabled;
-    uint8_t  ctrl_c_pressed;
-} keyboard_line_state_t;
 
 void keyboard_init(void);
 void keyboard_handle_scancode(uint8_t scancode);
@@ -52,18 +44,6 @@ void keyboard_handle_scancode(uint8_t scancode);
  * into the keyboard input ring, delivered to the shell as if typed. */
 void keyboard_inject(const char *chars, uint32_t count);
 
-int      keyboard_has_input(void);
-char     keyboard_getchar(void);
-char     keyboard_getchar_blocking(void);
-void     keyboard_flush(void);
-uint32_t keyboard_available(void);
-
-void  keyboard_line_init(void);
-void  keyboard_set_echo(bool enabled);
-char* keyboard_readline(void);
-int   keyboard_readline_async(char* buf, int max);
-int   keyboard_check_ctrl_c(void);
-void  keyboard_line_clear(void);
 
 keyboard_state_t* keyboard_get_state(void);
 
@@ -71,7 +51,6 @@ keyboard_state_t* keyboard_get_state(void);
 void keyboard_timer_tick(void);
 
 /* Push a raw byte sequence into the keyboard buffer (used by USB HID path) */
-void keyboard_push_sequence(const char* seq, uint8_t len);
 
 /* Update PS/2 keyboard LEDs (Caps/Num/Scroll Lock) */
 void keyboard_set_leds(uint8_t caps, uint8_t num, uint8_t scroll);

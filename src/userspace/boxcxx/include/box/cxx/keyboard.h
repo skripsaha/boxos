@@ -16,9 +16,10 @@
 //                      co_await next() — suspend on the current box::executor
 //                                    until the next key.
 //
-// This is a box:: extension, not part of std. (The raw poll ring lives at
-// box/keyboard.h::kb_getchar for the few callers that want it; box::key_stream
-// deliberately does not expose it — events, not polling.)
+// This is a box:: extension, not part of std. There is no poll ring anywhere
+// any more: the keyboard is events, and this is how C++ hears them. A program
+// under the display daemon hears the keys said on its own console lane
+// (readline / getchar); box::key_stream hears the raw "keyboard" tag itself.
 #ifndef BOXCXX_BOX_KEYBOARD_H
 #define BOXCXX_BOX_KEYBOARD_H
 

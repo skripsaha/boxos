@@ -281,7 +281,7 @@ uint32_t result_ferry_stash_count(void) {
 bool result_pop_non_ipc(Result* out) {
     if (!out) return false;
     /* Skip ERR_WOULD_BLOCK entries — these are transient kernel acks for
-     * async-parking ops (touch_await, kb_readline) and never valid replies
+     * async-parking ops (touch_await, readline) and never valid replies
      * to a synchronous manifest submission. If we returned them as the
      * reply for a different submission the caller would see a stale 9 and
      * misinterpret it as its own error. */
@@ -418,7 +418,7 @@ bool result_pop_touch(Result* out) {
  *   - everything else   → orphan manifest reply (DISCARD)
  *
  * Safe to call ONLY before submitting a fresh synchronous Manifest. Async
- * paths (touch_await, kb_readline) must NOT use this helper because their
+ * paths (touch_await, readline) must NOT use this helper because their
  * pending replies look identical to orphans. */
 void result_drain_orphan_replies(void) {
     /* Drop everything sitting in the local non_ipc_stash too — those are by

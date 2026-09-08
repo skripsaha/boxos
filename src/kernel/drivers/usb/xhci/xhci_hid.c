@@ -5,17 +5,17 @@
 #include "klib.h"
 #include "touch.h"
 
-/* Check if a USB HID keycode is an extended key and push its sequence.
-   Returns 1 if handled, 0 if not an extended key. */
+/* A USB extended key (arrow, Home/End, Delete, …) takes the road a PS/2 one
+ * takes: the 0xE0 prefix, then its set-1 scancode (with the release bit for a
+ * release), so it is published, repeated and released by the one driver.
+ * Returns 1 if the usage was an extended key, 0 if not. */
 static int usb_handle_ext_key(uint8_t usb_code, int is_release)
 {
     for (int i = 0; usb_ext_keys[i].usb_code != 0; i++) {
         if (usb_ext_keys[i].usb_code == usb_code) {
-            if (!is_release) {
-                keyboard_push_sequence(usb_ext_keys[i].seq,
-                                       usb_ext_keys[i].seq_len);
-            }
-            /* Extended key releases produce no output but are "handled" */
+            keyboard_handle_scancode(0xE0);
+            keyboard_handle_scancode((uint8_t)(usb_ext_keys[i].scancode |
+                                               (is_release ? 0x80 : 0)));
             return 1;
         }
     }

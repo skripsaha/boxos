@@ -16,27 +16,11 @@ uint32_t g_kb_repeat_rate_ticks;
 
 /* ─── Circular character buffer ─────────────────────────────────────────── */
 
-#define KEYBOARD_BUFFER_SIZE 256
-
-static char keyboard_buffer[KEYBOARD_BUFFER_SIZE];
-static volatile uint32_t kb_head = 0;
-static volatile uint32_t kb_tail = 0;
-static spinlock_t kb_lock = {0};
 
 /* ─── Keyboard state ────────────────────────────────────────────────────── */
 
 static keyboard_state_t kb_state = {0};
 
-/* ─── Line discipline ───────────────────────────────────────────────────── */
-
-static keyboard_line_state_t line_state = {0};
-static spinlock_t line_lock = {0};
-/* INVARIANT: readline_result is a singleton owned by the one thread that
- * calls keyboard_readline() (in BoxOS this is shell.bin / display.elf
- * stdin reader). If multiple threads ever read stdin concurrently the
- * pointer returned by keyboard_readline() will alias their data. Don't
- * call from more than one place. */
-static char readline_result[KEYBOARD_LINE_BUFFER_SIZE];
 
 /* ─── Touch tag handle cache (resolved once at keyboard_init) ──────────────
  *
@@ -88,8 +72,6 @@ static void kb_publish_event(const kb_event_t *ev)
 
 typedef struct {
     uint8_t  active;                  /* 1 = a key is held down          */
-    char     chars[KB_SEQ_MAX];       /* bytes to inject on repeat       */
-    uint8_t  char_count;              /* 1 for normal, 3-4 for esc seqs  */
     uint8_t  held_key;               /* bare scancode of held key        */
     uint8_t  held_is_extended;       /* 1 if the held key was 0xE0-prefixed */
     kb_event_t held_event;           /* the Touch a repeat says again    */
@@ -104,44 +86,18 @@ static KbRepeatState kb_repeat = {0};
    Internal helpers
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Push up to KB_SEQ_MAX bytes into the circular buffer.
-   Called from IRQ context — spinlock save/restore handles IF. */
-static void kb_push_chars(const char* chars, uint8_t count)
-{
-    spin_lock(&kb_lock);
-    for (uint8_t i = 0; i < count; i++) {
-        uint32_t next_head = (kb_head + 1) % KEYBOARD_BUFFER_SIZE;
-        if (next_head == kb_tail) break;  /* buffer full — drop remainder */
-        keyboard_buffer[kb_head] = chars[i];
-        kb_head = next_head;
-    }
-    spin_unlock(&kb_lock);
-}
-
 /* Public: feed characters from an external input source (the COM1 serial
- * console — see serial_console_init) into the SAME ring the PS/2 keyboard
- * fills, so keyboard_readline delivers them to the shell exactly as typed
- * keys. IRQ-safe: kb_push_chars takes the irqsave kb_lock. */
+ * console — see serial_console_init) as "keyboard" Touch events, so a real
+ * keypress and an injected byte are indistinguishable to whoever listens.
+ * Deferred (IRQ-safe) publish is mandatory: keyboard_inject runs in the COM1
+ * IRQ handler, same as the PS/2 site — a direct TouchPublish would take TagFS
+ * registry locks with IF=0 (the irq_defer deadlock pattern). scancode 0 says
+ * the key is synthetic. */
 void keyboard_inject(const char *chars, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++) {
-        char c = chars[i];
-
-        /* Feed the legacy char ring (keyboard_getchar / keyboard_readline_async
-         * consumers). */
-        kb_push_chars(&c, 1);
-
-        /* AND publish the "keyboard" Touch event — this is the path the display
-         * daemon's readline (touch_await on TOUCH_TAG_KEYBOARD) actually
-         * consumes, so a real keypress and an injected byte are indistinguish-
-         * able to the shell. Deferred (IRQ-safe) publish is mandatory:
-         * keyboard_inject runs in the COM1 IRQ handler, same as the PS/2 site
-         * above — a direct TouchPublish would take TagFS registry locks with
-         * IF=0 (the irq_defer deadlock pattern). scancode=0: synthetic key. */
-        kb_event_t kb_ev = { .scancode = 0, .ascii = c, .mods = 0 };
-        TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
-        TouchTag bare = __atomic_load_n(&g_kbd_touch_bare, __ATOMIC_ACQUIRE);
-        TouchPublishIrqPair(full, bare, &kb_ev, sizeof(kb_ev), 0, TOUCH_FLAG_KERNEL);
+        kb_event_t kb_ev = { .scancode = 0, .ascii = chars[i], .mods = 0 };
+        kb_publish_event(&kb_ev);
     }
 }
 
@@ -167,18 +123,14 @@ static char translate_key(uint8_t key)
 }
 
 /* Arm the software repeat timer for the given key. */
-static void kb_arm_repeat(const char* chars, uint8_t count,
-                           uint8_t key, uint8_t is_extended,
-                           const kb_event_t *event)
+static void kb_arm_repeat(uint8_t key, uint8_t is_extended,
+                          const kb_event_t *event)
 {
     kb_repeat.active         = 1;
-    kb_repeat.char_count     = count;
     kb_repeat.held_key       = key;
     kb_repeat.held_is_extended = is_extended;
     kb_repeat.held_event     = *event;
     kb_repeat.delay_passed   = 0;
-    for (uint8_t i = 0; i < count && i < KB_SEQ_MAX; i++)
-        kb_repeat.chars[i] = chars[i];
     kb_repeat.next_repeat_tick = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
                                  + g_kb_repeat_delay_ticks;
 }
@@ -241,15 +193,10 @@ void keyboard_set_leds(uint8_t caps, uint8_t num, uint8_t scroll)
 
 void keyboard_init(void)
 {
-    kb_head = 0;
-    kb_tail = 0;
     memset(&kb_state, 0, sizeof(kb_state));
     memset(&kb_repeat, 0, sizeof(kb_repeat));
     kb_e0_pending = 0;
     kb_led_state  = 0;
-
-    memset(&line_state, 0, sizeof(line_state));
-    line_state.echo_enabled = 1;
 
     debug_printf("[KEYBOARD] Initializing 8042 PS/2 controller...\n");
 
@@ -368,16 +315,11 @@ void keyboard_handle_scancode(uint8_t scancode)
 
         /* An extended key is a KEY, not a character: it is published as
          * its scancode with ascii 0 and KB_MOD_EXTENDED, and an editor
-         * answers it by name (arrows, Home/End, Delete). The escape
-         * sequence below feeds only the legacy poll ring. */
-        if (key < 128 && ext_key_table[key].len > 0) {
-            const ExtKeySeq* ek = &ext_key_table[key];
-            kb_push_chars(ek->seq, ek->len);
-            kb_event_t kb_ev = { .scancode = key, .ascii = 0,
-                                 .mods = (uint8_t)(kb_mods_now() | KB_MOD_EXTENDED) };
-            kb_arm_repeat(ek->seq, ek->len, key, 1, &kb_ev);
-            kb_publish_event(&kb_ev);
-        }
+         * answers it by name (arrows, Home/End, Delete). */
+        kb_event_t kb_ev = { .scancode = key, .ascii = 0,
+                             .mods = (uint8_t)(kb_mods_now() | KB_MOD_EXTENDED) };
+        kb_arm_repeat(key, 1, &kb_ev);
+        kb_publish_event(&kb_ev);
         return;
     }
 
@@ -444,9 +386,8 @@ void keyboard_handle_scancode(uint8_t scancode)
          * was delayed past make-t2. Real fix for Bochs host-typematic
          * passthrough needs time-based debounce or per-environment
          * policy, not unconditional same-key suppression.) */
-        kb_push_chars(&ascii, 1);
         kb_event_t kb_ev = { .scancode = key, .ascii = ascii, .mods = kb_mods_now() };
-        kb_arm_repeat(&ascii, 1, key, 0, &kb_ev);
+        kb_arm_repeat(key, 0, &kb_ev);
         kb_publish_event(&kb_ev);
     }
 }
@@ -461,8 +402,6 @@ void keyboard_timer_tick(void)
     if (now < kb_repeat.next_repeat_tick) return;
 
     /* Fire repeat */
-    kb_push_chars(kb_repeat.chars, kb_repeat.char_count);
-
     /* A repeat says the same key again — the same event, an arrow included.
      * Building it afresh from the poll-ring bytes once turned a held arrow
      * into a stream of ESC characters. */
@@ -475,251 +414,8 @@ void keyboard_timer_tick(void)
     kb_repeat.next_repeat_tick = now + g_kb_repeat_rate_ticks;
 }
 
-/* ─── Push raw sequence (used by USB HID extended keys) ────────────────── */
-
-void keyboard_push_sequence(const char* seq, uint8_t len)
-{
-    if (len > KB_SEQ_MAX) len = KB_SEQ_MAX;
-    kb_push_chars(seq, len);
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   Buffer access API (unchanged interface)
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-/* Hint readers — head/tail are written under kb_lock by the IRQ-side
- * producer; user-context probing without the lock is fine on x86 (aligned
- * 32-bit loads are atomic) but expressed via __atomic_load_n to avoid the
- * formal C11 data race vs the IRQ-side stores. */
-int keyboard_has_input(void)
-{
-    uint32_t h = __atomic_load_n(&kb_head, __ATOMIC_RELAXED);
-    uint32_t t = __atomic_load_n(&kb_tail, __ATOMIC_RELAXED);
-    return h != t;
-}
-
-uint32_t keyboard_available(void)
-{
-    uint32_t h = __atomic_load_n(&kb_head, __ATOMIC_RELAXED);
-    uint32_t t = __atomic_load_n(&kb_tail, __ATOMIC_RELAXED);
-    if (h == t) return 0;
-    if (h > t) return h - t;
-    return KEYBOARD_BUFFER_SIZE - t + h;
-}
-
-char keyboard_getchar(void)
-{
-    if (__atomic_load_n(&kb_head, __ATOMIC_RELAXED) ==
-        __atomic_load_n(&kb_tail, __ATOMIC_RELAXED))
-        return 0;
-
-    spin_lock(&kb_lock);
-    /* Re-check under lock: another consumer may have drained between the
-     * fast-path probe and here. */
-    if (kb_head == kb_tail) {
-        spin_unlock(&kb_lock);
-        return 0;
-    }
-    char c = keyboard_buffer[kb_tail];
-    kb_tail = (kb_tail + 1) % KEYBOARD_BUFFER_SIZE;
-    spin_unlock(&kb_lock);
-
-    return c;
-}
-
-char keyboard_getchar_blocking(void)
-{
-    while (!keyboard_has_input()) {
-        asm volatile("sti; hlt");
-    }
-    return keyboard_getchar();
-}
-
-void keyboard_flush(void)
-{
-    spin_lock(&kb_lock);
-    kb_head = kb_tail = 0;
-    spin_unlock(&kb_lock);
-}
-
 keyboard_state_t* keyboard_get_state(void)
 {
     return &kb_state;
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   Line discipline (unchanged logic)
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-void keyboard_line_init(void)
-{
-    spin_lock(&line_lock);
-    memset(&line_state, 0, sizeof(line_state));
-    line_state.echo_enabled = 1;
-    spin_unlock(&line_lock);
-}
-
-void keyboard_set_echo(bool enabled)
-{
-    spin_lock(&line_lock);
-    line_state.echo_enabled = enabled ? 1 : 0;
-    spin_unlock(&line_lock);
-}
-
-void keyboard_line_clear(void)
-{
-    spin_lock(&line_lock);
-    line_state.length = 0;
-    line_state.cursor = 0;
-    line_state.line_ready = 0;
-    line_state.ctrl_c_pressed = 0;
-    memset(line_state.buffer, 0, KEYBOARD_LINE_BUFFER_SIZE);
-    spin_unlock(&line_lock);
-}
-
-int keyboard_check_ctrl_c(void)
-{
-    spin_lock(&line_lock);
-    int result = line_state.ctrl_c_pressed;
-    line_state.ctrl_c_pressed = 0;
-    spin_unlock(&line_lock);
-    return result;
-}
-
-static void line_process_char(char c)
-{
-    spin_lock(&line_lock);
-
-    /* Enter — complete line */
-    if (c == '\n' || c == '\r') {
-        line_state.buffer[line_state.length] = '\0';
-        line_state.line_ready = 1;
-        if (line_state.echo_enabled) {
-            kprintf("\n");
-        }
-        spin_unlock(&line_lock);
-        return;
-    }
-
-    /* Ctrl+C — atomic load: kb_state.ctrl_pressed is written from PS/2 IRQ
-     * (BSP) and xHCI HID IRQ (any core), but read here from any user-thread
-     * core. */
-    if (__atomic_load_n(&kb_state.ctrl_pressed, __ATOMIC_RELAXED) &&
-        (c == 'c' || c == 'C')) {
-        line_state.ctrl_c_pressed = 1;
-        line_state.length = 0;
-        line_state.cursor = 0;
-        if (line_state.echo_enabled) {
-            kprintf("^C\n");
-        }
-        spin_unlock(&line_lock);
-        return;
-    }
-
-    /* Backspace / DEL */
-    if (c == '\b' || c == 127) {
-        if (line_state.cursor > 0) {
-            line_state.cursor--;
-            line_state.length--;
-
-            for (int i = line_state.cursor; i < line_state.length; i++) {
-                line_state.buffer[i] = line_state.buffer[i + 1];
-            }
-            line_state.buffer[line_state.length] = '\0';
-
-            if (line_state.echo_enabled) {
-                kprintf("\b \b");
-            }
-        }
-        spin_unlock(&line_lock);
-        return;
-    }
-
-    /* Tab → space */
-    if (c == '\t') {
-        c = ' ';
-    }
-
-    /* Escape sequences pass through as individual bytes — the shell
-       can decode them if it wants arrow key support later. For now
-       non-printable bytes (like 0x1B) are silently dropped by the
-       printable check below, which is fine. */
-
-    /* Printable characters */
-    if (c >= 32 && c < 127) {
-        if (line_state.length < KEYBOARD_LINE_BUFFER_SIZE - 1) {
-            line_state.buffer[line_state.cursor] = c;
-            line_state.cursor++;
-            line_state.length++;
-            line_state.buffer[line_state.length] = '\0';
-
-            if (line_state.echo_enabled) {
-                kputchar(c);
-            }
-        }
-    }
-
-    spin_unlock(&line_lock);
-}
-
-char* keyboard_readline(void)
-{
-    keyboard_line_clear();
-
-    while (1) {
-        while (!keyboard_has_input()) {
-            asm volatile("sti; hlt");
-        }
-
-        char c = keyboard_getchar();
-        if (c == 0) continue;
-
-        line_process_char(c);
-
-        spin_lock(&line_lock);
-        if (line_state.line_ready) {
-            memcpy(readline_result, line_state.buffer, line_state.length + 1);
-            spin_unlock(&line_lock);
-
-            keyboard_line_clear();
-            return readline_result;
-        }
-
-        if (line_state.ctrl_c_pressed) {
-            spin_unlock(&line_lock);
-            keyboard_line_clear();
-            return NULL;
-        }
-        spin_unlock(&line_lock);
-    }
-}
-
-int keyboard_readline_async(char* buf, int max)
-{
-    /* No room even for the NUL terminator: writing would do memcpy((size_t)-1)
-     * (len = max-1 = -1) and buf[-1]. Report not-ready; the line stays buffered. */
-    if (max <= 0)
-        return 0;
-
-    while (keyboard_has_input()) {
-        char c = keyboard_getchar();
-        if (c != 0) {
-            line_process_char(c);
-        }
-    }
-
-    spin_lock(&line_lock);
-    if (line_state.line_ready) {
-        int len = line_state.length;
-        if (len >= max) len = max - 1;
-        memcpy(buf, line_state.buffer, len);
-        buf[len] = '\0';
-        spin_unlock(&line_lock);
-
-        keyboard_line_clear();
-        return 1;
-    }
-    spin_unlock(&line_lock);
-
-    return 0;
-}

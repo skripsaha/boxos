@@ -1,7 +1,7 @@
 #include "serial.h"
 #include "io.h"
 #include "klib.h"
-#include "keyboard.h"   /* keyboard_inject — RX bytes -> shell input ring */
+#include "keyboard.h"   /* keyboard_inject — RX bytes -> "keyboard" Touch events */
 #include "idt.h"        /* irq_register_handler */
 #include "irqchip.h"    /* irqchip_enable_irq */
 
@@ -123,7 +123,7 @@ static void serial_com1_irq(void) {
     /* Only ERBFI (RX-data-available) is enabled, so inbound data is the sole
      * interrupt source and reading RBR clears it. Drain the whole FIFO. CR->LF
      * so a terminal's Enter submits the line (the PS/2 path delivers '\n' for
-     * Enter, which is what keyboard_readline expects). */
+     * Enter, which is what the line editor expects). */
     while (inb(SERIAL_PORT_COM1 + SERIAL_LINE_STATUS) & 0x01) {
         char c = (char)inb(SERIAL_PORT_COM1 + SERIAL_DATA);
         if (c == '\r') c = '\n';
