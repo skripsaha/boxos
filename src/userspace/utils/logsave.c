@@ -16,7 +16,7 @@
  * open, and is told so by name rather than handing back an empty file.
  */
 #include "box/print.h"
-#include "box/ipc.h"
+#include "box/luggage.h"
 #include "box/current.h"
 #include "box/error.h"
 #include "box/string.h"
@@ -28,17 +28,15 @@
  * stay off a userspace stack — the ring is read a page at a time behind this
  * anyway, so a larger pail would not fill any faster. */
 static char s_pail[4096];
-static char s_argv[16][64];
 static char s_target[128];
 
 int main(void)
 {
-    int argc;
-    receive_args(&argc, s_argv, 16);
+    int argc = (int)luggage_word_count();
 
     const char *name = LOGSAVE_DEFAULT_NAME;
-    if (argc > 1 && s_argv[1][0] != '\0') {
-        name = s_argv[1];
+    if (argc > 1 && luggage_word(1)[0] != '\0') {
+        name = luggage_word(1);
     }
 
     error_t  why = OK;

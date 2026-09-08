@@ -1,13 +1,11 @@
 #include "box/print.h"
-#include "box/ipc.h"
+#include "box/luggage.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
 
 int main(void) {
-    int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
+    int argc = (int)luggage_word_count();
 
     if (argc < 2) {
         system_info_t sys;
@@ -35,7 +33,7 @@ int main(void) {
 
     uint32_t matches[4];
     file_info_t infos[4];
-    int count = find_file_by_name(argv[1], matches, infos, 4);
+    int count = find_file_by_name(luggage_word(1), matches, infos, 4);
 
     if (count <= 0) { println("Error: File not found"); exit(1); return 1; }
     if (count > 1) { println("Error: Ambiguous filename"); exit(1); return 1; }

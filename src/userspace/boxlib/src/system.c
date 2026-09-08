@@ -189,12 +189,18 @@ void _Exit(int exit_code)
     }
 }
 
-int proc_exec_gen(const char *filename, const char *tags, uint32_t *out_gen)
+int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
 {
     if (out_gen) *out_gen = 0;
-    if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t name_len = strlen(filename);
-    if (name_len >= 64) return -ERR_INVALID_ARGUMENT;
+    if (!line) return -ERR_INVALID_ARGUMENT;
+
+    /* The program is the line's first word; the whole line, as typed, is the
+     * program's Luggage. Leading blanks are not part of what was said. */
+    while (*line == ' ' || *line == '\t') line++;
+    size_t name_len = 0;
+    while (line[name_len] != '\0' && line[name_len] != ' ' && line[name_len] != '\t') name_len++;
+    if (name_len == 0 || name_len >= 64) return -ERR_INVALID_ARGUMENT;
+    size_t line_len = strlen(line);
 
     const void *pbuf = NULL; uint16_t psize = 0;
     if (tags && tags[0]) {
@@ -202,6 +208,15 @@ int proc_exec_gen(const char *filename, const char *tags, uint32_t *out_gen)
         if (tlen >= PROC_EXEC_TAGS_MAX) return -ERR_INVALID_ARGUMENT;
         pbuf = tags; psize = (uint16_t)tlen;   /* strlen, no NUL — kernel bounds + NUL-terminates */
     }
+
+    /* in_crate: [name][NUL][the line as typed]. */
+    size_t crate_len = name_len + 1 + line_len;
+    char  *crate     = malloc(crate_len);
+    if (!crate) return -ERR_NO_MEMORY;
+    memcpy(crate, line, name_len);
+    crate[name_len] = '\0';
+    memcpy(crate + name_len + 1, line, line_len);
+
     /* 8-byte out: the kernel writes {pid, generation} when the crate fits both.
      * out_actual tells us whether the generation half actually arrived. */
     uint32_t out_blob[2] = { 0, 0 };
@@ -215,9 +230,10 @@ int proc_exec_gen(const char *filename, const char *tags, uint32_t *out_gen)
      * kernel defect Nightwatch names, not something to paper over. */
     int rc = MfCall1(DECK_SYSTEM, SYS_PROC_EXEC,
                      pbuf, psize,                  /* params = caller-tag augment */
-                     filename, (uint32_t)name_len, /* in_crate = filename (unchanged) */
+                     crate, (uint32_t)crate_len,   /* in_crate = name, NUL, line */
                      out_blob, sizeof(out_blob), &out_actual,
                      0 /* no deadline */, NULL);
+    free(crate);
     if (rc != 0) return box_fail(rc);
     if (out_gen) *out_gen = (out_actual >= 8) ? out_blob[1] : 0;
     return (int)out_blob[0];

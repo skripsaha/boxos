@@ -6,9 +6,6 @@
 #include "box/system.h"
 
 int main(void) {
-    int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
 
     println("=== BoxOS IPC + Multitasking Demo ===");
     println("Launching proca and procb...");

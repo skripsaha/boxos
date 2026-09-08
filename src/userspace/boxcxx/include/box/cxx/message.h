@@ -22,18 +22,16 @@
 #ifndef BOXCXX_BOX_MESSAGE_H
 #define BOXCXX_BOX_MESSAGE_H
 
-#include <array>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
-#include <initializer_list>
 #include <iterator>
 #include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
-#include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result + send_args / receive_args
+#include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result
 #include "box/cpu.h"           // cpu_rdtsc / cpu_ms_to_tsc (box::call deadline math)
 #include "box/cxx/executor.h"  // box::executor, __exec::waiter, wait_on, box::task (co_await)
 #include "box/cxx/error.h"     // box::status / box::error
@@ -386,134 +384,6 @@ private:
 };
 
 inline __result_any_awaiter result_any() noexcept { return __result_any_awaiter{}; }
-
-// ── box::args<N> / box::send_args / box::receive_args — the argv face of IPC ──
-// The argv-style message: a fixed "[count][arg\0][arg\0]…" payload, the wire every
-// BoxOS utility speaks (its main() reads char argv[16][64]). box::args<N> is that
-// fixed value — NO heap, NUL-bounded views into fixed 64-byte cells — and the
-// default N == 16 matches every util. This is a box:: extension, not part of std.
-template <std::size_t N> class args;
-template <std::size_t N = 16> result<args<N>> receive_args() noexcept;
-
-template <std::size_t N = 16>
-class args {
-    static_assert(N >= 1, "box::args<N> needs at least one slot");
-
-public:
-    using value_type = std::string_view;
-
-    // The number of populated arguments (clamped into [0, N]).
-    std::size_t size() const noexcept
-    {
-        if (n_ <= 0) return 0u;
-        return static_cast<std::size_t>(n_) > N ? N : static_cast<std::size_t>(n_);
-    }
-    bool empty() const noexcept { return size() == 0; }
-
-    // The i-th argument as a NUL-bounded view into its fixed 64-byte cell. An
-    // out-of-range index is an empty view — never an out-of-bounds read.
-    std::string_view operator[](std::size_t i) const noexcept
-    {
-        if (i >= size()) return {};
-        const char *p   = raw_[i].data();
-        std::size_t len = 0;
-        while (len < raw_[i].size() && p[len] != '\0') ++len;
-        return std::string_view(p, len);
-    }
-    std::string_view front() const noexcept { return (*this)[0]; }
-    std::string_view back()  const noexcept
-    {
-        return size() ? (*this)[size() - 1] : std::string_view{};
-    }
-
-    // Range-for: a forward iterator yielding string_view BY VALUE (each view is
-    // synthesised on deref from the fixed cell).
-    class iterator {
-    public:
-        using iterator_category = std::forward_iterator_tag;
-        using value_type        = std::string_view;
-        using difference_type   = std::ptrdiff_t;
-        using reference         = std::string_view;
-        using pointer           = void;
-
-        iterator() noexcept = default;
-        iterator(const args *__a, std::size_t __i) noexcept : _M_a(__a), _M_i(__i) {}
-
-        std::string_view operator*() const noexcept { return (*_M_a)[_M_i]; }
-        iterator        &operator++() noexcept { ++_M_i; return *this; }
-        iterator         operator++(int) noexcept { iterator __t = *this; ++_M_i; return __t; }
-        friend bool operator==(const iterator &__x, const iterator &__y) noexcept
-        {
-            return __x._M_i == __y._M_i;
-        }
-
-    private:
-        const args *_M_a = nullptr;
-        std::size_t _M_i = 0;
-    };
-
-    iterator begin() const noexcept { return iterator(this, 0); }
-    iterator end()   const noexcept { return iterator(this, size()); }
-
-private:
-    template <std::size_t M> friend result<args<M>> receive_args() noexcept;
-
-    std::array<std::array<char, 64>, N> raw_{};
-    int                                 n_ = 0;
-};
-
-// Marshal the args into the "[count][arg\0]…" wire and route to `pid`. Empty
-// status on accepted delivery; the error arm carries the real send cause. Maps
-// the int return by the from_ret rule (a non-negative return is an accept, a
-// negative return is the -error_t cause — the value is discarded). Honors the
-// boxlib caps (<=127 args, the 240-byte wire ceiling): an arg past the ceiling is
-// dropped exactly as the C marshaller drops it. An argument containing an embedded
-// NUL is truncated at the first NUL (the argv wire is NUL-delimited).
-inline status send_args(std::uint32_t pid, std::span<const std::string_view> a) noexcept
-{
-    constexpr std::size_t kMaxArgs = 127;   // ipc.c caps the arg count at 127
-    constexpr std::size_t kScratch = 256;   // > ipc.c's 240-byte wire buffer
-    char        scratch[kScratch];
-    char       *argv[kMaxArgs];
-    std::size_t pos  = 0;
-    int         argc = 0;
-    for (std::size_t i = 0; i < a.size() && static_cast<std::size_t>(argc) < kMaxArgs; ++i) {
-        if (pos + 1 >= kScratch) break;             // no room left even for a NUL
-        std::size_t room = kScratch - 1 - pos;      // chars we can take (keep 1 for the NUL)
-        std::size_t len  = a[i].size() < room ? a[i].size() : room;
-        if (len) __builtin_memcpy(scratch + pos, a[i].data(), len);
-        scratch[pos + len] = '\0';
-        argv[argc++]       = scratch + pos;
-        pos               += len + 1;
-    }
-    int r = ::send_args(pid, argc, argv);
-    if (r < 0) return std::unexpected(error{box_errno_of(r)});
-    return {};
-}
-inline status send_args(std::uint32_t pid, std::initializer_list<std::string_view> a) noexcept
-{
-    return send_args(pid, std::span<const std::string_view>(a.begin(), a.size()));
-}
-
-// Receive the next "[count][arg\0]…" payload into a fixed args<N>. Fallible: the
-// error arm carries the recovered cause (errc::timeout when no message arrives in
-// the boxlib inbox wait, errc::internal on a malformed payload); the value arm is
-// the populated args. Calls straight through ::receive_args, preserving its
-// context-tag side effect. The boxlib inbox wait is bounded (~1000 ms, a C-layer
-// constant) — receive_args cannot block forever; a not-yet-arrived payload
-// surfaces as errc::timeout, never a hang.
-template <std::size_t N>
-inline result<args<N>> receive_args() noexcept
-{
-    args<N> out;
-    int r = ::receive_args(&out.n_,
-                           reinterpret_cast<char (*)[64]>(out.raw_.data()),
-                           static_cast<int>(N));
-    if (r < 0) return std::unexpected(error{box_errno_of(r)});
-    if (out.n_ < 0) out.n_ = 0;
-    if (out.n_ > static_cast<int>(N)) out.n_ = static_cast<int>(N);
-    return out;
-}
 
 }  // namespace box
 

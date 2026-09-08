@@ -2,8 +2,8 @@
  * executor.c — BoxOS shell command executor
  *
  * Built-in commands are looked up in g_commands[].
- * External commands are spawned via proc_exec_gen(); args ship over IPC and the
- * child's exit is observed on the kernel's process:died Touch event.
+ * External commands are spawned via proc_exec_gen() with the typed line as
+ * their Luggage; the child's end is waited for as a STATE (process_gone).
  */
 
 #include "executor.h"
@@ -11,7 +11,6 @@
 #include "commands/commands.h"
 #include "box/string.h"
 #include "box/system.h"
-#include "box/ipc.h"
 #include "box/touch.h"
 #include "box/debug.h"
 #include "box/error.h"
@@ -59,45 +58,21 @@ const ShellCommand g_commands[] = {
  * before-and-after to get wrong, nothing to pre-arm, nothing to drain, and
  * nothing that can be dropped. */
 
-static int RunExternal(const char *name, ParsedCommand *cmd)
+/* The line goes to the child whole, as typed: it is the child's Luggage,
+ * in its cabin before its first instruction. Nothing is sent after the
+ * spawn, so there is no message to be late, no buffer to fill, no word to
+ * cut short — the 240-byte IPC buffer, the 64-byte words and the child's
+ * one-second wait for them are all gone with it. */
+static int RunExternal(const char *name, const char *line)
 {
     uint32_t gen = 0;
-    int pid = proc_exec_gen(name, NULL, &gen);
+    int pid = proc_exec_gen(line, NULL, &gen);
     if (pid <= 0) {
         /* Carried up, not flattened. "There is no such program" and "the
          * program is there and would not start" are different facts, and the
          * caller printed the same sentence for both. */
         return (pid == 0) ? -ERR_SPAWN_FAILED : pid;
     }
-
-    /* Build args into the IPC buffer. SHELL_ARGS_BUF_MAX (240 B) bounds the
-     * legacy send() payload; if the user's command exceeds that, we ship a
-     * partial argv to the child and warn the user rather than silently
-     * corrupting their input. */
-    char buf[SHELL_ARGS_BUF_MAX];
-    int pos = 0;
-    int args_sent = 0;
-
-    buf[pos++] = (char)cmd->argc;
-    for (int i = 0; i < cmd->argc; i++) {
-        size_t len = strlen(cmd->argv[i]);
-        if (pos + (int)len + 1 > SHELL_ARGS_BUF_MAX - 2) break;
-        memcpy(buf + pos, cmd->argv[i], len);
-        pos += (int)len;
-        buf[pos++] = '\0';
-        args_sent++;
-    }
-    /* Fix up the count byte so the child loops over what we actually
-     * shipped, not what the user originally typed. */
-    buf[0] = (char)args_sent;
-
-    if (args_sent < cmd->argc) {
-        printf("%colorWarning:%color shell IPC buffer full, sent %d/%d args\n",
-               COLOR_YELLOW, COLOR_DEFAULT, args_sent, cmd->argc);
-    }
-
-    send((uint32_t)pid, buf, (uint16_t)pos);
-
 
     /* Wait until THIS child is gone — one park, no clock, nothing to poll.
      *
@@ -133,7 +108,7 @@ static int RunExternal(const char *name, ParsedCommand *cmd)
  * Public API
  * ========================================================================= */
 
-int ExecutorRun(ParsedCommand *cmd)
+int ExecutorRun(ParsedCommand *cmd, const char *line)
 {
     g_error[0] = '\0';
 
@@ -141,7 +116,7 @@ int ExecutorRun(ParsedCommand *cmd)
      * sentinel cannot be mis-routed to the new command. */
     ShellDrainStaleIpc();
 
-    if (!cmd || cmd->argc == 0) {
+    if (!cmd || cmd->argc == 0 || !line) {
         memcpy(g_error, "No command", 11);
         return -1;
     }
@@ -155,7 +130,7 @@ int ExecutorRun(ParsedCommand *cmd)
     }
 
     /* Try external utility */
-    int rc = RunExternal(name, cmd);
+    int rc = RunExternal(name, line);
     if (rc == 0)
         return 0;
 

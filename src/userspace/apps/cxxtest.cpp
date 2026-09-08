@@ -16,7 +16,8 @@
 
 #include "box/print.h"
 #include "box/system.h"
-#include "box/ipc.h"      // receive_args - the launch args pick which phases run
+#include "box/ipc.h"      // send / receive — the peer IPC phases
+#include "box/luggage.h"  // luggage_word — the launch line picks which phases run
 #include "box/strand.h"   // strand_spawn / strand_exit (phase35 sibling strand)
 #include "box/sync.h"     // addr_park / addr_wake (phase35 join)
 #include "box/cpu.h"      // cpu_has_fsgsbase (phase35 spawn guard)
@@ -617,6 +618,7 @@
 #include "box/cxx/heap.h"
 #include "box/cxx/hw.h"
 #include "box/cxx/keyboard.h"
+#include "box/cxx/luggage.h"
 #include "box/cxx/line.h"
 #include "box/cxx/manifest.h"
 #include "box/cxx/math.h"
@@ -9443,12 +9445,13 @@ void Phase50()
     printf("[CXX] PASS phase50: executor block-then-repoll latch (deterministic, host-independent)\n");
 }
 
-// ── phase51 — Ф25a: IPC coverage (box::line<T> / box::call / send_args/args) ───
+// ── phase51 — Ф25a: IPC coverage (box::line<T> / box::call) + box::luggage ─────
 // box::line<T> is the typed face of process-to-process messaging; box::call is the
-// request/reply verb; box::send_args/receive_args/args<N> are the argv face. The
-// always-on block proves the structural surface deterministically (no peer); the
-// FSGSBASE-gated block proves the real cross-strand traffic — a send_args round-
-// trip with the 64-byte truncation, a box::line peer round-trip, co_await recv()
+// request/reply verb; box::luggage is the line this program was started with,
+// in its cabin before main ran (not a message at all). The always-on block
+// proves the structural surface deterministically (no peer); the FSGSBASE-gated
+// block proves the real cross-strand traffic — the luggage seen whole by a
+// sibling strand, a box::line peer round-trip, co_await recv()
 // and co_await box::call with reply-correlation + timeout, the GROUP-flavor
 // broadcast delivery + self-exclusion, the CONCURRENT cross-strand routing +
 // correlation under load (exercising C1 per-strand rings; pids never cross), and
@@ -9499,34 +9502,23 @@ static void p51_iso_worker(int idx)
     }
 }
 
-// scenario 1: receive_args round-trip target. Records argc + the three args back
-// for main to verify (including the 64-byte/arg truncation).
-struct P51ArgsResult {
-    std::atomic<int>  argc{-1};
-    std::atomic<bool> ok{false};
-    std::atomic<int>  len2{-1};
-    char              a0[64];
-    char              a1[64];
-    char              a2[64];
+// scenario 1: the luggage is the cabin's, not a strand's — a sibling strand
+// reads the very line main was launched with, cut the same way. Main captures
+// its own view before the spawn; the worker records what it sees.
+struct P51LuggageResult {
+    std::atomic<int>  size{-1};
+    std::atomic<bool> same_line{false};
+    std::atomic<bool> same_word0{false};
 };
-static P51ArgsResult g_p51_args;
+static P51LuggageResult g_p51_luggage;
+static std::string_view g_p51_line;
+static std::string_view g_p51_word0;
 
-static void p51_args_worker(int)
+static void p51_luggage_worker(int)
 {
-    box::result<box::args<16>> r = box::receive_args<16>();
-    if (!r) { g_p51_args.argc.store(-2, std::memory_order_release); return; }
-    const box::args<16> &a = *r;
-    int n = static_cast<int>(a.size());
-    auto copy_out = [](char *dst, std::string_view v) {
-        std::size_t k = v.size() < 63 ? v.size() : 63;
-        for (std::size_t i = 0; i < k; ++i) dst[i] = v[i];
-        dst[k] = '\0';
-    };
-    if (n >= 1) copy_out(g_p51_args.a0, a[0]);
-    if (n >= 2) copy_out(g_p51_args.a1, a[1]);
-    if (n >= 3) { copy_out(g_p51_args.a2, a[2]); g_p51_args.len2.store(static_cast<int>(a[2].size()), std::memory_order_relaxed); }
-    g_p51_args.argc.store(n, std::memory_order_release);
-    g_p51_args.ok.store(true, std::memory_order_release);   // visible-before via the join
+    g_p51_luggage.same_line.store(box::luggage::line() == g_p51_line, std::memory_order_relaxed);
+    g_p51_luggage.same_word0.store(box::luggage::word(0) == g_p51_word0, std::memory_order_relaxed);
+    g_p51_luggage.size.store(static_cast<int>(box::luggage::size()), std::memory_order_release);
 }
 
 // scenario 2: box::line peer echo. Receives one P51Msg from main and sends a
@@ -9649,26 +9641,23 @@ void Phase51()
               "phase51 line<T> decode: short payload -> nullopt (the recv guard)");
     }
 
-    // box::args<N> structural surface (default = empty; safe out-of-range).
+    // box::luggage — the line this program was started with, in its cabin
+    // before main ran; word 0 is its own name however it was launched.
     {
-        box::args<16> a;
-        Check(a.size() == 0 && a.empty(), "phase51 default box::args<16> is empty");
-        Check(a[0].empty(), "phase51 out-of-range args index -> empty view (no OOB read)");
-        Check(a.front().empty() && a.back().empty(), "phase51 empty args front/back are empty views");
-        int count = 0;
-        for (std::string_view v : a) { (void)v; ++count; }
-        Check(count == 0, "phase51 range-for over empty args yields nothing");
-    }
-
-    // box::send_args marshal-path negatives (the full marshaller runs, then the
-    // real cause surfaces).
-    {
-        box::status e0 = box::send_args(4242u, {});
-        Check(!e0 && e0.error().code() == box::errc::invalid_argument,
-              "phase51 send_args with no args -> invalid_argument");
-        box::status e1 = box::send_args(0u, { "a", "bb", "ccc" });
-        Check(!e1 && e1.error().code() == box::errc::invalid_argument,
-              "phase51 send_args to pid 0 -> invalid_argument (marshal path exercised)");
+        std::string_view line = box::luggage::line();
+        std::size_t      n    = box::luggage::size();
+        Check(n >= 1 && box::luggage::word(0) == "cxxtest",
+              "phase51 luggage word 0 is this program's own name as typed");
+        Check(line.size() >= 7 && line.substr(0, 7) == "cxxtest",
+              "phase51 luggage line begins with the program's name");
+        Check(box::luggage::tail(0) == line, "phase51 tail(0) is the whole line as typed");
+        Check(box::luggage::word(n + 5).empty(),
+              "phase51 out-of-range luggage word -> empty view (no OOB read)");
+        Check(box::luggage::tail(n + 5).empty(), "phase51 out-of-range luggage tail -> empty");
+        std::vector<std::string_view> ws = box::luggage::words();
+        Check(ws.size() == n && ws[0] == box::luggage::word(0),
+              "phase51 words() agrees with size() and word()");
+        Check(box::luggage::empty() == (n == 0), "phase51 empty() agrees with size()");
     }
 
     // box::call producer-path negatives (the send fails first, so no peer needed):
@@ -9690,36 +9679,27 @@ void Phase51()
     // other strand phases) — Block 0 already exercised the structural surface.
     if (!cpu_has_fsgsbase()) {
         printf("[CXX] note phase51: strands need FSGSBASE — skipping peer/concurrent IPC\n");
-        printf("[CXX] PASS phase51: box::line / box::call / box::send_args / box::args "
+        printf("[CXX] PASS phase51: box::line / box::call / box::luggage "
                "(structural; peer/concurrent skipped, no FSGSBASE)\n");
         return;
     }
 
-    // scenario 1: send_args -> receive_args round-trip + the 64-byte/arg truncation.
+    // scenario 1: the luggage is shared by every strand of the cabin — a sibling
+    // sees the same line, the same first word and the same word count, with no
+    // message sent and nothing waited for.
     {
-        g_p51_args.argc.store(-1, std::memory_order_relaxed);
-        g_p51_args.ok.store(false, std::memory_order_relaxed);
-        g_p51_args.len2.store(-1, std::memory_order_relaxed);
+        g_p51_line  = box::luggage::line();
+        g_p51_word0 = box::luggage::word(0);
+        g_p51_luggage.size.store(-1, std::memory_order_relaxed);
 
-        box::strand w(p51_args_worker, 0);
-        std::uint32_t wpid = w.get_id().native();
-
-        char long_arg[71];                        // 70 chars: crosses the 63-char cell limit
-        for (int i = 0; i < 70; ++i) long_arg[i] = 'x';
-        long_arg[70] = '\0';
-        box::status ss = box::send_args(wpid, { "alpha", "beta", std::string_view(long_arg, 70) });
-        Check(static_cast<bool>(ss), "phase51 send_args accepted by a live peer strand");
-
-        w.join();   // bounded: the worker's receive_args has a finite inbox wait
-        Check(g_p51_args.ok.load(std::memory_order_acquire), "phase51 receive_args parsed the payload");
-        Check(g_p51_args.argc.load(std::memory_order_acquire) == 3, "phase51 receive_args argc == 3");
-        Check(std::string_view(g_p51_args.a0) == "alpha", "phase51 receive_args arg0 == \"alpha\"");
-        Check(std::string_view(g_p51_args.a1) == "beta", "phase51 receive_args arg1 == \"beta\"");
-        Check(g_p51_args.len2.load(std::memory_order_acquire) == 63,
-              "phase51 receive_args truncated the 70-char arg to 63 (64-byte cell)");
-        Check(std::string_view(g_p51_args.a2).size() == 63 &&
-                  std::string_view(g_p51_args.a2).find_first_not_of('x') == std::string_view::npos,
-              "phase51 receive_args arg2 is exactly 63 'x' (clean truncation)");
+        box::strand w(p51_luggage_worker, 0);
+        w.join();
+        Check(g_p51_luggage.size.load(std::memory_order_acquire) == static_cast<int>(box::luggage::size()),
+              "phase51 a sibling strand counts the same luggage words");
+        Check(g_p51_luggage.same_line.load(std::memory_order_relaxed),
+              "phase51 a sibling strand reads the same luggage line");
+        Check(g_p51_luggage.same_word0.load(std::memory_order_relaxed),
+              "phase51 a sibling strand reads the same word 0");
     }
 
     // scenario 2: box::line<T> peer round-trip (send / try_recv / recv_for).
@@ -9910,8 +9890,8 @@ void Phase51()
     }
 
     printf("[CXX] PASS phase51: box::line<T> (to/on peer+group/send/try_recv/recv_for/co_await recv) "
-           "+ box::call (reply correlation + timeout) + box::send_args/receive_args/args "
-           "(round-trip + 64B truncation) + cross-strand pid-routing + correlation under load\n");
+           "+ box::call (reply correlation + timeout) + box::luggage (the launch line, "
+           "shared by sibling strands) + cross-strand pid-routing + correlation under load\n");
 }
 
 // ── Ф25b: box::tags + box::provenance + box::system_watch ────────────────────
@@ -56041,15 +56021,16 @@ int main()
 {
     g_clock_at_entry = std::clock();
 
-    int  argc = 0;
-    char argv[kMaxArgv][64];
-    receive_args(&argc, argv, kMaxArgv);
-    if (argc > kMaxArgv) argc = kMaxArgv;
+    /* The launch line picks the phases — "cxxtest 51 19" runs two of them.
+     * It is this program's Luggage, in the cabin before main ran. */
+    std::size_t words = box::luggage::size();
+    int         argc  = words > static_cast<std::size_t>(kMaxArgv) ? kMaxArgv : static_cast<int>(words);
 
     const char *sel[kMaxArgv];
     int         nsel = 0;
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] != '\0') sel[nsel++] = argv[i];
+        const char *w = ::luggage_word(static_cast<std::uint32_t>(i));
+        if (w && w[0] != '\0') sel[nsel++] = w;
     }
 
     constexpr int kTotal = (int)(sizeof(kPhases) / sizeof(kPhases[0]));

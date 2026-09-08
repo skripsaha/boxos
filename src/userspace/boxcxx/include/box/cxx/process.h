@@ -79,22 +79,26 @@ public:
     process() noexcept = default;
     explicit process(std::uint32_t pid) noexcept : pid_(pid) {}
 
-    // Spawn a program as a new cabin. On success a process handle for the child's
-    // pid; the error arm carries the real cause — the recovered kernel error_t
-    // (e.g. file_not_found for an unknown binary, process_limit_exceeded), or
-    // spawn_failed when the kernel returned no pid without naming a cause.
+    // Spawn a program as a new cabin from a command LINE — "say hello world", the
+    // way the shell does: the first word names the program, and the whole line
+    // becomes the child's Luggage (box/cxx/luggage.h), in its cabin before its
+    // first instruction. A bare name starts the program with a one-word luggage.
+    // On success a process handle for the child's pid; the error arm carries the
+    // real cause — the recovered kernel error_t (e.g. file_not_found for an
+    // unknown binary, process_limit_exceeded), or spawn_failed when the kernel
+    // returned no pid without naming a cause.
     //
     // out_gen (optional) receives the child's pid-allocator generation — the
     // second half of its canonical (pid, generation) identity, used by
     // box::child to match a death to the exact incarnation. 0 on failure or if
     // the kernel reported no generation; existing spawn(name) callers ignore it.
-    static result<process> spawn(const char *name,
+    static result<process> spawn(const char *line,
                                  std::uint32_t *out_gen = nullptr) noexcept
     {
         if (out_gen) *out_gen = 0;
-        if (!name) return std::unexpected(error{errc::invalid_argument});
+        if (!line) return std::unexpected(error{errc::invalid_argument});
         std::uint32_t gen = 0;
-        int p = ::proc_exec_gen(name, nullptr, &gen);
+        int p = ::proc_exec_gen(line, nullptr, &gen);
         if (p > 0) {
             if (out_gen) *out_gen = gen;
             return process(static_cast<std::uint32_t>(p));

@@ -1,5 +1,6 @@
 #include "box/print.h"
-#include "box/ipc.h"
+#include "box/luggage.h"
+#include "box/memory.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
@@ -9,34 +10,38 @@
 #define FILES_MAX 256
 static uint32_t    s_file_ids[FILES_MAX];
 static file_info_t s_file_infos[FILES_MAX];
-static char        s_argv[16][64];
-static char        s_query_tags[256];
 
 int main(void)
 {
-    int argc;
-    receive_args(&argc, s_argv, 16);
+    int argc = (int)luggage_word_count();
 
-    s_query_tags[0] = '\0';
-
+    /* Every word after the name is a tag; joined with commas into a list
+     * sized to what was typed, so no tag is ever dropped. */
+    char *query_tags = NULL;
     if (argc > 1)
     {
-        size_t pos = 0;
-        for (int i = 1; i < argc && pos < 250; i++)
+        size_t total = 0;
+        for (int i = 1; i < argc; i++) total += strlen(luggage_word(i)) + 1;
+        query_tags = malloc(total);
+        if (!query_tags)
         {
-            if (i > 1)
-                s_query_tags[pos++] = ',';
-            size_t len = strlen(s_argv[i]);
-            if (pos + len < 250)
-            {
-                memcpy(s_query_tags + pos, s_argv[i], len);
-                pos += len;
-            }
+            println("Error: no memory for the tag list");
+            exit(1);
+            return 1;
         }
-        s_query_tags[pos] = '\0';
+        size_t pos = 0;
+        for (int i = 1; i < argc; i++)
+        {
+            size_t len = strlen(luggage_word(i));
+            if (i > 1) query_tags[pos++] = ',';
+            memcpy(query_tags + pos, luggage_word(i), len);
+            pos += len;
+        }
+        query_tags[pos] = '\0';
     }
 
-    int count = query((argc > 1) ? s_query_tags : NULL, s_file_ids, FILES_MAX);
+    int count = query(query_tags, s_file_ids, FILES_MAX);
+    free(query_tags);
 
     if (count < 0)
     {

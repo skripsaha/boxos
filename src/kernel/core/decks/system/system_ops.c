@@ -54,6 +54,7 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
 #include "sync_ops.h"
 #include "cabin.h"          /* cabin_t.vmm — for StrandPool bind virt->phys walk */
+#include "cabin_info.h"     /* CabinInfo — where a child's Luggage is written */
 #include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
 #include "strand_pool_abi.h" /* StrandPool — _Alignof for the bind alignment check */
 
@@ -407,7 +408,9 @@ error_t ProcAuthSelfTest(void)
 /* SYSTEM_OP_PROC_SPAWN
  *   params:  [u64 binary_phys][u64 binary_size]
  *   in_crate: tags string (NUL-bounded)
- *   out_crate (optional): u32 new_pid */
+ *   out_crate (optional): u32 new_pid
+ *   A blob spawn carries no Luggage: nobody types a line at a binary in
+ *   memory. The child's CabinInfo says so (luggage_length 0). */
 static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
 {
@@ -768,10 +771,45 @@ static error_t proc_exec_merge_augment(char *dst, size_t dst_size, const char *a
     return OK;
 }
 
+/*
+ * Hand a child its Luggage — what the spawner said to it at boarding, the
+ * command line as the person typed it. It rides in the child's own cabin: in
+ * the CabinInfo page right after the header when it fits there, in the
+ * child's buffer heap when it does not, so a line has no ceiling but memory.
+ * Written before the child's first dispatch, so it is there from the child's
+ * first instruction — nothing to wait for, nothing that can arrive late.
+ */
+static error_t cabin_luggage_give(process_t *child, const uint8_t *bytes, uint32_t length)
+{
+    CabinInfo *ci = (CabinInfo *)vmm_phys_to_virt(child->cabin->cabin_info_phys);
+    if (length == 0) {
+        ci->luggage_addr   = 0;
+        ci->luggage_length = 0;
+        return OK;
+    }
+    if (length <= CABIN_INFO_SIZE - CABIN_LUGGAGE_INLINE_OFFSET) {
+        memcpy((uint8_t *)ci + CABIN_LUGGAGE_INLINE_OFFSET, bytes, length);
+        ci->luggage_addr = CABIN_INFO_ADDR + CABIN_LUGGAGE_INLINE_OFFSET;
+    } else {
+        uint64_t va = cabin_heap_deposit(child, bytes, length);
+        if (va == 0) return ERR_NO_MEMORY;
+        ci->luggage_addr = va;
+    }
+    ci->luggage_length = length;
+    return OK;
+}
+
+static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            const char *filename,
+                            const uint8_t *luggage, uint32_t luggage_len);
+
 /* SYSTEM_OP_PROC_EXEC
- *   in_crate: filename
+ *   in_crate: [program name][NUL][luggage bytes…] — the name the program is
+ *             filed under, then, after one NUL, the command line as typed
+ *             (the program's own name included, as its first word). A crate
+ *             that is only a name, no NUL, starts the program with no luggage.
  *   params (optional): caller-tag augment (comma-list); child = file-tags ∪ augment
- *   out_crate (optional): u32 new_pid */
+ *   out_crate (optional): u32 new_pid, or {u32 pid, u32 generation} */
 static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -781,10 +819,39 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     if (process_get_count() >= PROCESS_MAX_COUNT) return ERR_PROCESS_LIMIT_EXCEEDED;
 
-    char filename[64];
-    error_t srcrc = sys_crate_string(&crates[op->in_crate], ctx, filename, sizeof(filename));
-    if (srcrc != OK) return srcrc;
+    Crate *src = &crates[op->in_crate];
+    if (src->size == 0) return ERR_INVALID_ARGUMENT;
+    uint8_t *raw = crate_in_buf(src, ctx);
+    if (!raw) return ERR_INVALID_ADDRESS;
 
+    /* The name ends at the first NUL, or at the end of the crate. */
+    uint64_t name_len = 0;
+    while (name_len < src->size && raw[name_len] != '\0') name_len++;
+
+    char filename[64];
+    if (name_len == 0 || name_len >= sizeof(filename)) {
+        crate_buf_free(raw);
+        return ERR_INVALID_ARGUMENT;
+    }
+    memcpy(filename, raw, name_len);
+    filename[name_len] = '\0';
+
+    const uint8_t *luggage     = NULL;
+    uint32_t       luggage_len = 0;
+    if (name_len < src->size) {
+        luggage     = raw + name_len + 1;
+        luggage_len = (uint32_t)(src->size - name_len - 1);
+    }
+
+    int rc = SysProcExecNamed(op, crates, ctx, filename, luggage, luggage_len);
+    crate_buf_free(raw);
+    return rc;
+}
+
+static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
+                            const char *filename,
+                            const uint8_t *luggage, uint32_t luggage_len)
+{
     /* Optional caller-tag augment rides in op->params (NUL-free, length-bounded).
      * Empty (param_size == 0) leaves augment "" so the merge below is a no-op and
      * this path stays byte-identical to a plain proc_exec. */
@@ -894,6 +961,15 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     if (load != 0) {
         process_destroy(new_proc);
         return ERR_SPAWN_FAILED;
+    }
+
+    /* The luggage goes aboard after the cabin is built and before the child
+     * is ever dispatched: a child that cannot be given its line is not started
+     * without it. */
+    error_t lrc = cabin_luggage_give(new_proc, luggage, luggage_len);
+    if (lrc != OK) {
+        process_destroy(new_proc);
+        return lrc;
     }
 
     /* Snapshot the child's identity BEFORE process_set_state exposes it to the

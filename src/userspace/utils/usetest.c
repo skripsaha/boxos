@@ -19,7 +19,6 @@
 #include "box/string.h"
 #include "box/memory.h"
 #include "box/error.h"
-#include "box/ipc.h"
 
 #define PROBE_TAG    "use:probe"
 #define PROBE_INSIDE "use_probe_in"
@@ -41,9 +40,6 @@ static int fail(const char *what, int rc)
 
 int main(void)
 {
-    int  argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
 
     /* The user's context, to be put back. */
     size_t saved_need = 0;

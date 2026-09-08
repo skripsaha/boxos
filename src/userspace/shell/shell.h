@@ -10,7 +10,6 @@
 #define SHELL_LINE_MAX          512     /* max input line length (matches LINE_CAPACITY) */
 #define SHELL_MAX_ARGS          64      /* max tokens per command */
 #define SHELL_PROMPT_MAX        128     /* max prompt string */
-#define SHELL_ARGS_BUF_MAX      240     /* IPC send() limit for args */
 #define SHELL_ERROR_MAX         256     /* error message buffer */
 
 /* =========================================================================

@@ -61,14 +61,19 @@ void exit(int exit_code) __attribute__((noreturn));
  * no .fini_array, no flush. C's _Exit, and the primitive std::quick_exit and
  * std::abort are built on. */
 void _Exit(int exit_code) __attribute__((noreturn));
-int proc_exec(const char* filename);                          /* unchanged ABI */
-int proc_exec_tagged(const char* filename, const char* tags); /* child = file-tags ∪ caller-tags */
+/* Start a program from a command LINE — "say hello world" — the way the
+ * shell does. The first word names the program; the whole line, as typed,
+ * becomes the program's Luggage (box/luggage.h), in its cabin before its
+ * first instruction. A bare name — proc_exec("touch_test") — starts the
+ * program with a one-word luggage. */
+int proc_exec(const char* line);
+int proc_exec_tagged(const char* line, const char* tags); /* child = file-tags ∪ caller-tags */
 /* Like proc_exec_tagged, but also reports the child's pid-allocator generation
  * (the second half of its canonical (pid, generation) identity) via *out_gen,
  * so a supervisor can later match the child's process:died to the exact
  * incarnation. Returns the pid (>0) or -err; *out_gen is 0 on any failure or if
  * the kernel did not report a generation. */
-int proc_exec_gen(const char* filename, const char* tags, uint32_t* out_gen);
+int proc_exec_gen(const char* line, const char* tags, uint32_t* out_gen);
 
 /* Wait until the incarnation (pid, generation) is gone, then report how it
  * ended in *out_exit (proc_exit.h: >= 0 the code it passed to exit(), -1

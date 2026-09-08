@@ -1,5 +1,4 @@
 #include "box/print.h"
-#include "box/ipc.h"
 #include "box/file.h"
 #include "box/string.h"
 #include "box/system.h"
@@ -8,11 +7,7 @@
 #define HELP_MAX 256
 static uint32_t    s_file_ids[HELP_MAX];
 static file_info_t s_infos[HELP_MAX];
-static char        s_argv[16][64];
-
 int main(void) {
-    int argc;
-    receive_args(&argc, s_argv, 16);
 
     println("BoxOS Shell v1.0 - Available Commands:");
     println("");

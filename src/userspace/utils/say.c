@@ -1,11 +1,9 @@
 #include "box/print.h"
-#include "box/ipc.h"
+#include "box/luggage.h"
 #include "box/system.h"
 
 int main(void) {
-    int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
+    int argc = (int)luggage_word_count();
 
     if (argc < 2) {
         println("Usage: say <text...>");
@@ -13,11 +11,9 @@ int main(void) {
         return 1;
     }
 
-    for (int i = 1; i < argc; i++) {
-        if (i > 1) print(" ");
-        print(argv[i]);
-    }
-    println("");
+    /* The rest of the line as typed — spacing and quotes included — which is
+     * the luggage's tail from the first word after the name. */
+    println(luggage_tail(1));
 
     exit(0);
     return 0;

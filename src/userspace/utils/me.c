@@ -1,5 +1,4 @@
 #include "box/print.h"
-#include "box/ipc.h"
 #include "box/system.h"
 #include "box/convert.h"
 
@@ -46,9 +45,6 @@ static void fmt_bytes(uint64_t bytes, char *buf, size_t buf_size)
 }
 
 int main(void) {
-    int argc;
-    char argv[16][64];
-    receive_args(&argc, argv, 16);
 
     system_info_t info;
     if (sysinfo(&info) != 0) {
