@@ -42,11 +42,12 @@ void storage_deck_init(void)
         return;
     }
 
-    /* The volume is up: give the Use Context the numbers this volume has for
-     * its tags, so the scheduler's tier and TagFS's narrowing agree with it
-     * from the first strand dispatched. Said on every road to a mounted
-     * volume — this one, the late arrival, the return. */
-    UseContextRebind();
+    /* The volume is up: a context this machine holds is bound to the numbers
+     * this volume has for its tags, so the scheduler's tier and TagFS's
+     * narrowing agree with it from the first strand dispatched; a machine
+     * holding none — every boot — takes up what the volume remembers. Said on
+     * every road to a mounted volume — this one, the late arrival, the return. */
+    UseContextRecall();
     kprintf("[Storage Deck] Initialization complete\n");
 
     /* Said on both roads to a mounted volume, this one and the late one, so

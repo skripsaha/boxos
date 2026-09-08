@@ -29,6 +29,12 @@ struct process_t;
  * when the volume's registry is cleared away, and a tag the volume had no
  * number for yet is bound the moment a cabin interns it (UseContextBindTag),
  * so a process tagged after `use` still lands in the context tier.
+ *
+ * THE VOLUME REMEMBERS IT. What the person said is written to the volume's
+ * Ledger with every set and clear (UseContextRemember), and a volume coming
+ * up under a machine that holds no context is asked what it remembers
+ * (UseContextRecall) — so what one was doing is still what one is doing
+ * after the night, and it travels with the medium rather than the machine.
  */
 
 /*
@@ -74,12 +80,29 @@ bool    UseContextIsSet(void);
 bool    UseContextMatches(const struct process_t *proc);
 
 /*
- * The volume's book changed under the cache. Rebind: look every tag up in the
- * registry that was just mounted — lookup only, because mounting somebody's
- * medium must not write into it. Unbind: that registry is being freed, so its
- * numbers mean nothing from here on.
+ * The volume remembers the context (volume_ledger.h) — say the current one to
+ * it. Done after every set and clear, and when a volume comes up under a
+ * context the person had already said. *remembered says whether the volume
+ * now holds exactly this context: false with no volume up, a medium that will
+ * not take the write, or a context longer than the record holds. The context
+ * is set all the same — the person is told, never refused.
  */
-void    UseContextRebind(void);
+void    UseContextRemember(bool *remembered);
+
+/*
+ * A volume is up — said on every road to a mounted volume. A machine holding
+ * no context takes up what the volume remembers, without interning: a tag the
+ * volume no longer knows stays unbound, matching nothing, until something
+ * interns it. A machine that holds one keeps it — the person's word stands
+ * over the volume's memory — binds its numbers on the volume that is up now,
+ * and tells the volume.
+ */
+void    UseContextRecall(void);
+
+/*
+ * The volume's book is going: that registry is being freed, so its numbers
+ * mean nothing from here on.
+ */
 void    UseContextUnbind(void);
 
 /*

@@ -1182,6 +1182,77 @@ static TestResult test_use_context_narrows(void)
 }
 
 /*
+ * The volume remembers the context. What is said to it is read back off the
+ * medium by the Ledger's own reader; a list longer than the record holds is
+ * forgotten whole rather than kept in part; and what the volume held before
+ * is put back, so the boot road recalls exactly what it would have.
+ *
+ * Only the volume's memory is touched here, never the machine's context:
+ * the road that takes one up runs after these tests, on an empty context.
+ */
+static TestResult test_use_context_remembered(void)
+{
+    typedef struct {
+        char         before[TAGFS_SECTOR_SIZE];
+        VolumeLedger led[VOLUME_LEDGER_COPIES];
+        char         tail[VOLUME_LEDGER_COPIES][TAGFS_SECTOR_SIZE];
+        uint16_t     tail_len[VOLUME_LEDGER_COPIES];
+        char         oversize[TAGFS_SECTOR_SIZE];
+    } Scratch;
+    Scratch *sc = kmalloc(sizeof(Scratch));
+    TEST_ASSERT(sc != NULL, "no memory for the scratch");
+
+    size_t before_len = tagfs_recall_use_context(sc->before, sizeof(sc->before));
+    if (before_len > sizeof(sc->before)) {
+        kfree(sc);
+        TEST_ASSERT(false, "the remembered context is longer than its own record");
+    }
+
+    static const char said[] = "use:test:night,use:test:orders";
+    bool    kept = false;
+    error_t rc   = tagfs_remember_use_context(said, sizeof(said) - 1, &kept);
+    if (rc != OK || !kept) {
+        kfree(sc);
+        TEST_ASSERT(rc == OK, "the volume takes the context");
+        TEST_ASSERT(kept, "and remembers it");
+    }
+
+    /* Off the medium, not out of memory: the newer of the two copies. */
+    int newest = -1;
+    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
+        if (!tagfs_ledger_peek(c, &sc->led[c], sc->tail[c], &sc->tail_len[c])) continue;
+        if (newest < 0 || sc->led[c].seq > sc->led[newest].seq) newest = (int)c;
+    }
+    bool on_medium = newest >= 0 &&
+                     sc->tail_len[newest] == sizeof(said) - 1 &&
+                     memcmp(sc->tail[newest], said, sizeof(said) - 1) == 0 &&
+                     sc->led[newest].use_context_offset == sizeof(VolumeLedger);
+    if (!on_medium) {
+        kfree(sc);
+        TEST_ASSERT(newest >= 0, "a Ledger copy is readable");
+        TEST_ASSERT(false, "the medium carries the context as said, right after the fixed fields");
+    }
+
+    /* Longer than the record holds: forgotten whole, and said so. */
+    memset(sc->oversize, 'a', sizeof(sc->oversize));
+    rc = tagfs_remember_use_context(sc->oversize, sizeof(sc->oversize), &kept);
+    size_t left = tagfs_recall_use_context(NULL, 0);
+    if (rc != OK || kept || left != 0) {
+        kfree(sc);
+        TEST_ASSERT(rc == OK, "an oversize context is taken without error");
+        TEST_ASSERT(!kept, "and not remembered");
+        TEST_ASSERT(left == 0, "the volume now remembers none, not half");
+    }
+
+    /* What was there is put back. */
+    rc = tagfs_remember_use_context(sc->before, before_len, &kept);
+    bool restored = rc == OK && (before_len == 0 || kept);
+    kfree(sc);
+    TEST_ASSERT(restored, "the earlier context is put back and remembered again");
+    return TEST_PASS;
+}
+
+/*
  * Whether this build is allowed to write to the volume it is testing.
  *
  * A build switch rather than a runtime guess: "is this medium somebody's" is
@@ -1275,6 +1346,7 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"use_context_spelling", test_use_context_spelling, TEST_SKIP, 0, "", TEST_READS_ONLY},
         {"use_context_walls",    test_use_context_walls,    TEST_SKIP, 0, "", TEST_READS_ONLY},
         {"use_context_narrows",  test_use_context_narrows,  TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"use_context_remembered", test_use_context_remembered, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
     // Run all test suites

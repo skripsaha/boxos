@@ -1139,11 +1139,28 @@ static int SysStrandPoolBind(const ManifestOp *op, Crate *crates, uint16_t crate
  *  Use Context (use) — what the user is doing, said in tags
  * ========================================================================= */
 
+/* After a set or a clear: the volume is told, and the caller learns whether
+ * it listened. out_crate (optional): u8 — 1 when the volume now remembers
+ * exactly this context, 0 when it does not (no volume up, a medium that will
+ * not take the write, a context longer than the Ledger's record holds). The
+ * context itself is set either way; the person is told, never refused. */
+static int UseSayRemembered(const ManifestOp *op, Crate *crates, const OpContext *ctx)
+{
+    bool kept = false;
+    UseContextRemember(&kept);
+    if (op->out_crate != CRATE_INDEX_NONE && crates[op->out_crate].capacity >= 1) {
+        uint8_t byte = kept ? 1u : 0u;
+        (void)crate_write(&crates[op->out_crate], ctx, &byte, 1);
+    }
+    return OK;
+}
+
 /* SYSTEM_OP_USE_SET  in_crate: comma-separated tag list. No crate, or an
  * empty one, clears — the same thing use.clear says. The list rides whole:
  * copied off the caller's pages at its own length, no ceiling of this deck's
  * choosing, and handed to the context, which spells every tag canonically
- * and refuses one the volume registry could not hold. */
+ * and refuses one the volume registry could not hold.
+ * out_crate (optional): u8 remembered — see UseSayRemembered. */
 static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1152,7 +1169,7 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     if (op->in_crate == CRATE_INDEX_NONE || crates[op->in_crate].size == 0) {
         UseContextClear();
-        return OK;
+        return UseSayRemembered(op, crates, ctx);
     }
 
     Crate *src = &crates[op->in_crate];
@@ -1171,17 +1188,19 @@ static int SysUseSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     error_t rc = UseContextSet(list, true);
     kfree(list);
-    return rc;
+    if (rc != OK) return rc;   /* refused: the context is as it was, nothing to tell */
+    return UseSayRemembered(op, crates, ctx);
 }
 
-/* SYSTEM_OP_USE_CLEAR  nothing in, nothing out. */
+/* SYSTEM_OP_USE_CLEAR  nothing in; out_crate (optional): u8 remembered — see
+ * UseSayRemembered. */
 static int SysUseClear(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
-    (void)op; (void)crates; (void)crate_count;
+    (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
     UseContextClear();
-    return OK;
+    return UseSayRemembered(op, crates, ctx);
 }
 
 /* SYSTEM_OP_USE_GET  out_crate: [u32 count][u32 needed][(u16 len)(char tag[len])]*

@@ -1,8 +1,9 @@
 /*
  * use.c — the Use Context, spoken to the kernel through the System Deck.
  *
- * Three ops, one answer each: system.use.set takes the tag list in a crate,
- * system.use.clear takes nothing, system.use.get writes the tags back as
+ * Three ops: system.use.set takes the tag list in a crate, system.use.clear
+ * takes nothing — both answer whether the volume now remembers the context —
+ * and system.use.get writes the tags back as
  * [u32 count][u32 needed][(u16 len)(bytes)]* — count is how many tags fit the
  * crate, needed is the byte length of the whole context comma-joined, so the
  * caller can tell a full answer from a short one.
@@ -16,23 +17,33 @@
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* SYSTEM_OP_USE_* — single source */
 
-int use_set(const char *tags)
+/* set and clear answer one byte: whether the volume now remembers the
+ * context. An answer that did not arrive reads as "not remembered" — the
+ * honest reading of silence about a write. */
+int use_set(const char *tags, bool *remembered)
 {
-    if (!tags || tags[0] == '\0') return use_clear();
+    if (!tags || tags[0] == '\0') return use_clear(remembered);
 
+    uint8_t  kept       = 0;
+    uint32_t out_actual = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_USE_SET,
                      NULL, 0,
                      tags, (uint32_t)strlen(tags),
-                     NULL, 0, NULL,
+                     &kept, sizeof(kept), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
+    if (remembered) *remembered = (rc == 0 && out_actual >= 1 && kept != 0);
     return box_fail(rc);
 }
 
-int use_clear(void)
+int use_clear(bool *remembered)
 {
+    uint8_t  kept       = 0;
+    uint32_t out_actual = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_USE_CLEAR,
-                     NULL, 0, NULL, 0, NULL, 0, NULL,
+                     NULL, 0, NULL, 0,
+                     &kept, sizeof(kept), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
+    if (remembered) *remembered = (rc == 0 && out_actual >= 1 && kept != 0);
     return box_fail(rc);
 }
 

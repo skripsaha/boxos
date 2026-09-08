@@ -6,6 +6,12 @@
  *                     scheduler's context tier
  *   use               the context is cleared
  *
+ * The volume remembers it: what is said here is written to the mounted volume
+ * and taken up again at the next boot with that volume. When the volume
+ * cannot remember (no volume, a medium that will not take the write, a
+ * context longer than its record holds) the context is set all the same and
+ * the person is told.
+ *
  * The context is the kernel's, one per machine; the shell only speaks for the
  * user. The prompt is rebuilt from what the kernel holds, never from a copy
  * of what was typed, so a nested shell shows the context it was born into.
@@ -21,10 +27,11 @@
 
 int cmd_use(int argc, char *argv[])
 {
-    int rc;
+    int  rc;
+    bool remembered = false;
 
     if (argc == 1) {
-        rc = use_clear();
+        rc = use_clear(&remembered);
     } else {
         /* One comma-joined list, sized to what was typed. */
         size_t total = 0;
@@ -43,7 +50,7 @@ int cmd_use(int argc, char *argv[])
             pos += len;
         }
         list[pos] = '\0';
-        rc = use_set(list);
+        rc = use_set(list, &remembered);
         free(list);
     }
 
@@ -59,6 +66,13 @@ int cmd_use(int argc, char *argv[])
             printf("use: refused (error %d)\n", (int)why);
         return 1;
     }
-    println(argc == 1 ? "Context cleared" : "Context set");
+    /* The volume remembers the context across the night; when it cannot, the
+     * person hears it now rather than at the next boot. */
+    if (argc == 1)
+        println(remembered ? "Context cleared"
+                           : "Context cleared; this volume still remembers the old one");
+    else
+        println(remembered ? "Context set"
+                           : "Context set; this volume will not remember it");
     return 0;
 }
