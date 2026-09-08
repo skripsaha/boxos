@@ -160,25 +160,20 @@ void _Exit(int exit_code)
         0, (int32_t)exit_code
     };
 
-    /* Retry SYS_PROC_KILL — the syscall is supposed to be terminal but a
-     * transient kernel-side failure (ring full mid-burst, deck dispatcher
-     * busy) would otherwise drop us straight into the spin-pause loop
-     * below with a still-alive process. Spinning forever as a zombie
-     * holds onto kernel resources (file table entries, ring pages,
-     * touch claims). Three retries with a yield between is enough to
-     * out-wait any short-lived contention; if it still fails we kdbg the
-     * failure so the next run carries a paper trail. */
-    int kill_rc = -1;
-    for (int attempt = 0; attempt < 3 && kill_rc != 0; attempt++) {
-        kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
+    /* Asked ONCE. Nothing stands between a self-kill and its answer — no
+     * medium, no other process — and a self-kill that was honoured does not
+     * come back: the process is PROC_DONE before the guide can answer it,
+     * and a corpse still on its core until the next tick only spins below.
+     * What stood here was three tries with a yield between, a counter over a
+     * ring-full refusal that pocket_submit no longer gives (it waits for
+     * room). A refusal that does come back is therefore a kernel defect, not
+     * contention to be out-waited: name it, and stay parked. */
+    int kill_rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
                           &kill_param, sizeof(kill_param),
                           NULL, 0, NULL, 0, NULL,
                           BOX_ANSWER_GUARANTEED, NULL);
-        if (kill_rc != 0) yield();
-    }
-    if (kill_rc != 0) {
-        kdbg("[boxlib] _Exit(): SYS_PROC_KILL failed 3x; halting.");
-    }
+    if (kill_rc != 0)
+        kdbg_print("[boxlib] _Exit(): self-kill refused rc=%d — kernel defect; halting here", kill_rc);
 
     /* If the kernel honoured kill we will not run another instruction.
      * If it didn't (or returned and somehow rescheduled us), park the

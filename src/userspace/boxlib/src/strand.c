@@ -129,17 +129,23 @@ void strand_exit(void)
     /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
      * No __box_runtime_fini / spawner-notify — those are exit()'s job for the
      * whole cabin and would wrongly run global teardown on a per-strand exit
-     * (this strand's own console run was handed in above). Retry briefly, then
-     * park forever; must never fall through to a return on the trampoline's
-     * caller-less stack. */
+     * (this strand's own console run was handed in above).
+     *
+     * Asked ONCE. Nothing stands between a self-kill and its answer — no
+     * medium, no other process — and a self-kill that was honoured does not
+     * come back: the strand is PROC_DONE before the guide can answer it, and
+     * a corpse still on its core until the next tick only spins below. What
+     * stood here was three tries with a yield between, a counter over a
+     * ring-full refusal that pocket_submit no longer gives (it waits for
+     * room). A refusal that does come back is therefore a kernel defect, not
+     * contention to be out-waited: name it, and stay parked — the trampoline
+     * has no caller frame to return into. */
     uint32_t target = 0;
-    for (int attempt = 0; attempt < 3; attempt++) {
-        int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
-                         &target, (uint16_t)sizeof(target),
-                         NULL, 0, NULL, 0, NULL,
-                         BOX_ANSWER_GUARANTEED, NULL);
-        if (rc == 0) break;
-        yield();
-    }
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_KILL,
+                     &target, (uint16_t)sizeof(target),
+                     NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0)
+        kdbg_print("[strand] self-kill refused rc=%d — kernel defect; strand parked for ever", rc);
     for (;;) yield();
 }
