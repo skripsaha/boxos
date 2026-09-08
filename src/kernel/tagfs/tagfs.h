@@ -289,16 +289,8 @@ typedef struct {
 } TagFSMetadata;
 
 // ----------------------------------------------------------------------------
-// In-Memory Structures: Process Context and Global State
+// In-Memory Structures: Global State
 // ----------------------------------------------------------------------------
-
-typedef struct {
-    uint32_t  pid;
-    uint64_t  context_bits;
-    uint16_t* overflow_ids;
-    uint16_t  overflow_count;
-    uint16_t  overflow_capacity;
-} TagFSContext;
 
 /*
  * What the mounted volume is, split the way the medium splits it.
@@ -573,19 +565,6 @@ error_t  tagfs_write_ledger(void);
  */
 int      tagfs_volume_read (uint64_t vlba, uint32_t count, void* buffer);
 int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
-
-// ----------------------------------------------------------------------------
-// Context API
-// ----------------------------------------------------------------------------
-
-void     tagfs_context_init(void);
-int      tagfs_context_add_tag(uint32_t pid, uint16_t tag_id);
-int      tagfs_context_add_tag_string(uint32_t pid, const char* key, const char* value);
-void     tagfs_context_clear(uint32_t pid);
-bool     tagfs_context_matches_file(uint32_t pid, uint32_t file_id);
-void     tagfs_context_destroy(uint32_t pid);
-uint64_t tagfs_context_get_bits(uint32_t pid);
-int      tagfs_context_get_tags(uint32_t pid, const char* tags[], uint32_t max_tags);
 
 // ----------------------------------------------------------------------------
 // Tag String Helpers

@@ -24,8 +24,17 @@ typedef struct {
     tag_t tags[5];
 } file_info_t;
 
+/*
+ * Inside the Use Context by default. When the user has said `use code cpp`,
+ * query("project") asks for files that are code AND cpp AND project, and
+ * create() stamps the new file code and cpp along with the tags it was given.
+ * The _everywhere spellings ask the same of the whole volume, the user's
+ * context left out. See box/use.h.
+ */
 int create(const char* filename, const char* tags);
+int create_everywhere(const char* filename, const char* tags);
 int query(const char* tags, uint32_t* file_ids, size_t max_files);
+int query_everywhere(const char* tags, uint32_t* file_ids, size_t max_files);
 int file_info(uint32_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure. */
@@ -55,15 +64,6 @@ int file_truncate(uint32_t file_id, uint64_t new_size);
 
 int tag_add(uint32_t file_id, const char* tag);
 int tag_remove(uint32_t file_id, const char* key);
-
-int context_set(const char* tag);
-int context_clear(void);
-/* context_get — report the calling process's current context tags
- * ("key" or "key:value", each up to 63 chars + NUL) into the caller's
- * fixed-width table. *out_count receives the number written (capped at
- * max_tags). Use it to save the context before installing your own and
- * restore it on exit. Returns 0 on success, -1 on error. */
-int context_get(char out_tags[][64], uint32_t max_tags, uint32_t* out_count);
 
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 

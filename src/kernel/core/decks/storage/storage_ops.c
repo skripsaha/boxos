@@ -34,6 +34,7 @@
 #include "boxos_crate.h"
 #include "storage_deck.h"
 #include "tagfs.h"
+#include "use_context.h"   /* the user's tags — folded into query and create */
 #include "tag_registry.h"
 #include "vmm.h"
 #include "pmm.h"
@@ -941,9 +942,69 @@ static int parse_tag_list(const char *src, size_t src_len,
     return (int)count;
 }
 
-/* STORAGE_TAG_QUERY  in_crate (optional): comma-separated tag string
+/*
+ * The scope byte of storage.query / storage.create (boxos_decks.h): inside the
+ * Use Context unless the caller said everywhere. Absent means inside.
+ */
+static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_scope)
+{
+    uint8_t scope = STORAGE_SCOPE_USE;
+    if (op->param_size > at) scope = op->params[at];
+    if (scope != STORAGE_SCOPE_USE && scope != STORAGE_SCOPE_EVERYWHERE)
+        return ERR_INVALID_ARGUMENT;
+    *out_scope = scope;
+    return OK;
+}
+
+/*
+ * The caller's tags followed by the Use Context's, as one array of names —
+ * what a query is asked for and what a created file is stamped with when the
+ * scope is USE. `own` are the caller's parsed tags; the result is kmalloc'd
+ * (*out_all) and so is the block the context's names live in (*out_block);
+ * the caller frees both. Both NULL with *out_total == own_count when the
+ * scope is EVERYWHERE or the context is empty, so the caller's own array is
+ * used as is.
+ */
+static error_t storage_tags_with_use(uint8_t scope,
+                                     const char **own, uint32_t own_count,
+                                     const char ***out_all, char **out_block,
+                                     uint32_t *out_total)
+{
+    *out_all   = NULL;
+    *out_block = NULL;
+    *out_total = own_count;
+    if (scope != STORAGE_SCOPE_USE) return OK;
+
+    char        *block = NULL;
+    const char **names = NULL;
+    uint32_t     count = 0;
+    error_t rc = UseContextTagArray(&block, &names, &count);
+    if (rc != OK) return rc;
+    if (count == 0) return OK;
+
+    const char **all = kmalloc(sizeof(char *) * (own_count + count));
+    if (!all) {
+        kfree(block);
+        kfree(names);
+        return ERR_NO_MEMORY;
+    }
+    for (uint32_t i = 0; i < own_count; i++) all[i] = own[i];
+    for (uint32_t i = 0; i < count; i++)     all[own_count + i] = names[i];
+    kfree(names);
+
+    *out_all   = all;
+    *out_block = block;
+    *out_total = own_count + count;
+    return OK;
+}
+
+/* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
+ *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
+ *                    in_crate (optional): comma-separated tag string
  *                    out_crate: [u32 count][u32 file_ids[count]]
- *                    Auto-context tags from ctx->proc->pid are merged. */
+ *                    Inside the context the user's tags are ANDed with the
+ *                    caller's: `use code cpp` then "project" asks for files
+ *                    that are code AND cpp AND project. */
 static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                     const OpContext *ctx)
 {
@@ -952,6 +1013,10 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t scope;
+    error_t src_rc = storage_scope_of(op, 0, &scope);
+    if (src_rc != OK) return src_rc;
 
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
@@ -969,38 +1034,39 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         }
     }
 
+    const char *own_tags[16];
+    char        own_storage[16][32];
+    int own = parse_tag_list(qbuf, qlen, own_tags, own_storage, 16);
+    if (own < 0) own = 0;
+
+    const char **all_tags  = NULL;
+    char        *use_block = NULL;
+    uint32_t     total     = 0;
+    error_t mrc = storage_tags_with_use(scope, own_tags, (uint32_t)own,
+                                        &all_tags, &use_block, &total);
+    if (mrc != OK) return mrc;
+    const char **asked = all_tags ? all_tags : own_tags;
+
     uint8_t *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) return ERR_INVALID_ADDRESS;
+    if (!kp) {
+        kfree(all_tags);
+        kfree(use_block);
+        return ERR_INVALID_ADDRESS;
+    }
 
     uint32_t max_results = (uint32_t)((out->capacity - 4) / sizeof(uint32_t));
     uint32_t *file_ids = (uint32_t *)(kp + 4);
 
-    const char *all_tags[32];
-    char        tag_storage[32][32];
-    int total = parse_tag_list(qbuf, qlen, all_tags, tag_storage, 16);
-
-    /* Merge auto-context tags. */
-    if (ctx && ctx->proc) {
-        const char *ctx_tags[16];
-        int ccount = tagfs_context_get_tags(ctx->proc->pid, ctx_tags, 16);
-        for (int i = 0; i < ccount && total < 32; i++) {
-            size_t l = strlen(ctx_tags[i]);
-            if (l > 31) l = 31;
-            memcpy(tag_storage[total], ctx_tags[i], l);
-            tag_storage[total][l] = '\0';
-            all_tags[total] = tag_storage[total];
-            total++;
-        }
-    }
-
     int count;
     if (total > 0) {
-        count = tagfs_query_files(all_tags, (uint32_t)total, file_ids, max_results);
+        count = tagfs_query_files(asked, total, file_ids, max_results);
         if (count < 0) count = 0;
     } else {
         count = tagfs_list_all_files(file_ids, max_results);
         if (count < 0) count = 0;
     }
+    kfree(all_tags);
+    kfree(use_block);
 
     uint32_t cnt32 = (uint32_t)count;
     memcpy(kp, &cnt32, sizeof(uint32_t));
@@ -1061,13 +1127,21 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
 }
 
 /* STORAGE_OBJ_CREATE  params:[char filename[32]] (NUL-padded)
+ *                            [u8 scope] (optional) — inside the Use Context
+ *                            (absent, STORAGE_SCOPE_USE) or EVERYWHERE
  *                     in_crate (optional): tag string
- *                     out_crate (optional): u32 file_id */
+ *                     out_crate (optional): u32 file_id
+ *                     Inside the context the new file is stamped with the
+ *                     user's tags as well as its own. */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
     (void)crate_count;
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
+
+    uint8_t scope;
+    error_t src_rc = storage_scope_of(op, 32, &scope);
+    if (src_rc != OK) return src_rc;
 
     char filename[33];
     size_t fn_copy = op->param_size < 32 ? op->param_size : 32;
@@ -1091,41 +1165,44 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         }
     }
 
-    const char *tag_ptrs[16];
-    char        tag_storage[16][32];
-    int tag_count = parse_tag_list(tag_buf, tlen, tag_ptrs, tag_storage, 16);
-    if (tag_count < 0) tag_count = 0;
+    const char *own_tags[16];
+    char        own_storage[16][32];
+    int own = parse_tag_list(tag_buf, tlen, own_tags, own_storage, 16);
+    if (own < 0) own = 0;
 
-    /* Merge auto-context tags. */
-    if (ctx && ctx->proc) {
-        const char *ctx_tags[16];
-        int ccount = tagfs_context_get_tags(ctx->proc->pid, ctx_tags, 16);
-        for (int i = 0; i < ccount && tag_count < 16; i++) {
-            size_t l = strlen(ctx_tags[i]);
-            if (l > 31) l = 31;
-            memcpy(tag_storage[tag_count], ctx_tags[i], l);
-            tag_storage[tag_count][l] = '\0';
-            tag_ptrs[tag_count] = tag_storage[tag_count];
-            tag_count++;
+    const char **all_tags  = NULL;
+    char        *use_block = NULL;
+    uint32_t     total     = 0;
+    error_t mrc = storage_tags_with_use(scope, own_tags, (uint32_t)own,
+                                        &all_tags, &use_block, &total);
+    if (mrc != OK) return mrc;
+    const char **stamped = all_tags ? all_tags : own_tags;
+
+    /* Intern every tag into the registry — the file's own and the user's. */
+    uint16_t *tag_ids      = NULL;
+    uint16_t  intern_count = 0;
+    if (total > 0) {
+        tag_ids = kmalloc(sizeof(uint16_t) * total);
+        if (!tag_ids) {
+            kfree(all_tags);
+            kfree(use_block);
+            return ERR_NO_MEMORY;
+        }
+        for (uint32_t i = 0; i < total; i++) {
+            char k[64], v[64];
+            if (tagfs_parse_tag(stamped[i], k, sizeof(k), v, sizeof(v)) != 0) continue;
+            uint16_t tid = tagfs_tag_intern(stamped[i]);
+            if (tid != TAGFS_INVALID_TAG_ID) tag_ids[intern_count++] = tid;
         }
     }
-
-    /* Intern tags into the registry. */
-    uint16_t tag_id_buf[16];
-    uint16_t intern_count = 0;
-    for (int i = 0; i < tag_count && intern_count < 16; i++) {
-        char k[64], v[64];
-        if (tagfs_parse_tag(tag_ptrs[i], k, sizeof(k), v, sizeof(v)) != 0) continue;
-        uint16_t tid = tagfs_tag_intern(tag_ptrs[i]);
-        if (tid != TAGFS_INVALID_TAG_ID) {
-            tag_id_buf[intern_count++] = tid;
-        }
-    }
+    kfree(all_tags);
+    kfree(use_block);
 
     uint32_t file_id = 0;
     int rc = tagfs_create_file(filename,
-                               intern_count > 0 ? tag_id_buf : NULL,
+                               intern_count > 0 ? tag_ids : NULL,
                                intern_count, &file_id);
+    kfree(tag_ids);
     if (rc != 0) return ERR_DISK_FULL;
 
     if (op->out_crate != CRATE_INDEX_NONE) {
@@ -1137,98 +1214,6 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* STORAGE_CONTEXT_SET  in_crate: tag string ("key" or "key:value") */
-static int ObjContextSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                         const OpContext *ctx)
-{
-    (void)crate_count;
-    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
-    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    Crate *src = &crates[op->in_crate];
-    if (src->size == 0 || src->size > 127) return ERR_INVALID_ARGUMENT;
-
-    char tag[128];
-    if (crate_read(src, ctx, tag, src->size) != OK) return ERR_INVALID_ADDRESS;
-    tag[src->size] = '\0';
-
-    char key[64], value[64];
-    const char *colon = strchr(tag, ':');
-    if (colon) {
-        size_t klen = (size_t)(colon - tag);
-        if (klen >= sizeof(key)) klen = sizeof(key) - 1;
-        memcpy(key, tag, klen);
-        key[klen] = '\0';
-        strncpy(value, colon + 1, sizeof(value) - 1);
-        value[sizeof(value) - 1] = '\0';
-    } else {
-        strncpy(key, tag, sizeof(key) - 1);
-        key[sizeof(key) - 1] = '\0';
-        value[0] = '\0';
-    }
-
-    if (tagfs_context_add_tag_string(ctx->proc->pid, key, value[0] ? value : NULL) != 0) {
-        return ERR_INVALID_ARGUMENT;
-    }
-    return OK;
-}
-
-/* STORAGE_CONTEXT_CLEAR  no params, no crates */
-static int ObjContextClear(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                           const OpContext *ctx)
-{
-    (void)op; (void)crates; (void)crate_count;
-    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    tagfs_context_clear(ctx->proc->pid);
-    return OK;
-}
-
-/* STORAGE_CONTEXT_GET  no params
- *                      out_crate: [u32 count][ (u16 len)(char tag[len]) ]*
- *
- * The companion to CONTEXT_SET / CONTEXT_CLEAR — reports the calling
- * process's current context tags ("key" or "key:value"), so a caller can
- * snapshot the context, install its own, and restore the original on exit
- * (correct nesting). tagfs_context_get_tags already formats each tag; we
- * just length-prefix them into the crate. Tags that would overflow the
- * caller's buffer are dropped (count reflects what was actually written). */
-static int ObjContextGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                         const OpContext *ctx)
-{
-    (void)op; (void)crate_count;
-    if (!ctx || !ctx->proc)               return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) return ERR_INVALID_ADDRESS;
-
-    /* tagfs_context_get_tags returns pointers into a static per-slot buffer
-     * held only for the duration of the call — copy each out immediately. */
-    const char *ctx_tags[64];
-    int ccount = tagfs_context_get_tags(ctx->proc->pid, ctx_tags, 64);
-    if (ccount < 0) ccount = 0;
-
-    uint64_t pos     = 4;  /* reserve the leading count */
-    uint32_t written = 0;
-    for (int i = 0; i < ccount; i++) {
-        size_t l = strlen(ctx_tags[i]);
-        if (l > 0xFFFFu) l = 0xFFFFu;
-        if (pos + 2u + l > out->capacity) break;  /* no room — stop, report partial */
-        uint16_t l16 = (uint16_t)l;
-        memcpy(kp + pos, &l16, 2);          pos += 2;
-        memcpy(kp + pos, ctx_tags[i], l);   pos += l;
-        written++;
-    }
-    memcpy(kp, &written, 4);
-    int crc = crate_out_commit(out, ctx, kp, pos);
-    crate_buf_free(kp);
-    if (crc != OK) return crc;   /* fail closed: leave out->size unset */
-    out->size = pos;
-    return OK;
-}
 
 /* -------------------------------------------------------------------------
  * Snapshot ops — userspace surface for CoW snapshots.
@@ -1438,10 +1423,6 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
         { STORAGE_OBJ_TRUNCATE, ObjTruncate,     OP_AUTH_APP, "storage.truncate" },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
-        /* Per-process context: app+. */
-        { STORAGE_CONTEXT_SET,  ObjContextSet,   OP_AUTH_APP, "storage.ctx.set"  },
-        { STORAGE_CONTEXT_CLEAR,ObjContextClear, OP_AUTH_APP, "storage.ctx.clear"},
-        { STORAGE_CONTEXT_GET,  ObjContextGet,   OP_AUTH_APP, "storage.ctx.get"  },
         /* Snapshot management: app+. */
         { STORAGE_SNAP_CREATE,  ObjSnapCreate,   OP_AUTH_APP, "storage.snap.create"},
         { STORAGE_SNAP_DELETE,  ObjSnapDelete,   OP_AUTH_APP, "storage.snap.delete"},

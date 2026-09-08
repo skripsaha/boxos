@@ -5,7 +5,7 @@
  * to the display daemon; input requests (READLINE) still travel as IPC.
  * Input: line editor with cursor movement and history
  * Commands: built-in table + external utilities via proc_exec
- * Context: tag-based focus via `use` command
+ * Use Context: the user's tag-based focus via `use`, kept by the kernel
  */
 
 #include "shell.h"
@@ -17,6 +17,7 @@
 #include "box/ipc.h"
 #include "box/core/result.h"
 #include "box/system.h"
+#include "box/use.h"
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
 #include "box/display.h"
@@ -140,6 +141,10 @@ void ShellInit(void)
      * the FIRST readline pulls the stale reply and returns garbage. */
     ShellDrainStaleIpc();
 
+    /* The context this shell was born into — a nested shell inherits the
+     * user's `use`, because the context is the machine's, not a shell's. */
+    ShellUpdatePrompt();
+
     clear();
     println("BoxOS Shell v2.0");
     println("Type 'help' for commands, 'exit' to quit.");
@@ -150,30 +155,25 @@ void ShellInit(void)
  * Prompt management
  * ========================================================================= */
 
+/*
+ * The prompt says what the kernel holds as the Use Context — "[code,cpp] ~ " —
+ * read fresh each time rather than kept as a copy of what this shell typed, so
+ * a nested shell shows the context it was born into and a context set by a
+ * system program shows up too. The kernel writes as many whole tags as the
+ * prompt has room for; a context longer than the prompt is shown to that
+ * point and never torn mid-tag.
+ */
 void ShellUpdatePrompt(void)
 {
-    if (g_state.context_tag_count > 0) {
-        char ctx[SHELL_PROMPT_MAX];
-        int pos = 0;
-        ctx[pos++] = '[';
+    /* "[" + list + "] ~ " + NUL */
+    char list[SHELL_PROMPT_MAX - 5];
+    int  tags = use_get(list, sizeof(list), NULL);
 
-        for (uint32_t i = 0; i < g_state.context_tag_count && pos < SHELL_PROMPT_MAX - 5; i++) {
-            size_t tag_len = strlen(g_state.context_tags[i]);
-            if (pos + (int)tag_len + 2 >= SHELL_PROMPT_MAX - 5) break;
-
-            memcpy(ctx + pos, g_state.context_tags[i], tag_len);
-            pos += (int)tag_len;
-
-            if (i < g_state.context_tag_count - 1)
-                ctx[pos++] = ',';
-        }
-
-        ctx[pos++] = ']';
-        ctx[pos++] = ' ';
-        ctx[pos++] = '~';
-        ctx[pos++] = ' ';
-        ctx[pos]   = '\0';
-        memcpy(g_state.prompt, ctx, (size_t)pos + 1);
+    if (tags > 0) {
+        size_t len = strlen(list);
+        g_state.prompt[0] = '[';
+        memcpy(g_state.prompt + 1, list, len);
+        memcpy(g_state.prompt + 1 + len, "] ~ ", 5);
     } else {
         memcpy(g_state.prompt, "~ ", 3);
     }

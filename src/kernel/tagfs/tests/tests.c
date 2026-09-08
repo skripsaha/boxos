@@ -6,6 +6,9 @@
 #include "../cow/cow.h"
 #include "../integrity/integrity.h"
 #include "../../../kernel/drivers/timer/rtc.h"
+#include "use_context.h"   /* the user's tags, narrowing every query */
+#include "process.h"       /* a stand-in strand for the scheduler's question */
+#include "cabin.h"
 
 // ============================================================================
 // Global Test State
@@ -971,6 +974,213 @@ static TestResult test_integrity_persist_reload(void) {
     return TEST_PASS;
 }
 
+// ============================================================================
+// Use Context Tests — reads only.
+//
+// The context is the user's and the volume is the user's; neither is written
+// to prove that a query is narrowed. Every context set here is set WITHOUT
+// interning (a tag the volume does not know stays unknown), and whatever the
+// user had is put back afterwards.
+// ============================================================================
+
+/* The context as it was: a comma-joined list to hand back to UseContextSet,
+ * or NULL for none. */
+static bool use_snapshot_take(char **out_list)
+{
+    uint32_t n    = 0;
+    size_t   need = UseContextTags(NULL, 0, &n);
+    if (need == 0) {
+        *out_list = NULL;
+        return true;
+    }
+    char *block = kmalloc(need);
+    if (!block) return false;
+    uint32_t got = 0;
+    UseContextTags(block, need, &got);
+    size_t pos = 0;
+    for (uint32_t i = 0; i + 1 < got; i++) {
+        pos += strlen(block + pos);
+        block[pos++] = ',';
+    }
+    *out_list = block;
+    return true;
+}
+
+static void use_snapshot_restore(char *list)
+{
+    if (list) {
+        UseContextSet(list, false);
+        kfree(list);
+    } else {
+        UseContextClear();
+    }
+}
+
+/* A strand that wears exactly one tag, for UseContextMatches. */
+static process_t *use_test_strand(uint16_t tag_id, cabin_t **out_cabin)
+{
+    cabin_t *cabin = kmalloc(sizeof(cabin_t));
+    process_t *proc = kmalloc(sizeof(process_t));
+    if (!cabin || !proc) {
+        kfree(cabin);
+        kfree(proc);
+        return NULL;
+    }
+    memset(cabin, 0, sizeof(*cabin));
+    memset(proc, 0, sizeof(*proc));
+    if (tag_id < 64) {
+        cabin->tag_bits = (uint64_t)1 << tag_id;
+    } else {
+        cabin->tag_overflow_ids = kmalloc(sizeof(uint16_t));
+        if (!cabin->tag_overflow_ids) {
+            kfree(cabin);
+            kfree(proc);
+            return NULL;
+        }
+        cabin->tag_overflow_ids[0]   = tag_id;
+        cabin->tag_overflow_count    = 1;
+        cabin->tag_overflow_capacity = 1;
+    }
+    proc->cabin = cabin;
+    *out_cabin  = cabin;
+    return proc;
+}
+
+static void use_test_strand_free(process_t *proc, cabin_t *cabin)
+{
+    if (cabin) kfree(cabin->tag_overflow_ids);
+    kfree(cabin);
+    kfree(proc);
+}
+
+/* Spelling: blanks dropped, "key:" is "key", a duplicate kept once, an unfit
+ * tag refused with the context left as it was. */
+static TestResult test_use_context_spelling(void)
+{
+    char *saved;
+    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
+
+    TEST_ASSERT_OK(UseContextSet(" code , cpp:, ,project:alpha ,code", false),
+                   "a list with blanks, an empty value and a repeat is a context");
+    char        *block = NULL;
+    const char **names = NULL;
+    uint32_t     count = 0;
+    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
+    TEST_ASSERT_EQ(count, 3, "three distinct tags");
+    TEST_ASSERT(strcmp(names[0], "code") == 0, "first is code, trimmed");
+    TEST_ASSERT(strcmp(names[1], "cpp") == 0, "cpp: is spelled cpp");
+    TEST_ASSERT(strcmp(names[2], "project:alpha") == 0, "key:value kept whole");
+    kfree(block);
+    kfree(names);
+
+    char unfit[300];
+    memset(unfit, 'k', sizeof(unfit) - 1);
+    unfit[sizeof(unfit) - 1] = '\0';
+    TEST_ASSERT(UseContextSet(unfit, false) == ERR_INVALID_ARGUMENT,
+                "a key longer than the registry's field is refused");
+    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
+    TEST_ASSERT_EQ(count, 3, "the refusal left the context as it was");
+    kfree(block);
+    kfree(names);
+
+    use_snapshot_restore(saved);
+    return TEST_PASS;
+}
+
+/* Walls: a context of a tag nobody wears shows nothing, and no strand can be
+ * in its tier. */
+static TestResult test_use_context_walls(void)
+{
+    char *saved;
+    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
+
+    TEST_ASSERT_OK(UseContextSet("use:test:nobody-wears-this", false),
+                   "a tag the volume does not know is still a context");
+    TEST_ASSERT(UseContextIsSet(), "the context is set");
+
+    char        *block = NULL;
+    const char **names = NULL;
+    uint32_t     count = 0;
+    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
+    TEST_ASSERT_EQ(count, 1, "one tag");
+    uint32_t ids[8];
+    int found = tagfs_query_files(names, count, ids, 8);
+    kfree(block);
+    kfree(names);
+    TEST_ASSERT_EQ(found, 0, "inside walls nobody has built, nothing is visible");
+
+    cabin_t   *cabin = NULL;
+    process_t *proc  = use_test_strand(0, &cabin);
+    TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
+    cabin->tag_bits = ~(uint64_t)0;
+    bool in_tier = UseContextMatches(proc);
+    use_test_strand_free(proc, cabin);
+    TEST_ASSERT(!in_tier, "a tag without a number on this volume puts nobody in the tier");
+
+    use_snapshot_restore(saved);
+    return TEST_PASS;
+}
+
+/* Narrowing: a context of a tag some file wears shows only files wearing it,
+ * and a strand wearing it is in the tier while one without is not. */
+static TestResult test_use_context_narrows(void)
+{
+    uint32_t first[1];
+    TEST_ASSERT_EQ(tagfs_list_all_files(first, 1), 1, "a volume with at least one file");
+
+    TagFSMetadata meta;
+    TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
+    if (meta.tag_count == 0) {
+        tagfs_metadata_free(&meta);
+        return TEST_SKIP;   /* nothing to narrow by */
+    }
+    uint16_t tag_id = meta.tag_ids[0];
+    tagfs_metadata_free(&meta);
+
+    char text[512];
+    TEST_ASSERT(tagfs_tag_text(tag_id, text, sizeof(text)), "the tag has a name");
+
+    char *saved;
+    TEST_ASSERT(use_snapshot_take(&saved), "the user's context could not be saved");
+    TEST_ASSERT_OK(UseContextSet(text, false), "a context of a tag the volume knows");
+
+    char        *block = NULL;
+    const char **names = NULL;
+    uint32_t     count = 0;
+    TEST_ASSERT_OK(UseContextTagArray(&block, &names, &count), "names come back");
+
+    uint32_t inside[256];
+    int n_inside = tagfs_query_files(names, count, inside, 256);
+    kfree(block);
+    kfree(names);
+    TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
+    for (int i = 0; i < n_inside; i++)
+        TEST_ASSERT(tagfs_has_tag(inside[i], tag_id), "everything visible inside wears the tag");
+
+    uint32_t everywhere[256];
+    int n_everywhere = tagfs_list_all_files(everywhere, 256);
+    TEST_ASSERT(n_inside <= n_everywhere, "inside is never more than everywhere");
+
+    cabin_t   *cabin = NULL;
+    process_t *proc  = use_test_strand(tag_id, &cabin);
+    TEST_ASSERT(proc != NULL, "no memory for a stand-in strand");
+    bool wearing = UseContextMatches(proc);
+    cabin->tag_bits           = 0;
+    cabin->tag_overflow_count = 0;
+    bool bare = UseContextMatches(proc);
+    UseContextClear();
+    if (tag_id < 64) cabin->tag_bits = (uint64_t)1 << tag_id;
+    else             cabin->tag_overflow_count = 1;
+    bool after_clear = UseContextMatches(proc);
+    use_test_strand_free(proc, cabin);
+    TEST_ASSERT(wearing, "a strand wearing the context's tag is in the tier");
+    TEST_ASSERT(!bare, "a strand without it is not");
+    TEST_ASSERT(!after_clear, "with no context there is no tier");
+
+    use_snapshot_restore(saved);
+    return TEST_PASS;
+}
+
 /*
  * Whether this build is allowed to write to the volume it is testing.
  *
@@ -1061,9 +1271,15 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         {"dedup_reregister_follows_content", test_dedup_reregister_follows_content, TEST_SKIP, 0, "", TEST_WRITES_TO_VOLUME},
     };
 
+    static TestCase use_context_tests[] = {
+        {"use_context_spelling", test_use_context_spelling, TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"use_context_walls",    test_use_context_walls,    TEST_SKIP, 0, "", TEST_READS_ONLY},
+        {"use_context_narrows",  test_use_context_narrows,  TEST_SKIP, 0, "", TEST_READS_ONLY},
+    };
+
     // Run all test suites
     static TestCase* all_suites[] = {
-        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests, dedup_tests
+        core_tests, compression_tests, journal_tests, snapshot_tests, stress_tests, braid_tests, cow_tests, boxhash_tests, integrity_tests, dedup_tests, use_context_tests
     };
     uint32_t suite_sizes[] = {
         sizeof(core_tests)/sizeof(TestCase),
@@ -1075,7 +1291,8 @@ error_t TagFS_RunAllTests(TestStats* stats) {
         sizeof(cow_tests)/sizeof(TestCase),
         sizeof(boxhash_tests)/sizeof(TestCase),
         sizeof(integrity_tests)/sizeof(TestCase),
-        sizeof(dedup_tests)/sizeof(TestCase)
+        sizeof(dedup_tests)/sizeof(TestCase),
+        sizeof(use_context_tests)/sizeof(TestCase)
     };
 
     debug_printf("\n[Tests] Starting test run...\n");

@@ -66,19 +66,13 @@
 #include "box/cxx/executor.h"   // box::executor / __exec::wait_domain / wait_on  (+ box/core/result.h)
 #include "box/cxx/tagfs.h"      // box::tagfs::file (out-of-line read_async/write_async definitions)
 #include "box/core/manifest.h"  // Manifest / ManifestOp / ManifestBuilder / Crate / ManifestSubmitNoWait
-#include "boxos_decks.h"        // DECK_STORAGE
+#include "boxos_decks.h"        // DECK_STORAGE + STORAGE_OBJ_READ / WRITE — the single source
 #include "box/memory.h"         // malloc / free — station-owned submission blocks
 #include "box/error.h"          // ::error_t / ERR_* / OK
 
 namespace box {
 
 namespace _detail {
-
-// Storage opcodes — mirror src/kernel/core/decks/storage/storage_deck.h (and the
-// boxlib file.c copy). Kept local for the same reason file.c keeps its copy: the
-// opcode set has no shared userspace header today.
-inline constexpr std::uint16_t FERRY_STORAGE_OBJ_READ  = 0x05;
-inline constexpr std::uint16_t FERRY_STORAGE_OBJ_WRITE = 0x06;
 
 // The submission block a ferry hands to the kernel: the 1-op storage Manifest
 // bytes plus its single Crate descriptor. The station owns one per in-flight op
@@ -321,7 +315,7 @@ private:
             __builtin_memcpy(params + 12, &flags,   4);
             __builtin_memcpy(params + 16, &w,       8);
             CrateSetInput(&sub->crates[0], const_cast<void *>(buf), n);
-            rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, _detail::FERRY_STORAGE_OBJ_WRITE,
+            rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, STORAGE_OBJ_WRITE,
                                       0, /*in*/0, /*out*/CRATE_INDEX_NONE, params, 24);
         } else {
             std::uint8_t params[20];
@@ -329,7 +323,7 @@ private:
             __builtin_memcpy(params + 4,  &offset,  8);
             __builtin_memcpy(params + 12, &w,       8);
             CrateSetOutput(&sub->crates[0], const_cast<void *>(buf), n);
-            rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, _detail::FERRY_STORAGE_OBJ_READ,
+            rc = ManifestBuilderAddOp(&mb, DECK_STORAGE, STORAGE_OBJ_READ,
                                       0, /*in*/CRATE_INDEX_NONE, /*out*/0, params, 20);
         }
         if (rc != 0 || ManifestBuilderFinalize(&mb) != 0) {

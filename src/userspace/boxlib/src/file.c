@@ -1,5 +1,5 @@
 /*
- * file.c — userspace file/tag/context wrappers (Phase 12: Manifest-only).
+ * file.c — userspace file/tag wrappers (Phase 12: Manifest-only).
  *
  * Storage Deck is now fully Manifest-native. Every wrapper builds a 1-op
  * Manifest via MfCall1 with the new param/crate layout — the legacy
@@ -15,39 +15,22 @@
 #include "box/types.h"
 #include "box/error.h"
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
-
-#define STORAGE_TAG_QUERY       0x01
-#define STORAGE_TAG_SET         0x02
-#define STORAGE_TAG_UNSET       0x03
-#define STORAGE_OBJ_READ        0x05
-#define STORAGE_OBJ_WRITE       0x06
-#define STORAGE_OBJ_CREATE      0x07
-#define STORAGE_OBJ_DELETE      0x08
-#define STORAGE_OBJ_RENAME      0x09
-#define STORAGE_OBJ_GET_INFO    0x0A
-#define STORAGE_OBJ_TRUNCATE    0x0B
-#define STORAGE_CONTEXT_SET     0x10
-#define STORAGE_CONTEXT_CLEAR   0x11
-#define STORAGE_CONTEXT_GET     0x12
-#define STORAGE_SNAP_CREATE     0x20
-#define STORAGE_SNAP_DELETE     0x21
-#define STORAGE_SNAP_LIST       0x22
-#define STORAGE_OBJ_ANCHOR      0x23
-#define STORAGE_SNAP_INFO       0x24
+#include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
 /* =========================================================================
- *  CREATE / QUERY
+ *  CREATE / QUERY — inside the Use Context, or everywhere
  * ========================================================================= */
 
-int create(const char *filename, const char *tags)
+static int create_scoped(const char *filename, const char *tags, uint8_t scope)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes, NUL-padded filename. */
-    uint8_t params[32] = {0};
+    /* params: 32 bytes of NUL-padded filename, then the scope byte. */
+    uint8_t params[33] = {0};
     memcpy(params, filename, fn_len);
+    params[32] = scope;
 
     /* in_crate: tag list (optional). */
     const void *in = NULL;
@@ -67,7 +50,17 @@ int create(const char *filename, const char *tags)
     return (int)file_id;
 }
 
-int query(const char *tags, uint32_t *file_ids, size_t max_files)
+int create(const char *filename, const char *tags)
+{
+    return create_scoped(filename, tags, STORAGE_SCOPE_USE);
+}
+
+int create_everywhere(const char *filename, const char *tags)
+{
+    return create_scoped(filename, tags, STORAGE_SCOPE_EVERYWHERE);
+}
+
+static int query_scoped(const char *tags, uint32_t *file_ids, size_t max_files, uint8_t scope)
 {
     if (!file_ids || max_files == 0) return -ERR_INVALID_ARGUMENT;
 
@@ -86,7 +79,7 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
 
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_QUERY,
-                     NULL, 0,
+                     &scope, sizeof(scope),
                      in, in_size,
                      out, out_cap, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -100,6 +93,16 @@ int query(const char *tags, uint32_t *file_ids, size_t max_files)
         memcpy(&file_ids[i], out + 4 + i * 4, 4);
     }
     return (int)count;
+}
+
+int query(const char *tags, uint32_t *file_ids, size_t max_files)
+{
+    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_USE);
+}
+
+int query_everywhere(const char *tags, uint32_t *file_ids, size_t max_files)
+{
+    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE);
 }
 
 /* =========================================================================
@@ -268,7 +271,7 @@ int file_truncate(uint32_t file_id, uint64_t new_size)
 }
 
 /* =========================================================================
- *  TAGS / CONTEXT
+ *  TAGS
  * ========================================================================= */
 
 int tag_add(uint32_t file_id, const char *tag)
@@ -295,63 +298,6 @@ int tag_remove(uint32_t file_id, const char *key)
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
-}
-
-int context_set(const char *tag)
-{
-    if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t tl = strlen(tag);
-    if (tl >= 128) return -ERR_INVALID_ARGUMENT;
-    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_SET,
-                     NULL, 0,
-                     tag, (uint32_t)tl,
-                     NULL, 0, NULL,
-                     BOX_ANSWER_GUARANTEED, NULL);
-    return box_fail(rc);
-}
-
-int context_clear(void)
-{
-    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_CLEAR,
-                     NULL, 0, NULL, 0, NULL, 0, NULL,
-                     BOX_ANSWER_GUARANTEED, NULL);
-    return box_fail(rc);
-}
-
-int context_get(char out_tags[][64], uint32_t max_tags, uint32_t *out_count)
-{
-    if (!out_tags || !out_count || max_tags == 0) return -ERR_INVALID_ARGUMENT;
-
-    /* Sized to the kernel maximum: 4 + 64 tags * (2 len + 63 chars + 1). */
-    uint8_t  buf[4 + 64 * 66];
-    uint32_t out_actual = 0;
-    int rc = MfCall1(DECK_STORAGE, STORAGE_CONTEXT_GET,
-                     NULL, 0,
-                     NULL, 0,
-                     buf, sizeof(buf), &out_actual,
-                     BOX_ANSWER_GUARANTEED, NULL);
-    if (rc != 0) return box_fail(rc);
-    if (out_actual < 4) return -ERR_INTERNAL;
-
-    uint32_t count = 0;
-    memcpy(&count, buf, 4);
-
-    uint32_t pos     = 4;
-    uint32_t written = 0;
-    for (uint32_t i = 0; i < count && written < max_tags; i++) {
-        if (pos + 2 > out_actual) break;
-        uint16_t len = 0;
-        memcpy(&len, buf + pos, 2);
-        pos += 2;
-        if (pos + len > out_actual) break;
-        size_t copy = len < 63 ? len : 63;
-        memcpy(out_tags[written], buf + pos, copy);
-        out_tags[written][copy] = '\0';
-        pos += len;
-        written++;
-    }
-    *out_count = written;
-    return 0;
 }
 
 int find_file_by_name(const char *filename, uint32_t *file_ids,

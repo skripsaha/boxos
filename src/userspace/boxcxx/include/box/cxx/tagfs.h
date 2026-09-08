@@ -34,12 +34,16 @@
 //         for (auto& f : box::tagfs::query("video:cam0")
 //                        | std::views::filter([](auto& f){ return f.size() > 0; }))
 //
-//   * box::tagfs::context — a scoped, nesting-correct per-process tag filter
-//     (RAII restore of the previous context); box::tagfs::snapshot — an owning
-//     RAII handle on a CoW snapshot (auto-delete unless kept), with
-//     box::tagfs::snapshots() listing all ids; box::tagfs::on_anchor() — a
-//     box::touch subscription that delivers durability (anchor) events, read
-//     through box::tagfs::anchor_event.
+//   * The Use Context (box/cxx/use.h) is the user's, one per machine, and
+//     every query / create above is asked INSIDE it — `use code cpp` makes
+//     query("project") mean code AND cpp AND project, and stamps a created file
+//     code and cpp. query_everywhere / all_everywhere / create_everywhere ask
+//     the same of the whole volume, the context left out.
+//
+//   * box::tagfs::snapshot — an owning RAII handle on a CoW snapshot
+//     (auto-delete unless kept), with box::tagfs::snapshots() listing all ids;
+//     box::tagfs::on_anchor() — a box::touch subscription that delivers
+//     durability (anchor) events, read through box::tagfs::anchor_event.
 //
 // This is a box:: extension, not part of std. The byte-stream bridge resolves by
 // the file's NAME through the "file:" Current scheme; for I/O bound precisely to
@@ -470,6 +474,42 @@ inline std::vector<file> query(const char *tagspec)
 }
 inline std::vector<file> all() { return query(nullptr); }
 
+// ── the same, of the whole volume — the user's Use Context left out ─────
+// query / all / create above are asked inside the Use Context; these ask the
+// same question of everything on the volume. See box/cxx/use.h.
+inline std::vector<file> query_everywhere(const char *tagspec)
+{
+    std::uint32_t      ids[255];
+    int               n = ::query_everywhere(tagspec, ids, 255);
+    std::vector<file> out;
+    if (n > 0) {
+        out.reserve(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) out.emplace_back(ids[i]);
+    }
+    return out;
+}
+inline std::vector<file> all_everywhere() { return query_everywhere(nullptr); }
+
+inline box::result<file> create_everywhere(const char *name, std::initializer_list<const char *> tags)
+{
+    std::string spec;
+    for (const char *t : tags) {
+        if (!spec.empty()) spec.push_back(',');
+        spec += t;
+    }
+    int id = ::create_everywhere(name, spec.c_str());
+    if (id > 0) return file(static_cast<std::uint32_t>(id));
+    return std::unexpected(
+        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+}
+inline box::result<file> create_everywhere(const char *name, const char *tagspec = "")
+{
+    int id = ::create_everywhere(name, tagspec);
+    if (id > 0) return file(static_cast<std::uint32_t>(id));
+    return std::unexpected(
+        box::error{id < 0 ? box_errno_of(id) : static_cast<::error_t>(ERR_INTERNAL)});
+}
+
 // ── lookup by name (TagFS names are not unique; find returns the first) ──
 // find / find_all hand back records (the kernel already returned the metadata),
 // so their accessors read with zero syscalls — the asymmetry with query/all
@@ -506,77 +546,6 @@ inline std::vector<record> find_all(const char *name)
     }
     return out;
 }
-
-// ── context — a scoped per-process tag filter (RAII, nesting-correct) ──────
-// The context is a set of tags the kernel folds into every query/create this
-// process makes (it narrows what files you see and auto-tags what you create).
-// box::tagfs::context installs its tags on construction and *restores the
-// previous context* on destruction, so contexts nest correctly:
-//
-//     box::tagfs::context outer("project:alpha");      // sees alpha files
-//     {
-//         box::tagfs::context inner("stage:review");    // alpha AND review
-//     }                                                  // back to alpha-only
-//
-// Restoration is clear-then-reapply (not atomic) — correct for a cabin's single
-// line of execution. Move-only.
-class context {
-    std::vector<std::string> prior_;
-    bool                     active_ = false;
-
-    void _M_enter(std::initializer_list<const char *> tags)
-    {
-        prior_ = current();  // capture the existing context before changing it
-        for (const char *t : tags)
-            if (t && *t) ::context_set(t);
-        active_ = true;
-    }
-    void _M_restore()
-    {
-        ::context_clear();
-        for (const std::string &t : prior_) ::context_set(t.c_str());
-        active_ = false;
-    }
-
-public:
-    context() noexcept = default;
-    explicit context(const char *tag) { _M_enter({tag}); }
-    context(std::initializer_list<const char *> tags) { _M_enter(tags); }
-
-    context(const context &)            = delete;
-    context &operator=(const context &) = delete;
-    context(context &&o) noexcept : prior_(std::move(o.prior_)), active_(o.active_)
-    {
-        o.active_ = false;
-    }
-    context &operator=(context &&o) noexcept
-    {
-        if (this != &o) {
-            if (active_) _M_restore();
-            prior_    = std::move(o.prior_);
-            active_   = o.active_;
-            o.active_ = false;
-        }
-        return *this;
-    }
-    ~context() { if (active_) _M_restore(); }
-
-    explicit operator bool() const noexcept { return active_; }
-
-    // The tags in this process's context right now ("key" or "key:value"),
-    // freshly read from the kernel.
-    static std::vector<std::string> current()
-    {
-        std::vector<std::string> out;
-        char                     buf[64][64];
-        std::uint32_t            n = 0;
-        if (::context_get(buf, 64, &n) == 0) {
-            out.reserve(n);
-            for (std::uint32_t i = 0; i < n; ++i) out.emplace_back(buf[i]);
-        }
-        return out;
-    }
-};
 
 // ── snapshot — an owning RAII handle on a CoW snapshot ─────────────────────
 // snap_create freezes a copy-on-write view of one file (or the whole

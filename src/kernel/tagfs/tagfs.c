@@ -7,7 +7,7 @@
 #include "tag_bitmap/tag_bitmap.h"
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
-#include "context/tagfs_context.h"
+#include "use_context.h"
 #include "disk_book/disk_book.h"
 #include "bcdc/bcdc.h"
 #include "error.h"
@@ -1093,12 +1093,12 @@ static bool TagFSVolumeReturned(void)
         }
 
         if (tagfs_init() == OK) {
-            /* Said on every road to a mounted volume, because the per-process
-             * contexts every storage op looks for are set up by whoever
-             * mounted — and this road did not, while both of the others did.
-             * Idempotent, so a machine whose processes already have theirs
-             * keeps them; the asymmetry was the whole of the risk. */
-            tagfs_context_init();
+            /* Said on every road to a mounted volume: the Use Context keeps
+             * the volume's numbers for its tags, and the volume that is up now
+             * is not the one they were read from. This road did not say it
+             * once, while both of the others did; the asymmetry was the whole
+             * of the risk. */
+            UseContextRebind();
             mount_settled();
             return true;
         }
@@ -1238,10 +1238,10 @@ static void attend_arrival(void)
     }
 
     {
-        /* The boot path did this after its own mount and this path did not,
-         * so a volume that arrived late came up without the per-process
-         * contexts every storage op looks for. */
-        tagfs_context_init();
+        /* The boot path does this after its own mount and this path did not,
+         * so a volume that arrived late came up with the Use Context still
+         * holding no numbers for its tags. */
+        UseContextRebind();
         kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
                 "had none — mounted from seat %u\n", g_tagfs_seat);
         TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
@@ -2547,6 +2547,11 @@ static void tagfs_sync_inside(void)
  */
 static void tagfs_clear_the_ground(void)
 {
+    /* The registry is about to go, and with it every number it issued. The
+     * Use Context holds some of them for the scheduler; told first, so no
+     * dispatch decides on a page of a book that no longer exists. */
+    UseContextUnbind();
+
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);
         kfree(g_state.registry);

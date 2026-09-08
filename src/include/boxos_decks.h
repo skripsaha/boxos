@@ -28,7 +28,17 @@
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
-#define SYSTEM_OP_CTX_USE           0x04
+/* Use Context — what the person at this machine is doing, said in tags.
+ * One per machine (core/use_context). set takes a comma-separated tag list in
+ * the in_crate (an empty list clears); get writes the tags into the out_crate
+ * as [u32 count][u32 needed][(u16 len)(bytes)]*, needed being the byte length
+ * of the whole list comma-joined with its NUL; clear takes nothing. set and clear need
+ * system authority — the context is the user's, spoken for by the shell or a
+ * system program — while get is open: any program may ask what the user is
+ * doing. */
+#define SYSTEM_OP_USE_SET           0x04
+#define SYSTEM_OP_USE_GET           0x08
+#define SYSTEM_OP_USE_CLEAR         0x09
 /* () -> u64 microseconds of processor time used by the CALLING cabin. Self
  * only, deliberately: another cabin's processor time is information this op
  * has no business handing out, and a question about yourself needs no
@@ -194,5 +204,52 @@
  * no token, ERR_WOULD_BLOCK — "this moved the cursor, that was its whole
  * job". */
 #define SYSTEM_OP_BELL              0xC7  /* (u32 pid) — wake that strand; carries nothing */
+
+/* ============================================================================
+ *  Storage deck opcodes — SINGLE SOURCE OF TRUTH, like the system deck above.
+ *  Read by the kernel handler table (decks/storage/storage_ops.c) and by the
+ *  boxlib wrappers (boxlib/src/file.c); never mirrored in a *.c file.
+ * ============================================================================ */
+#define STORAGE_TAG_QUERY           0x01
+#define STORAGE_TAG_SET             0x02
+#define STORAGE_TAG_UNSET           0x03
+#define STORAGE_OBJ_READ            0x05
+#define STORAGE_OBJ_WRITE           0x06
+#define STORAGE_OBJ_CREATE          0x07
+#define STORAGE_OBJ_DELETE          0x08
+#define STORAGE_OBJ_RENAME          0x09
+#define STORAGE_OBJ_GET_INFO        0x0A
+/* obj.truncate — drop everything past a byte length. params =
+ * [u32 file_id][u64 new_size]. Shrink only: growing is refused, because
+ * TagFS does not zero freshly allocated blocks and a grow would hand back
+ * the allocator's previous tenant. The operation TagFS lacked until <fstream>
+ * needed it — ios_base::out alone means "w", and "w" truncates. */
+#define STORAGE_OBJ_TRUNCATE        0x0B
+#define STORAGE_SNAP_CREATE         0x20
+#define STORAGE_SNAP_DELETE         0x21
+#define STORAGE_SNAP_LIST           0x22
+/* anchor — durability + tag-event fan-out. params = [u32 file_id].
+ * file_id == 0 anchors the entire FS and publishes a generic "anchor"
+ * Touch event. Non-zero anchors and additionally fans out the event on
+ * every tag of that file, so observers keyed by tag (Touch REST) wake
+ * with payload {file_id, op=2, ...}. No POSIX equivalent — fsync()
+ * returns silently and offers no notification side-channel. */
+#define STORAGE_OBJ_ANCHOR          0x23
+/* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
+ * out_crate = [u32 id][u32 parent_file_id][u64 created_time][u32 file_count]
+ *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id
+ * lookup SNAP_LIST (ids only) lacks, enabling deterministic snapshot cleanup. */
+#define STORAGE_SNAP_INFO           0x24
+
+/* The scope byte storage.query and storage.create carry in their params.
+ *
+ * By default a query is asked, and a file is created, INSIDE the Use Context:
+ * the user said `use code cpp`, so "project,year:2026" means code AND cpp AND
+ * project AND year:2026, and a new file is stamped code and cpp along with
+ * whatever tags it was given. EVERYWHERE asks the same thing of the whole
+ * volume, the context left out. query: params = [u8 scope], absent = USE.
+ * create: params = [char filename[32]][u8 scope], a 32-byte params = USE. */
+#define STORAGE_SCOPE_USE           0
+#define STORAGE_SCOPE_EVERYWHERE    1
 
 #endif // BOXOS_DECKS_H
