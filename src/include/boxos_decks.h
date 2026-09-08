@@ -35,7 +35,10 @@
  * of the whole list comma-joined with its NUL; clear takes nothing. set and clear need
  * system authority — the context is the user's, spoken for by the shell or a
  * system program — while get is open: any program may ask what the user is
- * doing. */
+ * doing. The volume remembers the context (its Ledger): set and clear answer,
+ * in an optional 1-byte out_crate, whether it now does — 1 remembered, 0 not
+ * (no volume, a medium that will not take the write, a context longer than
+ * the record holds); the context is set either way. */
 #define SYSTEM_OP_USE_SET           0x04
 #define SYSTEM_OP_USE_GET           0x08
 #define SYSTEM_OP_USE_CLEAR         0x09

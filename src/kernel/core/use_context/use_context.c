@@ -345,7 +345,10 @@ bool UseContextMatches(const struct process_t *proc)
  * The volume's numbers
  * ------------------------------------------------------------------------- */
 
-void UseContextRebind(void)
+/* The volume's book changed under the cache: look every tag up in the registry
+ * that was just mounted — lookup only, because mounting somebody's medium must
+ * not write into it. */
+static void UseContextRebind(void)
 {
     /* Held across the lookups: the registry never calls back in here, so the
      * order use-lock then registry-lock has no reverse, and every lookup is a
@@ -355,6 +358,67 @@ void UseContextRebind(void)
         g_use.tags[i].id = tagfs_tag_lookup(g_use.tags[i].text);
     cache_rebuild_locked();
     spin_unlock(&g_use.lock);
+}
+
+void UseContextRemember(bool *remembered)
+{
+    bool kept = false;
+    if (remembered) *remembered = false;
+
+    /* Through the door, like every caller from outside the volume: the ground
+     * may be clearing under a medium that just left. */
+    if (!tagfs_enter()) return;
+
+    uint32_t n    = 0;
+    size_t   need = UseContextTags(NULL, 0, &n);
+    char    *block = need ? kmalloc(need) : NULL;
+    if (need == 0 || block) {
+        size_t len = 0;
+        if (need) {
+            /* NUL-separated to comma-joined, no NUL at the end — the form
+             * UseContextSet reads back. */
+            uint32_t got = 0;
+            UseContextTags(block, need, &got);
+            size_t pos = 0;
+            for (uint32_t i = 0; i + 1 < got; i++) {
+                pos += strlen(block + pos);
+                block[pos++] = ',';
+            }
+            len = got ? pos + strlen(block + pos) : 0;
+        }
+        tagfs_remember_use_context(block, len, &kept);
+        kfree(block);
+    }
+    tagfs_leave();
+
+    if (remembered) *remembered = kept;
+}
+
+void UseContextRecall(void)
+{
+    if (UseContextIsSet()) {
+        UseContextRebind();
+        bool kept = false;
+        UseContextRemember(&kept);
+        if (!kept)
+            kprintf("[USE] the context stands, and this volume will not remember it\n");
+        return;
+    }
+
+    size_t need = tagfs_recall_use_context(NULL, 0);
+    if (need == 0) return;
+    char *list = kmalloc(need + 1);
+    if (!list) return;
+    tagfs_recall_use_context(list, need);
+    list[need] = '\0';
+
+    error_t rc = UseContextSet(list, false);
+    if (rc == OK)
+        kprintf("[USE] the volume remembers the Use Context: %s\n", list);
+    else
+        kprintf("[USE] the volume remembers a Use Context this kernel cannot spell "
+                "(error %d): %s\n", (int)rc, list);
+    kfree(list);
 }
 
 void UseContextUnbind(void)

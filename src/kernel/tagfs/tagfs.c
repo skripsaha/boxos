@@ -1093,12 +1093,12 @@ static bool TagFSVolumeReturned(void)
         }
 
         if (tagfs_init() == OK) {
-            /* Said on every road to a mounted volume: the Use Context keeps
-             * the volume's numbers for its tags, and the volume that is up now
-             * is not the one they were read from. This road did not say it
-             * once, while both of the others did; the asymmetry was the whole
-             * of the risk. */
-            UseContextRebind();
+            /* Said on every road to a mounted volume: a context this machine
+             * holds is bound to the numbers of the volume that is up now and
+             * told to it; a machine holding none takes up what the volume
+             * remembers. This road did not say it once, while both of the
+             * others did; the asymmetry was the whole of the risk. */
+            UseContextRecall();
             mount_settled();
             return true;
         }
@@ -1240,8 +1240,9 @@ static void attend_arrival(void)
     {
         /* The boot path does this after its own mount and this path did not,
          * so a volume that arrived late came up with the Use Context still
-         * holding no numbers for its tags. */
-        UseContextRebind();
+         * holding no numbers for its tags. The person's word, if any, stands
+         * over what the arriving volume remembers. */
+        UseContextRecall();
         kprintf("[TagFS] a medium arrived carrying a volume, and this machine "
                 "had none — mounted from seat %u\n", g_tagfs_seat);
         TouchPublish("volume:mounted", &g_tagfs_seat, sizeof(g_tagfs_seat));
@@ -1581,6 +1582,22 @@ static const uint8_t g_ledger_magic[8] = {
  * one — this is the whole of the alternation. */
 static uint32_t g_ledger_current = 0;
 
+/* What the volume remembers of the Use Context — the comma-joined list it was
+ * last told, kept beside the counters and written out with them on every
+ * Ledger write. One sector is the record's whole world (ledger_read_copy takes
+ * one and refuses a longer claim), so this is bounded by what a sector holds
+ * past the fixed fields: a list that will not fit is not kept in part.
+ *
+ * One Ledger writer at a time, the whole way through. Two of them reading the
+ * same seq, building two records and racing for the same older copy would
+ * leave the medium with whichever landed last and memory with whichever
+ * committed last — not necessarily the same one. A leaf: nothing under it
+ * takes another lock. */
+static spinlock_t g_ledger_lock;
+static char       g_ledger_use[TAGFS_SECTOR_SIZE];
+static uint16_t   g_ledger_use_len;
+#define LEDGER_USE_MAX  ((size_t)TAGFS_SECTOR_SIZE - sizeof(VolumeLedger))
+
 static uint64_t ledger_vlba(uint32_t copy)
 {
     return ((uint64_t)g_state.layout.state_block + copy) * TAGFS_BLOCK_SECTORS;
@@ -1592,7 +1609,8 @@ static uint64_t ledger_vlba(uint32_t copy)
  * is longer than this one expects and is read up to what is understood, which
  * is what `bytes` is for.
  */
-static bool ledger_read_copy(uint32_t copy, VolumeLedger *out)
+static bool ledger_read_copy(uint32_t copy, VolumeLedger *out,
+                             char *tail, uint16_t *tail_len)
 {
     uint8_t buf[TAGFS_SECTOR_SIZE];
     if (disk_read_sectors(ledger_vlba(copy), 1, buf) != 0) {
@@ -1610,8 +1628,10 @@ static bool ledger_read_copy(uint32_t copy, VolumeLedger *out)
 
     /* Bounded before it is summed: `bytes` came off the medium and a stated
      * length longer than the sector it lives in would sum over memory this
-     * does not own. */
-    if (led.bytes < sizeof(VolumeLedger) || led.bytes > TAGFS_SECTOR_SIZE) {
+     * does not own. Required is what every reader needs, not what this one
+     * knows: a record from before the Use Context was kept ends at the
+     * counters, and refusing it would refuse every volume made before then. */
+    if (led.bytes < VOLUME_LEDGER_REQUIRED_BYTES || led.bytes > TAGFS_SECTOR_SIZE) {
         kprintf("[Ledger] copy %u states a length of %u, which cannot be one\n",
                 copy, led.bytes);
         return false;
@@ -1628,8 +1648,37 @@ static bool ledger_read_copy(uint32_t copy, VolumeLedger *out)
         return false;
     }
 
+    /* What a shorter record does not carry reads as zero, not as whatever
+     * followed it on the medium. */
+    if (led.bytes < sizeof(led))
+        memset((uint8_t *)&led + led.bytes, 0, sizeof(led) - led.bytes);
+
+    /* The remembered Use Context rides after the fixed fields, inside the
+     * summed bytes — so it is already proven intact by the checksum above;
+     * only its place in the record is checked here. */
+    *tail_len = 0;
+    if (led.use_context_bytes) {
+        uint32_t off = led.use_context_offset;
+        uint32_t len = led.use_context_bytes;
+        if (off < VOLUME_LEDGER_REQUIRED_BYTES || off + len > led.bytes) {
+            kprintf("[Ledger] copy %u places its Use Context at %u for %u bytes, "
+                    "outside its own record — it remembers none\n", copy, off, len);
+        } else {
+            memcpy(tail, buf + off, len);
+            *tail_len = (uint16_t)len;
+        }
+    }
+
     *out = led;
     return true;
+}
+
+/* One copy, read off the medium by the reader above and handed over as it
+ * is — for a proof that what was said to the volume is what it holds. */
+bool tagfs_ledger_peek(uint32_t copy, VolumeLedger *out, char *tail, uint16_t *tail_len)
+{
+    if (copy >= VOLUME_LEDGER_COPIES || !out || !tail || !tail_len) return false;
+    return ledger_read_copy(copy, out, tail, tail_len);
 }
 
 /*
@@ -1646,12 +1695,20 @@ static error_t ledger_load(void)
     bool         ok[VOLUME_LEDGER_COPIES];
     uint32_t     live = 0;
 
+    /* Each copy's remembered context, read with it; the newest copy's is the
+     * one the volume stands on. Off the stack: two sectors' worth. */
+    char *tails = kmalloc((size_t)VOLUME_LEDGER_COPIES * TAGFS_SECTOR_SIZE);
+    uint16_t tail_len[VOLUME_LEDGER_COPIES];
+    if (!tails) return ERR_NO_MEMORY;
+
     for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        ok[c] = ledger_read_copy(c, &led[c]);
+        ok[c] = ledger_read_copy(c, &led[c], tails + (size_t)c * TAGFS_SECTOR_SIZE,
+                                 &tail_len[c]);
         if (ok[c]) live++;
     }
 
     if (live == 0) {
+        kfree(tails);
         kprintf("[Ledger] neither copy is readable — this volume cannot say "
                 "what is on it\n");
         return ERR_TAGFS_CORRUPTED;
@@ -1670,6 +1727,12 @@ static error_t ledger_load(void)
     g_state.ledger   = led[newest];
     g_ledger_current = newest;
 
+    spin_lock(&g_ledger_lock);
+    g_ledger_use_len = tail_len[newest];
+    memcpy(g_ledger_use, tails + (size_t)newest * TAGFS_SECTOR_SIZE, g_ledger_use_len);
+    spin_unlock(&g_ledger_lock);
+    kfree(tails);
+
     if (live < VOLUME_LEDGER_COPIES) {
         kprintf("[Ledger] running on copy %u alone (seq %llu); the other one "
                 "did not survive\n",
@@ -1678,7 +1741,8 @@ static error_t ledger_load(void)
     return OK;
 }
 
-error_t tagfs_write_ledger(void)
+/* The write itself; g_ledger_lock is held by the caller. */
+static error_t ledger_write_locked(void)
 {
     if (g_state.layout.state_blocks < VOLUME_LEDGER_COPIES) {
         return ERR_TAGFS_METADATA_ERROR;
@@ -1686,17 +1750,24 @@ error_t tagfs_write_ledger(void)
 
     uint32_t target = (g_ledger_current + 1) % VOLUME_LEDGER_COPIES;
 
-    VolumeLedger led = g_state.ledger;
-    memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
-    led.bytes        = sizeof(VolumeLedger);
-    led.seq          = g_state.ledger.seq + 1;
-    led.written_unix = rtc_get_unix64();
-    led.crc32        = 0;
-    led.crc32        = KCrc32((const uint8_t *)&led, sizeof(led));
-
     uint8_t buf[TAGFS_SECTOR_SIZE];
     memset(buf, 0, sizeof(buf));
+
+    VolumeLedger led = g_state.ledger;
+    memcpy(led.magic, g_ledger_magic, sizeof(g_ledger_magic));
+    led.seq          = g_state.ledger.seq + 1;
+    led.written_unix = rtc_get_unix64();
+    /* The remembered Use Context follows the fixed fields and is summed with
+     * them: a torn write loses the context together with the counters, never
+     * one without the other. */
+    led.use_context_offset = g_ledger_use_len ? (uint16_t)sizeof(VolumeLedger) : 0;
+    led.use_context_bytes  = g_ledger_use_len;
+    led.bytes        = (uint32_t)sizeof(VolumeLedger) + g_ledger_use_len;
+    led.crc32        = 0;
     memcpy(buf, &led, sizeof(led));
+    memcpy(buf + sizeof(led), g_ledger_use, g_ledger_use_len);
+    led.crc32 = KCrc32(buf, led.bytes);
+    memcpy(buf + __builtin_offsetof(VolumeLedger, crc32), &led.crc32, sizeof(led.crc32));
 
     if (disk_write_sectors(ledger_vlba(target), 1, buf) != OK) {
         debug_printf("[Ledger] copy %u would not take the write\n", target);
@@ -1708,6 +1779,41 @@ error_t tagfs_write_ledger(void)
     g_state.ledger   = led;
     g_ledger_current = target;
     return OK;
+}
+
+error_t tagfs_write_ledger(void)
+{
+    spin_lock(&g_ledger_lock);
+    error_t rc = ledger_write_locked();
+    spin_unlock(&g_ledger_lock);
+    return rc;
+}
+
+error_t tagfs_remember_use_context(const char *list, size_t len, bool *remembered)
+{
+    if (!list && len) return ERR_INVALID_ARGUMENT;
+
+    /* A list the record cannot hold is not cut short and not kept: the volume
+     * forgets rather than remembering half of what was said, and says so. */
+    bool fits = len <= LEDGER_USE_MAX;
+
+    spin_lock(&g_ledger_lock);
+    g_ledger_use_len = fits ? (uint16_t)len : 0;
+    if (g_ledger_use_len) memcpy(g_ledger_use, list, g_ledger_use_len);
+    error_t rc = ledger_write_locked();
+    spin_unlock(&g_ledger_lock);
+
+    if (remembered) *remembered = fits && rc == OK;
+    return rc;
+}
+
+size_t tagfs_recall_use_context(char *buf, size_t cap)
+{
+    spin_lock(&g_ledger_lock);
+    size_t len = g_ledger_use_len;
+    if (buf && cap >= len && len) memcpy(buf, g_ledger_use, len);
+    spin_unlock(&g_ledger_lock);
+    return len;
 }
 
 // ----------------------------------------------------------------------------
@@ -2551,6 +2657,12 @@ static void tagfs_clear_the_ground(void)
      * Use Context holds some of them for the scheduler; told first, so no
      * dispatch decides on a page of a book that no longer exists. */
     UseContextUnbind();
+
+    /* What this volume remembered goes with it; the next one is read, not
+     * assumed. */
+    spin_lock(&g_ledger_lock);
+    g_ledger_use_len = 0;
+    spin_unlock(&g_ledger_lock);
 
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);

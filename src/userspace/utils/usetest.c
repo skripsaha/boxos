@@ -56,8 +56,10 @@ int main(void)
     int rc;
     int inside_id = 0, out_id = 0;
 
-    rc = use_set(PROBE_TAG);
+    bool remembered = false;
+    rc = use_set(PROBE_TAG, &remembered);
     if (rc < 0) { verdict = fail("use_set from a system program", rc); goto restore; }
+    if (!remembered) { verdict = fail("the volume did not remember the context", 0); goto restore; }
 
     char got[128];
     rc = use_get(got, sizeof(got), NULL);
@@ -94,7 +96,8 @@ int main(void)
     }
 
     /* Clear: the walls are gone, both are visible inside. */
-    rc = use_clear();
+    rc = use_clear(&remembered);
+    if (rc == 0 && !remembered) { verdict = fail("the volume did not remember the clear", 0); goto restore; }
     if (rc < 0) { verdict = fail("use_clear", rc); goto restore; }
     n = query(NULL, ids, 256);
     if (n < 0) { verdict = fail("query after clear", n); goto restore; }
@@ -107,10 +110,10 @@ restore:
     if (inside_id > 0) delete((uint32_t)inside_id);
     if (out_id > 0)    delete((uint32_t)out_id);
     if (saved) {
-        use_set(saved);
+        use_set(saved, NULL);
         free(saved);
     } else {
-        use_clear();
+        use_clear(NULL);
     }
 
     if (verdict == 0) println("[USE] PASS");

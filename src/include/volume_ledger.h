@@ -47,6 +47,14 @@
  * That is why there is no `reserved[]` here and no version number. A version
  * ladder answers "may I read this at all"; a length answers "how much of this
  * do I understand", which is the question that actually gets asked.
+ *
+ * Two things follow for anyone adding a field. The reader requires only the
+ * fields it cannot do without (VOLUME_LEDGER_REQUIRED_BYTES) and reads a
+ * shorter record as zeros past its end — otherwise the first field ever
+ * added would have refused every volume made before it. And the record stays
+ * inside its one sector: a reader takes one sector and refuses a longer
+ * claim, so a record that outgrew the sector would be unreadable everywhere
+ * it already mounts.
  */
 
 /*
@@ -104,7 +112,23 @@ typedef struct __attribute__((packed)) {
      * subsystems each trusting the other to stay inside its stated range. */
     uint32_t integrity_map_block;
     uint32_t integrity_map_blocks;
+
+    /* The Use Context the volume remembers — what its person was doing when
+     * they left, said in tags, taken up again when the volume comes up under
+     * a machine that holds none. The names ride inside this same record, one
+     * comma-joined list right after the fixed fields: `use_context_offset`
+     * from the start of the record, `use_context_bytes` long, no NUL. Both
+     * zero when the volume remembers none. The record is one sector, and
+     * that is the whole room a context has here — a list that will not fit
+     * is not kept in part; the volume forgets, and the person is told. */
+    uint16_t use_context_offset;
+    uint16_t use_context_bytes;
 } VolumeLedger;
+
+/* What every reader requires of `bytes`: the counters. A record written
+ * before the Use Context was kept ends exactly here, and reads as a volume
+ * that remembers none — the growth rule above, applied for the first time. */
+#define VOLUME_LEDGER_REQUIRED_BYTES  __builtin_offsetof(VolumeLedger, use_context_offset)
 
 /* Blocks in the data run are counted from zero, so zero cannot also mean "a
  * block". Nothing is allocated at data block 0 by anybody: mkfs puts the tag

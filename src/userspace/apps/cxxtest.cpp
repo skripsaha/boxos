@@ -4776,10 +4776,10 @@ void Phase19()
     {
         std::vector<std::string> before = box::use::current();
 
-        box::status said = box::use::set("p19ctx:alpha");
+        box::result<bool> said = box::use::set("p19ctx:alpha");
         Check(!said.has_value() && said.error().code() == box::errc::access_denied,
               "phase19 use::set without system authority is refused (access_denied)");
-        box::status cleared = box::use::clear();
+        box::result<bool> cleared = box::use::clear();
         Check(!cleared.has_value() && cleared.error().code() == box::errc::access_denied,
               "phase19 use::clear without system authority is refused (access_denied)");
         Check(box::use::current() == before,

@@ -13,6 +13,12 @@
 //   box::use::active()                   — is a context set at all
 //   box::use::clear()                    — the user is doing nothing in particular (system authority)
 //
+// The volume remembers the context: set and clear write it to the mounted
+// volume, and a machine booting with that volume takes it up again. Their
+// value says whether the volume now holds it — false with no volume up, a
+// medium that will not take the write, or a context longer than the volume's
+// record holds. The context is set either way.
+//
 // This is a box:: extension, not part of std. A program without system
 // authority gets box::errc::access_denied from set / clear — the context is
 // the user's, not a program's.
@@ -31,14 +37,18 @@
 namespace box {
 
 struct use {
-    // Replace the context with a comma-separated list. Empty clears.
-    static status set(std::string_view list)
+    // Replace the context with a comma-separated list. Empty clears. The
+    // value: does the volume now remember it.
+    static result<bool> set(std::string_view list)
     {
         std::string owned(list);
-        return _detail::from_status(::use_set(owned.c_str()));
+        bool        kept = false;
+        int         rc   = ::use_set(owned.c_str(), &kept);
+        if (rc < 0) return std::unexpected(error{box_errno_of(rc)});
+        return kept;
     }
 
-    static status set(std::initializer_list<std::string_view> tags)
+    static result<bool> set(std::initializer_list<std::string_view> tags)
     {
         std::string list;
         for (std::string_view t : tags) {
@@ -49,7 +59,13 @@ struct use {
         return set(list);
     }
 
-    static status clear() { return _detail::from_status(::use_clear()); }
+    static result<bool> clear()
+    {
+        bool kept = false;
+        int  rc   = ::use_clear(&kept);
+        if (rc < 0) return std::unexpected(error{box_errno_of(rc)});
+        return kept;
+    }
 
     // The context as tags, in the kernel's order; empty when none is set (or
     // when the kernel could not be asked — a failed ask reads as no context,
