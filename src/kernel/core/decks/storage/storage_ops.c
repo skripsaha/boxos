@@ -44,7 +44,7 @@
 #include "kring.h"
 #include "kresult.h"
 #include "write_job.h"
-#include "storage_completion.h"   /* StorageCompletionPush — never-drop read completion (Ф26 M2/M4) */
+#include "baton.h"   /* BatonPass — never-drop read completion (Ф26 M2/M4) */
 #include "ata.h"
 #include "touch.h"
 #include "cow.h"
@@ -183,7 +183,7 @@ typedef struct {
     /* Never-drop completion node (Ф26 M4): the AHCI IRQ posts this read to
      * the drain core with zero allocation, so a completion can never be
      * dropped. run = obj_read_pump, ctx = this ctx; set once at alloc. */
-    StorageCompletion cq_node;
+    Baton cq_node;
 } ObjReadAsyncCtx;
 
 static void obj_read_step(ObjReadAsyncCtx *ctx);
@@ -254,11 +254,11 @@ static void obj_read_async_complete(uint8_t port, uint8_t slot,
     (void)slot;
     ObjReadAsyncCtx *ctx = (ObjReadAsyncCtx *)ctx_;
     ctx->if_status = status;
-    StorageCompletionPush(&ctx->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&ctx->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* Ф26 M2 — K-Core pump: the heavy half of a read completion, drained by the same
- * StorageCompletionPump loop that pumps write jobs (kcore_run_loop). Safe to take locks /
+ * BatonPump loop that pumps write jobs (kcore_run_loop). Safe to take locks /
  * alloc / free / page-walk here (pump context, not IRQ). Applies the just-read
  * chunk, advances the cursor, and either finalizes or arms the next block. */
 static void obj_read_pump(void *ctx_)

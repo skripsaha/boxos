@@ -13,7 +13,8 @@
 #include "ktypes.h"
 #include "kernel_config.h"
 #include "amp.h"
-#include "irq_defer.h"   /* the deferred work an idle core is the last place to run */
+#include "irq_defer.h"
+#include "baton.h"   /* the deferred work an idle core is the last place to run */
 #include "fpu.h"
 #include "cpuid.h"          // g_cpu_caps.has_monitor (MWAIT idle)
 #include "cpu_calibrate.h"  // cpu_tsc_recal_if_pending — periodic TSC recal
@@ -163,6 +164,12 @@ void cpu_idle(void) {
      * tick — a few milliseconds at 250 Hz, and never longer, because the tick
      * arrives regardless of what this core is doing. */
     irq_defer_pump(amp_get_core_index());
+
+    /* And the batons — a park deadline's Result, a storage completion on a
+     * one-core box — for the same reason and in the same place: on one core
+     * there is no K-Core loop to pump them, and the tick pumps only when it
+     * interrupted ring 3, so it never runs this drain concurrently with us. */
+    BatonPump(amp_get_core_index());
 
     /* Periodic TSC recalibration. Runs out of IRQ context so the
      * 20ms HPET measurement window inside is harmless to interrupt

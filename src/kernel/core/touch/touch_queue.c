@@ -17,7 +17,7 @@
 #include "amp.h"
 #include "lapic.h"
 #include "irqchip.h"
-#include "irq_defer.h"   /* defer the WAKE delivery to a K-Core */
+#include "baton.h"       /* the deadline rides the process's own baton to a K-Core */
 #include "sync_ops.h"    /* SyncTimeoutDeliver */
 
 #define TQ_KIND_PUBLISH 0   /* deliver tag_id with payload via TouchPublishId */
@@ -28,8 +28,8 @@ typedef struct TouchQueueNode {
     uint64_t fire_tick;
     uint32_t source_pid;
     uint32_t target_pid;
-    uint32_t wait_seq;  /* WAKE only: addr_wait_entry->seq this timeout was armed for */
-    uint32_t park_seq;  /* WAKE only: target's park_seq at arm time — which sleep this is for */
+    uint32_t owes_result; /* WAKE only: 1 = an addr_park, owed ERR_TIMEOUT as a Result */
+    uint32_t park_seq;    /* WAKE only: target's park_seq at arm time — which sleep this is for */
     uint16_t tag_id;
     uint16_t flags;
     uint32_t plen;
@@ -55,7 +55,7 @@ static TouchQueueNode *touch_queue_alloc_node(const void *payload, uint32_t plen
     n->fire_tick  = 0;
     n->source_pid = 0;
     n->target_pid = 0;
-    n->wait_seq   = 0;
+    n->owes_result = 0;
     n->park_seq   = 0;
     n->tag_id     = 0;
     n->flags      = 0;
@@ -100,15 +100,15 @@ void TouchQueueEnqueue(uint16_t tag_id, const void *payload, uint32_t plen,
 }
 
 void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
-                         uint32_t wait_seq, uint32_t park_seq)
+                         uint32_t owes_result, uint32_t park_seq)
 {
     TouchQueueNode *n = touch_queue_alloc_node(NULL, 0);
     if (!n) return;
-    n->kind       = TQ_KIND_WAKE;
-    n->target_pid = target_pid;
-    n->fire_tick  = after_ticks;
-    n->wait_seq   = wait_seq;
-    n->park_seq   = park_seq;
+    n->kind        = TQ_KIND_WAKE;
+    n->target_pid  = target_pid;
+    n->fire_tick   = after_ticks;
+    n->owes_result = owes_result;
+    n->park_seq    = park_seq;
     touch_queue_link(n);
 }
 
@@ -118,42 +118,48 @@ void TouchQueueWakeAfter(uint32_t target_pid, uint64_t after_ticks,
  *      IRQ context. It is O(1), allocation-free, touches NO VMM, and is the
  *      original, long-shipping timeout behavior. It makes the waiter runnable
  *      immediately, which is what un-stalls a single-core box whose only
- *      userspace strand is parked (the scheduler then runs the waiter, whose
- *      userspace ticks drain the K-Core pump — idle context never pumps). It
- *      also fully serves touch_await, which has no addr_wait entry to deliver
- *      a Result to.
+ *      userspace strand is parked. It also fully serves touch_await, which has
+ *      no addr_wait entry to deliver a Result to.
  *
- *   2. An allocation-free irq_defer post carrying (seq<<32 | pid).
- *      SyncTimeoutDeliver then runs on a K-Core and, for a genuine addr_park
- *      waiter whose entry->seq still matches, KResultPushes ERR_TIMEOUT (cabin
- *      VMM — MUST be off the IRQ path: VMM work in the timer IRQ starved cores
- *      of TLB-shootdown ACKs under 16-core load → shootdown-timeout panic). On
- *      an irq_defer overflow the post is dropped and the boxlib +100 backstop
- *      covers the missed Result; the reschedule in (1) already happened.
+ *   2. The pass of the process's own deadline baton (process_t.deadline_baton,
+ *      a never-drop embedded node, baton.h). SyncTimeoutDeliver then runs on a
+ *      K-Core and, for a park that is linked, timed and past its deadline,
+ *      KResultPushes ERR_TIMEOUT (cabin VMM — MUST be off the IRQ path: VMM
+ *      work in the timer IRQ starved cores of TLB-shootdown ACKs under 16-core
+ *      load → shootdown-timeout panic). What stood here was an irq_defer post
+ *      that could be dropped, with boxlib holding a +100 ms clock over it.
  *
- * Both parts ask the same question first — is this wake still owed? — and for
- * a long time only part 2 did. A wait that ends early leaves its wake armed;
- * part 2 refused such a wake because entry->seq had moved on, while part 1
- * rescheduled unconditionally and so pulled the strand out of whatever park
- * came NEXT. Nothing was then owed it, so it sat in its userspace wait until
- * its own deadline arrived: a 300 ms sleep measured 250 ms of processor time,
- * on every core count, whenever any earlier wait had left a wake behind.
- * park_seq is that question for part 1. */
-static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq,
+ * Both parts ask the same question first — is this wake still for the sleep
+ * it was armed for? — and for a long time only part 2 did. A wait that ends
+ * early leaves its wake armed; part 2 refused such a wake because the park had
+ * moved on, while part 1 rescheduled unconditionally and so pulled the strand
+ * out of whatever park came NEXT. Nothing was then owed it, so it sat in its
+ * userspace wait until its own deadline arrived: a 300 ms sleep measured
+ * 250 ms of processor time, on every core count, whenever any earlier wait
+ * had left a wake behind. park_seq is that question for both.
+ *
+ * Part 1 additionally needs the strand to be WAITING; part 2 does not: a
+ * deadline that fires between the park's link and its sleep (an SMI can hold
+ * a K-Core that long) is still owed, and the deliverer judges it by the
+ * park's state. One baton per process, so a fire that finds it already
+ * queued (the previous deadline's pass not yet run) folds into that pass. */
+static void touch_queue_fire_wake(uint32_t target_pid, uint32_t owes_result,
                                   uint32_t park_seq)
 {
     process_t *target = process_find_ref(target_pid);
     if (!target) return;
-    if (!target->destroying && process_get_state(target) == PROC_WAITING &&
-        __atomic_load_n(&target->park_seq, __ATOMIC_ACQUIRE) == park_seq) {
+
+    bool this_sleep = !target->destroying &&
+                      __atomic_load_n(&target->park_seq, __ATOMIC_ACQUIRE) == park_seq;
+
+    if (this_sleep && process_get_state(target) == PROC_WAITING) {
         /* The deadline is the event: from this tick the answer (ERR_TIMEOUT) is
-         * determined and the kernel owes it — through the deferred delivery
-         * below, which CAN be dropped. Mark it due here, where the strand is
-         * provably still in this park (WAITING, park_seq unchanged, so it has
-         * not re-armed the entry; the ref is held), so a delivery that never
-         * comes is a chit DUE for ever, not a silence. touch_await (wait_seq
-         * 0) owes no Result and carries no token. */
-        if (wait_seq != 0)
+         * determined and the kernel owes it. Mark it due here, where the strand
+         * is provably still in this park (WAITING, park_seq unchanged, so it
+         * has not re-armed the entry; the ref is held), so a delivery that
+         * never comes is a chit DUE for ever, not a silence. touch_await owes
+         * no Result and carries no token. */
+        if (owes_result)
             ChitDue(target, target->addr_wait_entry.submit_cookie);
         process_set_state(target, PROC_WORKING);
         if (g_amp.total_cores > 1) {
@@ -163,15 +169,19 @@ static void touch_queue_fire_wake(uint32_t target_pid, uint32_t wait_seq,
             }
         }
     }
-    process_ref_dec(target);
 
-    /* wait_seq is >= 1 for an addr_park waiter (AddrWaitLink bumps it from 0);
-     * 0 is the touch_await sentinel — no addr_wait entry, no Result owed, so
-     * skip the deferred push entirely (the reschedule above already woke it). */
-    if (wait_seq != 0) {
-        uint64_t ctx = ((uint64_t)wait_seq << 32) | (uint64_t)target_pid;
-        irq_defer(SyncTimeoutDeliver, (void *)(uintptr_t)ctx);
+    if (this_sleep && owes_result) {
+        uint8_t idle = 0;
+        if (__atomic_compare_exchange_n(&target->deadline_passed, &idle, 1u,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            process_ref_inc(target);              /* released by SyncTimeoutDeliver */
+            target->deadline_baton.run = SyncTimeoutDeliver;
+            target->deadline_baton.ctx = target;
+            BatonPass(&target->deadline_baton);
+        }
     }
+
+    process_ref_dec(target);
 }
 
 void TouchQueueTick(uint64_t now)
@@ -199,7 +209,7 @@ void TouchQueueTick(uint64_t now)
         fire_list = n->next;
 
         if (n->kind == TQ_KIND_WAKE) {
-            touch_queue_fire_wake(n->target_pid, n->wait_seq, n->park_seq);
+            touch_queue_fire_wake(n->target_pid, n->owes_result, n->park_seq);
         } else {
             TouchPublishId(n->tag_id, n->payload, n->plen,
                            n->source_pid, n->flags);

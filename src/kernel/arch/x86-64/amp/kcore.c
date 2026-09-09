@@ -18,7 +18,7 @@
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 #include "nightwatch.h"
-#include "storage_completion.h"  /* Never-drop MPSC: async storage continuations */
+#include "baton.h"  /* Never-drop MPSC: async storage continuations */
 #include "tagfs.h"
 
 KCorePocketQueue *g_kcore_queues = NULL;
@@ -297,7 +297,7 @@ void kcore_run_loop(void)
          * consumer: each K-Core drains only its own queue. All completions
          * route to the drain core, so non-drain queues are a one-load
          * early-out. */
-        StorageCompletionPump(my_idx);
+        BatonPump(my_idx);
 
         /* Universal IRQ-defer drain — runs SCI/GPE/AHCI bottom-halves
          * that the IRQ stowed away with irq_defer(). Same K-Core
@@ -393,7 +393,7 @@ void kcore_run_loop(void)
          * interrupt shadow defers delivery until after HLT executes — so an IPI
          * that arrived under CLI wakes us the instant we sleep.
          *
-         * Storage async completions ARE re-checked (StorageCompletionPending):
+         * Storage async completions ARE re-checked (BatonPending):
          * their never-drop node can be posted cross-core (an App-Core token
          * handoff), which also sends IPI_WAKE — and the re-check closes the
          * post-pump / pre-CLI window so a completion that landed there is never
@@ -427,7 +427,7 @@ void kcore_run_loop(void)
          * round. Waits that actually sleep took that away, which is the right
          * trade and the reason this line has to exist now. */
         __asm__ volatile("cli");
-        if (kcore_queue_depth(my_idx) != 0 || StorageCompletionPending(my_idx) ||
+        if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) ||
             irq_defer_pending(my_idx) != 0) {
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {

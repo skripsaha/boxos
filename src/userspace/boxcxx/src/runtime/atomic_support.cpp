@@ -182,8 +182,6 @@ inline WaitPool *WaitPoolFor(const volatile void *addr)
     return &g_wait_pools[(a >> 4) & (kWaitPoolCount - 1)];
 }
 
-constexpr uint32_t kWaitBackstopMs = 100;    // defense-in-depth; never load-bearing
-
 // Predicate-proxy compare: did the bits the caller actually waits on change?
 // `mask` selects only those bits, so an unrelated field packed in the same word
 // (barrier's count beside its phase, shared_mutex's reader count beside the write
@@ -294,16 +292,20 @@ void __boxcxx_atomic_wait_cycle(const volatile void *addr, const void *observed,
         __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
         return;
     }
-    // Park until ver != v (a notify bumps it) or the backstop fires. The kernel's
-    // park-time pre-check compares *ver==v atomically; combined with snapshot-
-    // before-recheck this closes the notify-races-park window with no lost wakeup.
-    addr_park(&p->ver, v, kWaitBackstopMs);
+    // Park until ver != v (a notify bumps it). The kernel's park-time pre-check
+    // compares *ver==v atomically; combined with snapshot-before-recheck this
+    // closes the notify-races-park window with no lost wakeup. No clock of our
+    // own over it: the wake cannot be dropped (pocket_submit waits for room)
+    // and the wait is keyed by (cabin, VA), so a page moving under the word
+    // cannot lose it either — the 100 ms "backstop" that stood here re-parked
+    // every sleeper ten times a second for nothing.
+    addr_park(&p->ver, v, 0);
     __atomic_fetch_sub(&p->waiters, 1u, __ATOMIC_SEQ_CST);
 }
 
 // Timed sibling of __boxcxx_atomic_wait_cycle. Same two-phase wait (bounded
 // spin → kernel park on the version-pool), but the park is bounded by the
-// caller's REMAINING budget instead of the never-load-bearing backstop, so a
+// caller's REMAINING budget instead of waiting for the notify alone, so a
 // timed wait is event-driven: a notify (ver bump + addr_wake) wakes it early —
 // the wake Result is delivered promptly by the kernel substrate — and otherwise
 // addr_park returns ERR_TIMEOUT exactly at the budget. Returns true iff the

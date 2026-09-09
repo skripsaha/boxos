@@ -1,4 +1,4 @@
-#include "storage_completion.h"
+#include "baton.h"
 #include "amp.h"
 #include "atomics.h"
 #include "klib.h"
@@ -10,12 +10,12 @@
 /*
  * Vyukov intrusive MPSC with a persistent stub (1024cores.net,
  * "Intrusive MPSC node-based queue"). Producers XCHG the tail from any
- * core; a single consumer walks the head. See storage_completion.h for the
+ * core; a single consumer walks the head. See baton.h for the
  * never-drop rationale and the single-consumer deadlock-freedom argument.
  */
 
-StorageCompletionQueue *g_storage_cq       = NULL;
-volatile uint8_t        g_storage_cq_ready = 0;
+BatonQueue *g_baton       = NULL;
+volatile uint8_t        g_baton_ready = 0;
 
 /* ==========================================================================
  *  Raw MP link — the one primitive both the public push and the consumer's
@@ -23,12 +23,12 @@ volatile uint8_t        g_storage_cq_ready = 0;
  *  telemetry or routing, so re-anchoring the stub never perturbs the
  *  pushed/popped counters (the counter-drift the naive design would incur).
  * ========================================================================== */
-static inline void scq_link(StorageCompletionQueue *q, StorageCompletion *n)
+static inline void baton_link(BatonQueue *q, Baton *n)
 {
     __atomic_store_n(&n->next, NULL, __ATOMIC_RELAXED);
     /* LOCK XCHG — full fence. Publishes the producer as the new tail and
      * returns the prior tail, which we then link forward. */
-    StorageCompletion *prev = __atomic_exchange_n(&q->tail, n, __ATOMIC_ACQ_REL);
+    Baton *prev = __atomic_exchange_n(&q->tail, n, __ATOMIC_ACQ_REL);
     /* Release: the consumer's acquire-load of prev->next synchronises-with
      * this store, making n->run/ctx (and any if_status stashed before the
      * push) visible before the continuation runs. */
@@ -42,10 +42,10 @@ static inline void scq_link(StorageCompletionQueue *q, StorageCompletion *n)
  *  empty OR a producer is mid-push (XCHG done, forward-link pending) — a
  *  benign transient the next pump resolves.
  * ========================================================================== */
-static StorageCompletion *scq_pop(StorageCompletionQueue *q)
+static Baton *baton_pop(BatonQueue *q)
 {
-    StorageCompletion *head = q->head;                       /* SC-owned */
-    StorageCompletion *next = __atomic_load_n(&head->next, __ATOMIC_ACQUIRE);
+    Baton *head = q->head;                       /* SC-owned */
+    Baton *next = __atomic_load_n(&head->next, __ATOMIC_ACQUIRE);
 
     if (head == &q->stub) {
         if (!next) return NULL;                              /* genuinely empty */
@@ -66,7 +66,7 @@ static StorageCompletion *scq_pop(StorageCompletionQueue *q)
 
     /* head == tail == last real node. Re-anchor the stub so the queue stays
      * non-empty; then head can be returned. RAW link (no telemetry). */
-    scq_link(q, &q->stub);
+    baton_link(q, &q->stub);
 
     next = __atomic_load_n(&head->next, __ATOMIC_ACQUIRE);
     if (next) {
@@ -79,7 +79,7 @@ static StorageCompletion *scq_pop(StorageCompletionQueue *q)
 /* ==========================================================================
  *  Init
  * ========================================================================== */
-void StorageCompletionInit(void)
+void BatonInit(void)
 {
     uint32_t n = g_amp.total_cores;
     if (n == 0) n = 1;
@@ -87,19 +87,19 @@ void StorageCompletionInit(void)
     /* From the PMM, for the same reason as the K-Core queue array: sized by
      * CORE COUNT, allocated once, never freed. The kernel heap is a fixed
      * small-object pool and must not carry per-machine-scale arrays. */
-    size_t cq_bytes = sizeof(StorageCompletionQueue) * n;
+    size_t cq_bytes = sizeof(BatonQueue) * n;
     size_t cq_pages = (cq_bytes + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
     void  *cq_phys  = pmm_alloc_zero(cq_pages);
-    g_storage_cq = cq_phys ? (StorageCompletionQueue *)vmm_phys_to_virt((uintptr_t)cq_phys)
+    g_baton = cq_phys ? (BatonQueue *)vmm_phys_to_virt((uintptr_t)cq_phys)
                            : NULL;
-    if (!g_storage_cq) {
-        kprintf("[STORAGE_CQ] FATAL: cannot allocate queue array (%u cores, %zu pages)\n",
+    if (!g_baton) {
+        kprintf("[BATON] FATAL: cannot allocate queue array (%u cores, %zu pages)\n",
                 n, cq_pages);
         while (1) { __asm__ volatile("cli; hlt"); }
     }
 
     for (uint32_t i = 0; i < n; i++) {
-        StorageCompletionQueue *q = &g_storage_cq[i];
+        BatonQueue *q = &g_baton[i];
         __atomic_store_n(&q->stub.next, NULL, __ATOMIC_RELAXED);
         q->stub.run = NULL;
         q->stub.ctx = NULL;
@@ -107,12 +107,12 @@ void StorageCompletionInit(void)
         __atomic_store_n(&q->tail, &q->stub, __ATOMIC_RELAXED);
     }
 
-    __atomic_store_n(&g_storage_cq_ready, 1, __ATOMIC_RELEASE);
-    debug_printf("[STORAGE_CQ] %u per-core never-drop MPSC queue(s) ready\n", n);
+    __atomic_store_n(&g_baton_ready, 1, __ATOMIC_RELEASE);
+    debug_printf("[BATON] %u per-core never-drop queue(s) ready\n", n);
 }
 
 /* ==========================================================================
- *  Producer — StorageCompletionPush()
+ *  Producer — BatonPass()
  *
  *  IRQ-safe, allocation-free, NEVER drops. Routes to the drain core (BSP,
  *  the AHCI MSI owner). A cross-core producer (an App-Core initial-kick
@@ -120,17 +120,21 @@ void StorageCompletionInit(void)
  *  same-core producer (the BSP's own MSI / pump) needs no IPI — it returns
  *  straight to kcore_run_loop, which pumps.
  * ========================================================================== */
-void StorageCompletionPush(StorageCompletion *n)
+void BatonPass(Baton *n)
 {
-    /* Unreachable in practice: storage async I/O is gated total_cores > 1
-     * and only begins long after boot, whereas init runs right after
-     * irq_defer_init. Guarded defensively to never touch uninit memory. */
-    if (!__atomic_load_n(&g_storage_cq_ready, __ATOMIC_ACQUIRE)) return;
+    /* Init runs right after irq_defer_init, before any IRQ that can pass a
+     * baton is unmasked; a pass before that would touch memory that is not
+     * there, so it is refused — and said, because a refused pass is exactly
+     * the drop this queue exists to make impossible. */
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) {
+        kprintf("[BATON] ERROR: a baton was passed before BatonInit — the continuation is lost\n");
+        return;
+    }
 
     uint8_t drain = g_amp.bsp_index;
-    StorageCompletionQueue *q = &g_storage_cq[drain];
+    BatonQueue *q = &g_baton[drain];
 
-    scq_link(q, n);
+    baton_link(q, n);
     atomic_fetch_add_u64(&q->pushed, 1);
 
     uint8_t me = amp_get_core_index();
@@ -139,25 +143,25 @@ void StorageCompletionPush(StorageCompletion *n)
 }
 
 /* ==========================================================================
- *  Consumer — StorageCompletionPump()
+ *  Consumer — BatonPump()
  *
  *  Single-consumer: only the owning core drains its queue. Every K-Core
  *  calls this with its own index from kcore_run_loop; non-drain queues stay
  *  empty and cost a single load.
  * ========================================================================== */
-uint32_t StorageCompletionPump(uint8_t core_idx)
+uint32_t BatonPump(uint8_t core_idx)
 {
-    if (!__atomic_load_n(&g_storage_cq_ready, __ATOMIC_ACQUIRE)) return 0;
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return 0;
     if (core_idx >= g_amp.total_cores) return 0;
     /* Single-consumer contract: a foreign core draining this queue would
      * corrupt the SC-owned head. kcore_run_loop always passes my_idx. */
     if (core_idx != amp_get_core_index()) return 0;
 
-    StorageCompletionQueue *q = &g_storage_cq[core_idx];
+    BatonQueue *q = &g_baton[core_idx];
     uint32_t ran = 0;
 
     for (;;) {
-        StorageCompletion *n = scq_pop(q);
+        Baton *n = baton_pop(q);
         if (!n) break;
 
         /* Copy run/ctx BEFORE the call: the continuation may free the
@@ -167,7 +171,7 @@ uint32_t StorageCompletionPump(uint8_t core_idx)
         void  *ctx          = n->ctx;
 
         run(ctx);
-        /* Count AFTER the continuation returns: StorageCompletionOutstanding
+        /* Count AFTER the continuation returns: BatonOutstanding
          * (pushed != popped) then means "a completion is posted OR still
          * running", so halt-drain waits for a write's tagfs commit to finish
          * — not merely for the node to be dequeued. */
@@ -179,42 +183,42 @@ uint32_t StorageCompletionPump(uint8_t core_idx)
 }
 
 /* ==========================================================================
- *  HLT-gate helper — StorageCompletionPending()
+ *  HLT-gate helper — BatonPending()
  *
  *  Structural (no counter): the queue holds a real node iff head is a real
  *  node, or the stub at head has a successor. Called by the owning core in
  *  its pre-HLT re-check so it never sleeps on a queued completion.
  * ========================================================================== */
-bool StorageCompletionPending(uint8_t core_idx)
+bool BatonPending(uint8_t core_idx)
 {
-    if (!__atomic_load_n(&g_storage_cq_ready, __ATOMIC_ACQUIRE)) return false;
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return false;
     if (core_idx >= g_amp.total_cores) return false;
 
-    StorageCompletionQueue *q = &g_storage_cq[core_idx];
-    StorageCompletion *head = q->head;                       /* SC-owned */
+    BatonQueue *q = &g_baton[core_idx];
+    Baton *head = q->head;                       /* SC-owned */
     if (head != &q->stub) return true;                       /* real node at front */
     return __atomic_load_n(&q->stub.next, __ATOMIC_ACQUIRE) != NULL;
 }
 
 /* ==========================================================================
- *  Halt-drain helper — StorageCompletionOutstanding()
+ *  Halt-drain helper — BatonOutstanding()
  *
  *  Cross-core-safe: compares the atomic pushed/popped counters, so a core
  *  that does not own the queue can poll it during shutdown while the drain
  *  core is still pumping. The stub re-anchor is not counted, so at
  *  quiescence pushed == popped == real completions delivered.
  * ========================================================================== */
-bool StorageCompletionOutstanding(uint8_t core_idx)
+bool BatonOutstanding(uint8_t core_idx)
 {
-    if (!__atomic_load_n(&g_storage_cq_ready, __ATOMIC_ACQUIRE)) return false;
+    if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) return false;
     if (core_idx >= g_amp.total_cores) return false;
 
-    StorageCompletionQueue *q = &g_storage_cq[core_idx];
+    BatonQueue *q = &g_baton[core_idx];
     return atomic_load_u64(&q->pushed) != atomic_load_u64(&q->popped);
 }
 
 /* ==========================================================================
- *  Self-test — StorageCompletionSelfTest()
+ *  Self-test — BatonSelfTest()
  *
  *  Deterministic, single-core proof of the primitive. Runs on a PRIVATE
  *  queue (not a live per-core queue) so it is safe to call at boot before
@@ -231,26 +235,26 @@ bool StorageCompletionOutstanding(uint8_t core_idx)
  *  round, forcing the stub re-anchor and the single-node / transient-empty pop
  *  paths the bulk burst never reaches. Assert exactly-once again.
  * ========================================================================== */
-static void scq_selftest_probe(void *ctx)
+static void baton_selftest_probe(void *ctx)
 {
     uint32_t *seen = (uint32_t *)ctx;
     (*seen)++;
 }
 
-error_t StorageCompletionSelfTest(void)
+error_t BatonSelfTest(void)
 {
     const uint32_t N = 8192;   /* 8x CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY */
 
-    StorageCompletion *nodes = (StorageCompletion *)kmalloc(sizeof(StorageCompletion) * N);
+    Baton *nodes = (Baton *)kmalloc(sizeof(Baton) * N);
     uint32_t          *seen  = (uint32_t *)kmalloc(sizeof(uint32_t) * N);
     if (!nodes || !seen) {
         if (nodes) kfree(nodes);
         if (seen)  kfree(seen);
-        kprintf("[SCQ-TEST] SKIP (alloc)\n");
+        kprintf("[BATON-TEST] SKIP (alloc)\n");
         return OK;   /* environment shortage, not a logic failure — don't block boot */
     }
 
-    StorageCompletionQueue tq;
+    BatonQueue tq;
     memset(&tq, 0, sizeof(tq));
     tq.stub.run = NULL;
     tq.stub.ctx = NULL;
@@ -260,18 +264,18 @@ error_t StorageCompletionSelfTest(void)
 
     for (uint32_t i = 0; i < N; i++) {
         seen[i]        = 0;
-        nodes[i].run   = scq_selftest_probe;
+        nodes[i].run   = baton_selftest_probe;
         nodes[i].ctx   = &seen[i];
     }
 
     /* ---- Phase 1: never-drop burst ---- */
     for (uint32_t i = 0; i < N; i++)
-        scq_link(&tq, &nodes[i]);
+        baton_link(&tq, &nodes[i]);
 
     uint32_t popped = 0, misorder = 0, prev = 0;
     bool first = true;
     for (;;) {
-        StorageCompletion *n = scq_pop(&tq);
+        Baton *n = baton_pop(&tq);
         if (!n) break;
         uint32_t idx = (uint32_t)(n->ctx == NULL ? 0 : ((uint32_t *)n->ctx - seen));
         if (!first && idx != prev + 1) misorder++;
@@ -295,15 +299,15 @@ error_t StorageCompletionSelfTest(void)
     while (pushed_i < N) {
         uint32_t b = batches[pushed_i & 7];
         for (uint32_t k = 0; k < b && pushed_i < N; k++)
-            scq_link(&tq, &nodes[pushed_i++]);
-        StorageCompletion *n;
-        while ((n = scq_pop(&tq)) != NULL) { n->run(n->ctx); checked++; }
+            baton_link(&tq, &nodes[pushed_i++]);
+        Baton *n;
+        while ((n = baton_pop(&tq)) != NULL) { n->run(n->ctx); checked++; }
     }
     uint32_t inter_bad = 0;
     for (uint32_t i = 0; i < N; i++)
         if (seen[i] != 1) inter_bad++;
 
-    kprintf("[SCQ-TEST] never-drop N=%u pushed=%u popped=%u delivered=%u dup=%u lost=%u misorder=%u | "
+    kprintf("[BATON-TEST] never-drop N=%u pushed=%u popped=%u delivered=%u dup=%u lost=%u misorder=%u | "
             "interleave checked=%u bad=%u\n",
             N, N, popped, delivered, dup, lost, misorder, checked, inter_bad);
 
@@ -312,9 +316,9 @@ error_t StorageCompletionSelfTest(void)
 
     if (popped != N || delivered != N || dup != 0 || lost != 0 || misorder != 0 ||
         checked != N || inter_bad != 0) {
-        kprintf("[SCQ-TEST] FAIL\n");
+        kprintf("[BATON-TEST] FAIL\n");
         return ERR_IO;
     }
-    kprintf("[SCQ-TEST] PASS (never-drop + exactly-once + FIFO + stub-re-anchor)\n");
+    kprintf("[BATON-TEST] PASS (never-drop + exactly-once + FIFO + stub-re-anchor)\n");
     return OK;
 }

@@ -56,7 +56,7 @@
 #include "idt.h"
 #include "irqchip.h"
 #include "touch.h"
-#include "storage_completion.h"   /* never-drop K-Core recovery node */
+#include "baton.h"   /* never-drop K-Core recovery node */
 
 /* ---------------------------------------------------------------------
  *  BMIDE register layout (Intel BMIDE Rev 1.0 §3).
@@ -167,7 +167,7 @@ typedef struct AtaAsyncCh {
 
     /* Ф26 BMIDE watchdog. On a genuine wedge the PIT-tick scan CASes
      * `recovering` 0->1 (coalescing repeat detections into one) and posts
-     * `recover_node` to a K-Core via StorageCompletionPush — never-drop and
+     * `recover_node` to a K-Core via BatonPass — never-drop and
      * allocation-free, exactly as AHCI defers COMRESET — because
      * ata_channel_soft_reset busy-waits BSY for up to 2 s, far too long for the
      * tick's IRQ context. While recovering, the IRQ handler / scan / submit all
@@ -175,7 +175,7 @@ typedef struct AtaAsyncCh {
      * once in bmide_init_channel. */
     uint8_t            ch_idx;
     volatile uint32_t  recovering;
-    StorageCompletion  recover_node;
+    Baton  recover_node;
 } AtaAsyncCh;
 
 static AtaAsyncCh g_ata_async[ATA_CHANNEL_COUNT];
@@ -586,7 +586,7 @@ static void ata_irq_handler(void) {
  *  Watchdog — K-Core SRST recovery of a genuinely wedged channel.
  *
  *  Posted by bmide_watchdog_scan via the channel's never-drop recover_node;
- *  runs on a K-Core pump (StorageCompletionPump) where the up-to-2 s BSY wait
+ *  runs on a K-Core pump (BatonPump) where the up-to-2 s BSY wait
  *  in ata_channel_soft_reset is affordable. `recovering` is already 1 (the
  *  scan CAS'd it) and gates the IRQ handler / scan / submit off this channel
  *  for the duration.
@@ -721,7 +721,7 @@ void bmide_watchdog_scan(void) {
             spin_unlock(&aa->cmd_lock);
             /* Never-drop, allocation-free hand-off to a K-Core SRST — the
              * up-to-2 s reset cannot run in this IRQ (PIT) context. */
-            StorageCompletionPush(&aa->recover_node);
+            BatonPass(&aa->recover_node);
         } else {
             spin_unlock(&aa->cmd_lock);
         }
@@ -1238,7 +1238,7 @@ error_t bmide_wedge_selftest(void) {
     bool worker_ok = false;
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(6000);
     while (rdtsc() < deadline) {
-        StorageCompletionPump(g_amp.bsp_index);
+        BatonPump(g_amp.bsp_index);
         if (__atomic_load_n(&fake.done, __ATOMIC_ACQUIRE)) {
             worker_ok = (fake.sync_rc == ERR_IO);
             break;

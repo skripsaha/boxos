@@ -110,7 +110,7 @@ static int ahci_port_start(ahci_port_t* port) {
 
 /* K-Core bottom-half: full port recovery (COMRESET) after a fatal error.
  * Posted to a K-Core via the port's embedded never-drop recovery node
- * (StorageCompletionPush) because COMRESET busy-waits for hundreds of ms,
+ * (BatonPass) because COMRESET busy-waits for hundreds of ms,
  * far too long for interrupt context. The IRQ path already failed the
  * port's outstanding async slots with ERR_IO before scheduling this. */
 static void ahci_deferred_recover(void* ctx) {
@@ -256,7 +256,7 @@ void ahci_irq_handler(void) {
              * to a ring nothing drains. */
             if (g_amp.total_cores > 1 &&
                 __sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                StorageCompletionPush(&state->recover_node);   /* never-drop */
+                BatonPass(&state->recover_node);   /* never-drop */
             }
         }
     }
@@ -359,7 +359,7 @@ void ahci_watchdog_scan(void) {
                                : "went past its deadline", won);
             ahci_retire_slots(state, i, won, ERR_IO);
             if (__sync_bool_compare_and_swap(&state->recovering, 0, 1)) {
-                StorageCompletionPush(&state->recover_node);   /* never-drop */
+                BatonPass(&state->recover_node);   /* never-drop */
             }
         }
     }
@@ -647,7 +647,7 @@ static int ahci_port_init(uint8_t port_num) {
     spinlock_init(&port->lock);
 
     /* Never-drop recovery node: COMRESET is posted through this embedded
-     * node (StorageCompletionPush), so a wedged-port recovery can never be
+     * node (BatonPass), so a wedged-port recovery can never be
      * dropped for want of a defer slot. */
     port->recover_node.run = ahci_deferred_recover;
     port->recover_node.ctx = port;

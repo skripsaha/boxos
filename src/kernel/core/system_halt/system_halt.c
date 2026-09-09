@@ -15,7 +15,7 @@
 #include "xhci.h"
 #include "xhci_port.h"
 #include "touch.h"
-#include "storage_completion.h"
+#include "baton.h"
 #include "ahci.h"
 #include "amp.h"
 
@@ -62,15 +62,15 @@ static void halt_drain_async_writes(void)
          * pumping their own queues from their guide loops. irq_defer is
          * multi-consumer, but our own ring is likewise stranded here, so pump
          * it too. */
-        StorageCompletionPump(me);
+        BatonPump(me);
         irq_defer_pump(me);
 
         /* Pending irq_defer bottom-halves AND unconsumed never-drop storage
-         * completions, across all cores. StorageCompletionOutstanding is
+         * completions, across all cores. BatonOutstanding is
          * counter-based, so it is safe to poll from this (possibly non-owning)
          * core while the drain core keeps pumping. */
         for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-            if (irq_defer_pending(i) > 0 || StorageCompletionOutstanding(i)) {
+            if (irq_defer_pending(i) > 0 || BatonOutstanding(i)) {
                 any = true;
                 break;
             }

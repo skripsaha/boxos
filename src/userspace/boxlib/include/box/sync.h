@@ -132,21 +132,22 @@ INLINE void uspin_unlock(uspin_t *s) {
 // HELD, so an unlock landing after the re-test but before the park makes the
 // kernel's park-time compare return immediately instead of sleeping.
 //
-// The backstop bounds a park that the ALGORITHM did not lose but the machine
-// might: a wake syscall the transport dropped (a full pocket ring), or a VA
-// whose backing page migrated between park and wake (CoW, MCE poison
-// migration, Bay re-open; see the kernel's addr_wait.h). Every path re-checks
-// after the park returns, so a spurious or timed-out wake costs one more loop.
-// Any other park failure degrades to yield(): correctness never depends on the
-// park syscall being available, so a lock taken before the cabin's rings are
-// up still makes progress the old way.
+// The park has no clock of its own. There was one — 100 ms, re-parking for
+// ever — over two things the machine "might" do: drop the wake syscall (a
+// full pocket ring; pocket_submit now waits for room instead) and move the
+// parked-on page from under the sleeper (the kernel keyed the wait by
+// physical address; it is keyed by (cabin, VA) now, see addr_wait.h). Neither
+// remains, and a clock over a wake that cannot be lost only woke every sleeper
+// ten times a second for nothing. Every path still re-checks after the park
+// returns, so a spurious wake costs one more loop. Any park failure degrades
+// to yield(): correctness never depends on the park syscall being available,
+// so a lock taken before the cabin's rings are up still makes progress the
+// old way.
 //
-// ‼ A CONTENDED unlock now makes a syscall, and unlock is destructor-reachable
+// ‼ A CONTENDED unlock makes a syscall, and unlock is destructor-reachable
 // (~lock_guard, ~unique_lock), including while an exception unwinds. It cannot
 // fail the unlock — the lock word is already free before the wake is attempted
-// — but it does wait for the kernel's answer to the wake, and a wake that
-// cannot reach its sleeper (the parked page migrated, see the kernel's
-// addr_wait.h) falls to the backstop rather than being reported.
+// — but it does wait for the kernel's answer to the wake.
 //
 // Still intentionally simple:
 //   - No recursion (recursive locking deadlocks)
@@ -156,7 +157,6 @@ INLINE void uspin_unlock(uspin_t *s) {
 // ---------------------------------------------------------------------------
 
 #define UMUTEX_SPIN_LIMIT        16     /* spins before announcing a waiter */
-#define UMUTEX_PARK_BACKSTOP_MS  100u   /* bounds machine faults, not races */
 
 #define UMUTEX_FREE  0u
 #define UMUTEX_HELD  1u
@@ -192,9 +192,9 @@ INLINE bool umutex_trylock(umutex_t *m) {
 }
 
 /* One contended attempt: test-and-test-and-set for the spin budget, then
- * announce, re-test, and park for `timeout_ms` (0 = no park, spin only — a
- * timed caller whose budget is exhausted must never ask for the forever-park
- * that timeout_ms == 0 means to addr_park).
+ * announce, re-test, and park until an unlock wakes us — for `timeout_ms` at
+ * most, or for as long as it takes when timeout_ms is 0 (addr_park's own
+ * meaning of 0).
  *
  * Returns true iff the lock is now held by this caller. A false return means
  * "re-check and come back": the park ended (wake, value change, timeout, or an
@@ -211,7 +211,7 @@ INLINE bool umutex_lock_attempt(umutex_t *m, uint32_t timeout_ms) {
 
     __atomic_fetch_add(&m->waiters, 1u, __ATOMIC_SEQ_CST);
     bool got = umutex_trylock(m);
-    if (!got && timeout_ms != 0) {
+    if (!got) {
         error_t rc = addr_park(&m->state, UMUTEX_HELD, timeout_ms);
         if (rc != OK && rc != ERR_ADDR_VALUE_MISMATCH && rc != ERR_TIMEOUT)
             yield();   /* park unavailable — stay correct by yielding */
@@ -222,14 +222,17 @@ INLINE bool umutex_lock_attempt(umutex_t *m, uint32_t timeout_ms) {
 
 INLINE void umutex_lock(umutex_t *m) {
     if (__builtin_expect(umutex_trylock(m), 1)) return;   /* uncontended */
-    while (!umutex_lock_attempt(m, UMUTEX_PARK_BACKSTOP_MS)) { }
+    while (!umutex_lock_attempt(m, 0)) { }                 /* until unlocked */
 }
 
 /* Timed acquire: one attempt bounded by `timeout_ms`. Returns true iff the lock
  * is held. The caller owns the deadline — it re-checks its own clock and calls
- * again with a fresh budget (same contract as __boxcxx_atomic_wait_until). */
+ * again with a fresh budget (same contract as __boxcxx_atomic_wait_until). A
+ * budget already spent (0) is one try, never the forever-park that 0 means to
+ * addr_park. */
 INLINE bool umutex_lock_timeout(umutex_t *m, uint32_t timeout_ms) {
     if (umutex_trylock(m)) return true;
+    if (timeout_ms == 0) return false;
     return umutex_lock_attempt(m, timeout_ms);
 }
 

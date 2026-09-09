@@ -10,7 +10,7 @@
 #include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
-#include "storage_completion.h"
+#include "baton.h"
 
 /* Every transfer ring here is 64 TRBs — one page holds 256, and a ring that
  * fits in a page it does not share is a ring whose wrap behaviour is easy to
@@ -435,7 +435,7 @@ int xhci_ep_configure(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
 
 static int ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                      uint8_t dci, uint64_t buffer_phys, uint32_t length,
-                     StorageCompletion* done)
+                     Baton* done)
 {
     if (!ctrl || !slot || !slot->endpoints || dci < 2 || dci > XHCI_MAX_DCI) {
         return -1;
@@ -491,7 +491,7 @@ int xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
 
 int xhci_ep_submit_async(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                          uint8_t dci, uint64_t buffer_phys, uint32_t length,
-                         struct StorageCompletion* done)
+                         struct Baton* done)
 {
     return ep_submit(ctrl, slot, dci, buffer_phys, length, done);
 }
@@ -527,10 +527,10 @@ void xhci_ep_complete(xhci_device_slot_t* slot, uint8_t dci,
      * fail and no free slot to be short of. The continuation runs later, on a
      * K-Core, where the next transfer may be sent.
      */
-    struct StorageCompletion* done = ep->xfer_done;
+    struct Baton* done = ep->xfer_done;
     if (done) {
         ep->xfer_done = NULL;
-        StorageCompletionPush(done);
+        BatonPass(done);
     }
 }
 

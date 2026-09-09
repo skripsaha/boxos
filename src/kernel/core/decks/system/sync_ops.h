@@ -10,11 +10,12 @@ struct process_t;
  * and initialise the AddrWaitTable. Called from SystemDeckRegister. */
 error_t SyncOpsRegister(void);
 
-/* irq_defer bottom-half: deliver an expired park timeout's ERR_TIMEOUT Result
- * from a K-Core. ctx packs (wait_seq << 32 | pid). Re-resolves the process,
- * seq-gate-claims the waiter's addr_wait_entry, and on a win KResultPushes
- * ERR_TIMEOUT (the PROC_WAITING reschedule already happened in the IRQ). On a
- * lost/stale claim it does nothing. See sync_ops.c. */
+/* The deadline baton's continuation: deliver an expired park's ERR_TIMEOUT
+ * Result from a K-Core. ctx is the process (the pass holds a ref, released
+ * here). Claims the waiter's addr_wait_entry by its state — linked, timed,
+ * deadline passed — and on a win KResultPushes ERR_TIMEOUT (the PROC_WAITING
+ * reschedule already happened in the IRQ). On a lost claim it does nothing.
+ * See sync_ops.c. */
 void SyncTimeoutDeliver(void *ctx);
 
 /* Answer every waiter parked on this process being gone, carrying the exit

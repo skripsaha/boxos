@@ -29,7 +29,7 @@
 #include "write_job.h"
 #include "chit.h"        /* ChitGive / ChitDue — an answer put off is an answer promised */
 #include "boardroom.h"
-#include "storage_completion.h"
+#include "baton.h"
 #include "crate_stage.h"
 #include "tagfs.h"
 #include "ahci.h"
@@ -486,7 +486,7 @@ static bool w_release_token(WriteJob *j)
     WriteJob *next = token_release_handoff(j);
     if (next) {
         atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-        StorageCompletionPush(&next->cq_node);   /* never-drop; routes to drain core */
+        BatonPass(&next->cq_node);   /* never-drop; routes to drain core */
     }
     atomic_store_u32((volatile uint32_t *)&j->state, W_DONE);
     return true;
@@ -500,7 +500,7 @@ static void wjob_finalize(WriteJob *j, int rc)
         WriteJob *next = token_release_handoff(j);
         if (next) {
             atomic_store_u32((volatile uint32_t *)&next->state, W_LOCATE);
-            StorageCompletionPush(&next->cq_node);   /* never-drop; routes to drain core */
+            BatonPass(&next->cq_node);   /* never-drop; routes to drain core */
         }
     }
 
@@ -624,7 +624,7 @@ static void wjob_pump(void *job_)
  * the user-bytes overlay.
  *
  * Runs in AHCI completion IRQ context. It only stashes status and posts
- * the job's embedded completion node (StorageCompletionPush) to the drain
+ * the job's embedded completion node (BatonPass) to the drain
  * core — no allocation, no lock, and NEVER dropped: the node lives inside
  * the WriteJob, so there is no slot to run out of. The heavy half (memcpy /
  * finalize / next-block) runs later in the K-Core pump. */
@@ -639,7 +639,7 @@ static void wjob_cow_read_complete(uint8_t port, uint8_t slot,
     } else {
         atomic_store_u32((volatile uint32_t *)&j->state, W_DMA_FILL);
     }
-    StorageCompletionPush(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* IRQ callback. Lean — only stash status + defer continuation. See
@@ -651,7 +651,7 @@ static void wjob_ahci_complete(uint8_t port, uint8_t slot,
     WriteJob *j = (WriteJob *)ctx;
     j->if_status = status;
     atomic_store_u32((volatile uint32_t *)&j->state, W_AHCI_DONE);
-    StorageCompletionPush(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
+    BatonPass(&j->cq_node);   /* never-drop; heavy half on the K-Core pump */
 }
 
 /* =========================================================================
@@ -753,7 +753,7 @@ int ObjWriteAsync(uint32_t            file_id,
          * AHCI IRQ, whose completion posts the job's never-drop node to the
          * drain core). Any continuation the machine posts from here — e.g. a
          * token handoff on an early-error exit — goes through
-         * StorageCompletionPush, which routes to the drain core (never the
+         * BatonPass, which routes to the drain core (never the
          * calling App Core), so it cannot strand. */
         wjob_pump(j);
     } else {

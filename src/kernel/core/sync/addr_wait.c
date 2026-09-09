@@ -1,9 +1,12 @@
 /*
- * addr_wait.c — two-level hash registry of parked strands by physical address.
+ * addr_wait.c — two-level hash registry of parked strands by (space, VA).
  *
- * Bucket index = (phys >> 3) & 0xFFFF
+ * Bucket index = ((va >> 3) ^ (space >> 4) * 0x9E3779B1) & 0xFFFF
  *   hi = index >> 8  → L1 slab index
  *   lo = index & 0xFF → bucket within slab
+ * The VA is 8-byte granular (the parked-on word is a u64); the space is a
+ * kernel pointer, folded in so two cabins waiting on the same VA do not
+ * share a chain any more than they must.
  *
  * Slabs are lazily kmalloc'd: the first waiter for a given hi-byte
  * allocates the 256-bucket slab and CAS-installs it; a concurrent loser
@@ -51,9 +54,10 @@ static AddrWaitSlab *get_or_create_slab(uint32_t hi)
     return slab;
 }
 
-AddrWaitBucket *AddrWaitGetBucket(uintptr_t phys_addr)
+AddrWaitBucket *AddrWaitGetBucket(uintptr_t space, uint64_t user_va)
 {
-    uint32_t index = (uint32_t)((phys_addr >> 3) & 0xFFFF);
+    uint32_t mixed = (uint32_t)((user_va >> 3) ^ ((space >> 4) * 0x9E3779B1u));
+    uint32_t index = mixed & 0xFFFF;
     uint32_t hi    = index >> 8;
     uint32_t lo    = index & 0xFF;
 
@@ -85,7 +89,7 @@ void AddrWaitUnlink(AddrWaitBucket *bucket, AddrWaitEntry *entry)
 void AddrWaitUnlinkIfLinked(AddrWaitEntry *entry)
 {
     if (!entry->linked) return;
-    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
+    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->space, entry->user_va);
     if (!bucket) return;
     spin_lock(&bucket->lock);
     if (entry->linked) AddrWaitUnlink(bucket, entry);
@@ -107,7 +111,7 @@ bool AddrWaitClaim(AddrWaitEntry *entry)
      * and avoiding the bucket lookup keeps the hot wake path lean. The locked
      * re-check below is authoritative. */
     if (!entry->linked) return false;
-    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
+    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->space, entry->user_va);
     if (!bucket) return false;
 
     spin_lock(&bucket->lock);
@@ -116,17 +120,19 @@ bool AddrWaitClaim(AddrWaitEntry *entry)
     return won;
 }
 
-bool AddrWaitClaimSeq(AddrWaitEntry *entry, uint32_t seq)
+bool AddrWaitClaimDue(AddrWaitEntry *entry, uint64_t now, uint32_t *cookie_out)
 {
-    /* Same fast pre-check as AddrWaitClaim, plus the seq guard. The locked
-     * re-check (including seq, which is mutated only under the bucket lock in
-     * AddrWaitLink) is authoritative against a concurrent re-park. */
-    if (!entry->linked || entry->seq != seq) return false;
-    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->phys_addr);
+    /* Same fast pre-check as AddrWaitClaim. The locked re-check is
+     * authoritative: fire_at and timed are written only under the bucket
+     * lock (SysAddrPark), so a re-park cannot change them under this read. */
+    if (!entry->linked) return false;
+    AddrWaitBucket *bucket = AddrWaitGetBucket(entry->space, entry->user_va);
     if (!bucket) return false;
 
     spin_lock(&bucket->lock);
-    bool won = (entry->seq == seq) && AddrWaitClaimLocked(bucket, entry);
+    bool due = entry->linked && entry->timed && now >= entry->fire_at;
+    bool won = due && AddrWaitClaimLocked(bucket, entry);
+    if (won) *cookie_out = entry->submit_cookie;
     spin_unlock(&bucket->lock);
     return won;
 }

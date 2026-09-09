@@ -275,7 +275,7 @@ uint64_t TouchPublishIrqWraps(void);
  * one-off instead.
  *
  * What was missing was never delivery. Delivery the kernel already has
- * (irq_defer for IRQ context, never-drop StorageCompletion for point-to-point
+ * (irq_defer for IRQ context, never-drop Baton for point-to-point
  * hand-back). What was missing is SUBSCRIPTION BY TAG, and that is all this
  * adds: a callback on a bucket, alongside the process subscribers, seen by the
  * same publish.

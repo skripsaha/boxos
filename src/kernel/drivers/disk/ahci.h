@@ -7,7 +7,7 @@
 #include "klib.h"  // For spinlock_t
 #include "boxos_limits.h"
 #include "kernel_config.h"
-#include "storage_completion.h"  // embedded never-drop recovery node
+#include "baton.h"  // embedded never-drop recovery node
 
 // HBA Register Offsets
 #define AHCI_HBA_CAP        0x00
@@ -413,12 +413,12 @@ typedef struct {
     } status;
 
     /* Never-drop recovery node (Ф26 M4): a fatal-error or watchdog-wedge
-     * IRQ posts COMRESET to a K-Core via StorageCompletionPush with no
+     * IRQ posts COMRESET to a K-Core via BatonPass with no
      * allocation. The `recovering` 0->1 CAS coalesces a storm of error IRQs
      * into one post, and ahci_deferred_recover resets it to 0 on completion,
      * so this node is enqueued at most once at a time. run =
      * ahci_deferred_recover, ctx = this port; set once in ahci_port_init. */
-    StorageCompletion recover_node;
+    Baton recover_node;
 } ahci_port_t;
 
 typedef struct {

@@ -13,7 +13,7 @@
 #include "vmm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
-#include "storage_completion.h"
+#include "baton.h"
 
 /* ── Bulk-Only Transport wire format (USB MSC BOT 1.0) ──────────────────── */
 
@@ -690,7 +690,7 @@ static void msd_bot_reset(XhciMsdUnit* u)
 typedef struct MsdJob {
     /* First, and by value: this is how a completion reaches a K-Core without
      * an allocation standing between the two. */
-    StorageCompletion node;
+    Baton node;
 
     XhciMsdUnit* u;
 

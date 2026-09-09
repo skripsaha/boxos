@@ -50,7 +50,7 @@
 #include "amp.h"
 #include "per_core.h"
 #include "kcore.h"
-#include "storage_completion.h"
+#include "baton.h"
 #include "lapic.h"
 #include "per_core.h"
 #include "idle.h"
@@ -446,6 +446,12 @@ void kernel_main(void)
     debug_printf("[INIT] IRQ defer rings...\n");
     irq_defer_init();
 
+    /* The batons right behind it, on every core count: a park deadline is
+     * passed on one from the very first timed wait, and a one-core box has
+     * no K-Core loop to make up for a queue that is not there. */
+    debug_printf("[INIT] Baton queues (never-drop, per core)...\n");
+    BatonInit();
+
     debug_printf("[INIT] Per-core GDT/TSS/Notify (BSP)...\n");
     per_core_init_bsp();
 
@@ -730,11 +736,11 @@ void kernel_main(void)
         kprintf("[WARN] proc-authority self-test failed: %s\n", ErrorString(procauth_err));
     }
 
-    debug_printf("[INIT] storage-completion never-drop self-test...\n");
-    error_t scq_err = StorageCompletionSelfTest();
-    if (scq_err != OK)
+    debug_printf("[INIT] Baton never-drop self-test...\n");
+    error_t baton_err = BatonSelfTest();
+    if (baton_err != OK)
     {
-        kprintf("[WARN] storage-completion self-test failed: %s\n", ErrorString(scq_err));
+        kprintf("[WARN] Baton self-test failed: %s\n", ErrorString(baton_err));
     }
 
     debug_printf("[INIT] Operations Deck register...\n");
@@ -764,9 +770,6 @@ void kernel_main(void)
     {
         debug_printf("[INIT] K-Core Queues...\n");
         kcore_init();
-
-        debug_printf("[INIT] Storage completion queues (never-drop MPSC)...\n");
-        StorageCompletionInit();
 
         debug_printf("[INIT] Syscall Mode: ASYNC...\n");
         idt_set_syscall_mode(true);
