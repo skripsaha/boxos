@@ -9,7 +9,6 @@
 #include "klib.h"
 #include "kernel_config.h"
 #include "proc_exit.h"
-#include "buffer_registry.h"
 
 /*
  * Autostart — the programs the volume asks for, whenever the volume turns up.
@@ -247,7 +246,6 @@ static void autostart_relieve_stand_in(void)
     TouchCleanupProcess(p, 0);
     process_set_state(p, PROC_DONE);
     __sync_synchronize();
-    BufferRegistryCleanupProcess(pid);
     process_ref_dec(p);
 }
 

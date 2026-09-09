@@ -3,24 +3,13 @@
 
 #include "boxos_limits.h"
 
-#define CONFIG_KERNEL_LOAD_ADDR 0xFFFFFFFF80100000ULL  // Higher-half kernel VMA (must match linker.ld)
 #define CONFIG_KERNEL_PHYS_ADDR 0x100000ULL            // 1MB - physical load address
 #define CONFIG_KERNEL_VMA_OFFSET 0xFFFFFFFF80000000ULL // Higher-half base (VMA - phys = offset)
 // PAGE_TABLE_BASE and KERNEL_STACK_BASE are now DYNAMIC — placed after kernel_end
 // by the bootloader. Available at runtime via boot_info_t (boot_info.h).
 
-#define CONFIG_USER_CODE_BASE 0x20000000ULL  // 512MB - user code start
-#define CONFIG_USER_STACK_BASE 0x20100000ULL // 513MB - user stack start
-#define CONFIG_USER_RINGS_BASE 0x20200000ULL // 514MB - ring buffers start
-
-#define CONFIG_VMM_KERNEL_BASE 0xFFFF800000000000ULL
-#define CONFIG_VMM_KERNEL_HEAP_SIZE (1ULL << 30)        // 1GB kernel heap
-#define CONFIG_VMM_USER_BASE 0x0000000000400000ULL      // 4MB (ELF standard)
-#define CONFIG_VMM_USER_STACK_TOP 0x00007FFFFFFFE000ULL // ~128TB
-
 #define CONFIG_PAGE_SIZE 4096
 
-#define CONFIG_PROCESS_MAX_COUNT MAX_PROCESSES
 #define CONFIG_KERNEL_STACK_PAGES 4
 #define CONFIG_KERNEL_STACK_GUARD_PAGES 1
 #define CONFIG_KERNEL_STACK_TOTAL_PAGES (CONFIG_KERNEL_STACK_PAGES + CONFIG_KERNEL_STACK_GUARD_PAGES)
@@ -34,40 +23,14 @@
 #define CONFIG_USER_HEAP_MAX_SIZE BOXOS_USER_HEAP_MAX_SIZE
 #define CONFIG_USER_HEAP_INITIAL_PAGES (CONFIG_USER_HEAP_INITIAL_SIZE / CONFIG_PAGE_SIZE)
 
-#define CONFIG_USER_BSS_SIZE (16 * 1024)
-
 #define CONFIG_PROC_MAX_BINARY_SIZE BOXOS_PROC_MAX_BINARY_SIZE
-#define CONFIG_PROC_MAX_BUFFER_SIZE BOXOS_PROC_MAX_BUFFER_SIZE
 
 // Ring buffer capacities are defined at their source of truth:
 // - PocketRing: boxos_sizes.h (POCKET_RING_CAPACITY)
 // - ResultRing: boxos_sizes.h (RESULT_RING_CAPACITY)
 // - ReadyQueue: boxos_sizes.h (READY_QUEUE_CAPACITY)
 
-#define CONFIG_TAGFS_VERSION 2
-#define CONFIG_TAGFS_BLOCK_SIZE 4096
-#define CONFIG_TAGFS_MAX_FILES 65536
-#define CONFIG_TAGFS_MAX_FILE_SIZE (4ULL << 30) // 4GB per file
-#define CONFIG_TAGFS_INODE_SIZE TAGFS_INODE_SIZE
-
-#define CONFIG_TAGFS_MAX_TAGS_PER_FILE 32
-#define CONFIG_TAGFS_TAG_KEY_SIZE 32
-#define CONFIG_TAGFS_TAG_VALUE_SIZE 64
-#define CONFIG_TAGFS_MAX_TAG_INDEX 1024
-#define CONFIG_TAGFS_MAX_CONTEXT_TAGS 16
-
-#define CONFIG_MAX_OPEN_FILES MAX_OPEN_FILES
-
-#define CONFIG_MAX_TIMERS 64
-#define CONFIG_PIT_FREQUENCY_HZ 100
-#define CONFIG_PIT_BASE_FREQ 1193182 // PIT hardware frequency
-
 #define CONFIG_SYSCALL_VECTOR 0x80 // INT 0x80 (kernel_notify)
-#define CONFIG_IRQ_TIMER 32        // IRQ 0 -> INT 0x20
-
-#define CONFIG_TIME_SLICE_TICKS 10         // 100ms at 100Hz (LARGE - workflow-driven!)
-#define CONFIG_WATCHDOG_TIMEOUT_TICKS 1000 // 10 seconds at 100Hz
-#define CONFIG_WATCHDOG_CHECK_INTERVAL 100 // 1 second at 100Hz
 
 #define CONFIG_ATA_TIMEOUT_MS 5000
 
@@ -87,7 +50,7 @@
  * bus with nothing on it reads 0xFF and ends it immediately.
  */
 #define CONFIG_ATA_IO_TIMEOUT_MS 30000
-#define CONFIG_ATA_SECTOR_SIZE 512 // Hardware constant
+
 #define CONFIG_ATA_MAX_RETRIES 3
 
 /* BMIDE watchdog liveness-of-last-resort bound (bmide_watchdog_scan TIER 2b).
@@ -107,9 +70,6 @@
 #ifndef CONFIG_BMIDE_WEDGE_SELFTEST
 #define CONFIG_BMIDE_WEDGE_SELFTEST 0
 #endif
-
-#define CONFIG_ASYNC_DISPATCH_INTERVAL_MS 1
-#define CONFIG_DMA_TIMEOUT_CHECK_INTERVAL_MS 100
 
 #define CONFIG_IRQ_DEFER_INITIAL_CAPACITY    16U
 #define CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY  1024U
@@ -158,10 +118,7 @@
 _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
                CONFIG_TOUCH_REACT_DEPTH_MAX * 2560,
                "REACT depth-count fallback must fit the smallest REACT-capable kernel stack");
-#define CONFIG_ASYNC_IO_QUEUE_TIMEOUT_MS 5000 // 5s timeout for pending I/O in queue
-#define CONFIG_ASYNC_IO_BGND_SERVE_INTERVAL 8 // dequeue 1 BGND per N DATA dequeues
-#define CONFIG_FRIEND_ZONE_CACHE_MAX_PAGES 64 // max pages cached per Friend zone
-#define CONFIG_LISTEN_TABLE_MAX_ENTRIES 1024  // safety limit on total listeners
+
 #define CONFIG_PHYS_ZONE_DMA32_END 0x40000000ULL  // 1GB — DMA32 safe boundary
 #define CONFIG_PHYS_ZONE_USER_END  0x100000000ULL // 4GB — identity map limit
 
@@ -177,8 +134,6 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
  * never to false-positive on a drive in multi-second internal error recovery,
  * bounded so a wedge recovers instead of hanging a waiter forever. */
 #define CONFIG_AHCI_IO_TIMEOUT_MS 30000
-#define CONFIG_AHCI_MAX_PORTS 32
-#define CONFIG_AHCI_MAX_SLOTS 32
 
 /* AHCI boot-time self-test: a one-sector READ probe issued in ahci_init.
  * Useful on QEMU but on real HW it stalls boot if the device is slow or
@@ -236,13 +191,6 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 #define CONFIG_PROCESS_CLEANUP_BATCH  8     /* drain at most N corpses per tick */
 #define CONFIG_STRAND_REAP_BATCH      16    /* P5b: reap at most N exited strands per tick */
 #define CONFIG_PROCESS_POISON_MAGIC   0xDEADDEADu
-#define CONFIG_IDLE_PID               0
-
-/* IPC routing limits. */
-#define CONFIG_BUF_MAX_COUNT          64    /* legacy buffer registry capacity */
-#define CONFIG_BROADCAST_TAG_MAX      64    /* max tag chars in a broadcast() */
-#define CONFIG_BROADCAST_TARGETS_MAX  256   /* max recipients per broadcast */
-
 
 /* Software typematic timing. Override at build with -DCONFIG_KB_REPEAT_*.
  *
@@ -265,16 +213,11 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 #define CONFIG_KB_REPEAT_RATE_MS    33   /* ~30 chars/sec while held */
 #endif
 
-#define CONFIG_SERIAL_BAUD_RATE 115200
-
 /* ACPI 6.5 §5.2.5.3: when RSDP revision >= 2 and XsdtAddress != 0 the OS
  * MUST use XSDT (32-bit RSDT may be stale on those firmwares). Selection
  * is runtime, never a compile-time switch. CONFIG_ACPI_FALLBACK_QEMU was
  * removed: emulator-targeted defaults are not part of the spec. */
 #define CONFIG_ACPI_DEBUG 0
-
-#define CONFIG_KMALLOC_MIN_SIZE 16
-#define CONFIG_KMALLOC_ALIGNMENT 16
 
 /* TagFS BCDC compressor — runtime-tuneable. The on-disk header still pins
  * `dictionary_id` to a single byte (ID 0..255), so MAX_DICTS keeps that
@@ -299,17 +242,8 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 #define CONFIG_RUN_STARTUP_TESTS 1
 #endif
 
-#define CONFIG_DEBUG_PMM 0
-#define CONFIG_DEBUG_VMM 0
-#define CONFIG_DEBUG_PROCESS 0
-#define CONFIG_DEBUG_SCHEDULER 1
-#define CONFIG_DEBUG_USE_CONTEXT 1
-#define CONFIG_DEBUG_WORKFLOW 0
-#define CONFIG_DEBUG_TAGFS 0
-
 #define CONFIG_PERF_TRACE 0 // 1=in-memory ring buffer trace (fast: ~15 cycles, no serial I/O)
-#define CONFIG_GUIDE_BATCH_SIZE 16
-#define CONFIG_PREFETCH_ENABLED 1
+
 #define CONFIG_CACHE_LINE_SIZE 64 // x86-64 standard
 
 #ifndef CONFIG_START_USERSPACE
@@ -318,11 +252,7 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
 
 // AMP Configuration
 #define CONFIG_MAX_CORES 256
-#define CONFIG_AP_TRAMPOLINE_PHYS 0x8000
-#define CONFIG_AP_STACK_PAGES 4
 
-_Static_assert(CONFIG_TAGFS_BLOCK_SIZE == CONFIG_PAGE_SIZE,
-               "CONFIG_TAGFS_BLOCK_SIZE must match CONFIG_PAGE_SIZE");
 _Static_assert((CONFIG_USER_STACK_SIZE % CONFIG_PAGE_SIZE) == 0,
                "CONFIG_USER_STACK_SIZE must be page-aligned");
 _Static_assert(CONFIG_USER_STACK_SIZE >= 4096,

@@ -18,11 +18,6 @@ typedef struct process_t process_t;
 #define EFI_INFO_BLOB_SIZE        128u
 #define EFI_INFO_VERSION          1u
 
-/* Free every buffer owned by the given pid. Called during process teardown.
- * Equivalent to BufferRegistryCleanupProcess(pid) — the wrapper exists for
- * call-site stability across the Phase 12 cleanup. */
-void system_deck_cleanup_process_buffers(uint32_t pid);
-
 /* Allocate target->buf_heap pages, copy `length` bytes from sender's heap
  * to target's heap. Returns target user vaddr or 0 on failure. Used by the
  * Manifest-native system.route / system.broadcast ops. */
