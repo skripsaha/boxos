@@ -272,6 +272,13 @@ void ahci_irq_handler(void) {
  * routing is ever spread across cores. It NEVER writes PxIS (the MSI handler
  * owns that W1C); it only READS the PxSACT/PxCI completion level.
  *
+ * It has a second caller. The boot-time proof of a read nobody stands over
+ * (BoardroomProveUnattendedRead) turns it by hand, on the BSP, before that
+ * core has opened interrupts — the completion MSI this would otherwise be a
+ * backstop for is waiting in the LAPIC until then, and Tier 1 is how that
+ * read's completion comes in at all. Same core, interrupts closed: the
+ * exclusion above holds there too.
+ *
  *   TIER 1 — lost-edge reconcile. Re-read the completion LEVEL (PxSACT for NCQ,
  *     PxCI otherwise — AHCI 1.3.1 §5.5.3 / §5.3.x). A slot whose level bit has
  *     already cleared completed on the device but its MSI edge was lost or

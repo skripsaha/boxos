@@ -5048,6 +5048,139 @@ run_handsetdeafmut() {
 }
 
 
+# ── unattended: a read nobody stands over, proved at boot ─────────────────────
+#
+# The proof used to be called [USB ASYNC TEST], and on this stand it never
+# touched USB: the volume sits on AHCI under UEFI (q35) and on the legacy
+# channel under BIOS. On AHCI it was red on every boot — the completion is
+# delivered by an interrupt the BSP has not opened yet, and the proof turned
+# only the USB handle — and under BIOS it said nothing at all. Measured with a
+# probe: PxCI clear, PxIS.DHRS set, the MSI pending in the LAPIC's IRR, and the
+# callback landing 259 ms after the proof had given up and returned, at the
+# address of a stack frame that no longer existed.
+#
+# Now it turns the seat's own handle, has no clock of its own, and speaks on
+# every boot — saying where it was not asked, and why.
+unattended_boot() {   # $1 = tag, the rest = run-bg arguments
+    local tag=$1; shift
+    make run-stop >/dev/null 2>&1
+    make run-bg "$@" >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 60 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 2; i=$((i+1))
+    done
+    sleep 3
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 4
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$tag.log"
+}
+
+run_unattended() {
+    echo "== unattended: the volume's seat answers a read nobody stands over, at boot =="
+    build
+    unattended_boot unattended UEFI=on STRICT=on CORES=4 MEM=4G
+    L="$SCRATCH/serial.unattended.log"
+    grep -q "BoxOS Shell" "$L"; chk $? "unattended: UEFI 4c reaches the shell"
+    grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): PASSED — 4096 bytes read" "$L"
+    chk $? "unattended: the AHCI seat under the volume answered, and the bytes agree"
+    ! grep -q "\[UNATTENDED READ\].*FAILED" "$L"; chk $? "unattended: and nothing about it failed"
+    # Judged during boot, before the machine was running — not by a late answer.
+    local judged finished
+    judged=$(grep -n "\[UNATTENDED READ\]" "$L" | head -1 | cut -d: -f1)
+    finished=$(grep -n "Kernel initialization complete" "$L" | head -1 | cut -d: -f1)
+    [ -n "$judged" ] && [ -n "$finished" ] && [ "$judged" -lt "$finished" ]
+    chk $? "unattended: judged before the end of boot (line ${judged:-?} < ${finished:-?})"
+    ! grep -q "went past its deadline" "$L"; chk $? "unattended: no port was called overdue"
+    external_ok "$L"; chk $? "unattended: and the shell runs a program afterwards"
+
+    # Where the machine will never read this way it says so, and asks nothing.
+    unattended_boot unattended1c UEFI=on STRICT=on CORES=1 MEM=2G
+    L="$SCRATCH/serial.unattended1c.log"
+    grep -q "\[UNATTENDED READ\] not asked: with one core every read is attended" "$L"
+    chk $? "unattended: one core — not asked, and said"
+    unattended_boot unattendedbios STRICT=on CORES=4 MEM=4G
+    L="$SCRATCH/serial.unattendedbios.log"
+    grep -qE "\[UNATTENDED READ\] not asked: seat [0-9]+ \(ATA [a-z ]+\) answers only a read somebody stands over" "$L"
+    chk $? "unattended: the legacy channel — not asked, and said"
+}
+
+# The disk's answer withheld: Tier 1 of the AHCI watch — the level the proof
+# brings a completion in by — is switched off, so nothing can bring it in
+# before the machine is running. The proof must then be ended by the disk's
+# own patience (Tier 2, CONFIG_AHCI_IO_TIMEOUT_MS): the port is called overdue,
+# the slot is failed and given back, the link is reset, the proof says the
+# medium refused — and the machine boots. No clock of the proof's own is
+# involved, which is what the deadline line measures.
+unattended_silence_on() {
+    cp src/kernel/drivers/disk/ahci.c "$SCRATCH/ahci.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/drivers/disk/ahci.c"
+s = open(p).read()
+anchor = """        if (!port_error) {
+            uint32_t outstanding = state->ncq"""
+assert anchor in s, "unattended silence anchor missing"
+mut = """        if (!port_error && 0) {   /* logcheck mutation: the disk's answer is never brought in by its level */
+            uint32_t outstanding = state->ncq"""
+open(p, "w").write(s.replace(anchor, mut, 1))
+EOF
+    grep -q "logcheck mutation: the disk's answer" src/kernel/drivers/disk/ahci.c || { echo "unattended silence install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/drivers/disk/ahci.c
+}
+unattended_silence_off() {
+    [ -f "$SCRATCH/ahci.c.bak" ] && cp "$SCRATCH/ahci.c.bak" src/kernel/drivers/disk/ahci.c
+    sleep 1; touch src/kernel/drivers/disk/ahci.c
+}
+
+# The wrong block: the unattended read asks for the volume's first sector
+# instead of the one the attended read fetched. The bytes must disagree, and
+# the proof must say at which byte.
+unattended_wrongblock_on() {
+    cp src/kernel/core/boardroom/boardroom.c "$SCRATCH/boardroom.c.bak"
+    python3 - <<'EOF'
+p = "src/kernel/core/boardroom/boardroom.c"
+s = open(p).read()
+anchor = """    error_t sub = BoardroomReadAsync(seat, 0, sectors, dma,"""
+assert anchor in s, "unattended wrong-block anchor missing"
+mut = """    error_t sub = BoardroomReadAsync(seat, 2048, sectors, dma,   /* logcheck mutation: a different block than the one compared against */"""
+open(p, "w").write(s.replace(anchor, mut, 1))
+EOF
+    grep -q "logcheck mutation: a different block" src/kernel/core/boardroom/boardroom.c || { echo "unattended wrong-block install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/boardroom/boardroom.c
+}
+unattended_wrongblock_off() {
+    [ -f "$SCRATCH/boardroom.c.bak" ] && cp "$SCRATCH/boardroom.c.bak" src/kernel/core/boardroom/boardroom.c
+    sleep 1; touch src/kernel/core/boardroom/boardroom.c
+}
+
+run_unattendedmut() {
+    echo "== unattendedmut: withhold the disk's answer, then ask for the wrong block =="
+    unattended_silence_on; build
+    # The wait is the disk's own patience, thirty seconds; the boot waits it out.
+    unattended_boot unattendedmut UEFI=on STRICT=on CORES=4 MEM=4G
+    unattended_silence_off
+    L="$SCRATCH/serial.unattendedmut.log"
+    grep -qE "\[AHCI\] port [0-9]+ went past its deadline — failing slots 0x[0-9a-f]+ and resetting the link" "$L"
+    chk $? "unattendedmut: the disk's own watch called the port overdue and gave the slot back"
+    grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): FAILED — the medium refused the read \(error -?[0-9]+\)" "$L"
+    chk $? "unattendedmut: and the proof said the medium refused"
+    ! grep -q "\[UNATTENDED READ\].*PASSED" "$L"; chk $? "unattendedmut: no PASSED was said"
+    grep -q "BoxOS Shell" "$L"; chk $? "unattendedmut: the machine still boots"
+    external_ok "$L"; chk $? "unattendedmut: and runs a program afterwards"
+    ! grep -qE "PANIC|^\[EXCEPTION\]" "$L"; chk $? "unattendedmut: no panic, no exception"
+
+    unattended_wrongblock_on; build
+    unattended_boot unattendedwrong UEFI=on STRICT=on CORES=4 MEM=4G
+    unattended_wrongblock_off
+    L="$SCRATCH/serial.unattendedwrong.log"
+    grep -qE "\[UNATTENDED READ\] seat [0-9]+ \(AHCI port [0-9]+\): FAILED — the two reads disagree, first at byte [0-9]+" "$L"
+    chk $? "unattendedwrong: the bytes disagreed and the proof said where"
+    grep -q "BoxOS Shell" "$L"; chk $? "unattendedwrong: the machine still boots"
+}
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -5088,6 +5221,8 @@ case "${1:-both}" in
     knockmut)   run_knockmut ;;
     knockstorm) run_knockstorm ;;
     knockstormmut) run_knockstormmut ;;
+    unattended) run_unattended ;;
+    unattendedmut) run_unattendedmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -5110,8 +5245,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo
