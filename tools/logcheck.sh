@@ -4428,6 +4428,78 @@ run_bynamemut() {
 }
 
 # ===========================================================================
+# stash — what a strand is handed that is not for the caller at hand is KEPT
+# ===========================================================================
+#
+# A strand waiting for one Touch tag keeps the events of other tags; a strand
+# waiting for a kernel reply keeps the IPC messages ahead of it. Both stashes
+# used to hold 256 entries and lose the rest in silence — the Touch one shed
+# the newest, the IPC one dropped the oldest. They grow by the chunk now
+# (box/core/stash.h). TT 23 publishes 300 events of another tag past a wait,
+# TT 24 sends 300 messages past a kernel reply; both must all be there.
+run_stash() {
+    echo "== stash: 300 events of another tag and 300 messages ahead of a reply, all kept =="
+    build
+    if ! util_boot stash "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]" 60; then
+        bad "stash: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.stash.log"
+    grep -q "\[TT 23\] PASS" "$L" \
+        && ok "stash: 300 events of the other tag were kept across the wait" \
+        || bad "stash: $(grep -m1 '\[TT 23\]' "$L" || echo 'TT 23 never reported')"
+    grep -q "\[TT 24\] PASS" "$L" \
+        && ok "stash: 300 messages ahead of a kernel reply were kept" \
+        || bad "stash: $(grep -m1 '\[TT 24\]' "$L" || echo 'TT 24 never reported')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]|DEFECT" "$L" \
+        && bad "stash: the kernel or boxlib spoke of a stall, fault or defect" \
+        || ok "stash: no verdict, no panic, no defect"
+}
+
+# The oracle measured against itself: the stash of 256 put back — with the
+# new rule that an entry with no place stays in the ring, said aloud.
+stash_cap_on() {
+    cp src/userspace/boxlib/src/core/stash.c "$SCRATCH/stash.c.bak"
+    python3 - <<'EOF2'
+p = "src/userspace/boxlib/src/core/stash.c"
+s = open(p).read()
+anchor = "    if (s->tail && s->tail->count < s->chunk_cap) return true;\n"
+assert s.count(anchor) == 1, "stash mutation anchor missing"
+s = s.replace(anchor, "    if (s->count >= 256u) return false;   /* logcheck mutation: the stash of 256 */\n" + anchor, 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/userspace/boxlib/src/core/stash.c || { echo "stash mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/core/stash.c
+}
+
+stash_cap_off() {
+    [ -f "$SCRATCH/stash.c.bak" ] && cp "$SCRATCH/stash.c.bak" src/userspace/boxlib/src/core/stash.c
+    sleep 1; touch src/userspace/boxlib/src/core/stash.c
+}
+
+run_stashmut() {
+    echo "== stashmut: the stash of 256 put back — TT 23 and TT 24 must go red, and the strand must say why =="
+    stash_cap_on; build
+    util_boot stashmut "STRICT=on CORES=4 MEM=4G" touch_test "\[TT SUMMARY\]" 60; local booted=$?
+    stash_cap_off
+    if [ $booted -ne 0 ]; then bad "stashmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.stashmut.log"
+    if grep -q "\[TT 23\] PASS" "$L"; then
+        bad "stashmut: the stash capped at 256 and TT 23 STILL passed — the oracle cannot see that loss"
+    else
+        ok "stashmut: TT 23 sees the events that had no place"
+    fi
+    if grep -q "\[TT 24\] PASS" "$L"; then
+        bad "stashmut: the stash capped at 256 and TT 24 STILL passed — the oracle cannot see that loss"
+    else
+        ok "stashmut: TT 24 sees the messages that had no place"
+    fi
+    grep -q "DEFECT: no memory to keep" "$L" \
+        && ok "stashmut: the strand said aloud that it had no place for what it was handed" \
+        || bad "stashmut: nothing said about the entries that had no place"
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
 # deadline — a timed park's ERR_TIMEOUT rides the process's own baton
 # ===========================================================================
 #
@@ -4639,6 +4711,8 @@ case "${1:-both}" in
     deadlinemut) run_deadlinemut ;;
     byname)     run_byname ;;
     bynamemut)  run_bynamemut ;;
+    stash)      run_stash ;;
+    stashmut)   run_stashmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4661,7 +4735,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

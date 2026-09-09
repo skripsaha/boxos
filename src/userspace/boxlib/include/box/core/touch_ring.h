@@ -107,6 +107,10 @@ INLINE uint32_t touch_ring_count(const TouchRing *r) {
  * any further conversion (e.g. copying selected fields into the
  * user-facing `Touch` struct). Implementation: src/core/touch_ring.c. */
 bool touch_ring_pop_slot(TouchSlot *slot_out);
+/* The slot at the head of the ring, left where it is — what touch_ring_pop_slot
+ * would hand over next, so a consumer can secure a place for it before taking
+ * it. */
+bool touch_ring_peek_slot(TouchSlot *slot_out);
 
 /* The slot at head is released and unconsumed — poppable now. The fact a
  * sleep may end on (box_turn_in); a moved tail alone is a claim, not a slot. */

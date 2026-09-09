@@ -40,6 +40,7 @@ CFLAGS = -nostdlib -fno-builtin -ffreestanding -mno-red-zone \
          -Werror=int-conversion
 
 SRCS = src/core/notify.c \
+       src/core/stash.c \
        src/core/result.c \
        src/core/strand_self.c \
        src/core/touch_ring.c \

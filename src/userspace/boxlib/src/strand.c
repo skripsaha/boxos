@@ -121,10 +121,11 @@ void strand_exit(void)
      * death-stamp it would miss; an orderly exit never leaves an ORPHANED slot. */
     strand_pool_flush_self();
 
-    /* Ф21 — release this strand's per-strand Touch tag-filter stash back to the
-     * cabin heap (order: flush pool → free stash → kill). Idempotent; a strand
-     * that never consumed a tag is a no-op. */
+    /* This strand's stashes — Touch, IPC, kernel replies, ferry — back to the
+     * cabin heap (order: flush pool → free stashes → kill). Idempotent; a
+     * strand that never kept anything is a no-op. */
     touch_stash_free_self();
+    result_stash_free_self();
 
     /* Terminate just this strand: SYS_PROC_KILL(target == 0) means self.
      * No __box_runtime_fini / spawner-notify — those are exit()'s job for the

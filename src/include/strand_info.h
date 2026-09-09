@@ -33,20 +33,6 @@
  * accident. */
 #define STRAND_INFO_MAGIC      0x5354524E44494E46ULL
 
-/* Per-strand result stash capacity (entries). The main strand keeps a large
- * static stash in boxlib (result.c STASH_CAP); a spawned strand carries this
- * smaller inline stash so concurrent strands never share stash storage. 256
- * comfortably absorbs any single-strand reply burst — a strand's own
- * syscalls are serial, so the stash only buffers IPC payloads interleaved
- * with its kernel replies. */
-#define STRAND_STASH_CAP       256u
-/* One stash entry == one Result == 24 bytes. Asserted against sizeof(Result)
- * on both sides where Result is in scope (kernel kring path / boxlib result.c). */
-#define STRAND_STASH_ENTRY_SZ  24u
-/* Bytes reserved per stash: the 256-entry ring plus a 16-byte
- * head/tail/count/pad control block that boxlib overlays via StrandStashRing. */
-#define STRAND_STASH_BYTES     (STRAND_STASH_CAP * STRAND_STASH_ENTRY_SZ + 16u)
-
 /* Per-strand print state (boxlib print.c StrandPrintState). Fixed size,
  * always present (unlike the lazy opt-in stashes) since every strand that
  * ever calls print/printf needs one. 280 → 160 when the io_buf telegram
@@ -64,27 +50,21 @@ typedef struct StrandInfo {
     uint64_t pocket_ring_va;  /* @32 — per-strand PocketRing header VA */
     uint64_t result_ring_va;  /* @40 — per-strand ResultRing header VA */
     uint64_t touch_ring_va;   /* @48 — per-strand TouchRing header VA */
-    /* @56: two stash regions. Kernel zero-inits; boxlib overlays
-     * StrandStashRing and uses them for ipc / non-ipc result buffering. */
-    uint8_t  ipc_stash[STRAND_STASH_BYTES];
-    uint8_t  non_ipc_stash[STRAND_STASH_BYTES];
-    /* Ф20e — this strand's claimed StrandPool slab slot (boxlib memory.c).
-     * Kernel zero-inits the whole block (strand_rings.c pmm_alloc_zero), so 0
-     * means "not yet claimed"; boxlib lazy-claims a slab slot on first malloc
+    /* @56..@80: this strand's four stashes (boxlib box/core/stash.h) — what
+     * its rings handed it that was not for the caller at hand: IPC messages,
+     * plain kernel replies, box::ferry completions, Touches of another tag.
+     * Each is a heap Stash that grows by the chunk, made on first use; the
+     * kernel zero-inits the block (strand_rings.c pmm_alloc_zero), so 0 is
+     * "not yet". What stood here were two inline rings of 256 entries that
+     * dropped the oldest when full. */
+    uint64_t ipc_stash_ptr;      /* @56 */
+    uint64_t non_ipc_stash_ptr;  /* @64 */
+    uint64_t ferry_stash_ptr;    /* @72 */
+    uint64_t touch_stash_ptr;    /* @80 */
+    /* Ф20e — this strand's claimed StrandPool slab slot (boxlib memory.c);
+     * 0 = not yet claimed; boxlib lazy-claims a slab slot on first malloc
      * and caches the pointer here for the lock-free fast path. */
-    uint64_t strand_pool_ptr;
-    /* Ф21 — per-strand Touch tag-filter stash (boxlib touch.c); kernel
-     * zero-inits → 0 = not yet allocated; lazy-malloc'd on first tag-consume.
-     * Mirrors strand_pool_ptr. */
-    uint64_t touch_stash_ptr;
-    /* Ф26e — per-strand async file-I/O (box::ferry) completion stash
-     * (boxlib result.c); kernel zero-inits → 0 = not yet allocated;
-     * lazy-malloc'd on first KCTX_STORAGE record routed on this strand.
-     * A lazy pointer (not an inline reservation like ipc_stash) because
-     * ferry I/O is opt-in — a strand that never issues a ferry op pays
-     * nothing, and a third inline STRAND_STASH_BYTES block would overflow
-     * the 4-page StrandInfo reservation. Mirrors touch_stash_ptr. */
-    uint64_t ferry_stash_ptr;
+    uint64_t strand_pool_ptr;    /* @88 */
     /* per-strand print/IPC-output buffer (boxlib print.c); kernel zero-inits via
      * pmm_alloc_zero -> color_fg/bg=0, corrected to defaults by print.c's
      * initialized flag on first touch. Inline (small+universal), unlike the
@@ -105,15 +85,12 @@ STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, generation)     == 28, "Stra
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, pocket_ring_va) == 32, "StrandInfo.pocket_ring_va @32");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, result_ring_va) == 40, "StrandInfo.result_ring_va @40");
 STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_ring_va)  == 48, "StrandInfo.touch_ring_va @48");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ipc_stash)      == 56, "StrandInfo.ipc_stash @56");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pool_ptr) ==
-                     56 + 2u * STRAND_STASH_BYTES, "StrandInfo.strand_pool_ptr @ 56+2*STRAND_STASH_BYTES");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_stash_ptr) ==
-                     56 + 2u * STRAND_STASH_BYTES + 8u, "StrandInfo.touch_stash_ptr");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ferry_stash_ptr) ==
-                     56 + 2u * STRAND_STASH_BYTES + 16u, "StrandInfo.ferry_stash_ptr last");
-STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, print_state) ==
-                     56 + 2u * STRAND_STASH_BYTES + 24u, "StrandInfo.print_state @ 56+2*STRAND_STASH_BYTES+24");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ipc_stash_ptr)     == 56, "StrandInfo.ipc_stash_ptr @56");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, non_ipc_stash_ptr) == 64, "StrandInfo.non_ipc_stash_ptr @64");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, ferry_stash_ptr)   == 72, "StrandInfo.ferry_stash_ptr @72");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, touch_stash_ptr)   == 80, "StrandInfo.touch_stash_ptr @80");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, strand_pool_ptr)   == 88, "StrandInfo.strand_pool_ptr @88");
+STRAND_STATIC_ASSERT(__builtin_offsetof(StrandInfo, print_state)       == 96, "StrandInfo.print_state @96");
 /* The whole block must fit the Hammock StrandInfo reservation (4 pages =
  * 16 KiB — see HAMMOCK_STRANDINFO_PAGES in strand_rings.c). */
 STRAND_STATIC_ASSERT(sizeof(StrandInfo) <= 4u * 4096u, "StrandInfo must fit 4 pages");

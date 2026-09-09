@@ -221,17 +221,17 @@ bool touch_available(void);
  * ALL claimed tags. A cabin with several distinct claims (e.g. one box::touch
  * subscription per tag) needs to pull the NEXT event of ONE tag while leaving
  * the others intact for their own consumers. These two calls do that: they
- * hand back the first event whose tag_id == `tag`, parking each non-matching
- * event in a small per-cabin stash so a later call for ITS tag still finds it
- * (FIFO order within a tag is preserved — the stash is consulted before the
- * ring). Pure userspace; no new kernel op.
+ * hand back the first event whose tag_id == `tag`, keeping each non-matching
+ * event in a per-strand stash that grows by the chunk (box/core/stash.h) so a
+ * later call for ITS tag still finds it (FIFO order within a tag is preserved
+ * — the stash is consulted before the ring). Pure userspace; no new kernel op.
  *
  * touch_try_pop_tag: non-blocking. Returns true if a matching event was
  *   delivered into `*out`, false if none is currently available.
  * touch_wait_tag:    blocks up to timeout_ms (0 = forever) for a matching
- *   event; returns false on timeout (or, for a forever wait, only under a
- *   flood of unconsumed other-tag events that fills the stash — drain your
- *   claimed tags).
+ *   event; returns false on timeout — or, whatever the timeout, when the heap
+ *   has no room to keep an event of another tag, which is said aloud once
+ *   and leaves that event in the ring.
  *
  * Per-strand, no locking: the stash is private to the calling strand (Ф21),
  * not shared across the cabin. touch_pop already routes per strand — each

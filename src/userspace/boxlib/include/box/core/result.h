@@ -103,6 +103,9 @@ bool result_available(void);
 bool result_published_at_head(void);
 uint32_t result_count(void);
 bool result_pop(Result* out);
+/* The record at the head of the ring, left where it is — what result_pop
+ * would hand over next. */
+bool result_peek(Result* out);
 
 // Paired wait for a synchronous submit's reply. `expect_cookie` is the
 // submit's cloakroom token (Pocket.cookie24, echoed by the kernel in the
@@ -119,7 +122,19 @@ uint64_t result_orphans_dropped(void);
 
 bool result_pop_non_ipc(Result* out);
 bool result_pop_ipc(Result* out);
+/* Any message — IPC or a kernel reply — without blocking; a ferry completion
+ * met on the way goes to its station. For IPC servers and box::result_any. */
+bool result_pop_any(Result* out);
+/* A record already taken out of the ring, back to the stash of its consumer
+ * (an IPC message held while waiting for something else). With no room in the
+ * heap it is lost — the one such place — and that is said aloud. */
+void result_restash(const Result* r);
 uint32_t result_ipc_stash_count(void);
+uint32_t result_non_ipc_stash_count(void);
+
+/* A spawned strand's stashes (box/core/stash.h) back to the heap, at its
+ * exit. Idempotent; a no-op on the main strand. */
+void result_stash_free_self(void);
 
 /* Drop orphan manifest replies left behind by timed-out callers. Call
  * BEFORE each fresh synchronous ManifestSubmit so the stash+ring carry
@@ -143,12 +158,11 @@ bool result_wait_ipc(Result* out, uint32_t timeout_ms);
 /* Ф26e — box::ferry (async file I/O) completion channel. Storage completions
  * carry KCTX_STORAGE and are FULLY ISOLATED: every other ResultRing consumer
  * routes them out into a per-strand ferry stash, and they are returned ONLY by
- * result_pop_ferry / result_wait_ferry. result_restash routes one non-ferry
- * record back to its own consumer; result_ferry_stash_count backs the wait
- * loop's non-allocating readiness probe. Backs box::ferry (box/cxx/ferry.h). */
+ * result_pop_ferry / result_wait_ferry. result_ferry_stash_count backs the
+ * wait loop's non-allocating readiness probe. Backs box::ferry
+ * (box/cxx/ferry.h). */
 bool result_pop_ferry(Result* out);
 bool result_wait_ferry(Result* out, uint32_t timeout_ms);
-void result_restash(const Result* r);
 uint32_t result_ferry_stash_count(void);
 
 // Diagnostic: snapshot result_pop counters
