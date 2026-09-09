@@ -51,10 +51,8 @@
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (C++ TLS) */
 
-/* ─── Buffer registry (0x10 – 0x14) ────────────────────────────────── */
-#define SYSTEM_OP_BUF_ALLOC         0x10
-#define SYSTEM_OP_BUF_FREE          0x11
-#define SYSTEM_OP_BUF_RESIZE        0x12
+/* 0x10 – 0x12 were the buffer registry — an allocator no program ever
+ * submitted to, removed with it; the numbers stay unassigned. */
 /* Implicit huge-page prefault — boxlib memory.c calls this when growing
  * the user heap by >= 2 MB so the kernel pre-backs the new VA range with
  * 2 MB pages instead of waiting for 4 KB demand paging. The pre-fault

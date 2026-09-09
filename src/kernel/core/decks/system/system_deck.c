@@ -3,23 +3,16 @@
  *
  * The legacy switch-style dispatcher and per-opcode helpers are gone. All
  * system ops now live in system_ops.c on the Manifest path. This file
- * retains the two helpers that survived the migration:
+ * retains the one helper that survived the migration:
  *
- *   ipc_copy_to_heap                 — used by system.route / system.broadcast
- *   system_deck_cleanup_process_buffers — thin wrapper around BufferRegistry
+ *   ipc_copy_to_heap — used by system.route / system.broadcast
  */
 
 #include "system_deck.h"
-#include "buffer_registry.h"
 #include "klib.h"
 #include "process.h"
 #include "vmm.h"
 #include "pmm.h"
-
-void system_deck_cleanup_process_buffers(uint32_t pid)
-{
-    BufferRegistryCleanupProcess(pid);
-}
 
 uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length)
 {

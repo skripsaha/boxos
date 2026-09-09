@@ -26,7 +26,6 @@
 #include "boxos_crate.h"
 #include "crate_io.h"
 #include "system_deck.h"
-#include "buffer_registry.h"
 #include "touch.h"
 #include "result.h"
 #include "result_ring.h"
@@ -559,8 +558,6 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
 
     process_set_state(target, self_exit ? PROC_DONE : PROC_CRASHED);
     __sync_synchronize();
-
-    BufferRegistryCleanupProcess(target_pid);
 
     if (op->out_crate != CRATE_INDEX_NONE) {
         Crate *out = &crates[op->out_crate];
@@ -1276,82 +1273,6 @@ static int SysUseGet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 }
 
 /* =========================================================================
- *  Buffers
- * ========================================================================= */
-
-/* SYSTEM_OP_BUF_ALLOC
- *   params:  [u64 size][u32 flags]    (12 bytes; flags ignored for now)
- *   out_crate (32 bytes): [u64 handle][u64 phys][u64 actual][u64 virt] */
-static int SysBufAlloc(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                       const OpContext *ctx)
-{
-    (void)crate_count;
-    if (!ctx || !ctx->proc)                return ERR_INVALID_ARGUMENT;
-    if (op->param_size < sizeof(uint64_t)) return ERR_INVALID_ARGUMENT;
-    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
-
-    uint64_t size;
-    memcpy(&size, op->params, sizeof(uint64_t));
-
-    BufferAllocResult r = BufferRegistryAlloc(ctx->proc, size);
-    if (r.err != OK) return r.err;
-
-    Crate *out = &crates[op->out_crate];
-    if (out->capacity < 32) return ERR_BUFFER_TOO_SMALL;
-
-    uint8_t blob[32];
-    memcpy(blob +  0, &r.handle,      sizeof(uint64_t));
-    memcpy(blob +  8, &r.phys_addr,   sizeof(uint64_t));
-    memcpy(blob + 16, &r.actual_size, sizeof(uint64_t));
-    memcpy(blob + 24, &r.virt_addr,   sizeof(uint64_t));
-    if (crate_write(out, ctx, blob, 32) != OK) return ERR_INVALID_ADDRESS;
-    return OK;
-}
-
-/* SYSTEM_OP_BUF_FREE  params:[u64 handle] */
-static int SysBufFree(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                      const OpContext *ctx)
-{
-    (void)crates; (void)crate_count;
-    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < sizeof(uint64_t)) return ERR_INVALID_ARGUMENT;
-
-    uint64_t handle;
-    memcpy(&handle, op->params, sizeof(uint64_t));
-    return BufferRegistryFree(ctx->proc->pid, handle);
-}
-
-/* SYSTEM_OP_BUF_RESIZE
- *   params:  [u64 handle][u64 new_size]
- *   out_crate (16 bytes): [u64 handle][u64 actual_size] */
-static int SysBufResize(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                        const OpContext *ctx)
-{
-    (void)crate_count;
-    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
-
-    uint64_t handle, new_size;
-    memcpy(&handle,   op->params,     sizeof(uint64_t));
-    memcpy(&new_size, op->params + 8, sizeof(uint64_t));
-
-    uint64_t actual = 0;
-    error_t  rc = BufferRegistryResize(ctx->proc, handle, new_size, &actual, NULL);
-    if (rc != OK) return rc;
-
-    if (op->out_crate != CRATE_INDEX_NONE) {
-        Crate *out = &crates[op->out_crate];
-        if (out->capacity >= 16) {
-            uint8_t blob[16];
-            memcpy(blob,     &handle, sizeof(uint64_t));
-            memcpy(blob + 8, &actual, sizeof(uint64_t));
-            (void)crate_write(out, ctx, blob, 16);
-        }
-    }
-    return OK;
-}
-
-/* =========================================================================
  *  Tags
  * ========================================================================= */
 
@@ -1918,10 +1839,7 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_USE_SET,      SysUseSet,      OP_AUTH_SYSTEM, "system.use.set"    },
         { SYSTEM_OP_USE_GET,      SysUseGet,      OP_AUTH_NONE,   "system.use.get"    },
         { SYSTEM_OP_USE_CLEAR,    SysUseClear,    OP_AUTH_SYSTEM, "system.use.clear"  },
-        /* Tags, buffers: app+. */
-        { SYSTEM_OP_BUF_ALLOC,    SysBufAlloc,    OP_AUTH_APP,    "system.buf.alloc"  },
-        { SYSTEM_OP_BUF_FREE,     SysBufFree,     OP_AUTH_APP,    "system.buf.free"   },
-        { SYSTEM_OP_BUF_RESIZE,   SysBufResize,   OP_AUTH_APP,    "system.buf.resize" },
+        /* Tags: app+. */
         { SYSTEM_OP_TAG_ADD,      SysTagAdd,      OP_AUTH_APP,    "system.tag.add"    },
         { SYSTEM_OP_TAG_REMOVE,   SysTagRemove,   OP_AUTH_APP,    "system.tag.remove" },
         { SYSTEM_OP_TAG_CHECK,    SysTagCheck,    OP_AUTH_NONE,   "system.tag.check"  },

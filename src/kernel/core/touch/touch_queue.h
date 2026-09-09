@@ -3,17 +3,6 @@
 
 #include "ktypes.h"
 
-#define TOUCH_QUEUE_CAPACITY 256
-
-typedef struct {
-    uint16_t tag_id;
-    uint16_t flags;
-    uint32_t source_pid;
-    uint8_t  payload[64];
-    uint32_t plen;
-    uint64_t fire_tick;
-} TouchQueueEntry;
-
 void TouchQueueInit(void);
 void TouchQueueEnqueue(uint16_t tag_id, const void *payload, uint32_t plen,
                        uint64_t after_ticks, uint32_t source_pid, uint16_t flags);

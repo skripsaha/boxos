@@ -22,7 +22,7 @@
  * OUTPUT crates; sizes are runtime, never compile-time.
  *
  * Lifetime:
- *   - User allocates payload at addr (via SYSTEM_OP_BUF_ALLOC or local heap).
+ *   - User allocates payload at addr on its own heap.
  *   - User builds a Crate descriptor pointing at addr.
  *   - Kernel translates addr via vmm_translate_user_addr() and reads/writes.
  *   - User reclaims payload after the Pocket completes.
