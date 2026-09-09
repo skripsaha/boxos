@@ -176,7 +176,11 @@ int touch_claim(TouchTag tag, TouchMode mode, uint64_t manifest_or_handler,
 int touch_release(TouchTag tag);
 
 /* Publish to both ids in the pair (wildcard fan-out). Either may be
- * TOUCH_TAG_INVALID — that side is skipped by the kernel. */
+ * TOUCH_TAG_INVALID — that side is skipped by the kernel.
+ *
+ * Returns how many subscribers were handed the event (>= 0), or a negative
+ * error. 0 is an honest answer, not a failure: nobody wears that tag right
+ * now. A delayed send (after_ms > 0) returns 0 — nobody has heard it yet. */
 int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
                uint32_t after_ms);
 

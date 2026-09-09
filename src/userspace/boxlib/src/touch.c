@@ -79,13 +79,17 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
 
-    Crate crates[1];
+    Crate crates[2];
     uint16_t cc = 0;
     uint16_t payload_idx = CRATE_INDEX_NONE;
     if (payload && plen > 0) {
         CrateSetInOut(&crates[cc], (void *)payload, plen, plen);
         payload_idx = cc++;
     }
+    /* The count comes back in a crate of its own: how many were handed it. */
+    uint32_t handed = 0;
+    CrateSetOutput(&crates[cc], &handed, sizeof(handed));
+    uint16_t handed_idx = cc++;
 
     /* params: [u16 full][u16 bare][u32 after_ms] */
     uint8_t params[8];
@@ -94,12 +98,14 @@ int touch_send(TouchTagPair pair, const void *payload, uint32_t plen,
     memcpy(params + 4, &after_ms,  sizeof(uint32_t));
 
     if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_SEND, 0,
-                             payload_idx, CRATE_INDEX_NONE, params, 8) != 0)
+                             payload_idx, handed_idx, params, 8) != 0)
         return -ERR_INVALID_ARGS;
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
 
     Result r;
-    return ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_GUARANTEED);
+    int rc = ManifestSubmitTimeout((Manifest *)mbuf, crates, cc, &r, BOX_ANSWER_GUARANTEED);
+    if (rc != 0) return box_fail(rc);   /* one dialect: a failure is < 0 */
+    return (int)handed;
 }
 
 /* Diagnostic counters — bumped from touch_await consumer path. */

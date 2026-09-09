@@ -149,7 +149,7 @@ public:
 inline bool publish(const tag &tg, const void *payload, std::uint32_t plen,
                     std::uint32_t after_ms = 0) noexcept
 {
-    return touch_send(tg.pair(), payload, plen, after_ms) == OK;
+    return touch_send(tg.pair(), payload, plen, after_ms) >= 0;
 }
 
 // ‼ Constrained against pointers, and the reason was measured rather than

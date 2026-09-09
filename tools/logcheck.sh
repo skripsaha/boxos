@@ -4397,6 +4397,101 @@ run_deadlinemut() {
 }
 
 
+# ===========================================================================
+# handsetdeaf — a reader that vanished with the handset in its hand
+# ===========================================================================
+#
+# The daemon said each key to the lane on top and never learned whether anyone
+# heard: a reader that died in the middle of its reading kept the ear until the
+# daemon met its death by another road, and the keys typed meanwhile went to a
+# tag nobody wore. touch_send now returns how many heard; nobody drops that ear
+# and the key is said again to the next listener.
+#
+# handset deaf is the instrument: a strand takes the ear and gives up its claim
+# (alive, lane open), main reads a moment later. The line typed in between must
+# reach main.
+handsetdeaf_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=16 MEM=8G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "handset deaf" >/dev/null 2>&1; sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0; while [ $i -lt 30 ]; do grep -q "\[HANDSET\] deaf ear on top" build/serial.log && break; sleep 1; i=$((i+1)); done
+    # RAW keys, no witness: a key nobody echoes is exactly the key this case is
+    # about, and the typer would retype it once main listens and hide the loss.
+    local k
+    for k in a b c ret; do
+        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        sleep 0.05
+    done
+    i=0; while [ $i -lt 20 ]; do tail -n +$((MARK + 1)) build/serial.log | grep -q "\[HANDSET\] got:" && break; sleep 1; i=$((i+1)); done
+    sleep 2
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_handsetdeaf() {
+    echo "== handsetdeaf: the reader on top hears nothing, and the line still reaches the next =="
+    build
+    if ! handsetdeaf_boot handsetdeaf; then bad "handsetdeaf: never reached a shell"; return; fi
+    L="$SCRATCH/serial.handsetdeaf.log"
+    grep -q "\[HANDSET\] got: abc" "$L" \
+        && ok "handsetdeaf: the line said to a deaf ear reached the reader beneath" \
+        || bad "handsetdeaf: $(grep -m1 '\[HANDSET\]' "$L" | tail -1; echo '— the line typed at the deaf ear was lost')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "handsetdeaf: the kernel spoke of a stall or fault" \
+        || ok "handsetdeaf: no verdict, no panic"
+}
+
+# The oracle measured against itself: the daemon takes a key nobody heard for
+# heard, so the deaf ear keeps the handset and the line is lost.
+handsetdeaf_blind_on() {
+    cp src/userspace/display/display.c "$SCRATCH/display.c.handsetdeaf.bak"
+    python3 - <<'EOF2'
+p = "src/userspace/display/display.c"
+s = open(p).read()
+anchor = "        if (heard > 0) {\n"
+assert s.count(anchor) == 1, "handsetdeaf mutation anchor missing"
+s = s.replace(anchor, "        if (heard >= 0) {   /* logcheck mutation: a key nobody heard counts as heard */\n", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/userspace/display/display.c || { echo "handsetdeaf mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/display/display.c
+}
+
+handsetdeaf_blind_off() {
+    [ -f "$SCRATCH/display.c.handsetdeaf.bak" ] && cp "$SCRATCH/display.c.handsetdeaf.bak" src/userspace/display/display.c
+    sleep 1; touch src/userspace/display/display.c
+}
+
+run_handsetdeafmut() {
+    echo "== handsetdeafmut: the count ignored, and the line at the deaf ear must be lost =="
+    handsetdeaf_blind_on; build
+    handsetdeaf_boot handsetdeafmut; local booted=$?
+    handsetdeaf_blind_off
+    if [ $booted -ne 0 ]; then bad "handsetdeafmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.handsetdeafmut.log"
+    if grep -q "\[HANDSET\] got: abc" "$L"; then
+        bad "handsetdeafmut: the count ignored and the line STILL arrived — the oracle cannot see that defect"
+    else
+        ok "handsetdeafmut: with the count ignored the deaf ear kept the line — and the oracle sees it"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -4419,6 +4514,8 @@ case "${1:-both}" in
     rollcallmut) run_rollcallmut ;;
     handset)    run_handset ;;
     handsetmut) run_handsetmut ;;
+    handsetdeaf) run_handsetdeaf ;;
+    handsetdeafmut) run_handsetdeafmut ;;
     brigade)    run_brigade ;;
     brigademut) run_brigademut ;;
     headcount)  run_headcount ;;
@@ -4447,7 +4544,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

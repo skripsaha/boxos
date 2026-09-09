@@ -454,7 +454,7 @@ static int b_touch_self_rtt(uint32_t i, void *ctx)
     if (bench_setup_touch() != 0) return -1;
     uint32_t payload = i;
     int rc = touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
-    if (rc != 0) return rc;
+    if (rc < 0) return rc;
     Touch t;
     rc = touch_await(s_rtt_tag, &t, 1000);
     return rc;
@@ -473,7 +473,7 @@ static int b_touch_await_fastpath(uint32_t i, void *ctx)
     /* Pre-stage one touch per iter so the ring has data when we pop. */
     uint32_t payload = i;
     int rc = touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
-    if (rc != 0) return rc;
+    if (rc < 0) return rc;
     Touch t;
     return touch_await(s_rtt_tag, &t, 100);
 }

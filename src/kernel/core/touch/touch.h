@@ -206,15 +206,20 @@ void    TouchPolicySetLevelState(TouchTag tag_id, uint8_t state);
  */
 uint32_t TouchPolicyLatchedSnapshot(TouchTag tag_id, uint8_t *out_buf);
 
-/* Publish to a single tag_id. Hot path. */
-void   TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
-                      uint32_t source_pid, uint16_t flags);
+/* Publish to a single tag_id. Hot path. Returns how many subscribers the
+ * event was handed to — pushed into their ring, owed to it, or left latched
+ * for them — so a sender can know that nobody heard: the display daemon
+ * says each key again on the lane that listens, and a reader that died in
+ * the middle of its reading leaves a lane nobody wears the tag of any more. */
+uint32_t TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
+                        uint32_t source_pid, uint16_t flags);
 
 /* Publish to BOTH full and bare ids in one shot (wildcard support).
- * Either may be TOUCH_TAG_INVALID — that side is skipped. */
-void   TouchPublishPair(TouchTag full_id, TouchTag bare_id,
-                        const void *kpayload, uint32_t plen,
-                        uint32_t source_pid, uint16_t flags);
+ * Either may be TOUCH_TAG_INVALID — that side is skipped. Returns the sum
+ * of both sides' hand-overs. */
+uint32_t TouchPublishPair(TouchTag full_id, TouchTag bare_id,
+                          const void *kpayload, uint32_t plen,
+                          uint32_t source_pid, uint16_t flags);
 
 /* Kernel-side string convenience. Resolves once per call (no cache), so
  * cold paths use it freely; hot paths should cache via TouchLogbookIntern. */
