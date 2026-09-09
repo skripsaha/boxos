@@ -52,21 +52,9 @@ void kputchar(char c)
 {
     /* Every byte the kernel says passes here — kprintf's characters under the
      * console lock, the keyboard's echo without it — so this is where the log
-     * ring is fed and there is nowhere else to look. The character kept is the
-     * one the caller wrote: the '\r' below belongs to a serial line, not to
-     * what the kernel said. Nothing at all when the build was not asked for
-     * the ring (see klib_logring.h). */
+     * ring is fed and there is nowhere else to look. The serial line reads
+     * the ring (the Wire, serial.c): nothing here waits on a UART. */
     LogRingPut(c);
-
-    if (c == '\n')
-    {
-        serial_putchar('\r');
-        serial_putchar('\n');
-    }
-    else
-    {
-        serial_putchar(c);
-    }
 
     if (c == '\n')
     {
@@ -500,9 +488,15 @@ __attribute__((noreturn)) void panic(const char *message, ...)
 
     kprintf("\n\nDebug info:");
     kprintf("\n- Stack pointer: %p", __builtin_frame_address(0));
-    kprintf("\n- Instruction pointer: %p", __builtin_return_address(0));
+    kprintf("\n- Instruction pointer: %p\n", __builtin_return_address(0));
 
     va_end(args);
+
+    /* Everything said, onto the wire, before the last breath: the line
+     * drives itself by interrupt and interrupts are off. The locks may be
+     * this core's own from the moment it died. */
+    WireForceRelease();
+    WireDrain();
 
     while (1)
         asm volatile("hlt");

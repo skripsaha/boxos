@@ -14,13 +14,8 @@
  */
 #include "klib.h"
 #include "klib_logring.h"
+#include "serial.h"     /* WireKick — the line is this ring's reader */
 #include "vmm.h"
-
-#ifndef CONFIG_PRINTTOFILE
-
-bool LogRingIsKept(void) { return false; }
-
-#else
 
 _Static_assert((LOGRING_CAPACITY & (LOGRING_CAPACITY - 1)) == 0,
                "LOGRING_CAPACITY must be a power of two — the position maps "
@@ -35,12 +30,27 @@ static char       g_ring[LOGRING_CAPACITY];
  * position names the same byte for the life of the boot. */
 static uint64_t   g_written;
 
-bool LogRingIsKept(void) { return true; }
-
 void LogRingLockInit(void)
 {
     spinlock_init(&g_ring_lock);
 }
+
+void LogRingForceRelease(void)
+{
+    spin_force_release(&g_ring_lock);
+}
+
+uint64_t LogRingWritten(void)
+{
+    return __atomic_load_n(&g_written, __ATOMIC_ACQUIRE);
+}
+
+char LogRingByteAt(uint64_t pos)
+{
+    return g_ring[pos & LOGRING_MASK];
+}
+
+#ifdef CONFIG_PRINTTOFILE
 
 /* ==========================================================================
  * The carry-over window. See klib_logring.h for what it survives and what it
@@ -233,24 +243,35 @@ uint64_t LogKeepPreviousRead(uint64_t from, void *dst, uint64_t max,
     return copied;
 }
 
+/* The same byte, into the window the next boot will find. Two stores
+ * instead of one, both into RAM, and the counter goes down with every byte
+ * rather than at some flush point — a machine that wedges never reaches a
+ * flush point, and that is the machine this exists for. */
+static inline void keep_put(char c)
+{
+    if (!g_keep_ok) return;
+    volatile LogKeepHeader *h = keep_header();
+    uint64_t n = h->bytes[g_keep_current];
+    keep_bank(g_keep_current)[n & LOGRING_MASK] = (uint8_t)c;
+    h->bytes[g_keep_current] = n + 1;
+}
+
+#else
+
+static inline void keep_put(char c) { (void)c; }
+
+#endif /* CONFIG_PRINTTOFILE */
+
 void LogRingPut(char c)
 {
     spin_lock(&g_ring_lock);
     g_ring[g_written & LOGRING_MASK] = c;
-    g_written++;
-
-    /* The same byte, into the window the next boot will find. Two stores
-     * instead of one, both into RAM, and the counter goes down with every byte
-     * rather than at some flush point — a machine that wedges never reaches a
-     * flush point, and that is the machine this exists for. */
-    if (g_keep_ok) {
-        volatile LogKeepHeader *h = keep_header();
-        uint64_t n = h->bytes[g_keep_current];
-        keep_bank(g_keep_current)[n & LOGRING_MASK] = (uint8_t)c;
-        h->bytes[g_keep_current] = n + 1;
-    }
-
+    __atomic_store_n(&g_written, g_written + 1u, __ATOMIC_RELEASE);
+    keep_put(c);
     spin_unlock(&g_ring_lock);
+
+    /* The lock is down: the wire takes its own, and never this one. */
+    WireKick();
 }
 
 uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
@@ -296,5 +317,3 @@ uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
     if (out_written) *out_written = written;
     return copied;
 }
-
-#endif /* CONFIG_PRINTTOFILE */

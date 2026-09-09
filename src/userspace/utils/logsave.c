@@ -12,8 +12,9 @@
  *   logsave            -> watch.log
  *   logsave NAME       -> NAME
  *
- * A kernel built without `PRINTTOFILE=on` keeps no ring, refuses the read
- * open, and is told so by name rather than handing back an empty file.
+ * Every kernel keeps the ring — it is the serial line's source — so the read
+ * is refused only by a kernel with no log door at all, and that is said by
+ * name rather than by handing back an empty file.
  */
 #include "box/print.h"
 #include "box/luggage.h"
@@ -43,8 +44,7 @@ int main(void)
     Current *log = current_open_ex("log:file", CURRENT_READ, 0, 0, &why);
     if (!log) {
         if (why == ERR_UNSUPPORTED) {
-            println("This kernel does not keep what it says. Build it with "
-                    "PRINTTOFILE=on and the log will be here.");
+            println("This kernel has no door to what it says.");
         } else {
             printf("The log could not be opened for reading (error %u)\n",
                    (unsigned)why);

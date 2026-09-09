@@ -22,8 +22,9 @@
  *   - it sees NOTHING after power was removed. Holding the power button for
  *     four seconds cuts the rails and takes RAM with them. On a wedged
  *     machine, press RESET, not power.
- *   - a kernel built without PRINTTOFILE=on keeps no ring at all, and says so
- *     by name rather than handing back an empty file.
+ *   - a kernel built without PRINTTOFILE=on carries nothing through a reset
+ *     (the ring of THIS run it keeps regardless), and says so by name rather
+ *     than handing back an empty file.
  */
 #include "box/print.h"
 #include "box/luggage.h"
@@ -51,7 +52,7 @@ int main(void)
     Current *log = current_open_ex("log:previous", CURRENT_READ, 0, 0, &why);
     if (!log) {
         if (why == ERR_UNSUPPORTED) {
-            println("This kernel does not keep what it says. Build it with "
+            println("This kernel carries nothing through a reset. Build it with "
                     "PRINTTOFILE=on and the last run will be here.");
         } else {
             printf("The previous run's log could not be opened (error %u)\n",

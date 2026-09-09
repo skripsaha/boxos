@@ -1,4 +1,5 @@
 #include "idt.h"
+#include "serial.h"      /* WireForceRelease / WireDrain — the halt is heard */
 #include "gdt.h"
 #include "tss.h"
 #include "klib.h"
@@ -970,6 +971,11 @@ void exception_handler(interrupt_frame_t *frame)
 
     kprintf("====================================================================\n");
     kprintf("System halted.\n");
+
+    /* Everything said, onto the wire: interrupts are off, so the line cannot
+     * drive itself, and the locks may be this core's own. */
+    WireForceRelease();
+    WireDrain();
 
     /* Halt all cores via IPI_PANIC. Guarded on the LAPIC actually being
      * mapped: lapic_send_ipi writes through the same MMIO window whose absence
