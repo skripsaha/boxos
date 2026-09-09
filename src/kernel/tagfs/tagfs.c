@@ -3626,6 +3626,20 @@ static int tagfs_query_files_inside(const char *query_strings[], uint32_t count,
 
 static int tagfs_list_all_files_inside(uint32_t *out_file_ids, uint32_t max_results);
 
+uint32_t tagfs_file_ceiling(void)
+{
+    if (!tagfs_enter())
+        return 0;
+    /* Under g_state.lock for the same reason the scan bound below is: create
+     * bumps next_file_id under it, and a lock-free read can see the value
+     * from before a create that has already returned to its caller. */
+    spin_lock(&g_state.lock);
+    uint32_t ceiling = g_state.ledger.next_file_id;
+    spin_unlock(&g_state.lock);
+    tagfs_leave();
+    return ceiling;
+}
+
 int tagfs_list_all_files(uint32_t *out_file_ids, uint32_t max_results)
 {
     if (!tagfs_enter())

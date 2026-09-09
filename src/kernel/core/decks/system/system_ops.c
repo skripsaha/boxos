@@ -877,12 +877,18 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
         augment[op->param_size] = '\0';
     }
 
-    /* Locate the file by tag-name + executable tag. */
-    #define EXEC_SCAN_MAX 256
-    uint32_t *file_ids = kmalloc(EXEC_SCAN_MAX * sizeof(uint32_t));
+    /* Locate the file by tag-name + executable tag: every file that carries
+     * the name as a tag, asked of the index, with room for every one of them.
+     * The volume knows how many files it has and that is the only ceiling
+     * there is. What stood here was a scan of the first 256 files of the
+     * volume, so the 257th program was "not found" — and nothing said so. */
+    uint32_t room = tagfs_file_ceiling();
+    if (room == 0) return ERR_FILE_NOT_FOUND;
+    uint32_t *file_ids = kmalloc(room * sizeof(uint32_t));
     if (!file_ids) return ERR_NO_MEMORY;
 
-    int file_count = tagfs_list_all_files(file_ids, EXEC_SCAN_MAX);
+    const char *by_name[1] = { filename };
+    int file_count = tagfs_query_files(by_name, 1, file_ids, room);
 
     uint32_t found_id = 0;
     char     found_tags[PROCESS_TAG_SIZE];
@@ -896,15 +902,14 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
             continue;
         }
 
-        bool has_name = false, has_exec_tag = false;
+        bool has_exec_tag = false;
         for (uint16_t t = 0; t < meta.tag_count; t++) {
             char key[128];
             if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
-            if (strcmp(key, filename) == 0)                      has_name = true;
             if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
         }
 
-        if (has_name && has_exec_tag) {
+        if (has_exec_tag) {
             found_id = file_ids[i];
             size_t pos = 0;
             for (uint16_t t = 0; t < meta.tag_count; t++) {
