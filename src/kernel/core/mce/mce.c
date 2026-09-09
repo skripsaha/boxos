@@ -320,7 +320,7 @@ bool mce_handle(interrupt_frame_t *frame) {
             (void)MemTagApplyByPhys(poisoned_phys, 1, "mce:poisoned");
 
             /* Queue a deferred migration. The actual copy + PTE swap +
-             * TLB shootdown runs in K-Core context via irq_defer (the
+             * TLB shootdown runs in K-Core context off the slot's baton (the
              * #MC IST stack can't safely take pmm_alloc / region-bucket
              * locks). Failure to queue (ring saturation) is non-fatal:
              * the page stays poisoned in the PMM bitmap, so the owning

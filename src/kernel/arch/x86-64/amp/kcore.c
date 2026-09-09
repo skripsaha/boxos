@@ -14,7 +14,6 @@
 #include "pmm.h"
 #include "perf_trace.h"
 #include "amp.h"
-#include "irq_defer.h"
 #include "error.h"
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 #include "nightwatch.h"
@@ -290,20 +289,16 @@ void kcore_run_loop(void)
             kcore_process_entry(proc);
         }
 
-        /* Drain async storage completions on this K-Core (never-drop MPSC).
-         * Read + write state-machine steps that came back from an AHCI IRQ,
-         * plus port-recovery COMRESETs, land here; running them in the same
-         * loop body keeps cache-locality with the pocket pump. Single-
-         * consumer: each K-Core drains only its own queue. All completions
-         * route to the drain core, so non-drain queues are a one-load
+        /* Drain the batons on this K-Core (never-drop MPSC): storage
+         * completions that came back from an IRQ, port-recovery COMRESETs,
+         * park deadlines, and every knock — the Touch IRQ ring, the power
+         * button, a GHES source, an MCE slot. Same K-Core context, so the
+         * continuations can kmalloc / tagfs / process_walk safely; running
+         * them in the same loop body keeps cache-locality with the pocket
+         * pump. Single-consumer: each K-Core drains only its own queue. All
+         * passes route to the drain core, so non-drain queues are a one-load
          * early-out. */
         BatonPump(my_idx);
-
-        /* Universal IRQ-defer drain — runs SCI/GPE/AHCI bottom-halves
-         * that the IRQ stowed away with irq_defer(). Same K-Core
-         * context, so handlers can kmalloc / tagfs / process_walk
-         * safely. */
-        irq_defer_pump(my_idx);
 
         /* USB hubs, when one has reported a change on its ports.
          *
@@ -393,14 +388,12 @@ void kcore_run_loop(void)
          * interrupt shadow defers delivery until after HLT executes — so an IPI
          * that arrived under CLI wakes us the instant we sleep.
          *
-         * Storage async completions ARE re-checked (BatonPending):
-         * their never-drop node can be posted cross-core (an App-Core token
-         * handoff), which also sends IPI_WAKE — and the re-check closes the
-         * post-pump / pre-CLI window so a completion that landed there is never
-         * left queued across a HLT (AHCI port recovery rides the same storage
-         * queue, so it is covered too). Other irq-defer work (SCI/GPE/ATA) is
-         * fed by its own device IRQ, which wakes HLT directly, so it needs no
-         * re-check.
+         * Batons ARE re-checked (BatonPending): a never-drop node can be
+         * posted cross-core (an App-Core token handoff, an xHCI MSI on another
+         * core), which also sends IPI_WAKE — and the re-check closes the
+         * post-pump / pre-CLI window so a pass that landed there is never left
+         * queued across a HLT. A same-core pass comes from an interrupt, which
+         * wakes HLT itself.
          *
          * (Before the K-Core timer was masked, the 100 Hz tick papered over
          * this race by waking every 10 ms; this is the proper fix.) */
@@ -408,27 +401,14 @@ void kcore_run_loop(void)
          * CLI so the mark is never held across the sleep decision. */
         nightwatch_core_idle(my_idx);
 
-        /* Deferred work is re-checked here for the same reason as the two
-         * above, and it was the one thing this gate did not ask about.
-         *
-         * A device interrupt that lands between the pump at the top of this
-         * loop and the CLI below hands its bottom half to irq_defer and
-         * returns — leaving nothing in the pocket queue and nothing in the
-         * storage queue, which is all this gate used to look at. The K-Core
-         * then slept on a ring holding work, and with its LAPIC timer masked
-         * there is no periodic wake to save it: the item waited for an
-         * unrelated interrupt that might never come. Measured — a program
-         * being read off a stick throttled to 512 bytes a second sat in
-         * PROC_WAITING for 248 seconds with every core idle, and Nightwatch
-         * named it: "ring holds head=0 tail=1, yet this process still waits".
-         *
-         * It stayed hidden while a waiting shell spun: the constant syscall
-         * traffic woke these cores often enough that the drain always came
-         * round. Waits that actually sleep took that away, which is the right
-         * trade and the reason this line has to exist now. */
+        /* Measured, when interrupt work still lived in a ring of its own that
+         * this gate did not ask about: a program being read off a stick
+         * throttled to 512 bytes a second sat in PROC_WAITING for 248 seconds
+         * with every core idle, and Nightwatch named it ("ring holds head=0
+         * tail=1, yet this process still waits"). Everything an interrupt
+         * hands over now rides a baton, and the baton queue is asked. */
         __asm__ volatile("cli");
-        if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) ||
-            irq_defer_pending(my_idx) != 0) {
+        if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx)) {
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
             __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */

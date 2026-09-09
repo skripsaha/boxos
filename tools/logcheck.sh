@@ -4613,6 +4613,262 @@ run_wiremut() {
 }
 
 # ===========================================================================
+# knock — an interrupt's event rides the ring and ONE knock; nothing drops
+# ===========================================================================
+#
+# An interrupt cannot publish where it stands, so it leaves the event in the
+# Touch IRQ ring and knocks; the drain core comes once per knock and reads
+# everything up to the producers' cursor. What stood between the ring and the
+# K-Core was a note per event in a ring of notes that could be full — and a
+# full ring of notes lost the event in silence, three ways (before its init,
+# when its chunk had no successor, after four tries in a race). The knock is
+# a baton embedded in the ring itself: nothing to allocate, nowhere to
+# overflow, and a burst of interrupts is one pass.
+#
+# The scenario: a boot on sixteen cores and on one (the idle/tick drain) must
+# hear the keyboard — a builtin AND an external program — with the ring never
+# saying it lost anything, and the baton self-test must have proven the knock
+# at boot (a thousand knocks, one pass; a knock after the open, one more).
+run_knock() {
+    echo "== knock: a keystroke rides the ring and one knock, on 16 cores and on one =="
+    build
+    if ! util_boot knock16 "STRICT=on CORES=16 MEM=8G" help "Show available commands" 20; then
+        bad "knock: never reached a shell (16c)"; return
+    fi
+    L="$SCRATCH/serial.knock16.log"
+    typed_ok "$L" \
+        && ok "knock (16c): a builtin answered the keyboard" \
+        || bad "knock (16c): 'help' was typed and nothing answered"
+    grep -q "\[BATON-TEST\] PASS (never-drop + exactly-once + FIFO + stub-re-anchor + knock)" build/serial.log \
+        && ok "knock (16c): the baton self-test proved the knock at boot" \
+        || bad "knock (16c): no baton self-test PASS with the knock at boot"
+    grep -q "\[TOUCH\] ERROR" "$L" \
+        && bad "knock (16c): the ring reports a loss on plain typing" \
+        || ok "knock (16c): the ring lost nothing"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "knock (16c): the kernel spoke of a stall or fault" \
+        || ok "knock (16c): no verdict, no panic"
+
+    if ! util_boot knock1 "STRICT=on CORES=1 MEM=2G" hw "TSC freq" 20; then
+        bad "knock: never reached a shell (1c)"; return
+    fi
+    L="$SCRATCH/serial.knock1.log"
+    grep -q "TSC freq" "$L" \
+        && ok "knock (1c): an external program was started from the keyboard through the idle/tick drain" \
+        || bad "knock (1c): 'hw' was typed and never ran"
+    grep -q "\[TOUCH\] ERROR" "$L" \
+        && bad "knock (1c): the ring reports a loss on plain typing" \
+        || ok "knock (1c): the ring lost nothing"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "knock (1c): the kernel spoke of a stall or fault" \
+        || ok "knock (1c): no verdict, no panic"
+}
+
+# The oracle measured against itself: nobody knocks. The event is in the ring
+# and no visit ever comes for it — the machine boots and is deaf.
+knock_deaf_on() {
+    cp src/kernel/core/touch/touch.c "$SCRATCH/touch.c.knock.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/touch/touch.c"
+s = open(p).read()
+anchor = "    KnockOn(&g_touch_irq_knock);\n}\n"
+assert s.count(anchor) == 1, "knock mutation anchor missing"
+s = s.replace(anchor, "    /* logcheck mutation: nobody knocks */\n}\n", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/touch/touch.c || { echo "knock mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/touch/touch.c
+}
+
+knock_deaf_off() {
+    [ -f "$SCRATCH/touch.c.knock.bak" ] && cp "$SCRATCH/touch.c.knock.bak" src/kernel/core/touch/touch.c
+    sleep 1; touch src/kernel/core/touch/touch.c
+}
+
+run_knockmut() {
+    echo "== knockmut: nobody knocks — the machine must boot and be deaf, and the oracle must see it =="
+    knock_deaf_on; build
+    util_boot knockmut "STRICT=on CORES=4 MEM=4G" help "Show available commands" 8; local booted=$?
+    knock_deaf_off
+    if [ $booted -ne 0 ]; then bad "knockmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.knockmut.log"
+    if typed_ok "$L"; then
+        bad "knockmut: nobody knocked and the keyboard STILL answered — the oracle cannot see a dead ring"
+    else
+        ok "knockmut: with nobody knocking the keyboard is deaf — and the oracle sees it"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# knockstorm — more events than the ring, and every one of them delivered;
+# then the reader held back, the ring outrun, and the loss counted exactly
+# ===========================================================================
+#
+# One key held for five seconds through the monitor. The kernel's own
+# typematic repeat (PIT IRQ0, 33 ms) publishes some hundred and forty events
+# — more than two rings — and each one must reach the shell. The shell's echo
+# is the listener's account; the kernel's is said at the halt: published,
+# delivered, lost, still in the ring. Every event the keyboard published in
+# the session is an 'a' the shell echoed, plus the eight keys that ended the
+# line and typed `reboot` (Enter, six letters, Enter — the driver publishes
+# presses and repeats, never releases), so delivered = echoed + 8 exactly, and
+# published = delivered + lost + still. Under the mutation the reader stalls
+# three seconds on every visit: the ring is outrun, and the kernel must name
+# the loss with a number that the same two equations confirm.
+storm_session() {
+    # storm_session NAME "RUN-BG ARGS"
+    local name=$1 args=$2
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh raw "sendkey a 5000" >/dev/null 2>&1
+    sleep 7
+    # Enter: the line of a's becomes a command nobody knows, and the prompt
+    # comes back. Then `reboot`, key by key through the monitor with no echo
+    # check — under the mutation the echo lags the keys by design.
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt 60 ]; do
+        tail -n +$((MARK + 1)) build/serial.log | grep -q "Unknown command" && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 1
+    local k
+    for k in r e b o o t ret; do
+        ./tools/qemu-input.sh key "$k" >/dev/null 2>&1
+    done
+    i=0
+    while [ $i -lt 90 ]; do
+        grep -q "\[HALT\] Rebooting" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$name.log"
+    echo "$MARK" > "$SCRATCH/serial.$name.mark"
+    return 0
+}
+
+# Reads the two accounts out of a storm session's log and prints them as
+# shell assignments: E (a's the shell echoed on the storm line), P D L S (the
+# kernel's account at the halt), K (of those, delivered under the keyboard's
+# own name), X (the loss the kernel announced, -1 if it announced none).
+# Kernel lines that landed inside the echo are removed before counting.
+storm_numbers() {
+    python3 - "$1" "$2" <<'EOF2'
+import re, sys
+log = open(sys.argv[1]).read().replace("\r", "")
+mark = int(open(sys.argv[2]).read().strip())
+tail = "\n".join(log.split("\n")[mark:])
+clean = re.sub(r"\[[A-Z0-9 -]+\][^\n]*\n", "", tail)
+i = clean.find("~ a")
+E = clean[i:].split("\n")[0].count("a") if i >= 0 else 0
+acc = re.search(r"interrupt ring since boot: published (\d+), delivered (\d+), lost (\d+), still in the ring (\d+)", log)
+P, D, L, S = (int(x) for x in acc.groups()) if acc else (-1, -1, -1, -1)
+err = re.search(r"\[TOUCH\] ERROR: (\d+) interrupt event\(s\) were overwritten", log)
+X = int(err.group(1)) if err else -1
+kb = re.search(r"delivered by name: keyboard (\d+)", log)
+K = int(kb.group(1)) if kb else -1
+names = " ".join(m.group(1) for m in re.finditer(r"delivered by name: (\S+ \d+)", log))
+print(f"E={E} P={P} D={D} L={L} S={S} X={X} K={K} NAMES='{names}'")
+EOF2
+}
+
+run_knockstorm() {
+    echo "== knockstorm: a key held five seconds — more events than two rings, every one delivered =="
+    build
+    if ! storm_session knockstorm "STRICT=on CORES=4 MEM=4G"; then
+        bad "knockstorm: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.knockstorm.log"
+    eval "$(storm_numbers "$L" "$SCRATCH/serial.knockstorm.mark")"
+    echo "   shell echoed $E a's; kernel: published $P delivered $D lost $L still $S; by name: $NAMES"
+    [ "$E" -ge 65 ] \
+        && ok "knockstorm: the shell received more events than the ring holds ($E a's)" \
+        || bad "knockstorm: only $E a's reached the shell — the storm did not outsize the ring"
+    grep -q "\[TOUCH\] ERROR" "$L" \
+        && bad "knockstorm: the ring reports a loss under a burst it should carry" \
+        || ok "knockstorm: the ring lost nothing"
+    [ "$P" -ge 0 ] \
+        && ok "knockstorm: the kernel gave its account at the halt" \
+        || bad "knockstorm: no ring account at the halt"
+    [ "$K" -eq $((E + 8)) ] \
+        && ok "knockstorm: keyboard events delivered ($K) = echoed ($E) + the 8 keys after the storm — the kernel's count is the shell's" \
+        || bad "knockstorm: keyboard events delivered $K but the shell echoed $E (+8 expected) — the kernel's account and the shell's disagree"
+    [ "$P" -eq $((D + L + S)) ] && [ "$L" -eq 0 ] && [ "$S" -eq 0 ] \
+        && ok "knockstorm: published = delivered, nothing lost, nothing left in the ring" \
+        || bad "knockstorm: published $P, delivered $D, lost $L, still $S — the account does not add up"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "knockstorm: the kernel spoke of a stall or fault" \
+        || ok "knockstorm: no verdict, no panic"
+}
+
+# The oracle measured against itself: the reader stalls three seconds on
+# every visit. During the first stall the held key outruns the ring; the
+# oldest events are overwritten, and the kernel must say how many — a number
+# the shell's echo and the halt account confirm.
+storm_stall_on() {
+    cp src/kernel/core/touch/touch.c "$SCRATCH/touch.c.storm.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/touch/touch.c"
+s = open(p).read()
+anchor = "    KnockOpen(&g_touch_irq_knock);\n\n    for (;;) {\n        uint32_t claimed = __atomic_load_n(&g_touch_irq_claimed, __ATOMIC_ACQUIRE);\n"
+assert s.count(anchor) == 1, "storm mutation anchor missing"
+stall = ("    KnockOpen(&g_touch_irq_knock);\n"
+         "    {   /* logcheck mutation: the reader stalls three seconds on every visit */\n"
+         "        uint64_t until = clockboard_uptime_ms() + 3000u;\n"
+         "        while (clockboard_uptime_ms() < until) __asm__ volatile(\"pause\");\n"
+         "    }\n\n    for (;;) {\n        uint32_t claimed = __atomic_load_n(&g_touch_irq_claimed, __ATOMIC_ACQUIRE);\n")
+s = s.replace(anchor, stall, 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/touch/touch.c || { echo "storm mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/touch/touch.c
+}
+
+storm_stall_off() {
+    [ -f "$SCRATCH/touch.c.storm.bak" ] && cp "$SCRATCH/touch.c.storm.bak" src/kernel/core/touch/touch.c
+    sleep 1; touch src/kernel/core/touch/touch.c
+}
+
+run_knockstormmut() {
+    echo "== knockstormmut: the reader stalls, the ring is outrun, and the loss must be named exactly =="
+    storm_stall_on; build
+    storm_session knockstormmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
+    storm_stall_off
+    if [ $booted -ne 0 ]; then bad "knockstormmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.knockstormmut.log"
+    eval "$(storm_numbers "$L" "$SCRATCH/serial.knockstormmut.mark")"
+    echo "   shell echoed $E a's; kernel: published $P delivered $D lost $L still $S; announced $X; by name: $NAMES"
+    [ "$X" -ge 1 ] \
+        && ok "knockstormmut: the kernel said the ring was outrun and named the loss ($X)" \
+        || bad "knockstormmut: the ring was outrun and nothing was said"
+    [ "$L" -ge 1 ] && [ "$P" -eq $((D + L + S)) ] && [ "$S" -eq 0 ] \
+        && ok "knockstormmut: the halt account carries the loss and adds up (published $P = delivered $D + lost $L)" \
+        || bad "knockstormmut: the halt account does not add up (published $P, delivered $D, lost $L, still $S)"
+    [ "$K" -eq $((E + 8)) ] \
+        && ok "knockstormmut: keyboard events delivered ($K) = echoed ($E) + 8 — what the kernel counts as delivered is exactly what the shell received" \
+        || bad "knockstormmut: keyboard events delivered $K but the shell echoed $E (+8 expected) — the count of the loss is not true"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "knockstormmut: the kernel spoke of a stall or fault" \
+        || ok "knockstormmut: no verdict, no panic"
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
 # deadline — a timed park's ERR_TIMEOUT rides the process's own baton
 # ===========================================================================
 #
@@ -4828,6 +5084,10 @@ case "${1:-both}" in
     stashmut)   run_stashmut ;;
     wire)       run_wire ;;
     wiremut)    run_wiremut ;;
+    knock)      run_knock ;;
+    knockmut)   run_knockmut ;;
+    knockstorm) run_knockstorm ;;
+    knockstormmut) run_knockstormmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4850,8 +5110,8 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

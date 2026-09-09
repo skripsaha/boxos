@@ -3,7 +3,6 @@
 #include "amp.h"
 #include "lapic.h"
 #include "irqchip.h"
-#include "irq_defer.h"
 #include "process.h"
 #include "scheduler.h"
 #include "tagfs.h"
@@ -30,13 +29,13 @@ static void halt_delay_ms(uint32_t ms)
 }
 
 /*
- * Drain in-flight async storage I/O before we kill cores. Three targets:
- *   1. Per-core irq_defer rings — SCI/GPE/ATA/AHCI-recovery bottom-halves.
- *   2. The never-drop storage completion queue — read/write state-machine
- *      continuations posted by the AHCI IRQ that haven't been consumed yet
- *      (a pending WRITE completion still owes its tagfs commit, so this
- *      must drain before we cut power or data is lost).
- *   3. AHCI port command issue (CI/SACT) — commands the controller is
+ * Drain in-flight async storage I/O before we kill cores. Two targets:
+ *   1. The never-drop baton queue — read/write state-machine continuations
+ *      posted by the AHCI IRQ that haven't been consumed yet (a pending
+ *      WRITE completion still owes its tagfs commit, so this must drain
+ *      before we cut power or data is lost), and every other pass an
+ *      interrupt made: SCI/GPE, AHCI recovery, the Touch IRQ ring's knock.
+ *   2. AHCI port command issue (CI/SACT) — commands the controller is
  *      still executing.
  * We poll all until idle or the timeout elapses. Other cores are still
  * live at this point (cli not yet executed) so their guide loops keep
@@ -60,18 +59,14 @@ static void halt_drain_async_writes(void)
          * and its write's tagfs-commit continuation lost. Draining our own
          * index each pass is a valid single-consumer pump (me == this core) and
          * a harmless empty early-out on a non-drain core; other cores keep
-         * pumping their own queues from their guide loops. irq_defer is
-         * multi-consumer, but our own ring is likewise stranded here, so pump
-         * it too. */
+         * pumping their own queues from their guide loops. */
         BatonPump(me);
-        irq_defer_pump(me);
 
-        /* Pending irq_defer bottom-halves AND unconsumed never-drop storage
-         * completions, across all cores. BatonOutstanding is
+        /* Unconsumed never-drop passes, across all cores. BatonOutstanding is
          * counter-based, so it is safe to poll from this (possibly non-owning)
          * core while the drain core keeps pumping. */
         for (uint8_t i = 0; i < g_amp.total_cores; i++) {
-            if (irq_defer_pending(i) > 0 || BatonOutstanding(i)) {
+            if (BatonOutstanding(i)) {
                 any = true;
                 break;
             }
@@ -237,6 +232,11 @@ void system_halt(bool reboot)
     /* Drain BEFORE cli — other cores need their guide loops alive to
      * pump pending continuations from the AHCI IRQ. */
     halt_drain_async_writes();
+
+    /* What the interrupts said this session and what of it was delivered —
+     * the one place the account is complete, because nothing knocks after
+     * the drain above and the reader is done. */
+    TouchIrqRingAccount();
 
     __asm__ volatile("cli");
 

@@ -2,7 +2,7 @@
  * MCE Page Migration — integration test
  *
  * Exercises the full migrate path synchronously (mce_migrate_run_sync,
- * which bypasses irq_defer but uses the same perform() core) so we can
+ * which bypasses the baton hop but uses the same perform() core) so we can
  * observe side effects in the same test process.
  *
  * Scenarios covered:

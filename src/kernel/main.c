@@ -33,7 +33,6 @@
 #include "storage_deck.h"
 #include "kernel_config.h"
 #include "ready_queue.h"
-#include "irq_defer.h"
 #include "xhci.h"
 #include "xhci_interrupt.h"
 #include "boardroom.h"
@@ -438,17 +437,10 @@ void kernel_main(void)
     debug_printf("[INIT] AMP Core Detection...\n");
     amp_init();
 
-    /* Deferred-work rings must exist before any IRQ handler that
-     * defers can fire. acpi_sci_register above only installed the
-     * handler with irqchip; the LAPIC still has the SCI vector
-     * masked until acpi_enable() runs much later. So initialising
-     * here is well before the first IRQ-with-defer can land. */
-    debug_printf("[INIT] IRQ defer rings...\n");
-    irq_defer_init();
-
-    /* The batons right behind it, on every core count: a park deadline is
-     * passed on one from the very first timed wait, and a one-core box has
-     * no K-Core loop to make up for a queue that is not there. */
+    /* The batons, before the sti that opens the machine to interrupts, on
+     * every core count: a park deadline is passed on one from the very first
+     * timed wait, a keystroke knocks on one, and a one-core box has no K-Core
+     * loop to make up for a queue that is not there. */
     debug_printf("[INIT] Baton queues (never-drop, per core)...\n");
     BatonInit();
 
@@ -616,14 +608,14 @@ void kernel_main(void)
      * affected page to a fresh phys + atomically swaps PTEs in every
      * cabin that mapped the poisoned page. Initialization is gated on
      * (a) MemTag being up so MemRegion reverse-map is queryable, and
-     * (b) irq_defer being up so the worker can be enqueued from #MC
+     * (b) the batons being up so the slot's pass can be made from #MC
      * IST. Touch resolution happens here so the worker's publish path
      * uses cached handles. */
     {
         extern void mce_migrate_init(void);
         mce_migrate_init();
         /* Kernel-side test: exercises the full migrate path
-         * synchronously (no irq_defer hop) so we can observe side
+         * synchronously (no baton hop) so we can observe side
          * effects on real vmm_context + MemRegion attaches.
          * Real-HW MCE injection (APEI EINJ) is the integration test;
          * this validates correctness without real silicon. */
@@ -648,6 +640,12 @@ void kernel_main(void)
         apei_ghes_runtime_init();
         extern void ApeiGhesTest(void);
         ApeiGhesTest();
+
+        /* The SCI line opens only now: its handler says events under names
+         * that exist since guide_init, and consults the APEI runtime that
+         * exists since the line above. A level-triggered SCI raised before
+         * this has been waiting in the IOAPIC. */
+        if (acpi_err == ACPI_OK) acpi_sci_arm();
 
         /* Sort the .uaccess_fixup table so the #PF handler can
          * binary-search instead of linear-scan it. Must run before any
@@ -912,7 +910,7 @@ void kernel_main(void)
     /* Ф26 BMIDE watchdog TIER-1 proof: mask a channel's IOAPIC pin so a real
      * disk completion latches BMISR.IRQ with no CPU IRQ, then verify
      * bmide_watchdog_scan recovers the "lost interrupt". Everything it needs is
-     * up by here (multi-core, irq_defer, BMIDE); skips cleanly on single-core
+     * up by here (multi-core, BMIDE); skips cleanly on single-core
      * or when AHCI owns block I/O. */
     {
         extern error_t bmide_watchdog_selftest(void);

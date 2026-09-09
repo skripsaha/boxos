@@ -16,7 +16,7 @@
 #include "touch.h"
 #include "ata.h"
 #include "amp.h"
-#include "irq_defer.h"
+#include "baton.h"      /* BatonPump — the drain core keeps pumping while it waits for a lock */
 #include "cow/cow.h"
 #include "braid/braid.h"
 #include "dedup/dedup.h"
@@ -4014,16 +4014,18 @@ static int tagfs_write_inside(TagFSFileHandle *handle, const void *buffer, uint6
      * the pending BMIDE IRQ can fire on the BSP and stamp the holder's
      * `landing` slot; the holder (spinning in ata_dma_sync) claims it, runs
      * its completion, flips cmd.done, and releases. Opening the IRQ window is
-     * the load-bearing part; the irq_defer_pump below is now vestigial for
-     * BMIDE (the holder self-drains via landing) but harmless — it still
-     * drains this core's other deferred work. Uncontended fast path is
+     * the load-bearing part for BMIDE (the holder self-drains via landing).
+     * The pump beside it is for the drain core: a holder on another core may
+     * be waiting for a continuation that only the drain core can run, and
+     * the drain core standing here must not stop running them. On any other
+     * core the pump is a one-load early-out. Uncontended fast path is
      * unchanged — trylock succeeds first try. */
     if (handle->ofe)
     {
         if (!spin_trylock(&handle->ofe->write_lock)) {
             uint8_t self_core = amp_get_core_index();
             while (!spin_trylock(&handle->ofe->write_lock)) {
-                irq_defer_pump(self_core);
+                BatonPump(self_core);
                 cpu_pause();
             }
         }
@@ -4433,7 +4435,7 @@ static int tagfs_truncate_file_inside(uint32_t file_id, uint64_t new_size)
         if (!spin_trylock(&handle->ofe->write_lock)) {
             uint8_t self_core = amp_get_core_index();
             while (!spin_trylock(&handle->ofe->write_lock)) {
-                irq_defer_pump(self_core);
+                BatonPump(self_core);
                 cpu_pause();
             }
         }

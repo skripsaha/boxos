@@ -19,7 +19,7 @@
 #include "kcore.h"
 #include "lapic.h"
 #include "irqchip.h"
-#include "irq_defer.h"
+#include "baton.h"      /* Knock — the one pass for the IRQ ring */
 #include "kernel_config.h"
 #include "manifest_exec.h"
 #include "boxos_crate.h"
@@ -1103,30 +1103,36 @@ void TouchPublish(const char *tag, const void *kpayload, uint32_t plen)
  * IRQ-context publisher — TouchPublishIrqPair
  *
  * Drivers running in IRQ context (PS/2 IRQ1, PIT IRQ0 software repeat, xHCI
- * MSI hot-plug, future MSI/IOAPIC publishers) hand off to a K-Core via the
- * shared irq_defer subsystem rather than touching kmalloc / pmm_alloc /
- * vmm_map_page / per-bucket spinlocks from interrupt context. This is the
- * same hazard class closed for AHCI/SCI/APEI in `irq_defer_done_2026_05_17`
- * — keyboard and xHCI were never migrated, and that regression is what
- * this commit closes.
+ * MSI hot-plug, the ACPI SCI, a GHES walk) cannot publish where they stand:
+ * TouchPublishPair takes per-bucket spinlocks, may kmalloc a leaf or a
+ * snapshot, and maps pages in the target's cabin — all of it under locks
+ * that non-IRQ code on the same core may hold. So an interrupt leaves the
+ * event in a ring slot and knocks; the K-Core that owns the drain queue
+ * (the BSP) comes, reads every slot up to the producers' cursor, and
+ * publishes each in the order it was claimed.
  *
- * The slot ring is a static array claimed by fetch_add: an interrupt can
- * neither wait for room nor allocate, so a burst that outruns the K-Cores
- * wraps the producer onto a slot whose event has not been read yet, and that
- * event is gone. It used to go in silence, with a count of wraps as the only
- * hint. Now every slot carries its generation: the K-Core, arriving at a slot
- * that no longer holds the event it was sent for, counts the loss exactly and
- * says it out loud. Nothing is made rarer by this, and nothing is hidden.
+ * The ring is static and claimed by fetch_add: an interrupt can neither
+ * wait for room nor allocate. Its size is the one number here, and it is a
+ * budget, not a decision — nothing is decided when it runs out. When the
+ * interrupts outrun the K-Core by a whole ring the oldest events are
+ * overwritten, and the K-Core counts EXACTLY how many and says so. Every
+ * slot carries its generation (1 + claim index), written first, and a
+ * `done` mark equal to the generation, written last: the reader knows a
+ * slot it reached is still being written (the knock for it follows), and a
+ * slot it copied was overwritten under its hands (the generation changed —
+ * the copy is discarded and counted, never published torn).
  *
- * Payload is bounded at TOUCH_IRQ_PAYLOAD_MAX bytes. All current IRQ-side
- * publishers (kbd 3 B event, xhci 8 B port event, acpi 2 B sts, ata 24 B
- * err) fit comfortably; a payload that does not is cut, and the K-Core says
- * so — a cut nobody hears of is a corrupted event.
+ * One Knock for the whole ring (baton.h): a burst of interrupts is one pass,
+ * the reader opens the door once per visit and takes everything, and an
+ * interrupt that lands after the open brings the next visit. Nothing is
+ * allocated on the way and the pass cannot be dropped for want of a slot —
+ * what used to stand here was a note per event in a ring of notes that
+ * could be full, and a full ring of notes lost the event in silence.
  *
- * The K-Core handler is touch_irq_deferred. It is handed the event's
- * generation, not the slot: it finds the slot, copies it, and checks the
- * generation before and after the copy — the seqlock reading — so a slot
- * overwritten under its hands is discarded and said, never published torn.
+ * Payload is bounded at TOUCH_IRQ_PAYLOAD_MAX bytes. All IRQ-side publishers
+ * (kbd 3 B event, xhci 8 B port event, acpi 2 B word, apei 64 B) fit; a
+ * payload that does not is cut, and the K-Core says so — a cut nobody hears
+ * of is a corrupted event.
  * ──────────────────────────────────────────────────────────────────────── */
 
 #define TOUCH_IRQ_PAYLOAD_MAX  64u
@@ -1138,7 +1144,8 @@ _Static_assert(CONFIG_TOUCH_IRQ_RING_SIZE >= 16U,
                "CONFIG_TOUCH_IRQ_RING_SIZE too small for typical IRQ burst");
 
 typedef struct {
-    uint32_t gen;         /* 1 + the producer's claim index; 0 = never used */
+    uint32_t gen;         /* 1 + the producer's claim index; 0 = never used. Written FIRST. */
+    uint32_t done;        /* == gen once every field below is in place. Written LAST. */
     TouchTag full_id;
     TouchTag bare_id;
     uint16_t flags;
@@ -1149,9 +1156,46 @@ typedef struct {
 } TouchIrqSlot;
 
 static TouchIrqSlot      g_touch_irq_ring[CONFIG_TOUCH_IRQ_RING_SIZE];
-static volatile uint32_t g_touch_irq_idx;
-static volatile uint64_t g_touch_irq_lost;       /* events overwritten before a K-Core read them */
-static volatile uint64_t g_touch_irq_said_ms;    /* the last time the K-Core spoke of the ring */
+static volatile uint32_t g_touch_irq_claimed;    /* producers' cursor: slots claimed since boot */
+static uint32_t          g_touch_irq_read;       /* reader's cursor — the drain core only */
+static volatile uint64_t g_touch_irq_delivered;  /* events the reader published */
+static volatile uint64_t g_touch_irq_lost;       /* events overwritten before the reader read them */
+static volatile uint64_t g_touch_irq_said_ms;    /* the last time the reader spoke of the ring */
+
+/* What the reader delivered, by name, for the account at a halt: "163
+ * events" explains nothing on a board, "keyboard 150, acpi:gpe 13" does.
+ * Reader-owned; grows by one node per name ever seen; names are resolved
+ * only when the account is said. */
+typedef struct TouchIrqTally {
+    TouchTag              id;
+    uint64_t              count;
+    struct TouchIrqTally *next;
+} TouchIrqTally;
+static TouchIrqTally    *g_touch_irq_tally;
+static volatile uint64_t g_touch_irq_untallied;  /* delivered while no node could be made */
+
+static void touch_irq_tally(TouchTag full_id, TouchTag bare_id)
+{
+    TouchTag id = (full_id != TOUCH_TAG_INVALID) ? full_id : bare_id;
+    for (TouchIrqTally *t = g_touch_irq_tally; t; t = t->next) {
+        if (t->id == id) { t->count++; return; }
+    }
+    TouchIrqTally *n = (TouchIrqTally *)kmalloc(sizeof(*n));
+    if (!n) {
+        __atomic_fetch_add(&g_touch_irq_untallied, 1, __ATOMIC_RELAXED);
+        return;
+    }
+    n->id    = id;
+    n->count = 1;
+    n->next  = g_touch_irq_tally;
+    __atomic_store_n(&g_touch_irq_tally, n, __ATOMIC_RELEASE);
+}
+
+static void touch_irq_ring_serve(void *ctx);
+static Knock g_touch_irq_knock = {
+    .baton  = { .next = NULL, .run = touch_irq_ring_serve, .ctx = NULL },
+    .raised = 0,
+};
 
 /* Once per burst, so a storm cannot drown the console it warns. */
 static bool touch_irq_may_speak(void)
@@ -1163,41 +1207,120 @@ static bool touch_irq_may_speak(void)
                                        false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
 }
 
-/* K-Core context. The slot the generation names, copied and checked. */
-static void touch_irq_deferred(void *ctx)
+/* The reader's own account of a loss. `claimed` is the producers' cursor as
+ * the reader saw it; with the reader's cursor and its two counters the four
+ * numbers add up exactly (published = delivered + lost + still in the ring),
+ * so what is said can be checked against what the listeners received. */
+static void touch_irq_say_lost(uint32_t lost_now, uint32_t claimed)
 {
-    uint32_t      gen = (uint32_t)(uintptr_t)ctx;
-    uint32_t      idx = (gen - 1u) & (CONFIG_TOUCH_IRQ_RING_SIZE - 1);
-    TouchIrqSlot *s   = &g_touch_irq_ring[idx];
-    TouchIrqSlot  copy;
+    uint64_t lost = __atomic_add_fetch(&g_touch_irq_lost, lost_now, __ATOMIC_RELAXED);
+    if (!touch_irq_may_speak()) return;
+    kprintf("[TOUCH] ERROR: %u interrupt event(s) were overwritten before the K-Core "
+            "read them — the interrupts outran the K-Core by a whole ring of %u; "
+            "since boot: published %u, delivered %lu, lost %lu, still in the ring %u\n",
+            lost_now, (unsigned)CONFIG_TOUCH_IRQ_RING_SIZE, claimed,
+            (unsigned long)__atomic_load_n(&g_touch_irq_delivered, __ATOMIC_RELAXED),
+            (unsigned long)lost, claimed - g_touch_irq_read);
+}
 
-    bool intact = __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) == gen;
-    if (intact) {
+/* The visit: runs on the drain core, once per knock. Reads from the reader's
+ * cursor up to the producers' and publishes each event in claim order. */
+static void touch_irq_ring_serve(void *ctx)
+{
+    (void)ctx;
+    /* Exactly once, first: whoever knocks from here on brings the next visit
+     * (baton.h, Knock). */
+    KnockOpen(&g_touch_irq_knock);
+
+    for (;;) {
+        uint32_t claimed = __atomic_load_n(&g_touch_irq_claimed, __ATOMIC_ACQUIRE);
+        if (g_touch_irq_read == claimed) return;
+
+        /* Lapped: the producers claimed a whole ring past the reader. The
+         * slots between the reader and (claimed - ring) hold newer events
+         * now; what stood there is gone, and the count is exact. */
+        if (claimed - g_touch_irq_read > CONFIG_TOUCH_IRQ_RING_SIZE) {
+            uint32_t gone = claimed - g_touch_irq_read - CONFIG_TOUCH_IRQ_RING_SIZE;
+            g_touch_irq_read += gone;
+            touch_irq_say_lost(gone, claimed);
+        }
+
+        uint32_t      gen = g_touch_irq_read + 1u;
+        TouchIrqSlot *s   = &g_touch_irq_ring[g_touch_irq_read &
+                                              (CONFIG_TOUCH_IRQ_RING_SIZE - 1)];
+
+        uint32_t seen = __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE);
+        if (seen != gen) {
+            if ((int32_t)(seen - gen) > 0) {
+                /* A newer claim already took this slot: the event that was
+                 * the reader's to read is overwritten. */
+                g_touch_irq_read++;
+                touch_irq_say_lost(1, claimed);
+                continue;
+            }
+            /* Claimed — the producers' cursor passed it — but its producer has
+             * not begun writing. Its knock follows its writes; leave now. */
+            return;
+        }
+        if (__atomic_load_n(&s->done, __ATOMIC_ACQUIRE) != gen) return;   /* mid-write: same */
+
+        TouchIrqSlot copy;
         memcpy(&copy, s, sizeof(copy));
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        intact = __atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) == gen;
-    }
-    if (!intact) {
-        uint64_t lost = __atomic_add_fetch(&g_touch_irq_lost, 1, __ATOMIC_RELAXED);
-        if (touch_irq_may_speak()) {
-            kprintf("[TOUCH] ERROR: an interrupt's event (ring slot %u, generation %u) "
-                    "was overwritten before a K-Core read it — that event is gone, "
-                    "%lu lost since boot. The interrupts outran the K-Cores by a "
-                    "whole ring of %u\n",
-                    idx, gen, (unsigned long)lost, (unsigned)CONFIG_TOUCH_IRQ_RING_SIZE);
+        if (__atomic_load_n(&s->gen, __ATOMIC_ACQUIRE) != gen) {
+            /* Overwritten under the reader's hands — the copy may be torn.
+             * Discarded and counted, never published. */
+            g_touch_irq_read++;
+            touch_irq_say_lost(1, claimed);
+            continue;
         }
-        return;
+        g_touch_irq_read++;
+
+        if (copy.cut_from != 0 && touch_irq_may_speak()) {
+            kprintf("[TOUCH] ERROR: an interrupt's event (tag %u) carried %u bytes and the "
+                    "ring keeps %u — it was cut, and what its subscribers get is not what "
+                    "was published\n",
+                    (unsigned)(copy.full_id != TOUCH_TAG_INVALID ? copy.full_id : copy.bare_id),
+                    (unsigned)copy.cut_from, (unsigned)TOUCH_IRQ_PAYLOAD_MAX);
+        }
+        TouchPublishPair(copy.full_id, copy.bare_id,
+                         copy.plen ? copy.payload : NULL,
+                         copy.plen, copy.source_pid, copy.flags);
+        __atomic_fetch_add(&g_touch_irq_delivered, 1, __ATOMIC_RELAXED);
+        touch_irq_tally(copy.full_id, copy.bare_id);
     }
-    if (copy.cut_from != 0 && touch_irq_may_speak()) {
-        kprintf("[TOUCH] ERROR: an interrupt's event (tag %u) carried %u bytes and the "
-                "ring keeps %u — it was cut, and what its subscribers get is not what "
-                "was published\n",
-                (unsigned)(copy.full_id != TOUCH_TAG_INVALID ? copy.full_id : copy.bare_id),
-                (unsigned)copy.cut_from, (unsigned)TOUCH_IRQ_PAYLOAD_MAX);
+}
+
+/* The ring's account since boot, for whoever asks at the end (system_halt):
+ * four numbers that add up, so what the machine says it delivered can be
+ * checked against what its listeners received. The counters are the
+ * reader's; at a halt the reader is done, and any core may read them. */
+void TouchIrqRingAccount(void)
+{
+    uint32_t claimed = __atomic_load_n(&g_touch_irq_claimed, __ATOMIC_ACQUIRE);
+    uint32_t read    = __atomic_load_n(&g_touch_irq_read,    __ATOMIC_ACQUIRE);
+    kprintf("[TOUCH] interrupt ring since boot: published %u, delivered %lu, "
+            "lost %lu, still in the ring %u\n",
+            claimed,
+            (unsigned long)__atomic_load_n(&g_touch_irq_delivered, __ATOMIC_RELAXED),
+            (unsigned long)__atomic_load_n(&g_touch_irq_lost,      __ATOMIC_RELAXED),
+            claimed - read);
+    for (TouchIrqTally *t = __atomic_load_n(&g_touch_irq_tally, __ATOMIC_ACQUIRE);
+         t; t = t->next) {
+        const char *value = NULL;
+        const char *key   = TouchLogbookName(t->id, &value);
+        if (key && value) kprintf("[TOUCH]   delivered by name: %s:%s %lu\n", key, value,
+                                  (unsigned long)t->count);
+        else if (key)     kprintf("[TOUCH]   delivered by name: %s %lu\n", key,
+                                  (unsigned long)t->count);
+        else              kprintf("[TOUCH]   delivered by name: tag %u %lu\n",
+                                  (unsigned)t->id, (unsigned long)t->count);
     }
-    TouchPublishPair(copy.full_id, copy.bare_id,
-                     copy.plen ? copy.payload : NULL,
-                     copy.plen, copy.source_pid, copy.flags);
+    uint64_t untallied = __atomic_load_n(&g_touch_irq_untallied, __ATOMIC_RELAXED);
+    if (untallied) {
+        kprintf("[TOUCH]   %lu delivered with no memory to count them by name\n",
+                (unsigned long)untallied);
+    }
 }
 
 void TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
@@ -1218,11 +1341,11 @@ void TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
     /* MPSC claim: atomic_fetch_add gives every concurrent IRQ a unique
      * slot index; the generation is that index plus one, so 0 stays
      * "never used". */
-    uint32_t      raw = atomic_fetch_add_u32(&g_touch_irq_idx, 1);
+    uint32_t      raw = atomic_fetch_add_u32(&g_touch_irq_claimed, 1);
     uint32_t      gen = raw + 1u;
     TouchIrqSlot *s   = &g_touch_irq_ring[raw & (CONFIG_TOUCH_IRQ_RING_SIZE - 1)];
 
-    /* The generation goes in first, ahead of the payload: a K-Core in the
+    /* The generation goes in first, ahead of the payload: a reader in the
      * middle of copying this slot's previous event sees it change and
      * discards its copy rather than publish a torn one. */
     __atomic_store_n(&s->gen, gen, __ATOMIC_RELEASE);
@@ -1234,11 +1357,12 @@ void TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
     s->cut_from   = cut_from;
     s->source_pid = source_pid;
     if (plen > 0 && payload) memcpy(s->payload, payload, plen);
+    /* The mark goes in last, RELEASE: the reader's ACQUIRE load of it sees
+     * every field above. Then the knock — its CAS is a full fence, so a
+     * reader that opens after it and looks finds this slot done. */
+    __atomic_store_n(&s->done, gen, __ATOMIC_RELEASE);
 
-    /* irq_defer's release-store on its internal slot.ready is the
-     * publication fence between the writes above and the K-Core's
-     * deferred read. See irq_defer.c invariant (1). */
-    irq_defer(touch_irq_deferred, (void *)(uintptr_t)gen);
+    KnockOn(&g_touch_irq_knock);
 }
 
 /* ────────────────────────────────────────────────────────────────────────

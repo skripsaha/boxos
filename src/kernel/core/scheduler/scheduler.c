@@ -312,7 +312,7 @@ void scheduler_recalc_parameters(void)
      *
      *  2. Non-deterministic timing for any subsystem that derives
      *     its rate from g_timer_frequency (keyboard typematic ticks,
-     *     irq_defer batching, scheduler starvation thresholds). The
+     *     scheduler starvation thresholds). The
      *     timer rate becoming load-dependent makes every other
      *     subsystem load-dependent too.
      *

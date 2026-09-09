@@ -32,7 +32,6 @@
 #include "nightwatch.h"
 #include "clockboard.h"
 #include "pit.h"
-#include "irq_defer.h"
 #include "baton.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
@@ -450,7 +449,7 @@ void exception_handler(interrupt_frame_t *frame)
     /* NMI (vector 2) — server-class firmware can deliver APEI/GHES
      * notifications via NMI when a HEST source's notify type == 4. The
      * GHES runtime walks its NMI-notify sources, defers GESB processing
-     * to K-Core via irq_defer, and returns true if any source had a
+     * to a K-Core on each source's knock, and returns true if any source had a
      * pending block_status. We don't `return` after a consumed NMI —
      * the kernel still needs to clear the NMI source on the LAPIC/PIC
      * path (if any) and fall through to the standard NMI logging
@@ -1232,34 +1231,30 @@ void irq_handler(interrupt_frame_t *frame)
             bmide_watchdog_scan();
         }
 
-        /* Single-core mode: drain irq_defer here, when the PIT IRQ
+        /* Single-core mode: pump the batons here, when the PIT IRQ
          * interrupted USERSPACE code.
          *
-         * Background: irq_defer is the universal IRQ→K-Core hand-off
-         * for bottom-half work that touches kmalloc / tagfs / process
-         * tables. In multi-core configurations, K-Cores drain their
-         * own rings inside `kcore_run_loop`. Single-core mode does NOT
-         * run kcore_run_loop (the BSP runs userspace directly via
-         * scheduler), so without an explicit pump nothing ever drains
-         * the queued deferred handlers (keyboard Touch, USB Touch,
-         * SCI/GPE notifications, write_job completions, ...).
+         * Background: the baton is the one hand-off from an interrupt to a
+         * K-Core for work that touches kmalloc / tagfs / process tables. In
+         * multi-core configurations the drain core pumps inside
+         * `kcore_run_loop`. Single-core mode does NOT run kcore_run_loop
+         * (the BSP runs userspace directly via the scheduler), so without an
+         * explicit pump nothing would ever run the queued continuations
+         * (keyboard Touch, USB Touch, SCI/GPE notifications, write_job
+         * completions, a park deadline's ERR_TIMEOUT).
          *
-         * Lock-safety: the deferred handlers take heap_lock, tagfs
-         * locks, process_lock, etc. If the PIT IRQ interrupted a
-         * kernel-mode syscall holding one of those locks, pumping here
-         * would deadlock against the interrupted thread on the same
-         * core. We gate the pump on `(frame->cs & 3) == 3` — the
-         * interrupted code was in user mode (CS=USER_CS, RPL=3) — which
-         * guarantees no kernel lock is held. Multi-core takes the
-         * `amp_is_appcore()` branch above and does not pump here. */
+         * Lock-safety: the continuations take heap_lock, tagfs locks,
+         * process_lock, etc. If the PIT IRQ interrupted a kernel-mode
+         * syscall holding one of those locks, pumping here would deadlock
+         * against the interrupted thread on the same core. We gate the pump
+         * on `(frame->cs & 3) == 3` — the interrupted code was in user mode
+         * (CS=USER_CS, RPL=3) — which guarantees no kernel lock is held.
+         * Multi-core takes the `amp_is_appcore()` branch above and does not
+         * pump here. On one core this and the idle loop are the only drains,
+         * and the ring-3 gate is what keeps the two from ever interleaving
+         * on the single-consumer queue. */
         if (g_amp.total_cores == 1 && (frame->cs & 3) == 3)
         {
-            irq_defer_pump(0);
-            /* The batons too — a park deadline's ERR_TIMEOUT rides the
-             * process's own baton to be delivered here, and on one core
-             * this and the idle loop are the only drains. The ring-3 gate
-             * above is what keeps the two from ever interleaving on the
-             * single-consumer queue. */
             BatonPump(0);
         }
 

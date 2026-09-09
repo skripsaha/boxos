@@ -71,11 +71,6 @@
 #define CONFIG_BMIDE_WEDGE_SELFTEST 0
 #endif
 
-#define CONFIG_IRQ_DEFER_INITIAL_CAPACITY    16U
-#define CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY  1024U
-#define CONFIG_IRQ_DEFER_GROWTH_FACTOR       2U   // each new chunk = prev × this, up to MAX_CHUNK_CAPACITY
-#define CONFIG_IRQ_DEFER_PRODUCER_RETRIES    4    // bounded chunk-advance retries per irq_defer() call
-
 /* Cross-core TLB shootdown ACK wait (vmm.c shootdown_wait_acks). The M1 fix is
  * in spin_lock(): a core spinning for an unrelated spinlock services shootdowns
  * inline, so the initiator never waits on a spinning target. These only bound

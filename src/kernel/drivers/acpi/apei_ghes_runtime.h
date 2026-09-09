@@ -23,7 +23,7 @@
  *   NMI    (notify type 4) — apei_ghes_nmi_check() invoked from the NMI
  *                            entry in exception_handler. IRQ-safe;
  *                            defers the actual GESB walk to a K-Core
- *                            worker via irq_defer.
+ *                            worker on the source's knock (baton.h).
  *   SCI    (notify type 3) — apei_ghes_sci_check() invoked from
  *                            acpi_sci_handler alongside the GPE drain.
  *
@@ -87,7 +87,7 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
 void apei_ghes_poll_tick(void);
 
 /* NMI-context entry. Walks NMI-notify sources, defers GESB processing
- * via irq_defer (NMI is even more restrictive than #MC IST — must not
+ * on the source's knock (NMI is even more restrictive than #MC IST — must not
  * take spinlocks held by interrupted code). Returns true if any source
  * advertised a pending error. */
 bool apei_ghes_nmi_check(void);

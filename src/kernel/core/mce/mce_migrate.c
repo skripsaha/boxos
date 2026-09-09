@@ -4,7 +4,7 @@
  * See mce_migrate.h for design + race analysis. This file contains:
  *   1. Static request ring + per-CPU nesting state.
  *   2. mce_migrate_request — IRQ-safe producer (called from #MC IST).
- *   3. mce_migrate_worker — K-Core consumer (called via irq_defer).
+ *   3. mce_migrate_worker — K-Core consumer (runs off the slot's baton).
  *   4. mce_migrate_perform — the actual region lookup, copy, PTE swap.
  *   5. mce_safe_page_copy — 64 B chunked copy with abort flag.
  *   6. mce_swap_pte — atomic CAS on leaf PTE preserving metadata bits.
@@ -21,7 +21,7 @@
 #include "pmm.h"
 #include "touch.h"
 #include "logbook.h"
-#include "irq_defer.h"
+#include "baton.h"
 
 /* ─── Request ring (static — no allocation in IRQ context) ──────── */
 
@@ -35,6 +35,10 @@ typedef struct {
     uint16_t        rsv0;
     uint32_t        rsv1;
     volatile uint32_t in_use;       /* 0 = free, 1 = in-flight */
+    /* The slot's own pass to the drain core (baton.h): allocation-free and
+     * never dropped. `in_use` is the gate — a slot is passed once per claim
+     * and released by the worker before it can be claimed again. */
+    Baton           baton;
 } MceMigrateSlot;
 
 static MceMigrateSlot   g_ring[MCE_MIGRATE_RING_SIZE];
@@ -106,11 +110,16 @@ bool mce_migrate_is_initialized(void) {
     return g_initialized;
 }
 
+static void mce_migrate_worker(void *slot_ptr);
+
 void mce_migrate_init(void) {
     if (g_initialized) return;
 
     for (uint32_t i = 0; i < MCE_MIGRATE_RING_SIZE; i++) {
         __atomic_store_n(&g_ring[i].in_use, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_ring[i].baton.next, NULL, __ATOMIC_RELAXED);
+        g_ring[i].baton.run = mce_migrate_worker;
+        g_ring[i].baton.ctx = &g_ring[i];
     }
     for (uint32_t c = 0; c < MCE_MIGRATE_MAX_CORES; c++) {
         __atomic_store_n(&g_in_migration[c],      0, __ATOMIC_RELAXED);
@@ -396,10 +405,30 @@ static uint32_t mce_migrate_perform(uintptr_t phys, mce_severity_t sev,
     return cabins_touched;
 }
 
-/* ─── irq_defer worker (runs in K-Core context) ─────────────────── */
+/* ─── The slot's continuation (runs on a K-Core, off the slot's baton) ── */
+
+/* Requests that found no free slot, as many as the worker has said so far.
+ * Worker-only (single consumer), so a plain variable. */
+static uint64_t g_stat_drops_said = 0;
 
 static void mce_migrate_worker(void *slot_ptr) {
     MceMigrateSlot *slot = (MceMigrateSlot *)slot_ptr;
+
+    /* A request that found every slot taken was dropped in #MC context,
+     * where nothing can be said; it is said here, by the first worker that
+     * runs after it, with the count. The page itself stays poisoned in the
+     * PMM, so it is never handed out again — what was lost is its
+     * migration, and its owner will fault on it. */
+    uint64_t drops = __atomic_load_n(&g_stat_drops, __ATOMIC_RELAXED);
+    if (drops != g_stat_drops_said) {
+        kprintf("[MCE] ERROR: %lu page migration request(s) found no free slot — "
+                "the machine's errors outran the K-Core by a whole pool of %u; "
+                "those pages stay poisoned and unmigrated, and their owners "
+                "will fault on them\n",
+                (unsigned long)(drops - g_stat_drops_said),
+                (unsigned)MCE_MIGRATE_RING_SIZE);
+        g_stat_drops_said = drops;
+    }
 
     /* Copy parameters before releasing the slot so back-to-back IRQ
      * producers can reuse it immediately. */
@@ -418,11 +447,12 @@ bool mce_migrate_request(uintptr_t phys, mce_severity_t sev, uint64_t status) {
     if (!g_initialized) return false;
     if (phys == 0) return false;
 
-    /* Claim a slot from the static ring. Producer rolls a bounded
-     * fetch_add cursor and tries to CAS in_use from 0 → 1. On contention
-     * (ring saturation) we walk a bounded number of slots before giving
-     * up — never block, never panic. The drop is counted in stats so
-     * operators see when MCE event rate exceeds the slot budget. */
+    /* Claim a slot from the static pool — #MC context can neither allocate
+     * nor wait, so the slots exist in advance. Producer rolls a fetch_add
+     * cursor and tries to CAS in_use from 0 → 1; a claimed slot passes its
+     * own baton, which cannot be dropped. Only the pool can run out: that
+     * is counted here and SAID by the next worker (nothing can be printed
+     * from #MC). */
     uint32_t start = __atomic_fetch_add(&g_ring_cursor, 1, __ATOMIC_RELAXED);
     for (uint32_t k = 0; k < MCE_MIGRATE_RING_SIZE; k++) {
         uint32_t idx = (start + k) & MCE_MIGRATE_RING_MASK;
@@ -437,15 +467,16 @@ bool mce_migrate_request(uintptr_t phys, mce_severity_t sev, uint64_t status) {
             slot->rsv0     = 0;
             slot->rsv1     = 0;
 
-            irq_defer(mce_migrate_worker, slot);
+            BatonPass(&slot->baton);
             __atomic_fetch_add(&g_stat_requests, 1, __ATOMIC_RELAXED);
             return true;
         }
     }
 
-    /* Ring saturation — drop the request. Phase 2F already poisoned the
-     * page so future allocations skip it; the process that owns the
-     * page will eventually #PF on access and be killed cleanly. */
+    /* Pool saturation — the request is dropped and counted; the next worker
+     * says it. Phase 2F already poisoned the page so future allocations skip
+     * it; the process that owns the page will #PF on access and be killed
+     * cleanly. */
     __atomic_fetch_add(&g_stat_drops, 1, __ATOMIC_RELAXED);
     return false;
 }
@@ -463,7 +494,7 @@ bool mce_migrate_note_nested(uintptr_t phys) {
 }
 
 uint32_t mce_migrate_run_sync(uintptr_t phys) {
-    /* Tests bypass the irq_defer hop. Same perform() — different entry. */
+    /* Tests bypass the baton hop. Same perform() — different entry. */
     return mce_migrate_perform(phys, MCE_SEV_UCR, 0ULL);
 }
 

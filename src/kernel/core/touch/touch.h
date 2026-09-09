@@ -233,18 +233,19 @@ void   TouchPublish(const char *tag, const void *kpayload, uint32_t plen);
  * on cold tags, kmalloc a snapshot-growth buffer under contention, and
  * walk per-target VMM via vmm_ensure_user_page → pmm_alloc. All of those
  * acquire heap/PMM locks that are also held by non-IRQ kernel code on the
- * same core, which has historically deadlocked the kernel (see project
- * memory `irq_defer_done_2026_05_17` for the closed AHCI/SCI variant of
- * the same bug class).
+ * same core, which has deadlocked the kernel before (the AHCI/SCI variant
+ * of the same bug class was the first one closed).
  *
  * TouchPublishIrqPair copies the tag handles + a bounded payload into a
- * preallocated static slot, then enqueues the publish for K-Core
- * execution via irq_defer(). The slot ring is power-of-2 sized
- * (CONFIG_TOUCH_IRQ_RING_SIZE) and claimed by fetch_add: an interrupt can
- * neither wait for room nor allocate, so a burst that outruns the K-Cores
- * overwrites the OLDEST queued event. Every slot carries its generation,
- * and the K-Core that comes for an event no longer there counts the loss
- * exactly and says it on the console — never in silence.
+ * preallocated static slot and knocks (baton.h, Knock): the K-Core that
+ * owns the drain queue comes once per knock, reads every slot up to the
+ * producers' cursor and publishes each in claim order. The slot ring is
+ * power-of-2 sized (CONFIG_TOUCH_IRQ_RING_SIZE) and claimed by fetch_add:
+ * an interrupt can neither wait for room nor allocate, so a burst that
+ * outruns the K-Core by a whole ring overwrites the OLDEST queued events.
+ * Every slot carries its generation and a done-mark, and the K-Core that
+ * finds an event no longer there counts the loss exactly and says it on
+ * the console — never in silence. The knock itself cannot be dropped.
  *
  * Bounded payload size is TOUCH_IRQ_PAYLOAD_MAX (small, fits the largest
  * in-kernel Touch event today). A larger payload is cut, and the K-Core
@@ -258,6 +259,11 @@ void   TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
                            const void *payload, uint16_t plen,
                            uint32_t source_pid, uint16_t flags);
 
+/* The IRQ ring's account since boot — published, delivered, lost, still in
+ * the ring — said once at a halt, where it can be checked against what the
+ * listeners received. */
+void   TouchIrqRingAccount(void);
+
 /*
  * TouchWatch — the kernel's own ear.
  *
@@ -270,8 +276,8 @@ void   TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
  * one-off instead.
  *
  * What was missing was never delivery. Delivery the kernel already has
- * (irq_defer for IRQ context, never-drop Baton for point-to-point
- * hand-back). What was missing is SUBSCRIPTION BY TAG, and that is all this
+ * (the never-drop Baton for point-to-point hand-back, and a Knock on it
+ * from IRQ context). What was missing is SUBSCRIPTION BY TAG, and that is all this
  * adds: a callback on a bucket, alongside the process subscribers, seen by the
  * same publish.
  *

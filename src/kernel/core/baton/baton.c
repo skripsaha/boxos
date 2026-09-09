@@ -116,19 +116,19 @@ void BatonInit(void)
  *
  *  IRQ-safe, allocation-free, NEVER drops. Routes to the drain core (BSP,
  *  the AHCI MSI owner). A cross-core producer (an App-Core initial-kick
- *  handoff) sends IPI_WAKE so a HLT'd drain core wakes and pumps; a
- *  same-core producer (the BSP's own MSI / pump) needs no IPI — it returns
- *  straight to kcore_run_loop, which pumps.
+ *  handoff, an xHCI MSI on another core) sends IPI_WAKE so a HLT'd drain
+ *  core wakes and pumps; a same-core producer (the BSP's own IRQ / pump)
+ *  needs no IPI — it returns straight to kcore_run_loop, which pumps.
  * ========================================================================== */
-void BatonPass(Baton *n)
+bool BatonPass(Baton *n)
 {
-    /* Init runs right after irq_defer_init, before any IRQ that can pass a
-     * baton is unmasked; a pass before that would touch memory that is not
-     * there, so it is refused — and said, because a refused pass is exactly
-     * the drop this queue exists to make impossible. */
+    /* Init runs before the sti that opens the machine to interrupts, so
+     * nothing can pass a baton before the queues exist; a pass that does is
+     * refused — and said, because a refused pass is exactly the drop this
+     * queue exists to make impossible. */
     if (!__atomic_load_n(&g_baton_ready, __ATOMIC_ACQUIRE)) {
         kprintf("[BATON] ERROR: a baton was passed before BatonInit — the continuation is lost\n");
-        return;
+        return false;
     }
 
     uint8_t drain = g_amp.bsp_index;
@@ -140,6 +140,7 @@ void BatonPass(Baton *n)
     uint8_t me = amp_get_core_index();
     if (me != drain)
         lapic_send_ipi(g_amp.cores[drain].lapic_id, IPI_WAKE_VECTOR);
+    return true;
 }
 
 /* ==========================================================================
@@ -165,8 +166,9 @@ uint32_t BatonPump(uint8_t core_idx)
         if (!n) break;
 
         /* Copy run/ctx BEFORE the call: the continuation may free the
-         * container (and its embedded node) before returning. Once popped,
-         * n is unreachable from the queue, so the free is safe. */
+         * container (and its embedded node) before returning, or — a Knock
+         * opened inside the run — let a producer link this very node again.
+         * Once popped, n is unreachable from the queue, so both are safe. */
         void (*run)(void *) = n->run;
         void  *ctx          = n->ctx;
 
@@ -218,22 +220,69 @@ bool BatonOutstanding(uint8_t core_idx)
 }
 
 /* ==========================================================================
+ *  Knock — see baton.h.
+ *
+ *  The claim is a SEQ_CST CAS (LOCK CMPXCHG, a full fence): every store the
+ *  producer made to its place is globally visible before the claim is, so a
+ *  reader that opens the door after this claim and then looks at the place
+ *  sees them. The open is a SEQ_CST store (MOV + MFENCE) followed by the
+ *  reader's look: on x86-TSO that fence is what forbids the look from being
+ *  served before the open is visible — the Dekker half that makes "either
+ *  the producer's CAS finds the door open, or the reader's look finds the
+ *  producer's writes" a theorem rather than a hope.
+ * ========================================================================== */
+static inline bool knock_claim(Knock *k)
+{
+    uint32_t expected = 0;
+    return __atomic_compare_exchange_n(&k->raised, &expected, 1u, false,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+void KnockInit(Knock *k, void (*run)(void *ctx), void *ctx)
+{
+    __atomic_store_n(&k->baton.next, NULL, __ATOMIC_RELAXED);
+    k->baton.run = run;
+    k->baton.ctx = ctx;
+    __atomic_store_n(&k->raised, 0u, __ATOMIC_RELAXED);
+}
+
+void KnockOn(Knock *k)
+{
+    if (!knock_claim(k)) return;              /* a pass is already on its way */
+    if (!BatonPass(&k->baton)) {
+        /* Refused (before BatonInit, and said there). The door was never
+         * knocked as far as the queue is concerned: reopen it, or this
+         * place would be deaf for the rest of the boot. */
+        __atomic_store_n(&k->raised, 0u, __ATOMIC_SEQ_CST);
+    }
+}
+
+void KnockOpen(Knock *k)
+{
+    __atomic_store_n(&k->raised, 0u, __ATOMIC_SEQ_CST);
+}
+
+/* ==========================================================================
  *  Self-test — BatonSelfTest()
  *
  *  Deterministic, single-core proof of the primitive. Runs on a PRIVATE
  *  queue (not a live per-core queue) so it is safe to call at boot before
  *  any drain core is looping.
  *
- *  Phase 1 (never-drop): push N nodes with N far beyond any fixed-slot ring
- *  (irq_defer's un-pumped chain is a single CONFIG_IRQ_DEFER_INITIAL_CAPACITY
- *  chunk, and even a fully grown chunk caps at CONFIG_IRQ_DEFER_MAX_CHUNK_
- *  CAPACITY) WITHOUT draining, then drain. A slot-based ring would have
- *  dropped; the embedded node carries its own link, so all N survive. Assert
- *  every node delivered exactly once, in per-producer FIFO order.
+ *  Phase 1 (never-drop): push N nodes — N far beyond any pre-allocated
+ *  place in this kernel (the Touch IRQ ring, an MCE slot pool, a GHES
+ *  source table) — WITHOUT draining, then drain. A slot-based ring would
+ *  have dropped; the embedded node carries its own link, so all N survive.
+ *  Assert every node delivered exactly once, in per-producer FIFO order.
  *
- *  Phase 2 (edge cases): push/drain in tiny batches so the queue empties every
- *  round, forcing the stub re-anchor and the single-node / transient-empty pop
- *  paths the bulk burst never reaches. Assert exactly-once again.
+ *  Phase 2 (edge cases): push/drain in tiny batches so the queue empties
+ *  every round, forcing the stub re-anchor and the single-node /
+ *  transient-empty pop paths the bulk burst never reaches. Assert
+ *  exactly-once again.
+ *
+ *  Phase 3 (the knock): many claims before the door opens are one pass; a
+ *  claim after the open is one more. The gate is exercised on the private
+ *  queue through the same claim the live KnockOn uses.
  * ========================================================================== */
 static void baton_selftest_probe(void *ctx)
 {
@@ -243,7 +292,7 @@ static void baton_selftest_probe(void *ctx)
 
 error_t BatonSelfTest(void)
 {
-    const uint32_t N = 8192;   /* 8x CONFIG_IRQ_DEFER_MAX_CHUNK_CAPACITY */
+    const uint32_t N = 8192;
 
     Baton *nodes = (Baton *)kmalloc(sizeof(Baton) * N);
     uint32_t          *seen  = (uint32_t *)kmalloc(sizeof(uint32_t) * N);
@@ -307,18 +356,47 @@ error_t BatonSelfTest(void)
     for (uint32_t i = 0; i < N; i++)
         if (seen[i] != 1) inter_bad++;
 
+    /* ---- Phase 3: the knock ---- */
+    uint32_t visits = 0;
+    Knock knock;
+    KnockInit(&knock, baton_selftest_probe, &visits);
+    uint32_t won_before_open = 0;
+    for (uint32_t i = 0; i < 1000; i++)
+        if (knock_claim(&knock)) { baton_link(&tq, &knock.baton); won_before_open++; }
+    uint32_t knock_runs = 0;
+    for (;;) {
+        Baton *n = baton_pop(&tq);
+        if (!n) break;
+        KnockOpen(&knock);                     /* once, as the continuation does */
+        n->run(n->ctx);
+        knock_runs++;
+    }
+    uint32_t won_after_open = 0;
+    if (knock_claim(&knock)) { baton_link(&tq, &knock.baton); won_after_open++; }
+    if (knock_claim(&knock)) won_after_open++;  /* must lose: the door is shut again */
+    for (;;) {
+        Baton *n = baton_pop(&tq);
+        if (!n) break;
+        KnockOpen(&knock);
+        n->run(n->ctx);
+        knock_runs++;
+    }
+    bool knock_ok = (won_before_open == 1 && won_after_open == 1 &&
+                     knock_runs == 2 && visits == 2);
+
     kprintf("[BATON-TEST] never-drop N=%u pushed=%u popped=%u delivered=%u dup=%u lost=%u misorder=%u | "
-            "interleave checked=%u bad=%u\n",
-            N, N, popped, delivered, dup, lost, misorder, checked, inter_bad);
+            "interleave checked=%u bad=%u | knock: 1000 knocks -> %u pass, after open -> %u, visits=%u\n",
+            N, N, popped, delivered, dup, lost, misorder, checked, inter_bad,
+            won_before_open, won_after_open, visits);
 
     kfree(nodes);
     kfree(seen);
 
     if (popped != N || delivered != N || dup != 0 || lost != 0 || misorder != 0 ||
-        checked != N || inter_bad != 0) {
+        checked != N || inter_bad != 0 || !knock_ok) {
         kprintf("[BATON-TEST] FAIL\n");
         return ERR_IO;
     }
-    kprintf("[BATON-TEST] PASS (never-drop + exactly-once + FIFO + stub-re-anchor)\n");
+    kprintf("[BATON-TEST] PASS (never-drop + exactly-once + FIFO + stub-re-anchor + knock)\n");
     return OK;
 }
