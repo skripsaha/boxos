@@ -2,7 +2,7 @@
 #include "klib.h"
 #include "cpu_calibrate.h"
 #include "boxos_decks.h"
-#include "serial.h"
+#include "klib_logring.h"   /* the trace is said into the log ring; the wire carries it */
 
 #if CONFIG_PERF_TRACE
 
@@ -11,8 +11,13 @@
 /* ------------------------------------------------------------------ */
 PerfTraceRing g_perf_ring;
 
-/* Serial-only printf (never touches VGA).
+/* Into the log ring only (never the screen): the serial line reads the ring.
    Handles: %u %d %s %x %llu %llx %02x %% and zero-pad widths. */
+static void ring_print(const char *s)
+{
+    while (*s) LogRingPut(*s++);
+}
+
 static void serial_printf(const char *fmt, ...)
 {
     va_list ap;
@@ -20,7 +25,7 @@ static void serial_printf(const char *fmt, ...)
 
     while (*fmt)
     {
-        if (*fmt != '%') { serial_putchar(*fmt++); continue; }
+        if (*fmt != '%') { LogRingPut(*fmt++); continue; }
         fmt++;
 
         /* Parse zero-pad and width */
@@ -42,7 +47,7 @@ static void serial_printf(const char *fmt, ...)
             char tmp[24];
             if (ll >= 2) utoa64(va_arg(ap, uint64_t), tmp, 10);
             else         utoa(va_arg(ap, unsigned int), tmp, 10);
-            serial_print(tmp);
+            ring_print(tmp);
             break;
         }
         case 'd': case 'i': {
@@ -50,14 +55,14 @@ static void serial_printf(const char *fmt, ...)
             if (ll >= 2)
             {
                 long long v = va_arg(ap, long long);
-                if (v < 0) { serial_putchar('-'); v = -v; }
+                if (v < 0) { LogRingPut('-'); v = -v; }
                 utoa64((uint64_t)v, tmp, 10);
             }
             else
             {
                 itoa(va_arg(ap, int), tmp, 10);
             }
-            serial_print(tmp);
+            ring_print(tmp);
             break;
         }
         case 'x': {
@@ -67,21 +72,21 @@ static void serial_printf(const char *fmt, ...)
             /* zero-pad to requested width */
             int len = 0;
             for (const char *p = tmp; *p; p++) len++;
-            while (len < width) { serial_putchar(pad_zero ? '0' : ' '); len++; }
-            serial_print(tmp);
+            while (len < width) { LogRingPut(pad_zero ? '0' : ' '); len++; }
+            ring_print(tmp);
             break;
         }
         case 's': {
             const char *s = va_arg(ap, const char *);
-            if (s) serial_print(s); else serial_print("(null)");
+            if (s) ring_print(s); else ring_print("(null)");
             break;
         }
         case '%':
-            serial_putchar('%');
+            LogRingPut('%');
             break;
         default:
-            serial_putchar('%');
-            serial_putchar(*fmt);
+            LogRingPut('%');
+            LogRingPut(*fmt);
             break;
         }
         fmt++;
@@ -118,7 +123,7 @@ static const char *deck_name(uint8_t deck_id)
 void perf_trace_init(void)
 {
     memset(&g_perf_ring, 0, sizeof(g_perf_ring));
-    serial_printf("[PERF] Trace ring initialized: %u slots x %u bytes\r\n",
+    serial_printf("[PERF] Trace ring initialized: %u slots x %u bytes\n",
                   PERF_TRACE_CAPACITY,
                   (uint32_t)sizeof(PerfTraceEntry));
 }
@@ -166,7 +171,7 @@ static void visitor_print_all(uint32_t seq,
                               void *ctx)
 {
     (void)ctx;
-    serial_printf("[PERF] #%u pid=%u %s op=0x%02x err=%u  %llu us  (%llu cy)\r\n",
+    serial_printf("[PERF] #%u pid=%u %s op=0x%02x err=%u  %llu us  (%llu cy)\n",
                   seq, e->pid, deck_name(e->deck_id), e->opcode,
                   (uint32_t)e->error_code, elapsed_us, elapsed_cycles);
 }
@@ -183,7 +188,7 @@ static void visitor_print_slow(uint32_t seq,
     uint64_t min_cycles = *(const uint64_t *)ctx;
     if (elapsed_cycles >= min_cycles)
     {
-        serial_printf("[PERF] SLOW #%u pid=%u %s op=0x%02x err=%u  %llu us\r\n",
+        serial_printf("[PERF] SLOW #%u pid=%u %s op=0x%02x err=%u  %llu us\n",
                       seq, e->pid, deck_name(e->deck_id), e->opcode,
                       (uint32_t)e->error_code, elapsed_us);
     }
@@ -198,17 +203,17 @@ void perf_dump(void)
                      ? g_perf_ring.total
                      : PERF_TRACE_CAPACITY;
 
-    serial_printf("[PERF] === Dump: %u entries (total recorded: %u) ===\r\n",
+    serial_printf("[PERF] === Dump: %u entries (total recorded: %u) ===\n",
                   n, g_perf_ring.total);
     walk_ring(visitor_print_all, NULL);
-    serial_printf("[PERF] === End of dump ===\r\n");
+    serial_printf("[PERF] === End of dump ===\n");
 }
 
 void perf_dump_slow(uint64_t min_cycles)
 {
-    serial_printf("[PERF] === Slow entries (>= %llu cycles) ===\r\n", min_cycles);
+    serial_printf("[PERF] === Slow entries (>= %llu cycles) ===\n", min_cycles);
     walk_ring(visitor_print_slow, &min_cycles);
-    serial_printf("[PERF] === End of slow dump ===\r\n");
+    serial_printf("[PERF] === End of slow dump ===\n");
 }
 
 void perf_trace_flush_since(uint32_t snapshot_total)
@@ -229,7 +234,7 @@ void perf_trace_flush_since(uint32_t snapshot_total)
                                ? (e->tsc_end - e->tsc_start)
                                : 0;
         uint64_t us = cpu_tsc_to_us(elapsed);
-        serial_printf("[PERF] pid=%u %s op=0x%02x err=%u  %llu us\r\n",
+        serial_printf("[PERF] pid=%u %s op=0x%02x err=%u  %llu us\n",
                       e->pid, deck_name(e->deck_id), e->opcode,
                       (uint32_t)e->error_code, us);
     }
@@ -238,7 +243,7 @@ void perf_trace_flush_since(uint32_t snapshot_total)
 void perf_reset(void)
 {
     memset(&g_perf_ring, 0, sizeof(g_perf_ring));
-    serial_printf("[PERF] Trace ring reset.\r\n");
+    serial_printf("[PERF] Trace ring reset.\n");
 }
 
 #endif /* CONFIG_PERF_TRACE */

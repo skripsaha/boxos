@@ -1363,11 +1363,12 @@ run_mountfail() {
 run_logsave() {
     echo "== logsave: what the kernel said, written down where it can be read =="
 
-    # Two kernels, because the switch is a BUILD switch. The machine that keeps
-    # its log and the machine that does not are different kernels, and both
-    # halves of the promise have to hold: the one that keeps it must produce a
-    # readable account, and the one that does not must SAY so rather than hand
-    # back an empty file that reads like a machine which never spoke.
+    # Two kernels, because the switch is a BUILD switch. Every kernel keeps the
+    # ring of its own run (it is the serial line's source); PRINTTOFILE adds
+    # the window that carries it through a reset. Both halves have to hold:
+    # both kernels must produce a readable account of their run, and the one
+    # without the window must SAY it carries nothing through a reset rather
+    # than hand back an empty file that reads like a machine which never spoke.
     make PRINTTOFILE=on >"$SCRATCH/build.log" 2>&1
     if [ $? -ne 0 ]; then
         echo "BUILD FAILED (PRINTTOFILE=on) — tail:"; tail -25 "$SCRATCH/build.log"; exit 1
@@ -1424,7 +1425,7 @@ run_logsave() {
     img_carries "$I" 'TSC freq      : \d+ kHz'
     chk $? "and the answer that command produced"
 
-    # Now the same command on a kernel that keeps nothing.
+    # Now the same on a kernel without the carry-over window.
     build
     make run-stop >/dev/null 2>&1
     make run-bg >/dev/null 2>&1
@@ -1435,16 +1436,18 @@ run_logsave() {
     done
     sleep 3
     ./tools/qemu-input.sh type "logsave" >/dev/null 2>&1
-    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 6
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 8
+    ./tools/qemu-input.sh type "lastsaid" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.logsave-off.log"
     O="$SCRATCH/serial.logsave-off.log"
 
-    grep -q "does not keep what it says" "$O"
-    chk $? "a kernel without the ring refuses by name"
+    grep -qE "[0-9]+ byte\(s\) written to watch.log" "$O"
+    chk $? "a kernel without the window still writes down what it said"
 
-    ! grep -qE "byte\(s\) written to" "$O"
-    chk $? "and claims nothing it did not do"
+    grep -q "carries nothing through a reset" "$O"
+    chk $? "and says by name that it carries nothing through a reset"
 }
 
 # ---------------------------------------------------------------------------
@@ -4500,6 +4503,116 @@ run_stashmut() {
 }
 
 # ===========================================================================
+# wire — the serial line reads the log ring by its own interrupt, and the
+# last words are drained before a halt
+# ===========================================================================
+#
+# Every byte the kernel says goes into the log ring; the Wire is the line's
+# reader, advanced by the UART's transmitter-empty interrupt (IRQ4). No core
+# waits on the UART — what stood here spun four million times per byte and
+# then dropped it. At panic and halt the line cannot drive itself (interrupts
+# are off), so the last words are drained on the transmitter's own word.
+# The scenario: a boot must reach the shell on the wire, a command must be
+# heard, and `reboot` must leave "[HALT] Rebooting..." on the wire — the
+# drain at halt, seen.
+wire_session() {
+    local name=$1
+    make run-stop >/dev/null 2>&1
+    make run-bg STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    local reached=0
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null && reached=1
+    sleep 3
+    # Typed through the monitor's keyboard, not the serial line, so the wire's
+    # own state cannot stop the command from landing.
+    ./tools/qemu-input.sh type "hw" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 4
+    ./tools/qemu-input.sh type "reboot" >/dev/null 2>&1
+    sleep 1; ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt 20 ]; do
+        grep -q "Rebooting" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    make run-stop >/dev/null 2>&1
+    cp build/serial.log "$SCRATCH/serial.$name.log"
+    return $((1 - reached))
+}
+
+run_wire() {
+    echo "== wire: the line reads the ring by interrupt; the last words are drained at halt =="
+    build
+    wire_session wire; local reached=$?
+    L="$SCRATCH/serial.wire.log"
+    [ $reached -eq 0 ] \
+        && ok "wire: the boot reached the shell on the wire" \
+        || bad "wire: the shell never appeared on the wire"
+    grep -q "TSC freq" "$L" \
+        && ok "wire: a command's answer came down the wire" \
+        || bad "wire: hw's answer never came down the wire"
+    grep -q "\[HALT\] Rebooting" "$L" \
+        && ok "wire: the last words before the reboot were drained onto the wire" \
+        || bad "wire: '[HALT] Rebooting' never reached the wire"
+    grep -q "\[WIRE\]" "$L" \
+        && bad "wire: the line reports falling behind on a plain boot" \
+        || ok "wire: the line never fell behind the ring"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "wire: the kernel spoke of a stall or fault" \
+        || ok "wire: no verdict, no panic"
+}
+
+# The oracle measured against itself: the ring grows and nobody tells the
+# line (WireKick does nothing once the line drives itself), so after the
+# first THRE has drained what was pending the line goes quiet for good — the
+# shell never appears on the wire — and only the drain at halt brings the
+# rest out.
+#
+# ‼ The other half of the mechanism — IRQ4 continuing a BUSY line on THRE —
+# cannot be made red on this desk: QEMU's transmitter is empty again by the
+# time the next byte is put, so every byte is pumped by its own kick and the
+# interrupt is never needed (measured: with the THRE branch cut, the whole
+# boot still came down the wire). That half is for the board, where a byte
+# takes 87 us and a kick finds the transmitter busy.
+wire_deaf_on() {
+    cp src/kernel/drivers/serial/serial.c "$SCRATCH/serial.c.wire.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/drivers/serial/serial.c"
+s = open(p).read()
+anchor = "    __atomic_thread_fence(__ATOMIC_SEQ_CST);\n    if (!__atomic_load_n(&g_wire_idle, __ATOMIC_SEQ_CST)) return;\n"
+assert s.count(anchor) == 1, "wire mutation anchor missing"
+s = s.replace(anchor, "    return;   /* logcheck mutation: the ring grew and nobody told the line */\n" + anchor, 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/drivers/serial/serial.c || { echo "wire mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/drivers/serial/serial.c
+}
+
+wire_deaf_off() {
+    [ -f "$SCRATCH/serial.c.wire.bak" ] && cp "$SCRATCH/serial.c.wire.bak" src/kernel/drivers/serial/serial.c
+    sleep 1; touch src/kernel/drivers/serial/serial.c
+}
+
+run_wiremut() {
+    echo "== wiremut: nobody tells the line the ring grew — the shell must NOT reach the wire, and the drain at halt must bring it out =="
+    wire_deaf_on; build
+    wire_session wiremut; local reached=$?
+    wire_deaf_off
+    L="$SCRATCH/serial.wiremut.log"
+    [ $reached -ne 0 ] \
+        && ok "wiremut: with nobody telling the line, the shell never reached the wire — the oracle sees the stall" \
+        || bad "wiremut: the shell reached the wire with nobody telling the line — the oracle cannot see a dead line"
+    grep -q "BoxOS Shell" "$L" && grep -q "\[HALT\] Rebooting" "$L" \
+        && ok "wiremut: the drain at halt brought the whole ring out, shell banner and last words alike" \
+        || bad "wiremut: the drain at halt did not bring the ring out"
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
 # deadline — a timed park's ERR_TIMEOUT rides the process's own baton
 # ===========================================================================
 #
@@ -4713,6 +4826,8 @@ case "${1:-both}" in
     bynamemut)  run_bynamemut ;;
     stash)      run_stash ;;
     stashmut)   run_stashmut ;;
+    wire)       run_wire ;;
+    wiremut)    run_wiremut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4735,7 +4850,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

@@ -7,10 +7,12 @@
  * lines that scrolled away. Photographing the screen recovers a frame, not a
  * chronology.
  *
- * So when the build is asked for it, every byte `kputchar()` emits is also
- * kept here, in kernel memory, and `logsave` writes it to the volume through
- * Current. Three reasons this is a ring in memory and not a file written as it
- * goes, all three measured rather than assumed:
+ * So every byte `kputchar()` emits is kept here, in kernel memory: `logsave`
+ * writes it to the volume through Current, and the serial line reads it —
+ * the Wire (drivers/serial/serial.c) is this ring's reader, driven by the
+ * UART's own interrupt, so no core ever waits on a UART. Three reasons this
+ * is a ring in memory and not a file written as it goes, all three measured
+ * rather than assumed:
  *
  *   - kprintf is called from interrupt context, and a disk is not something an
  *     interrupt handler may touch;
@@ -20,8 +22,9 @@
  *     answering, and a log written to that medium is missing exactly the
  *     moment it exists for.
  *
- * Off by default. `make PRINTTOFILE=on` compiles it in; without it LogRingPut
- * is an empty inline and the kernel carries neither the buffer nor the branch.
+ * Always on: the ring is the wire's source, and a kernel without it would
+ * have no serial line. `make PRINTTOFILE=on` adds the carry-over window below
+ * — the copy that survives a reset.
  *
  * Where the account begins, and where it ends, said here so the file does not
  * promise more than it carries:
@@ -48,13 +51,6 @@
  * build of this file). */
 #include "ktypes.h"
 
-/* Is this kernel keeping the log? Answered by the kernel rather than guessed
- * from a build flag on the other side of the wall: userspace ASKS, so a
- * program built once behaves honestly against either kernel. */
-bool LogRingIsKept(void);
-
-#ifdef CONFIG_PRINTTOFILE
-
 /* 1 MiB, a power of two so the position maps to a slot by mask. A boot in
  * QEMU is ~21 KB; a board with two controllers, thirty ports and a recovery
  * or two is a few hundred. The room left over is for the session that
@@ -67,8 +63,19 @@ bool LogRingIsKept(void);
  * has depended on since it was written. */
 void LogRingLockInit(void);
 
-/* One byte, from any core, from any context including an interrupt. */
+/* One byte, from any core, from any context including an interrupt. Kicks
+ * the wire once the byte is in. */
 void LogRingPut(char c);
+
+/* For the wire, lock-free: the position just past the last byte said, and
+ * the byte at a position. A byte is stable for as long as it is held — a
+ * reader that stays within LOGRING_CAPACITY of `written`, which the wire
+ * checks before every read, sees what was said. */
+uint64_t LogRingWritten(void);
+char     LogRingByteAt(uint64_t pos);
+
+/* For a panic on a core that may have died holding the ring's lock. */
+void LogRingForceRelease(void);
 
 /*
  * Copy out at most `max` bytes starting at ring position `from`.
@@ -86,6 +93,8 @@ void LogRingPut(char c);
  */
 uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
                      uint64_t *out_oldest, uint64_t *out_written);
+
+#ifdef CONFIG_PRINTTOFILE
 
 /* ==========================================================================
  * The carry-over: what the machine said LAST time, read after a reset.
@@ -146,8 +155,6 @@ uint64_t LogKeepPreviousRead(uint64_t from, void *dst, uint64_t max,
 
 #else
 
-static inline void LogRingLockInit(void) { }
-static inline void LogRingPut(char c)    { (void)c; }
 static inline void LogKeepInit(void)     { }
 static inline bool LogKeepWindow(uintptr_t *p, uint64_t *b)
 { (void)p; (void)b; return false; }
@@ -157,18 +164,6 @@ static inline uint64_t LogKeepPreviousRead(uint64_t from, void *dst,
                                            uint64_t max, uint64_t *o,
                                            uint64_t *w)
 { (void)from; (void)dst; (void)max; if (o) *o = 0; if (w) *w = 0; return 0; }
-
-/* Declared in both builds so the door that offers the log carries no #ifdef
- * of its own: it asks LogRingIsKept() and refuses, which is the same answer
- * userspace would get from a kernel that simply has no ring. */
-static inline uint64_t LogRingRead(uint64_t from, void *dst, uint64_t max,
-                                   uint64_t *out_oldest, uint64_t *out_written)
-{
-    (void)from; (void)dst; (void)max;
-    if (out_oldest)  *out_oldest  = 0;
-    if (out_written) *out_written = 0;
-    return 0;
-}
 
 #endif /* CONFIG_PRINTTOFILE */
 

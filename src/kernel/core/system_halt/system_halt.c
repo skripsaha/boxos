@@ -1,3 +1,4 @@
+#include "serial.h"      /* WireDrain — the last words are heard */
 #include "system_halt.h"
 #include "amp.h"
 #include "lapic.h"
@@ -247,17 +248,14 @@ void system_halt(bool reboot)
     halt_stop_hardware();
 
     kprintf("[HALT] Cleanup complete.\n");
+    kprintf(reboot ? "[HALT] Rebooting...\n" : "[HALT] Powering off...\n");
 
-    if (reboot)
-    {
-        kprintf("[HALT] Rebooting...\n");
-        acpi_reboot();
-    }
-    else
-    {
-        kprintf("[HALT] Powering off...\n");
-        acpi_shutdown();
-    }
+    /* The last words onto the wire before the machine goes: interrupts are
+     * off, so the line cannot drive itself from here. */
+    WireDrain();
+
+    if (reboot) acpi_reboot();
+    else        acpi_shutdown();
 
     __builtin_unreachable();
 }

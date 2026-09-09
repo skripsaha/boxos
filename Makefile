@@ -263,7 +263,9 @@ endif
 # once with it, every run of that image keeps its log — first, second, third —
 # until the tree is rebuilt without it.
 #
-# `make PRINTTOFILE=on`
+# `make PRINTTOFILE=on` — the log ring itself is always in the kernel (it is
+# the serial line's source); this switch adds the carry-over window, the copy
+# of the ring that survives a warm reset for `lastsaid`.
 ifeq ($(PRINTTOFILE),on)
 CFLAGS += -DCONFIG_PRINTTOFILE=1
 endif

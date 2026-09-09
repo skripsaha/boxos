@@ -109,7 +109,7 @@ void kernel_main(void)
 
     /* Whether anything came through the last reset, said early so it is on
      * the screen even when the machine does not get much further. */
-    if (LogRingIsKept()) {
+    if (LogKeepWindow(NULL, NULL)) {
         uint64_t carried = LogKeepPreviousBytes();
         if (carried) {
             kprintf("[BOOT] the previous run left %lu byte(s) behind (boot %u) "

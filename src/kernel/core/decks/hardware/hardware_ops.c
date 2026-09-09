@@ -20,7 +20,6 @@
 #include "process.h"
 #include "video.h"
 #include "pit.h"
-#include "serial.h"
 #include "rtc.h"
 #include "keyboard.h"
 #include "io.h"
@@ -32,35 +31,21 @@
 #include "xhci.h"
 #include "xhci_port.h"
 #include "xhci_enumeration.h"
-#include "serial.h"
 #include "touch.h"
 #include "kring.h"
 #include "kernel_config.h"
 
 #define VGA_PUTSTRING_FLAG_KEEP_COLOR 0x02u
 
-/* Mirror userspace VGA prints to COM1 so headless QEMU runs leave a
- * shell-output trace in build/serial.log. Kernel-side prints already
- * reach serial via kputchar; this fills the gap for user Manifest VGA
- * ops. Gated behind CONFIG_VIDEO_SERIAL_MIRROR — keep OFF on real HW
- * where serial is not wired or where 115200 baud (~87us/char) would
- * dominate latency on long output.
- *
- * The log ring is NOT behind that gate, and must not be. The reason the
- * serial mirror is off on a board is that a UART costs ~87us a character;
- * the ring costs a store. And a saved log that has the kernel's answers but
- * not the command that caused them is a log somebody has to guess at — the
- * board is exactly where nobody can afford to. What the machine put on its
- * screen belongs in the account of what the machine said. */
+/* What userspace puts on the screen goes into the log ring, where the serial
+ * line reads it (the Wire) and `logsave` writes it down. A saved log that has
+ * the kernel's answers but not the command that caused them is a log
+ * somebody has to guess at — the board is exactly where nobody can afford
+ * to. The ring costs a store; nothing here waits on a UART, so the gate that
+ * kept this off a board (87 us a character) is gone with the wait. */
 static inline void HwVgaMirrorChar(char ch)
 {
     LogRingPut(ch);
-#if CONFIG_VIDEO_SERIAL_MIRROR
-    if (ch == '\n') serial_putchar('\r');
-    serial_putchar(ch);
-#else
-    (void)ch;
-#endif
 }
 
 static bool hw_irq_is_valid(uint8_t irq)
@@ -143,7 +128,7 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         return ERR_INVALID_ADDRESS;
     }
 
-    /* Hold the console lock around the whole VGA + serial-mirror run.
+    /* Hold the console lock around the whole VGA run.
      * The framebuffer and cursor are global state; without serialisation
      * a kprintf from another core (or another user process calling
      * vga_puts in parallel) would interleave at cell-level and produce
@@ -160,15 +145,11 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
         char c = str[i];
         if (c == '\0') break;
         VideoPrintCharCur(c);
-        LogRingPut(c);           /* see HwVgaMirrorChar: not behind the gate */
+        LogRingPut(c);           /* see HwVgaMirrorChar */
         chars_written++;
     }
     VideoBatchEnd();
     VideoUpdateCursor();
-
-#if CONFIG_VIDEO_SERIAL_MIRROR
-    serial_write(str, (size_t)chars_written);
-#endif
 
     if (!(flags & VGA_PUTSTRING_FLAG_KEEP_COLOR)) {
         VideoSetColorRgb(old_fg, old_bg);
@@ -1058,26 +1039,29 @@ static int HwLogReadFrom(LogSource source, const ManifestOp *op, Crate *crates,
     return (crc == OK) ? OK : ERR_INVALID_ADDRESS;
 }
 
-/* What the run before this one said. Refused by a kernel with no ring, the
- * same as HW_LOG_READ; an empty answer from a kernel that HAS one means
- * nothing came through the last reset, which is a different fact and one the
- * caller is left to report. */
+/* What the run before this one said. A kernel built without the carry-over
+ * window (PRINTTOFILE) says so, rather than answering with an empty log that
+ * reads exactly like a machine that never spoke; an empty answer from a
+ * kernel that HAS the window means nothing came through the last reset,
+ * which is a different fact and one the caller is left to report. */
 static int HwLogPrevious(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
-    if (!LogRingIsKept()) return ERR_UNSUPPORTED;
+#ifndef CONFIG_PRINTTOFILE
+    (void)op; (void)crates; (void)ctx;
+    return ERR_UNSUPPORTED;
+#else
     return HwLogReadFrom(LogKeepPreviousRead, op, crates, ctx);
+#endif
 }
 
+/* What this run has said so far. Every kernel keeps it: the ring is the
+ * serial line's source. */
 static int HwLogRead(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
     (void)crate_count;
-
-    /* A kernel built without the ring says so, rather than answering with an
-     * empty log that reads exactly like a machine that never spoke. */
-    if (!LogRingIsKept()) return ERR_UNSUPPORTED;
     return HwLogReadFrom(LogRingRead, op, crates, ctx);
 }
 
