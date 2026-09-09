@@ -330,10 +330,24 @@ run_config() {
     selftest_ok=$(grep -c   "\[TESTS\] All tests PASSED"   build/serial.log)
     selftest_bad=$(grep -c  "\[TESTS\] Some tests FAILED"  build/serial.log)
 
+    # The boot-time proof of a read nobody stands over. It speaks on every
+    # boot: PASSED where the machine reads that way (several cores, a seat
+    # with a completion — the AHCI seat every UEFI config here stands on),
+    # "not asked" where it does not (one core; the legacy channel under BIOS).
+    # A FAILED is the medium, the completion spine or the bytes being wrong on
+    # the boot path, before userspace. It was red on every UEFI config for two
+    # weeks and gated nothing.
+    case "$cfg_name" in
+        UEFI*4c|UEFI*16c) ur_want="PASSED" ;;
+        *)                ur_want="not asked" ;;
+    esac
+    ur_ok=$(grep -c   "\[UNATTENDED READ\].*${ur_want}" build/serial.log)
+    ur_fail=$(grep -c "\[UNATTENDED READ\].*FAILED"     build/serial.log)
+
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
     echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p luggage=$luggage_p"
-    echo "  selftest: kernel=$selftest_ok bad=$selftest_bad"
+    echo "  selftest: kernel=$selftest_ok bad=$selftest_bad unattended(${ur_want})=$ur_ok fail=$ur_fail"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw TSC=~1GHz:$tsc_good/$bn"
 
     ok=1
@@ -379,6 +393,8 @@ run_config() {
 
     [ "$selftest_bad" -gt 0 ] && ok=0
     [ "$selftest_ok"  -lt 1 ] && ok=0
+    [ "$ur_ok"   -lt 1 ] && ok=0
+    [ "$ur_fail" -gt 0 ] && ok=0
 
     [ -n "$TIMED_OUT_CMD" ] && ok=0
     [ -n "$TYPING_FAILED_CMD" ] && ok=0

@@ -99,10 +99,6 @@ static void seats_lock_init(void)
  * one filesystem block, which is the unit everything above reads in. */
 #define BOARD_RUN_FALLBACK 8u
 
-/* Long enough that a slow stick answering one block is not called broken,
- * short enough that a machine with a dead one still boots. */
-#define BOARD_ASYNC_TEST_MS 5000u
-
 static BoardSeat* seat_find(uint8_t number)
 {
     for (BoardSeat* s = g_seats; s; s = s->next) {
@@ -753,101 +749,175 @@ error_t BoardroomReadAsync(uint8_t seat, uint64_t lba, uint32_t count,
     }
 }
 
-/* ── the self-test ──────────────────────────────────────────────────────── */
+/* ── a read nobody stands over, proved on this machine ─────────────────── */
 
+/*
+ * The proof's record. It is a static, and it has to be: the seat keeps the
+ * address of this record for as long as the read is outstanding, and a record
+ * that is still outstanding cannot live on a stack frame that goes away. It
+ * did, once. The proof gave up after a clock of its own, returned, and the
+ * answer came in later through the completion interrupt — into whatever the
+ * K-Core loop had put on that stack by then. Measured: 259 ms after the
+ * give-up, on this core, at the same address.
+ */
 typedef struct {
-    volatile uint8_t done;
-    error_t          status;
-} BoardAsyncProbe;
+    Baton    node;              /* the answer's continuation: passed by the
+                                 * seat's callback, run by the pump */
+    error_t  status;            /* what the medium said */
+    uint8_t  seat;
+    void*    dma;               /* the physical page the medium wrote */
+    uint8_t* expect;            /* the attended read of the same block */
+    uint32_t bytes;
+    volatile uint8_t judged;    /* the verdict has been said */
+} UnattendedRead;
 
-static void board_async_probe_done(uint8_t index, uint8_t slot,
-                                   error_t status, void* ctx)
+static UnattendedRead g_unattended;
+
+/* The seat's callback. Lean, because on a running machine it is called from
+ * the completion interrupt: it keeps what came and passes the rest on. */
+static void unattended_read_answered(uint8_t index, uint8_t slot,
+                                     error_t status, void* ctx)
 {
     (void)index; (void)slot;
-    BoardAsyncProbe* p = (BoardAsyncProbe*)ctx;
-    p->status = status;
-    __atomic_store_n(&p->done, 1u, __ATOMIC_RELEASE);
+    UnattendedRead* r = (UnattendedRead*)ctx;
+    r->status = status;
+    BatonPass(&r->node);
 }
 
-void BoardroomAsyncSelfTest(uint8_t seat)
+/* The pump half: compares, says the verdict, gives the buffers back. */
+static void unattended_read_judge(void* ctx)
 {
+    UnattendedRead* r    = (UnattendedRead*)ctx;
+    const uint8_t*  got  = (const uint8_t*)vmm_phys_to_virt((uintptr_t)r->dma);
+    const char*     name = BoardroomSeatName(r->seat);
+
+    if (r->status != OK) {
+        kprintf("[UNATTENDED READ] seat %u (%s): FAILED — the medium refused "
+                "the read (error %d)\n", r->seat, name, (int)r->status);
+    } else if (memcmp(got, r->expect, r->bytes) != 0) {
+        uint32_t first = 0;
+        while (first < r->bytes && got[first] == r->expect[first]) first++;
+        kprintf("[UNATTENDED READ] seat %u (%s): FAILED — the two reads "
+                "disagree, first at byte %u (0x%02x, expected 0x%02x)\n",
+                r->seat, name, first, got[first], r->expect[first]);
+    } else {
+        kprintf("[UNATTENDED READ] seat %u (%s): PASSED — %u bytes read with "
+                "nobody standing over them, identical to the ordinary read\n",
+                r->seat, name, r->bytes);
+    }
+
+    pmm_free(r->dma, 1);
+    kfree(r->expect);
+    r->dma    = NULL;
+    r->expect = NULL;
+    __atomic_store_n(&r->judged, 1u, __ATOMIC_RELEASE);
+}
+
+/*
+ * Turn the handle under the seat by hand.
+ *
+ * This runs before the machine is running. The BSP has not opened interrupts
+ * yet — it does that on entering its K-Core loop, after kernel_main — so the
+ * completion interrupt an AHCI port raises is left waiting in the LAPIC, and a
+ * USB event lands on a ring nobody is reading. What the tick and the K-Core
+ * loop do once the machine is up is done here instead, on this core and in the
+ * same words: bring in what the medium has answered, and run the medium's own
+ * watch over a read nobody stands over — the one that gives up on a silent
+ * device at the device's own patience and answers for it. The proof therefore
+ * has no clock of its own. A medium that answers ends the wait; one that does
+ * not is given up on by the driver that owns it, and that ends the wait too.
+ */
+static void seat_turn_handle(const BoardSeat* s)
+{
+    switch (s->kind) {
+    case BOARD_AHCI:
+        ahci_watchdog_scan();
+        break;
+    case BOARD_USB:
+        xhci_process_events();
+        xhci_msd_watchdog();
+        break;
+    default:
+        break;
+    }
+    BatonPump(amp_get_core_index());
+}
+
+void BoardroomProveUnattendedRead(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    if (!s) {
+        return;             /* no volume under this machine: nothing to prove */
+    }
     if (!BoardroomSeatCanReadAsync(seat)) {
+        kprintf("[UNATTENDED READ] not asked: seat %u (%s) answers only a read "
+                "somebody stands over\n", seat, BoardroomSeatName(seat));
+        return;
+    }
+    /* The condition under which the storage deck reads this way at all
+     * (storage_ops.c, ObjRead): on one core every read is attended, and a proof
+     * of a path this machine will never take says nothing about this machine.
+     * It is also the condition under which the AHCI watch runs. */
+    if (g_amp.total_cores < 2) {
+        kprintf("[UNATTENDED READ] not asked: with one core every read is "
+                "attended\n");
         return;
     }
 
+    UnattendedRead* r    = &g_unattended;
+    const char*     name = BoardroomSeatName(seat);
+
     /* One filesystem block, which is the unit everything above reads in, and
-     * the only shape the asynchronous path accepts. Sector 0 because every
-     * medium has one and its contents are not this test's business — the test
-     * is whether two ways of asking give the same answer. */
-    const uint32_t sectors = 8;
+     * the only shape the unattended path accepts. Sector 0 because every
+     * medium has one and its contents are not this proof's business — the
+     * question is whether two ways of asking give the same answer. */
+    const uint32_t sectors = BOARD_RUN_FALLBACK;
     const uint32_t bytes   = sectors * BOARDROOM_SECTOR_BYTES;
 
-    void* dma = pmm_alloc_zero(1, PHYS_TAG_DMA32);
+    void*    dma    = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     uint8_t* expect = (uint8_t*)kmalloc(bytes);
     if (!dma || !expect) {
         if (dma)    pmm_free(dma, 1);
         if (expect) kfree(expect);
-        kprintf("[USB ASYNC TEST] no memory to run it — not run\n");
+        kprintf("[UNATTENDED READ] seat %u (%s): not run — no memory for it\n",
+                seat, name);
         return;
     }
-    uint8_t* got = (uint8_t*)vmm_phys_to_virt((uintptr_t)dma);
 
     if (BoardroomRead(seat, 0, sectors, expect) != 0) {
-        kprintf("[USB ASYNC TEST] the ordinary read failed, so there is "
-                "nothing to compare against — not run\n");
-        pmm_free(dma, 1); kfree(expect);
+        kprintf("[UNATTENDED READ] seat %u (%s): not run — the ordinary read "
+                "failed, so there is nothing to compare against\n", seat, name);
+        pmm_free(dma, 1);
+        kfree(expect);
         return;
     }
 
-    BoardAsyncProbe probe = { .done = 0, .status = OK };
+    r->node.run  = unattended_read_judge;
+    r->node.ctx  = r;
+    r->node.next = NULL;
+    r->status    = OK;
+    r->seat      = seat;
+    r->dma       = dma;
+    r->expect    = expect;
+    r->bytes     = bytes;
+    __atomic_store_n(&r->judged, 0u, __ATOMIC_RELAXED);
+
     error_t sub = BoardroomReadAsync(seat, 0, sectors, dma,
-                                     board_async_probe_done, &probe);
+                                     unattended_read_answered, r);
     if (sub != OK) {
-        kprintf("[USB ASYNC TEST] FAILED: the seat would not take the read "
-                "(error %d)\n", (int)sub);
-        pmm_free(dma, 1); kfree(expect);
+        kprintf("[UNATTENDED READ] seat %u (%s): FAILED — the seat would not "
+                "take the read (error %d)\n", seat, name, (int)sub);
+        pmm_free(dma, 1);
+        kfree(expect);
+        r->dma    = NULL;
+        r->expect = NULL;
         return;
     }
 
-    /*
-     * Turn the handle. The guide loop that would normally do it does not start
-     * until the end of boot, and this runs before that — so the completion is
-     * pumped here, on this core, which is the one it was posted to.
-     */
-    uint64_t deadline = rdtsc() + cpu_ms_to_tsc(BOARD_ASYNC_TEST_MS);
-    while (!__atomic_load_n(&probe.done, __ATOMIC_ACQUIRE)) {
-        xhci_process_events();
-        BatonPump(amp_get_core_index());
-        if ((int64_t)(rdtsc() - deadline) >= 0) {
-            kprintf("[USB ASYNC TEST] FAILED: no answer in %u ms — the read was "
-                    "accepted and its completion never arrived\n",
-                    BOARD_ASYNC_TEST_MS);
-            /* The buffers are deliberately NOT freed: the transfer was
-             * accepted, so the controller may still write into that page. A
-             * leaked page is a smaller fault than a device writing into one
-             * somebody else has been given. */
-            kfree(expect);
-            return;
-        }
+    while (!__atomic_load_n(&r->judged, __ATOMIC_ACQUIRE)) {
+        seat_turn_handle(s);
         cpu_pause();
     }
-
-    if (probe.status != OK) {
-        kprintf("[USB ASYNC TEST] FAILED: the medium refused the read "
-                "(error %d)\n", (int)probe.status);
-    } else if (memcmp(got, expect, bytes) != 0) {
-        uint32_t first = 0;
-        while (first < bytes && got[first] == expect[first]) first++;
-        kprintf("[USB ASYNC TEST] FAILED: the two reads disagree, first at "
-                "byte %u (0x%02x, expected 0x%02x)\n",
-                first, got[first], expect[first]);
-    } else {
-        kprintf("[USB ASYNC TEST] PASSED: %u bytes read without anybody "
-                "standing over it, identical to the ordinary read\n", bytes);
-    }
-
-    pmm_free(dma, 1);
-    kfree(expect);
 }
 
 int BoardroomFlush(uint8_t seat)

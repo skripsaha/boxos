@@ -250,14 +250,17 @@ bool BoardroomSeatCanReadAsync(uint8_t seat);
  *
  * A boot self-test rather than a unit test, because the thing being tested is a
  * conversation with the hardware in front of it: whether the completion reaches
- * a K-Core, whether the sectors land where they were asked to, and whether the
+ * the pump, whether the sectors land where they were asked to, and whether the
  * bytes are the right ones. None of that can be established anywhere but on the
  * machine, and the machine this matters most on is read by photographing its
- * screen — so it says PASS or FAIL in one line and says why.
+ * screen — so it says PASSED or FAILED in one line, names the seat, and says
+ * why.
  *
- * No-op, silently, for a seat that has no asynchronous read to test.
+ * It always speaks. Where the machine will never read this way — one core, or
+ * a seat whose caller has to stay — it says so and asks nothing. It has no
+ * clock of its own: the seat's driver answers for a medium that does not.
  */
-void BoardroomAsyncSelfTest(uint8_t seat);
+void BoardroomProveUnattendedRead(uint8_t seat);
 
 /* Push the medium's own write cache out. A write that has completed is a write
  * the device has accepted, not necessarily one it has kept. */

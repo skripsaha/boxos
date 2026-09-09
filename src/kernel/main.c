@@ -845,10 +845,10 @@ void kernel_main(void)
     debug_printf("[INIT] Storage Deck & TagFS...\n");
     storage_deck_init();
 
-    /* And whether the medium the volume landed on can be read without a core
+    /* And whether the medium the volume landed on can be read with nobody
      * standing over the transfer — asked here, where the volume is known and
      * the answer is still cheap to act on. */
-    BoardroomAsyncSelfTest(tagfs_get_seat());
+    BoardroomProveUnattendedRead(tagfs_get_seat());
 
     /* And what every medium's own ground says it carries. Reads only — and not
      * the ground the volume above is standing on, which has just been read,
