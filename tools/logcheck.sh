@@ -4313,6 +4313,121 @@ run_headcountmut() {
 
 
 # ===========================================================================
+# byname — a file is found by its name through the index, and the name's tag
+# follows a rename
+# ===========================================================================
+#
+# The volume stamps every file with the stem of its name as a tag, and that is
+# how by-name lookup (find_file_by_name, boxcxx fopen) and proc_exec find a
+# file — the index, not a walk of the first 255 files. rename used to change
+# the string and leave the tag, so a renamed file answered to its old name and
+# not its new one. The scenario creates a file, renames it, and asks the volume
+# by tag and by name; then trashes it and erases the trash, which asks for the
+# trashed files by their tag (a plain listing leaves them out on purpose).
+byname_session() {
+    local name=$1 args=$2
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    local cmd
+    for cmd in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
+               "info beta.txt" "info alpha.txt" "trash beta.txt" "erase trashed" "files beta"; do
+        type_line "$cmd" || break
+        wait_for_prompt || break
+    done
+    sleep 1
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+byname_judge() {
+    local name=$1 L="$SCRATCH/serial.$1.log"
+    grep -q "Created file: alpha.txt" "$L" \
+        && ok "$name: the file was created" \
+        || bad "$name: create did not answer"
+    grep -q "File renamed" "$L" \
+        && ok "$name: the file was renamed" \
+        || bad "$name: rename did not answer"
+    # `files beta` asks by tag: the renamed file must carry its new name's tag
+    sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt" \
+        && ok "$name: asked by its new name's tag, the volume answers with the file" \
+        || bad "$name: the tag did not follow the name — 'files beta' does not list beta.txt"
+    sed -n '/~ files alpha/,/~ info beta.txt/p' "$L" | grep -q "No files found" \
+        && ok "$name: the old name's tag is gone" \
+        || bad "$name: the file still answers to its old name's tag"
+    sed -n '/~ info beta.txt/,/~ info alpha.txt/p' "$L" | grep -q "beta.txt" \
+        && ok "$name: found by its new name" \
+        || bad "$name: 'info beta.txt' did not find the file"
+    sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "File not found" \
+        && ok "$name: not found by its old name" \
+        || bad "$name: 'info alpha.txt' still finds the renamed file"
+    grep -q "Deleted 1 trashed files" "$L" \
+        && ok "$name: erase found the trashed file by its tag" \
+        || bad "$name: 'erase trashed' did not delete the one trashed file ($(grep -m1 'Deleted' "$L" || echo 'no answer'))"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "$name: the kernel spoke of a stall or fault" \
+        || ok "$name: no verdict, no panic"
+}
+
+run_byname() {
+    echo "== byname: a file is found by its name through the index, and the tag follows a rename =="
+    build
+    if ! byname_session byname "STRICT=on CORES=4 MEM=4G"; then
+        bad "byname: never reached a shell"; return
+    fi
+    byname_judge byname
+}
+
+# The oracle measured against itself: rename leaves the tag where it was, and
+# the renamed file must stop answering to its new name.
+byname_mut_on() {
+    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.c.byname.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "    if (old_tag != new_tag)\n    {\n        if (old_tag != TAGFS_INVALID_TAG_ID)\n"
+assert s.count(anchor) == 1, "byname mutation anchor missing"
+s = s.replace(anchor, "    if (old_tag != new_tag && false)   /* logcheck mutation: the tag stays behind */\n    {\n        if (old_tag != TAGFS_INVALID_TAG_ID)\n", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "byname mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+byname_mut_off() {
+    [ -f "$SCRATCH/tagfs.c.byname.bak" ] && cp "$SCRATCH/tagfs.c.byname.bak" src/kernel/tagfs/tagfs.c
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+run_bynamemut() {
+    echo "== bynamemut: rename leaves the tag behind, and the oracle must see the file answer to the wrong name =="
+    byname_mut_on; build
+    byname_session bynamemut "STRICT=on CORES=4 MEM=4G"; local booted=$?
+    byname_mut_off
+    if [ $booted -ne 0 ]; then bad "bynamemut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.bynamemut.log"
+    if sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt"; then
+        bad "bynamemut: the tag was left behind and 'files beta' STILL lists beta.txt — the oracle cannot see that defect"
+    else
+        ok "bynamemut: the tag left behind, and the oracle sees the file gone from its new name"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
 # deadline — a timed park's ERR_TIMEOUT rides the process's own baton
 # ===========================================================================
 #
@@ -4522,6 +4637,8 @@ case "${1:-both}" in
     headcountmut) run_headcountmut ;;
     deadline)   run_deadline ;;
     deadlinemut) run_deadlinemut ;;
+    byname)     run_byname ;;
+    bynamemut)  run_bynamemut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4544,7 +4661,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

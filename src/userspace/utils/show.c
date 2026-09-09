@@ -34,7 +34,8 @@ int main(void)
     if (count > 1)
     {
         println("Multiple files found:");
-        for (int i = 0; i < count; i++)
+        int written = count < 16 ? count : 16;
+        for (int i = 0; i < written; i++)
         {
             file_info_t info;
             if (file_info(matches[i], &info) == 0)

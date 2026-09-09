@@ -33,8 +33,14 @@ typedef struct {
  */
 int create(const char* filename, const char* tags);
 int create_everywhere(const char* filename, const char* tags);
+/* query writes up to max_files ids and returns how many it wrote. A caller
+ * that wants every match asks query_all: it learns the count from the kernel,
+ * hands back a malloc'd list of that many ids (NULL when there are none) and
+ * returns the count; the caller frees the list. */
 int query(const char* tags, uint32_t* file_ids, size_t max_files);
 int query_everywhere(const char* tags, uint32_t* file_ids, size_t max_files);
+int query_all(const char* tags, uint32_t** out_ids);
+int query_all_everywhere(const char* tags, uint32_t** out_ids);
 int file_info(uint32_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure. */
@@ -65,6 +71,9 @@ int file_truncate(uint32_t file_id, uint64_t new_size);
 int tag_add(uint32_t file_id, const char* tag);
 int tag_remove(uint32_t file_id, const char* key);
 
+/* Every file called `filename`, inside the Use Context. Returns how many
+ * there are; the first `max` of them are written to file_ids (and out_infos,
+ * when given). Asked with max == 0 it only counts. */
 int find_file_by_name(const char* filename, uint32_t* file_ids, file_info_t* out_infos, size_t max);
 
 /* CoW snapshots — capture a frozen view of a file (or all files when

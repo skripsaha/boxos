@@ -211,6 +211,12 @@
  *  Read by the kernel handler table (decks/storage/storage_ops.c) and by the
  *  boxlib wrappers (boxlib/src/file.c); never mirrored in a *.c file.
  * ============================================================================ */
+/* tag.query — every file carrying the asked tags. params = [u8 scope] (see
+ * STORAGE_SCOPE_* below), in_crate = comma-separated tags (absent = all).
+ * out_crate = [u32 delivered][u32 total][u32 file_ids[delivered]]: `total` is
+ * how many files match, `delivered` how many of them fit the crate — so a
+ * caller with too small a crate learns the true count and can ask again with
+ * room for it, instead of being handed the smaller number as the answer. */
 #define STORAGE_TAG_QUERY           0x01
 #define STORAGE_TAG_SET             0x02
 #define STORAGE_TAG_UNSET           0x03

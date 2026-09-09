@@ -3,10 +3,8 @@
 #include "box/string.h"
 #include "box/system.h"
 
-/* Big arrays in BSS to keep the user stack ≤ a few KB. */
-#define HELP_MAX 256
-static uint32_t    s_file_ids[HELP_MAX];
-static file_info_t s_infos[HELP_MAX];
+#include "box/memory.h"
+
 int main(void) {
 
     println("BoxOS Shell v1.0 - Available Commands:");
@@ -18,8 +16,12 @@ int main(void) {
     println("");
     println("Utilities:");
 
-    int count = query("utility", s_file_ids, HELP_MAX);
-    if (count > HELP_MAX) count = HELP_MAX;
+    /* Every utility on the volume, however many there are. */
+    uint32_t    *s_file_ids = NULL;
+    file_info_t *s_infos    = NULL;
+    int count = query_all("utility", &s_file_ids);
+    if (count > 0) s_infos = malloc((size_t)count * sizeof(file_info_t));
+    if (count > 0 && !s_infos) count = -1;
 
     if (count > 0) {
         for (int i = 0; i < count; i++) {

@@ -14,6 +14,7 @@
 #include "box/string.h"
 #include "box/types.h"
 #include "box/error.h"
+#include "box/memory.h"     /* malloc / free — a crate sized to the ask */
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
@@ -60,15 +61,19 @@ int create_everywhere(const char *filename, const char *tags)
     return create_scoped(filename, tags, STORAGE_SCOPE_EVERYWHERE);
 }
 
-static int query_scoped(const char *tags, uint32_t *file_ids, size_t max_files, uint8_t scope)
+/* The kernel answers [u32 delivered][u32 total][u32 ids[delivered]]: how many
+ * it handed over, and how many there are. The crate is sized to the caller's
+ * room, not to a buffer of ours — what stood here was a 1 KiB stack buffer
+ * that quietly cut every ask down to 254 files. */
+static int query_scoped(const char *tags, uint32_t *file_ids, size_t max_files,
+                        uint8_t scope, uint32_t *out_total)
 {
-    if (!file_ids || max_files == 0) return -ERR_INVALID_ARGUMENT;
+    if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
+    if (max_files > (UINT32_MAX - 8u) / sizeof(uint32_t)) return -ERR_INVALID_ARGUMENT;
 
-    /* out_crate: [u32 count][u32 ids[max_files]]. */
-    uint32_t out_cap = (uint32_t)(4 + max_files * sizeof(uint32_t));
-    uint8_t  stack_buf[1024];
-    uint8_t *out = stack_buf;
-    if (out_cap > sizeof(stack_buf)) out_cap = (uint32_t)sizeof(stack_buf);
+    uint32_t out_cap = (uint32_t)(8 + max_files * sizeof(uint32_t));
+    uint8_t *out = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
 
     const void *in = NULL;
     uint32_t    in_size = 0;
@@ -83,26 +88,62 @@ static int query_scoped(const char *tags, uint32_t *file_ids, size_t max_files, 
                      in, in_size,
                      out, out_cap, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
-    if (rc != 0) return box_fail(rc);
-    if (out_actual < 4) return 0;
+    if (rc != 0) { free(out); return box_fail(rc); }
+    if (out_actual < 8) { free(out); return -ERR_INTERNAL; }
 
-    uint32_t count;
-    memcpy(&count, out, 4);
-    if (count > max_files) count = (uint32_t)max_files;
-    for (uint32_t i = 0; i < count; i++) {
-        memcpy(&file_ids[i], out + 4 + i * 4, 4);
-    }
-    return (int)count;
+    uint32_t delivered, total;
+    memcpy(&delivered, out,     4);
+    memcpy(&total,     out + 4, 4);
+    if (delivered > max_files) delivered = (uint32_t)max_files;
+    if (delivered > 0) memcpy(file_ids, out + 8, delivered * sizeof(uint32_t));
+    free(out);
+    if (out_total) *out_total = total;
+    return (int)delivered;
 }
 
 int query(const char *tags, uint32_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_USE);
+    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_USE, NULL);
 }
 
 int query_everywhere(const char *tags, uint32_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE);
+    return query_scoped(tags, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
+}
+
+/* Every match, however many: ask how many there are, then ask for that many.
+ * The volume may grow between the two asks — then the second answer says so,
+ * and the ask is repeated with room for the new count. */
+static int query_all_scoped(const char *tags, uint32_t **out_ids, uint8_t scope)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+
+    uint32_t total = 0;
+    int rc = query_scoped(tags, NULL, 0, scope, &total);
+    if (rc < 0) return rc;
+
+    for (;;) {
+        if (total == 0) return 0;
+        uint32_t *ids = malloc(total * sizeof(uint32_t));
+        if (!ids) return -ERR_NO_MEMORY;
+        uint32_t now = 0;
+        rc = query_scoped(tags, ids, total, scope, &now);
+        if (rc < 0) { free(ids); return rc; }
+        if (now <= total) { *out_ids = ids; return rc; }
+        free(ids);
+        total = now;
+    }
+}
+
+int query_all(const char *tags, uint32_t **out_ids)
+{
+    return query_all_scoped(tags, out_ids, STORAGE_SCOPE_USE);
+}
+
+int query_all_everywhere(const char *tags, uint32_t **out_ids)
+{
+    return query_all_scoped(tags, out_ids, STORAGE_SCOPE_EVERYWHERE);
 }
 
 /* =========================================================================
@@ -303,21 +344,46 @@ int tag_remove(uint32_t file_id, const char *key)
 int find_file_by_name(const char *filename, uint32_t *file_ids,
                       file_info_t *out_infos, size_t max)
 {
-    uint32_t all_files[256];
-    int total = query(NULL, all_files, 256);
-    if (total < 0) return total;
-    int match_count = 0;
-    for (int i = 0; i < total && (size_t)match_count < max; i++) {
-        file_info_t info;
-        if (file_info(all_files[i], &info) == 0) {
-            if (strcmp(info.filename, filename) == 0) {
-                file_ids[match_count] = all_files[i];
-                if (out_infos) out_infos[match_count] = info;
-                match_count++;
-            }
-        }
+    if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    if (max > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
+
+    /* The name is a tag. The volume stamps every file with the stem of its
+     * name — up to the last dot — as its first tag, so the index answers "who
+     * is called this" in one ask, however many files there are. What stood
+     * here walked the first 255 files of the volume and asked each its name.
+     * A stem the tag grammar cannot spell (a ':' or ',' inside it) is asked
+     * the old way: every file in the context, compared by name. */
+    char   stem[sizeof(((file_info_t *)0)->filename)];
+    size_t len = strlen(filename);
+    size_t cut = len;
+    for (size_t i = len; i > 0; i--) {
+        if (filename[i - 1] == '.') { cut = i - 1; break; }
     }
-    return match_count;
+    if (cut >= sizeof(stem)) cut = sizeof(stem) - 1;
+    memcpy(stem, filename, cut);
+    stem[cut] = '\0';
+    bool by_tag = stem[0] != '\0';
+    for (size_t i = 0; i < cut && by_tag; i++) {
+        if (stem[i] == ':' || stem[i] == ',') by_tag = false;
+    }
+
+    uint32_t *ids = NULL;
+    int n = query_all(by_tag ? stem : NULL, &ids);
+    if (n < 0) return n;
+
+    int found = 0;
+    for (int i = 0; i < n; i++) {
+        file_info_t info;
+        if (file_info(ids[i], &info) != 0) continue;
+        if (strcmp(info.filename, filename) != 0) continue;
+        if ((size_t)found < max) {
+            file_ids[found] = ids[i];
+            if (out_infos) out_infos[found] = info;
+        }
+        found++;
+    }
+    free(ids);
+    return found;
 }
 
 /* =========================================================================
