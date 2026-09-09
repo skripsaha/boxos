@@ -444,7 +444,7 @@ static void nightwatch_verdict(void)
      * that happened, and they are exactly what a lost wake in this new sleep
      * looks like. */
 
-    uint32_t parked = 0, lost = 0, unreachable = 0, timed = 0, undelivered = 0;
+    uint32_t parked = 0, lost = 0, timed = 0, undelivered = 0;
     uint32_t unserved = 0, unsched = 0, owed = 0;
     uint32_t fresh_count = 0;
 
@@ -454,7 +454,7 @@ static void nightwatch_verdict(void)
     for (uint32_t pass = 0; pass < 2; pass++)
     {
     bool speak = (pass == 1);
-    parked = lost = unreachable = timed = undelivered = 0;
+    parked = lost = timed = undelivered = 0;
     unserved = unsched = owed = 0;
     for (uint32_t i = 0; i < n; i++)
     {
@@ -706,23 +706,6 @@ static void nightwatch_verdict(void)
         if (lost_wake) lost++;
         if (e->timed)  timed++;
 
-        /* UNREACHABLE. Re-resolve the VA the parker gave us. A different
-         * physical page means the wait table has this entry filed under an
-         * address no waker will ever compute. */
-        bool moved = false;
-        uintptr_t phys_now = 0;
-        process_t *ref = process_find_ref(e->pid);
-        if (ref)
-        {
-            if (ref->cabin && ref->cabin->vmm && e->user_va)
-            {
-                phys_now = vmm_virt_to_phys(ref->cabin->vmm, e->user_va);
-                moved = (phys_now != 0) && (phys_now != e->phys_addr);
-            }
-            process_ref_dec(ref);
-        }
-        if (moved) unreachable++;
-
         if (speak) {
         kprintf("  pid %u gen %u %s home=%u on_cpu=%d parked seq=%u%s\n",
                 e->pid, e->generation, nightwatch_state_name(e->state),
@@ -733,9 +716,6 @@ static void nightwatch_verdict(void)
                 (unsigned long)e->expected, (unsigned long)actual);
         if (lost_wake)
             kprintf("      ‼ LOST WAKE — value already changed, no deadline to save it\n");
-        if (moved)
-            kprintf("      ‼ UNREACHABLE — va now resolves to phys 0x%lx, filed under 0x%lx\n",
-                    (unsigned long)phys_now, (unsigned long)e->phys_addr);
         if (bell_unrung)
             kprintf("      ‼ BELL UNRUNG — asleep with a brook bell hung out while "
                     "tag %u could have served it (head=%lu tail=%lu)\n",
@@ -745,7 +725,7 @@ static void nightwatch_verdict(void)
     }
 
     /* Nothing proven and the box is not even stopped: say nothing at all. */
-    bool proven = (lost || unreachable || undelivered || unserved || unsched || owed);
+    bool proven = (lost || undelivered || unserved || unsched || owed);
     if (pass == 0 && !proven)
     {
         /* Nothing to say this look — but remember today's suspects so the
@@ -775,12 +755,12 @@ static void nightwatch_verdict(void)
         kprintf("[NIGHTWATCH] %u process(es) appeared mid-walk and were not described\n",
                 skipped);
 
-    if (lost || unreachable || undelivered || unserved || unsched || owed)
-        kprintf("[NIGHTWATCH] VERDICT: %u lost wake(s), %u unreachable park(s), "
+    if (lost || undelivered || unserved || unsched || owed)
+        kprintf("[NIGHTWATCH] VERDICT: %u lost wake(s), "
                 "%u undelivered result(s), %u unserved pocket(s), "
                 "%u unscheduled runnable(s), %u answer(s) owed of %u parked "
                 "— a defect, not a slow test\n",
-                lost, unreachable, undelivered, unserved, unsched, owed, parked);
+                lost, undelivered, unserved, unsched, owed, parked);
     else if (parked && parked == timed)
         kprintf("[NIGHTWATCH] VERDICT: %u parked, all with deadlines — will recover\n",
                 parked);

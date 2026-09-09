@@ -32,6 +32,7 @@
 #include "clockboard.h"
 #include "pit.h"
 #include "irq_defer.h"
+#include "baton.h"
 
 static idt_entry_t idt[IDT_ENTRIES];
 static idt_descriptor_t idt_desc;
@@ -1248,6 +1249,12 @@ void irq_handler(interrupt_frame_t *frame)
         if (g_amp.total_cores == 1 && (frame->cs & 3) == 3)
         {
             irq_defer_pump(0);
+            /* The batons too — a park deadline's ERR_TIMEOUT rides the
+             * process's own baton to be delivered here, and on one core
+             * this and the idle loop are the only drains. The ring-3 gate
+             * above is what keeps the two from ever interleaving on the
+             * single-consumer queue. */
+            BatonPump(0);
         }
 
         /* PIT IRQ 0: same scheduling rule as the LAPIC timer above —

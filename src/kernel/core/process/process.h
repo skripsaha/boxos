@@ -9,6 +9,7 @@
 #include "atomics.h"
 #include "cabin.h"
 #include "addr_wait.h"
+#include "baton.h"
 #include "chit.h"
 
 /*
@@ -315,6 +316,19 @@ typedef struct process_t
      * promised, by whom, and whether the event that makes it has come. One
      * slot — a strand holds out for one token at a time. See chit.h. */
     Chit              chit;
+
+    /* The deadline's baton. A timed park's ERR_TIMEOUT is delivered by a
+     * K-Core (KResultPush touches the cabin VMM, never allowed in the tick),
+     * and the node that carries that delivery lives HERE, so the tick's pass
+     * cannot fail for want of a slot — irq_defer, which used to carry it,
+     * drops when its chunk has no successor, and a dropped deadline was a
+     * park that never returned (boxlib covered it with a +100 ms clock of
+     * its own). One slot, one gate: `deadline_passed` is 1 while the baton
+     * is queued; a deadline that fires while it is still queued is folded
+     * into that pass, which judges by the park's state when it runs, not by
+     * which fire woke it. The pass holds a ref on this process until run. */
+    Baton             deadline_baton;
+    volatile uint8_t  deadline_passed;
 
     /* Who is waiting for THIS process to be gone.
      *

@@ -9,7 +9,7 @@
 /* By pointer only: an endpoint may carry somewhere for its answer to go, and
  * the queue that carries it there belongs to the storage deck. Including that
  * header here would make every USB translation unit depend on the deck. */
-struct StorageCompletion;
+struct Baton;
 
 /* Endpoint types as the controller numbers them (xHCI Table 6-9). The value
  * goes straight into the endpoint context, so these are the controller's
@@ -86,7 +86,7 @@ typedef struct xhci_endpoint {
      * allocation and cannot fail for want of a slot: a transfer completion
      * that went missing would leave its caller waiting for ever.
      */
-    struct StorageCompletion* xfer_done;
+    struct Baton* xfer_done;
 } xhci_endpoint_t;
 
 /* Device Context Index of an endpoint address: the endpoint number doubled,
@@ -145,7 +145,7 @@ int  xhci_ep_submit(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
  */
 int  xhci_ep_submit_async(xhci_controller_t* ctrl, xhci_device_slot_t* slot,
                           uint8_t dci, uint64_t buffer_phys, uint32_t length,
-                          struct StorageCompletion* done);
+                          struct Baton* done);
 
 /* Wait for the transfer submitted above.
  *

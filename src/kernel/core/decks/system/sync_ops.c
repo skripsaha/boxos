@@ -21,18 +21,18 @@
  *     is safe there. The parker's step-6 lost-wakeup recheck can also CLAIM (when
  *     the watched value already changed) and complete synchronously.
  *   - TIMEOUT: armed via TouchQueueWakeAfter. When the timer fires (PIT IRQ),
- *     touch_queue_fire_wake posts an allocation-free irq_defer() — it does NO
- *     ResultRing/VMM work in the PIT tick. The deferred SyncTimeoutDeliver then
- *     runs on a K-Core: it CLAIMS the entry (arbitrating against a racing
- *     addr_wake — exactly one delivers) and, on a win, KResultPushes ONE
- *     ERR_TIMEOUT Result, so the caller's result_wait returns AT the deadline.
- *     Delivering the timeout Result FROM the timer IRQ was tried and REVERTED:
- *     doing VMM work in interrupt context starved cores from ACKing TLB
- *     shootdowns under 16-core load (shootdown-timeout panic) — hence the
+ *     touch_queue_fire_wake passes the process's own baton (a never-drop
+ *     embedded node, baton.h) — it does NO ResultRing/VMM work in the PIT
+ *     tick. SyncTimeoutDeliver then runs on a K-Core: it CLAIMS the entry by
+ *     its state — linked, timed, deadline passed — (arbitrating against a
+ *     racing addr_wake — exactly one delivers) and, on a win, KResultPushes
+ *     ONE ERR_TIMEOUT Result, so the caller's result_wait returns AT the
+ *     deadline. Delivering the timeout Result FROM the timer IRQ was tried and
+ *     REVERTED: doing VMM work in interrupt context starved cores from ACKing
+ *     TLB shootdowns under 16-core load (shootdown-timeout panic) — hence the
  *     K-Core hand-off, where KResultPush (which touches the cabin VMM) is safe.
- *     A claim LOSS means either addr_wake already delivered (do nothing) or the
- *     waiter never registered an entry (a touch_await timeout) — in both cases
- *     a bare PROC_WORKING reschedule + IPI is the right, idempotent fallback.
+ *     A claim LOSS means addr_wake already delivered, the parker's recheck
+ *     did, or the strand re-parked with a deadline still ahead — nothing owed.
  *
  * Lock ordering (never violated here):
  *   vmm translate (holds ctx->lock) completes BEFORE bucket lock is taken.
@@ -64,7 +64,6 @@
 #include "irqchip.h"
 #include "scheduler.h"   /* g_global_tick, SCHEDULER_DEFAULT_TICK_HZ */
 #include "boxos_decks.h"
-#include "irq_defer.h"   /* SyncTimeoutDeliver runs as an irq_defer bottom-half */
 
 /* -------------------------------------------------------------------------
  * SysAddrPark — park the calling process until *addr != expected or woken.
@@ -126,7 +125,8 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * that push keeps the chit. Nothing else here writes the flag. */
     ChitGive(ctx, "system.addr.park", (uint64_t)phys);
 
-    AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
+    uintptr_t space = (uintptr_t)ctx->proc->cabin->vmm;
+    AddrWaitBucket *bucket = AddrWaitGetBucket(space, user_va);
     if (!bucket) return ERR_NO_MEMORY;
 
     /* Arm the entry UNDER the bucket lock — the lock that guards the chain
@@ -134,8 +134,20 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * never observes a half-armed entry.  (Between the unlink above and this
      * link the entry is in no chain, so wakers cannot reach it.)  Previously
      * these stores sat outside the lock, correct only by statement order. */
+    /* The deadline, if the caller named one, in the tick's own clock. Fixed
+     * before the link so the entry carries it from its first instant on the
+     * chain: the delivery judges by it, under this same lock. */
+    uint64_t fire_at = 0;
+    if (timeout_ms > 0) {
+        uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
+                         / 1000ULL;
+        if (delay == 0) delay = 1;
+        fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + delay;
+    }
+
     spin_lock(&bucket->lock);
     entry->proc          = ctx->proc;
+    entry->space         = space;
     entry->phys_addr     = phys;
     entry->done          = 0;
     entry->submit_cookie = ctx->submit_cookie;
@@ -144,34 +156,28 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     entry->user_va   = user_va;
     entry->expected  = expected;
     entry->timed     = (timeout_ms > 0) ? 1u : 0u;
+    entry->fire_at   = fire_at;
     AddrWaitLink(bucket, entry);   /* bumps entry->seq for THIS park */
-    uint32_t wait_seq = entry->seq;
     spin_unlock(&bucket->lock);
 
-    /* Step 4: arm an IRQ-safe timeout (same helper SysTouchAwait uses), tagged
-     * with this park's wait_seq. On expiry the PIT tick reschedules us
-     * (PROC_WORKING + IPI, in-IRQ, no VMM) AND posts an allocation-free
-     * irq_defer; the deferred SyncTimeoutDeliver then runs on a K-Core and — only
-     * if entry->seq still equals wait_seq — KResultPushes ERR_TIMEOUT, so the
-     * caller's result_wait returns AT the deadline (the boxlib +100 margin is
-     * now a dormant backstop). Early wake takes the K-Core delivery path through
-     * addr_wake (see SysAddrWake); the seq-gated claim arbitrates which one
-     * delivers and stops a stale timeout from hitting a later re-park. */
-    /* Claim this sleep's number before arming anything for it. Every wake in
+    /* Step 4: arm the deadline (same helper SysTouchAwait uses). On expiry the
+     * PIT tick reschedules us (PROC_WORKING + IPI, in-IRQ, no VMM) AND passes
+     * this process's own baton (process_t.deadline_baton) to a K-Core, where
+     * SyncTimeoutDeliver claims the park by its state — linked, timed, deadline
+     * passed — and KResultPushes ERR_TIMEOUT, so the caller's result_wait
+     * returns AT the deadline. The pass rides an embedded node, so it cannot
+     * be dropped; the caller waits for that Result without any clock of its
+     * own. Early wake takes the K-Core delivery path through addr_wake (see
+     * SysAddrWake); the claim arbitrates which one delivers.
+     *
+     * Claim this sleep's number before arming anything for it. Every wake in
      * the queue carries the number of the sleep it was armed for, and the
-     * tick reschedules only while the two agree — so the wake left behind by
-     * a wait that ended early cannot reach the park that follows it. */
+     * tick acts only while the two agree — so the wake left behind by a wait
+     * that ended early cannot reach the park that follows it. */
     uint32_t park_seq = __atomic_add_fetch(&ctx->proc->park_seq, 1,
                                            __ATOMIC_ACQ_REL);
-
-    if (timeout_ms > 0) {
-        uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
-                         / 1000ULL;
-        if (delay == 0) delay = 1;
-        uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
-                           + delay;
-        TouchQueueWakeAfter(ctx->proc->pid, fire_at, wait_seq, park_seq);
-    }
+    if (timeout_ms > 0)
+        TouchQueueWakeAfter(ctx->proc->pid, fire_at, /*owes_result=*/1u, park_seq);
 
     /* Step 5: park (identical to SysTouchAwait line 275). */
     process_set_state(ctx->proc, PROC_WAITING);
@@ -258,15 +264,16 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     memcpy(&user_va, op->params,     sizeof(uint64_t));
     memcpy(&count,   op->params + 8, sizeof(uint32_t));
 
-    uintptr_t phys = 0;
-    if (ctx->proc->cabin) {
-        phys = vmm_virt_to_phys(ctx->proc->cabin->vmm, user_va);
-    }
-    if (phys == 0) return ERR_INVALID_ADDRESS;
+    /* The word must be the caller's to name: a VA with nothing behind it is
+     * a caller error, said as such. The translation is only that check —
+     * the wait is keyed by (space, va), not by the page. */
+    if (!ctx->proc->cabin || vmm_virt_to_phys(ctx->proc->cabin->vmm, user_va) == 0)
+        return ERR_INVALID_ADDRESS;
+    uintptr_t space = (uintptr_t)ctx->proc->cabin->vmm;
 
     /* Look up bucket.  If no slab exists for this address yet, there are no
      * waiters — return OK silently (no waiters is not an error). */
-    AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
+    AddrWaitBucket *bucket = AddrWaitGetBucket(space, user_va);
     if (!bucket) return OK;
 
     /* Claim every waiter parked on THIS address now — up to `count`, all of
@@ -292,12 +299,13 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     while (e && (count == 0 || wake_count < count))
     {
         AddrWaitEntry *next = e->next;   /* save: AddrWaitUnlink nulls e->next */
-        /* The bucket is a HASH of the physical address ((phys>>3)&0xFFFF), so a
-         * chain can hold waiters parked on DIFFERENT addresses that collide.
-         * Wake only waiters on THIS exact address — otherwise a colliding waiter
-         * consumes the (count==1) notify_one budget and the intended waiter
-         * misses its wake (lost wakeup for a mutex/semaphore handoff). */
-        if (e->phys_addr == phys && AddrWaitClaimLocked(bucket, e)) {
+        /* The bucket is a HASH of (space, va), so a chain can hold waiters
+         * parked on DIFFERENT words that collide. Wake only waiters on THIS
+         * exact word — otherwise a colliding waiter consumes the (count==1)
+         * notify_one budget and the intended waiter misses its wake (lost
+         * wakeup for a mutex/semaphore handoff). */
+        if (e->space == space && e->user_va == user_va &&
+            AddrWaitClaimLocked(bucket, e)) {
             /* Claimed — we own this waiter's one completion, and its chit is
              * DUE from here (AddrWaitClaimLocked marks it under this lock). */
             process_ref_inc(e->proc);
@@ -359,11 +367,11 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
         /* Publish outside bucket lock (per spec). */
         {
             struct __attribute__((packed)) {
-                uint64_t phys;
+                uint64_t va;
                 uint32_t pid;
                 uint32_t waker_pid;
             } ev;
-            ev.phys      = (uint64_t)phys;
+            ev.va        = user_va;
             ev.pid       = target->pid;
             ev.waker_pid = waker_pid;
             TouchPublish("strand:woken", &ev, sizeof(ev));
@@ -376,57 +384,55 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
 }
 
 /* -------------------------------------------------------------------------
- * SyncTimeoutDeliver — irq_defer bottom-half for an expired park timeout.
+ * SyncTimeoutDeliver — the deadline's continuation, run on a K-Core.
  *
- * Posted by touch_queue_fire_wake (the PIT-tick WAKE path). ctx packs the wait
- * seq in the high 32 bits and the target pid in the low 32 — a plain integer,
- * NOT a pinned pointer, so an irq_defer overflow drop can never leak a ref (the
- * boxlib +100 backstop then covers the dropped Result). The reschedule out of
- * PROC_WAITING already happened in the IRQ (touch_queue_fire_wake); this runs on
- * a K-Core via irq_defer_pump purely to deliver the Result, where KResultPush
- * (cabin VMM) is safe — NEVER in IRQ context (the 16c shootdown-panic lesson).
+ * Passed by touch_queue_fire_wake (the PIT-tick WAKE path) on the process's
+ * own baton; ctx is the process, and the pass holds a ref on it that is
+ * released here. The reschedule out of PROC_WAITING already happened in the
+ * IRQ; this runs purely to deliver the Result, where KResultPush (cabin VMM)
+ * is safe — NEVER in IRQ context (the 16c shootdown-panic lesson).
  *
- * It is the timeout arm of the same claim arbitration SysAddrWake uses, seq-
- * gated so a STALE timeout (its park was woken early and the strand re-parked,
- * reusing this entry) can never inject ERR_TIMEOUT into the new wait:
+ * It is the deadline arm of the same claim arbitration SysAddrWake uses, and
+ * it judges by the park's STATE, not by a token from the fire that woke it:
  *
- *   - CLAIM WON (entry linked, not done, seq matches): this was a real
+ *   - CLAIM WON (entry linked, timed, deadline at or before now): a real
  *     addr_park waiter whose deadline elapsed before any notify. We OWN
  *     delivery — KResultPush ONE ERR_TIMEOUT onto its ResultRing (the channel
- *     boxlib result_wait monitors). result_wait returns with ERR_TIMEOUT at the
- *     deadline. A defensive re-flip handles the rare case the IRQ reschedule was
- *     undone by a re-park before this push (harmless if already WORKING).
+ *     boxlib result_wait monitors). result_wait returns with ERR_TIMEOUT at
+ *     the deadline. A defensive re-flip handles the rare case the IRQ
+ *     reschedule was undone by a re-park before this push.
  *   - CLAIM LOST: SysAddrWake already delivered an OK Result, OR the parker's
- *     own recheck completed it, OR the strand re-parked (seq bumped), OR this is
- *     a touch_await timeout (no linked entry). In every case the IRQ reschedule
- *     already did the right thing and no Result is owed here — do nothing.
+ *     own recheck completed it, OR the strand re-parked with a deadline still
+ *     ahead. In every case no Result is owed here — do nothing.
  *
- * The ref taken here (process_find_ref) is released at the end. If the pid no
- * longer resolves (the process exited between the timer fire and this pump),
- * the lookup returns NULL and we simply do nothing.
+ * One baton per process, gated by deadline_passed: the gate is cleared FIRST,
+ * with a full fence, so a deadline that fires from here on passes the baton
+ * afresh, and one that fired before the clear is answered by the state read
+ * below — the fire's CAS on the gate is itself a full fence, so the two
+ * orders cannot both miss (Dekker). A fire that landed between the park's
+ * link and its sleep is answered the same way: the park's deadline has
+ * passed, and it is claimed.
  * ------------------------------------------------------------------------- */
 void SyncTimeoutDeliver(void *ctx)
 {
-    uint64_t packed = (uint64_t)(uintptr_t)ctx;
-    uint32_t pid      = (uint32_t)(packed & 0xFFFFFFFFu);
-    uint32_t wait_seq = (uint32_t)(packed >> 32);
+    process_t *target = (process_t *)ctx;
 
-    process_t *target = process_find_ref(pid);
-    if (!target) return;
+    __atomic_store_n(&target->deadline_passed, 0u, __ATOMIC_SEQ_CST);
 
-    if (AddrWaitClaimSeq(&target->addr_wait_entry, wait_seq) &&
-        !target->destroying) {
+    uint64_t now    = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    uint32_t cookie = 0;
+    if (!target->destroying &&
+        AddrWaitClaimDue(&target->addr_wait_entry, now, &cookie)) {
         /* We own this waiter's single completion — deliver ERR_TIMEOUT, the
-         * deadline Result the boxlib +100 backstop used to synthesise late.
-         * Push BEFORE any state flip so the woken strand finds its Result the
-         * instant it is rescheduled (mirrors SysAddrWake's OK-delivery tail). */
+         * deadline Result. Push BEFORE any state flip so the woken strand
+         * finds its Result the instant it is rescheduled (mirrors
+         * SysAddrWake's OK-delivery tail). */
         Result r;
         memset(&r, 0, sizeof(r));
         r.error_code = ERR_TIMEOUT;
         r.sender_pid = 0;
         /* Same token the claimed park armed — see the wake path above. */
-        r.context    = KCTX_PACK24(KCTX_GUIDE,
-                                   target->addr_wait_entry.submit_cookie);
+        r.context    = KCTX_PACK24(KCTX_GUIDE, cookie);
         KResultPush(target, &r);
 
         if (process_get_state(target) == PROC_WAITING) {
@@ -440,7 +446,7 @@ void SyncTimeoutDeliver(void *ctx)
         }
     }
 
-    process_ref_dec(target);
+    process_ref_dec(target);   /* the pass's ref */
 }
 
 /* -------------------------------------------------------------------------
@@ -634,7 +640,7 @@ void AddrWaitSelfTest(void)
     {
         volatile uint64_t dummy = 0;
         uintptr_t phys_sim = (uintptr_t)&dummy;
-        AddrWaitBucket *b = AddrWaitGetBucket(phys_sim);
+        AddrWaitBucket *b = AddrWaitGetBucket(0, (uint64_t)phys_sim);
         if (!b) {
             kprintf("[ADDR_WAIT TEST] FAIL (a): bucket alloc failed\n");
             fail++;
@@ -644,6 +650,8 @@ void AddrWaitSelfTest(void)
             e.linked    = 0;
             e.seq       = 0;
             e.proc      = NULL;
+            e.space     = 0;
+            e.user_va   = (uint64_t)phys_sim;
             e.phys_addr = phys_sim;
             e.next      = NULL;
             e.prev      = NULL;
@@ -672,7 +680,7 @@ void AddrWaitSelfTest(void)
     {
         volatile uint64_t dummy2 = 0;
         uintptr_t phys_sim2 = (uintptr_t)&dummy2 + 8; /* distinct address from (b) */
-        AddrWaitBucket *b2 = AddrWaitGetBucket(phys_sim2);
+        AddrWaitBucket *b2 = AddrWaitGetBucket(0, (uint64_t)phys_sim2);
         if (!b2) {
             kprintf("[ADDR_WAIT TEST] FAIL (b): bucket alloc failed\n");
             fail++;
@@ -682,6 +690,8 @@ void AddrWaitSelfTest(void)
             e2.linked    = 0;
             e2.seq       = 0;
             e2.proc      = NULL;
+            e2.space     = 0;
+            e2.user_va   = (uint64_t)phys_sim2;
             e2.phys_addr = phys_sim2;
             e2.next      = NULL;
             e2.prev      = NULL;

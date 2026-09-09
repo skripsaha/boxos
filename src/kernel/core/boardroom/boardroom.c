@@ -12,7 +12,7 @@
 #include "xhci_msd.h"
 #include "xhci_hub.h"
 #include "xhci_interrupt.h"
-#include "storage_completion.h"
+#include "baton.h"
 #include "amp.h"
 #include "pmm.h"
 #include "vmm.h"
@@ -817,7 +817,7 @@ void BoardroomAsyncSelfTest(uint8_t seat)
     uint64_t deadline = rdtsc() + cpu_ms_to_tsc(BOARD_ASYNC_TEST_MS);
     while (!__atomic_load_n(&probe.done, __ATOMIC_ACQUIRE)) {
         xhci_process_events();
-        StorageCompletionPump(amp_get_core_index());
+        BatonPump(amp_get_core_index());
         if ((int64_t)(rdtsc() - deadline) >= 0) {
             kprintf("[USB ASYNC TEST] FAILED: no answer in %u ms — the read was "
                     "accepted and its completion never arrived\n",

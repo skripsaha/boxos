@@ -4312,6 +4312,91 @@ run_headcountmut() {
 }
 
 
+# ===========================================================================
+# deadline — a timed park's ERR_TIMEOUT rides the process's own baton
+# ===========================================================================
+#
+# The PIT tick used to post the deadline's delivery through irq_defer, which
+# drops when its chunk has no successor, and boxlib held a +100 ms clock of its
+# own over that hop. The delivery now rides the process's embedded baton — a
+# pass that cannot fail for want of a slot — and boxlib waits for the answer
+# with no clock at all. strandpark is the instrument: 600 timed parks from
+# four strands at once (T4), then the brigade. On one core the drain is the
+# idle loop and the tick from ring 3, so that path is boot-tested too.
+run_deadline() {
+    echo "== deadline: 600 timed parks answered at their deadline, on 16 cores and on one =="
+    build
+    if ! util_boot deadline16 "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+        bad "deadline: never reached a shell (16c)"; return
+    fi
+    L="$SCRATCH/serial.deadline16.log"
+    grep -q "\[SPK\] PASS: all 3 workers + main completed 150 concurrent parks" "$L" \
+        && ok "deadline (16c): every timed park came back at its deadline" \
+        || bad "deadline (16c): $(grep -m1 '\[SPK\] FAIL' "$L" || echo 'strandpark T4 never finished')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "deadline (16c): the kernel spoke of a stall or fault" \
+        || ok "deadline (16c): no verdict, no panic"
+
+    if ! util_boot deadline1 "STRICT=on CORES=1 MEM=2G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+        bad "deadline: never reached a shell (1c)"; return
+    fi
+    L="$SCRATCH/serial.deadline1.log"
+    # The self-test speaks at boot, before the shell — that is before the mark
+    # util_boot keeps from, so it is read off the whole serial log.
+    grep -q "\[BATON-TEST\] PASS" build/serial.log \
+        && ok "deadline (1c): the baton self-test passed at boot" \
+        || bad "deadline (1c): no baton self-test PASS at boot"
+    grep -q "\[SPK\] PASS: all 3 workers + main completed 150 concurrent parks" "$L" \
+        && ok "deadline (1c): every timed park came back at its deadline through the idle/tick drain" \
+        || bad "deadline (1c): $(grep -m1 '\[SPK\] FAIL' "$L" || echo 'strandpark T4 never finished')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "deadline (1c): the kernel spoke of a stall or fault" \
+        || ok "deadline (1c): no verdict, no panic"
+}
+
+# The oracle measured against itself: the tick drops the pass, so no deadline
+# is ever delivered. With no clock left in boxlib the timed park never returns,
+# and Nightwatch must name it: the chit fell DUE at the tick and was never kept.
+deadline_drop_on() {
+    cp src/kernel/core/touch/touch_queue.c "$SCRATCH/touch_queue.c.deadline.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/touch/touch_queue.c"
+s = open(p).read()
+anchor = "            BatonPass(&target->deadline_baton);\n"
+assert s.count(anchor) == 1, "deadline mutation anchor missing"
+s = s.replace(anchor, "            process_ref_dec(target);   /* logcheck mutation: the pass is dropped */\n", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/touch/touch_queue.c || { echo "deadline mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/touch/touch_queue.c
+}
+
+deadline_drop_off() {
+    [ -f "$SCRATCH/touch_queue.c.deadline.bak" ] && cp "$SCRATCH/touch_queue.c.deadline.bak" src/kernel/core/touch/touch_queue.c
+    sleep 1; touch src/kernel/core/touch/touch_queue.c
+}
+
+run_deadlinemut() {
+    echo "== deadlinemut: the pass dropped, and the kernel must name the answer it owes =="
+    deadline_drop_on; build
+    util_boot deadlinemut "STRICT=on CORES=16 MEM=8G" strandpark "ANSWER OWED|\[SPK\] (PASS|FAIL): brigade" 45; local booted=$?
+    deadline_drop_off
+    if [ $booted -ne 0 ]; then bad "deadlinemut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.deadlinemut.log"
+    if grep -q "ANSWER OWED: system.addr.park took the event" "$L"; then
+        ok "deadlinemut: the dropped deadline is named — system.addr.park owes an answer it never delivered"
+    else
+        bad "deadlinemut: the pass dropped and nobody said so ($(grep -m1 -E 'ANSWER OWED|\[SPK\] (PASS|FAIL)' "$L" || echo 'no verdict, no strandpark line'))"
+    fi
+    if grep -q "\[SPK\] PASS: all 3 workers + main completed 150 concurrent parks" "$L"; then
+        bad "deadlinemut: no deadline delivered and strandpark T4 STILL passed — the oracle cannot see that defect"
+    else
+        ok "deadlinemut: without the pass no timed park came back — and the oracle sees it"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -4338,6 +4423,8 @@ case "${1:-both}" in
     brigademut) run_brigademut ;;
     headcount)  run_headcount ;;
     headcountmut) run_headcountmut ;;
+    deadline)   run_deadline ;;
+    deadlinemut) run_deadlinemut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4360,7 +4447,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_brigade; echo; run_headcount; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
