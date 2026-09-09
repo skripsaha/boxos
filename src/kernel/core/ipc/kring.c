@@ -270,6 +270,29 @@ static inline void kring_wake_remote(process_t *target)
  * chit that answer redeems (or fails to) is where it is recorded now. */
 static volatile uint64_t g_krp_full;
 static volatile uint64_t g_krp_seq_broken;
+static volatile uint64_t g_krp_refused;
+static volatile uint64_t g_krp_token_astray;
+
+/* A refusal is not a statistic when an ANSWER is being refused: somebody is
+ * parked on it, every caller of KResultPush drops the return value, and the
+ * strand would simply never wake — Nightwatch then finds a token nobody left
+ * a chit for and can only say "the work was taken and nobody promised the
+ * answer". Every refusal says why, names the victim and the token. Refused
+ * unsolicited traffic is counted and said once in sixty-four, so a saturated
+ * ring cannot drown the console it is warning. */
+static void krp_refused(const process_t *target, const Result *r, const char *why)
+{
+    uint64_t n     = __atomic_fetch_add(&g_krp_refused, 1, __ATOMIC_RELAXED);
+    uint32_t token = KCTX_COOKIE24(r->context);
+    if (token != 0) {
+        kprintf("[KRP] ERROR: dropped an ANSWER for pid %u (token %u): %s. The "
+                "strand waiting on that answer will not be woken by it\n",
+                (unsigned int)target->pid, (unsigned int)token, why);
+    } else if ((n & 0x3Fu) == 0) {
+        kprintf("[KRP] WARN: refused a message for pid %u: %s\n",
+                (unsigned int)target->pid, why);
+    }
+}
 
 bool KResultPush(process_t *target, const Result *r)
 {
@@ -287,10 +310,10 @@ bool KResultPush(process_t *target, const Result *r)
     if (!target || !r) return false;
 
     ResultRing *rr = kring_result_hdr(target);
-    if (!rr) return false;
+    if (!rr) { krp_refused(target, r, "it has no reply ring"); return false; }
 
     uint32_t cap = rr->hdr.slot_count_max;
-    if (cap == 0) return false;
+    if (cap == 0) { krp_refused(target, r, "its reply ring has no slots"); return false; }
 
     /* ── Claim a position, or refuse. Nothing here waits on the consumer. ──
      *
@@ -408,13 +431,15 @@ bool KResultPush(process_t *target, const Result *r)
         uintptr_t page   = uvaddr & ~(uintptr_t)(VMM_PAGE_SIZE - 1);
         if (page != ensured) {
             if (vmm_ensure_user_page(target->cabin->vmm, uvaddr,
-                                     /*writable=*/true) != 0)
+                                     /*writable=*/true) != 0) {
+                krp_refused(target, r, "the slot's page could not be mapped");
                 return false;
+            }
             ensured = page;
         }
 
         slot = kring_translate_slot(target, uvaddr);
-        if (!slot) return false;
+        if (!slot) { krp_refused(target, r, "the slot does not translate"); return false; }
 
         /* The linearisation point. A failure here means ANOTHER PRODUCER won
          * the tail — the ring moved forward, so this is lock-free progress and
@@ -446,6 +471,25 @@ bool KResultPush(process_t *target, const Result *r)
     }
 
     slot->r = *r;
+
+    /* The waiter's half of the token, when it has said one. boxlib drops on
+     * sight a reply whose token is not the one it waits on — the orphan of a
+     * call abandoned on a deadline — and with every guaranteed answer waited
+     * on without a deadline nothing is ever abandoned: an answer published
+     * under one token for a strand that waits on another is a defect, and it
+     * is said here, the one place both halves are in view. A strand that has
+     * not yet said what it waits for (0) is simply ahead of its own wait. */
+    {
+        uint32_t token    = KCTX_COOKIE24(r->context);
+        uint64_t awaiting = __atomic_load_n(&rr->hdr.awaiting, __ATOMIC_ACQUIRE);
+        if (token != 0 && awaiting != 0 && awaiting != (uint64_t)token) {
+            __atomic_fetch_add(&g_krp_token_astray, 1, __ATOMIC_RELAXED);
+            kprintf("[KRP] DEFECT: pid %u waits on token 0x%06x, but the answer "
+                    "being published for it carries token 0x%06x — its wait will "
+                    "drop this reply as an orphan\n",
+                    (unsigned int)target->pid, (unsigned int)awaiting, (unsigned int)token);
+        }
+    }
 
     /* Publish — the RELEASE store makes the payload above visible to the
      * consumer's ACQUIRE load of the same word. */
