@@ -101,6 +101,35 @@ void kdbg(const char *msg)
             0 /* no deadline — reply guaranteed */, NULL);
 }
 
+/* Say it without waiting for an answer. For the one place a wait cannot be
+ * afforded: a strand whose ring holds, at its head, a record it has nowhere
+ * to keep (box/core/stash.h) — the answer to a print would stand behind it.
+ * The kernel reads the text and the crate after this returns, so both are
+ * static, and the line is one per process: a second call is dropped rather
+ * than overwrite a line the kernel may still be reading. */
+void kdbg_nowait(const char *msg)
+{
+    static char    text[256];
+    static uint8_t mbuf[200];
+    static Crate   crate;
+    static bool    used;
+    if (!msg || used) return;
+    used = true;
+
+    size_t n = strlen(msg);
+    if (n >= sizeof(text)) n = sizeof(text) - 1;
+    memcpy(text, msg, n);
+    text[n] = '\0';
+
+    ManifestBuilder mb;
+    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return;
+    CrateSetInput(&crate, text, n + 1);
+    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, HW_DEBUG_PRINT, 0,
+                             0, CRATE_INDEX_NONE, NULL, 0) != 0) return;
+    if (ManifestBuilderFinalize(&mb) != 0) return;
+    (void)ManifestSubmitNoWait((Manifest *)mbuf, &crate, 1, 0);
+}
+
 int kdbg_print(const char *fmt, ...)
 {
     if (!fmt) return -ERR_INVALID_ARGUMENT;

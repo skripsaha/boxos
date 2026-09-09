@@ -12,6 +12,7 @@
 #include "boxos_decks.h"         /* DECK_SYSTEM, SYSTEM_OP_PROC_KILL */
 #include "box/timeouts.h"        /* BOX_ANSWER_GUARANTEED */
 #include "box/strand.h"          /* strand_spawn — TT22 needs a 64-slot ring */
+#include "box/core/strand_self.h" /* strand_self — TT24 sends to the strand by pid */
 #include "box/sync.h"            /* yield */
 #include "proc_exit.h"           /* PROC_EXIT_KILLED — shared exit disposition */
 
@@ -1164,6 +1165,157 @@ static void test22(void)
     else                                fail(22, "a full ring lost or reordered events");
 }
 
+/* ── TT 23 / TT 24: what a strand is handed that is not for the caller at
+ * hand is KEPT, however much of it there is.
+ *
+ * A strand waiting for one tag keeps the events of other tags in its stash;
+ * a strand waiting for a kernel reply keeps the IPC messages ahead of it.
+ * Both stashes used to be fixed at 256 entries: the Touch one shed the newest
+ * foreign event on a forever wait, the IPC one dropped the oldest message —
+ * in silence. They grow by the chunk now (box/core/stash.h), and the only
+ * thing that can stop them is a heap with no room, which is said aloud.
+ *
+ * TT 23: a strand claims two tags, 300 events of the second are published,
+ * then one of the first; the strand waits for the first alone and must then
+ * find all 300 of the second.
+ * TT 24: 300 IPC messages are sent to a strand while it waits on a Touch,
+ * then a kernel reply is made to stand behind them (one sync call); every
+ * message must still be there for receive(). */
+#define KEPT_TAG_A   "test:kept.a"
+#define KEPT_TAG_B   "test:kept.b"
+#define KEPT_EVENTS  300u   /* past the 256 the old stashes held */
+
+static TouchTagPair      g_kept_a, g_kept_b;
+static volatile uint32_t g_kept_claimed;   /* strand → main: both tags claimed */
+static volatile uint32_t g_kept_release;   /* main → strand: everything sent   */
+static volatile uint32_t g_kept_got;       /* strand: events / messages found  */
+static volatile uint32_t g_kept_waited;    /* strand: the wait for A came back */
+static volatile uint32_t g_kept_done;      /* strand → main: finished          */
+static volatile uint32_t g_kept_pid;       /* strand → main: its own pid       */
+
+static void kept_touch_strand(void *arg)
+{
+    (void)arg;
+    if (touch_claim(g_kept_a.full, TOUCH_REST, 0, 0) != 0 ||
+        touch_claim(g_kept_b.full, TOUCH_REST, 0, 0) != 0) {
+        __atomic_store_n(&g_kept_done, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_kept_claimed, 1, __ATOMIC_RELEASE);
+
+    /* The wait for A: every B met on the way must be kept, not shed. */
+    Touch t;
+    if (touch_wait_tag(g_kept_a.full, &t, 0))
+        __atomic_store_n(&g_kept_waited, 1, __ATOMIC_RELEASE);
+
+    uint32_t got = 0;
+    while (touch_try_pop_tag(g_kept_b.full, &t)) got++;
+    __atomic_store_n(&g_kept_got, got, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kept_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test23(void)
+{
+    g_kept_claimed = g_kept_release = g_kept_got = g_kept_waited = g_kept_done = 0;
+    g_kept_a = touch_intern(KEPT_TAG_A);
+    g_kept_b = touch_intern(KEPT_TAG_B);
+    if (g_kept_a.full == TOUCH_TAG_INVALID || g_kept_b.full == TOUCH_TAG_INVALID) {
+        fail(23, "tag intern failed"); return;
+    }
+    if (strand_spawn(kept_touch_strand, NULL) == 0) { fail(23, "strand_spawn failed"); return; }
+
+    uint64_t t0 = uptime_ms();
+    while (__atomic_load_n(&g_kept_claimed, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 5000) { fail(23, "strand never claimed its tags"); return; }
+        yield();
+    }
+
+    uint32_t sent = 0;
+    for (uint32_t i = 0; i < KEPT_EVENTS; i++) {
+        if (touch_send(g_kept_b, &i, sizeof(i), 0) < 0) break;
+        sent++;
+    }
+    uint32_t one = 0;
+    if (sent == KEPT_EVENTS && touch_send(g_kept_a, &one, sizeof(one), 0) < 0) sent = 0;
+    if (sent != KEPT_EVENTS) { fail(23, "publisher could not send the burst"); return; }
+
+    t0 = uptime_ms();
+    while (__atomic_load_n(&g_kept_done, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 20000) break;
+        yield();
+    }
+    uint32_t got = __atomic_load_n(&g_kept_got, __ATOMIC_ACQUIRE);
+    kdbg_print("[TT 23] other-tag events published=%u kept=%u waited=%u",
+               (unsigned)KEPT_EVENTS, (unsigned)got,
+               (unsigned)__atomic_load_n(&g_kept_waited, __ATOMIC_ACQUIRE));
+    if (__atomic_load_n(&g_kept_waited, __ATOMIC_ACQUIRE) == 0)
+        fail(23, "the wait for the first tag did not come back");
+    else if (got == KEPT_EVENTS)
+        pass(23);
+    else
+        fail(23, "events of the other tag were lost while waiting");
+}
+
+static void kept_ipc_strand(void *arg)
+{
+    (void)arg;
+    if (touch_claim(g_kept_a.full, TOUCH_REST, 0, 0) != 0) {
+        __atomic_store_n(&g_kept_done, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    __atomic_store_n(&g_kept_pid, strand_self(), __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kept_claimed, 1, __ATOMIC_RELEASE);
+
+    /* Off the ResultRing while the messages arrive: a Touch wait does not
+     * drain it. Then one synchronous call — its reply stands behind every
+     * message, and each one must be kept on the way to it. */
+    Touch t;
+    if (touch_wait_tag(g_kept_a.full, &t, 0))
+        __atomic_store_n(&g_kept_waited, 1, __ATOMIC_RELEASE);
+    kdbg_print("[TT 24] strand %u: reply wanted behind %u messages",
+               (unsigned)strand_self(), (unsigned)KEPT_EVENTS);
+
+    uint32_t got = 0;
+    Result   r;
+    while (receive(&r)) got++;
+    __atomic_store_n(&g_kept_got, got, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_kept_done, 1, __ATOMIC_RELEASE);
+}
+
+static void test24(void)
+{
+    g_kept_claimed = g_kept_release = g_kept_got = g_kept_waited = g_kept_done = g_kept_pid = 0;
+    g_kept_a = touch_intern(KEPT_TAG_A);
+    if (g_kept_a.full == TOUCH_TAG_INVALID) { fail(24, "tag intern failed"); return; }
+    if (strand_spawn(kept_ipc_strand, NULL) == 0) { fail(24, "strand_spawn failed"); return; }
+
+    uint64_t t0 = uptime_ms();
+    while (__atomic_load_n(&g_kept_claimed, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 5000) { fail(24, "strand never claimed its tag"); return; }
+        yield();
+    }
+    uint32_t pid = __atomic_load_n(&g_kept_pid, __ATOMIC_ACQUIRE);
+
+    uint32_t sent = 0;
+    for (uint32_t i = 0; i < KEPT_EVENTS; i++) {
+        if (send(pid, &i, sizeof(i)) != 0) break;
+        sent++;
+    }
+    uint32_t one = 0;
+    if (sent == KEPT_EVENTS && touch_send(g_kept_a, &one, sizeof(one), 0) < 0) sent = 0;
+    if (sent != KEPT_EVENTS) { fail(24, "sender could not send the burst"); return; }
+
+    t0 = uptime_ms();
+    while (__atomic_load_n(&g_kept_done, __ATOMIC_ACQUIRE) == 0) {
+        if (uptime_ms() - t0 > 20000) break;
+        yield();
+    }
+    uint32_t got = __atomic_load_n(&g_kept_got, __ATOMIC_ACQUIRE);
+    kdbg_print("[TT 24] messages sent=%u kept=%u", (unsigned)KEPT_EVENTS, (unsigned)got);
+    if (got == KEPT_EVENTS) pass(24);
+    else                    fail(24, "messages ahead of a kernel reply were lost");
+}
+
 int main(void)
 {
     CabinInfo *ci = cabin_info();
@@ -1233,6 +1385,8 @@ int main(void)
     test20();
     test21();
     test22();
+    test23();
+    test24();
 
     kdbg_print("[TT SUMMARY] %d/%d passed", g_passed, g_total);
     return 0;

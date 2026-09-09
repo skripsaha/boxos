@@ -214,9 +214,9 @@ bool strand_rings_create(process_t *proc)
     si->pocket_ring_va  = pocket_hdr_va;
     si->result_ring_va  = result_hdr_va;
     si->touch_ring_va   = touch_hdr_va;
-    /* ipc_stash / non_ipc_stash / strand_pool_ptr / touch_stash_ptr already
-     * zero — pmm_alloc_zero cleared the whole 4-page block, so every lazily-
-     * claimed boxlib field starts at 0 ("not yet allocated"). */
+    /* The stash pointers and strand_pool_ptr are already zero — pmm_alloc_zero
+     * cleared the whole 4-page block, so every lazily-made boxlib field starts
+     * at 0 ("not yet"). */
 
     /* (6) Wire the strand: per-strand routing + FS base = StrandInfo VA. The
      * first scheduler dispatch installs user_fsbase via context_restore. */
