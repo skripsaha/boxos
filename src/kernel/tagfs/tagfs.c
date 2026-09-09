@@ -2906,6 +2906,60 @@ static error_t TagFS_RunTests_inside(void)
 }
 
 // ----------------------------------------------------------------------------
+// The name is a tag
+//
+// Every file carries the stem of its name — up to the last dot — as its first
+// tag, so "who is called kernel" is a question for the index, not a walk of the
+// volume. create puts the tag there and rename moves it, both through this one
+// rule, so the two can never disagree about what a name's tag is.
+// ----------------------------------------------------------------------------
+
+static void tagfs_name_stem(const char *filename, char *out, size_t out_size)
+{
+    size_t flen = strlen(filename);
+    size_t slen = flen;
+    for (size_t i = flen; i > 0; i--)
+    {
+        if (filename[i - 1] == '.')
+        {
+            slen = i - 1;
+            break;
+        }
+    }
+    if (slen >= out_size)
+        slen = out_size - 1;
+    memcpy(out, filename, slen);
+    out[slen] = '\0';
+}
+
+/* Intern the name's tag. Called WITHOUT g_state.lock: a new tag flushes the
+ * registry to the medium, and that I/O must not run under the state lock. */
+static uint16_t tagfs_name_tag_intern(const char *filename)
+{
+    char stem[128];
+    tagfs_name_stem(filename, stem, sizeof(stem));
+    if (stem[0] == '\0' || !g_state.registry)
+        return TAGFS_INVALID_TAG_ID;
+    uint16_t tag = tag_registry_intern(g_state.registry, stem, NULL);
+    if (tag_registry_is_dirty())
+    {
+        tag_registry_flush(g_state.registry);
+    }
+    return tag;
+}
+
+/* The name's tag if the registry already knows it, else invalid. A lookup only
+ * takes the registry's own lock, so it is safe under g_state.lock. */
+static uint16_t tagfs_name_tag_lookup(const char *filename)
+{
+    char stem[128];
+    tagfs_name_stem(filename, stem, sizeof(stem));
+    if (stem[0] == '\0' || !g_state.registry)
+        return TAGFS_INVALID_TAG_ID;
+    return tag_registry_lookup(g_state.registry, stem, NULL);
+}
+
+// ----------------------------------------------------------------------------
 // tagfs_create_file
 // ----------------------------------------------------------------------------
 
@@ -2928,44 +2982,12 @@ static int tagfs_create_file_inside(const char *filename, const uint16_t *tag_id
     if (!filename || !out_file_id)
         return -1;
 
+    // The name's tag first, outside the state lock (it may flush the registry).
+    uint16_t auto_tag = tagfs_name_tag_intern(filename);
+
     spin_lock(&g_state.lock);
 
     uint32_t file_id = g_state.ledger.next_file_id++;
-
-    // Derive auto-label tag from filename stem (e.g. "kernel.bin" → "kernel")
-    char stem[128];
-    {
-        const char *dot = NULL;
-        size_t flen = strlen(filename);
-        for (size_t i = flen; i > 0; i--)
-        {
-            if (filename[i - 1] == '.')
-            {
-                dot = filename + i - 1;
-                break;
-            }
-        }
-        size_t slen = dot ? (size_t)(dot - filename) : flen;
-        if (slen >= sizeof(stem))
-            slen = sizeof(stem) - 1;
-        memcpy(stem, filename, slen);
-        stem[slen] = '\0';
-    }
-
-    // Intern the auto-label tag (lock is already held, call intern directly)
-    uint16_t auto_tag = TAGFS_INVALID_TAG_ID;
-    if (stem[0] != '\0' && g_state.registry)
-    {
-        // Release state lock briefly to avoid lock ordering issues with registry
-        spin_unlock(&g_state.lock);
-        auto_tag = tag_registry_intern(g_state.registry, stem, NULL);
-        // Flush registry to disk if a new tag was created (crash safety)
-        if (tag_registry_is_dirty())
-        {
-            tag_registry_flush(g_state.registry);
-        }
-        spin_lock(&g_state.lock);
-    }
 
     // Build deduplicated tag array: auto-label first, then caller's tags
     uint16_t final_count = 0;
@@ -3170,6 +3192,11 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     if (!new_filename)
         return -1;
 
+    /* The tag follows the name. A rename that changed the string and left the
+     * tag made the file visible under its old name and invisible under its
+     * new one — by-name lookup and proc_exec ask the index, not the string. */
+    uint16_t new_tag = tagfs_name_tag_intern(new_filename);
+
     spin_lock(&g_state.lock);
 
     uint32_t meta_block, meta_offset;
@@ -3188,6 +3215,9 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
         return -1;
     }
 
+    uint16_t old_tag = meta.filename ? tagfs_name_tag_lookup(meta.filename)
+                                     : TAGFS_INVALID_TAG_ID;
+
     // Replace filename
     if (meta.filename)
         kfree(meta.filename);
@@ -3201,6 +3231,51 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     }
     memcpy(meta.filename, new_filename, len + 1);
 
+    // Move the name's tag: the old one out (if it was there), the new one in
+    // first, where create puts it. Same stem, same tag — nothing to move.
+    bool old_tag_removed = false;
+    bool new_tag_added   = false;
+    if (old_tag != new_tag)
+    {
+        if (old_tag != TAGFS_INVALID_TAG_ID)
+        {
+            for (uint16_t i = 0; i < meta.tag_count; i++)
+            {
+                if (meta.tag_ids[i] == old_tag)
+                {
+                    for (uint16_t j = i; j + 1 < meta.tag_count; j++)
+                        meta.tag_ids[j] = meta.tag_ids[j + 1];
+                    meta.tag_count--;
+                    old_tag_removed = true;
+                    break;
+                }
+            }
+        }
+        if (new_tag != TAGFS_INVALID_TAG_ID)
+        {
+            bool present = false;
+            for (uint16_t i = 0; i < meta.tag_count; i++)
+                if (meta.tag_ids[i] == new_tag) present = true;
+            if (!present)
+            {
+                uint16_t *ids = kmalloc(sizeof(uint16_t) * (meta.tag_count + 1u));
+                if (!ids)
+                {
+                    tagfs_metadata_free(&meta);
+                    spin_unlock(&g_state.lock);
+                    return -1;
+                }
+                ids[0] = new_tag;
+                if (meta.tag_ids)
+                    memcpy(ids + 1, meta.tag_ids, sizeof(uint16_t) * meta.tag_count);
+                kfree(meta.tag_ids);
+                meta.tag_ids = ids;
+                meta.tag_count++;
+                new_tag_added = true;
+            }
+        }
+    }
+
     uint32_t new_block, new_offset;
     if (meta_pool_write(&meta, &new_block, &new_offset) != 0)
     {
@@ -3211,6 +3286,10 @@ static int tagfs_rename_file_inside(uint32_t file_id, const char *new_filename)
     }
 
     file_table_update(file_id, new_block, new_offset);
+    if (old_tag_removed)
+        tag_bitmap_clear(g_state.bitmap_index, old_tag, file_id);
+    if (new_tag_added)
+        tag_bitmap_set(g_state.bitmap_index, new_tag, file_id);
     meta_pool_delete(meta_block, meta_offset);
 
     tagfs_metadata_free(&meta);
