@@ -240,14 +240,15 @@ void   TouchPublish(const char *tag, const void *kpayload, uint32_t plen);
  * TouchPublishIrqPair copies the tag handles + a bounded payload into a
  * preallocated static slot, then enqueues the publish for K-Core
  * execution via irq_defer(). The slot ring is power-of-2 sized
- * (CONFIG_TOUCH_IRQ_RING_SIZE) and bump-allocated with circular
- * overwrite: extreme IRQ burst silently drops the OLDEST queued event.
- * That is the correct policy for events whose duty is best-effort
- * delivery (key-repeat ticks, USB port-change blips, ACPI GPE traffic).
+ * (CONFIG_TOUCH_IRQ_RING_SIZE) and claimed by fetch_add: an interrupt can
+ * neither wait for room nor allocate, so a burst that outruns the K-Cores
+ * overwrites the OLDEST queued event. Every slot carries its generation,
+ * and the K-Core that comes for an event no longer there counts the loss
+ * exactly and says it on the console — never in silence.
  *
- * Bounded payload size is CONFIG_TOUCH_IRQ_PAYLOAD_MAX (small, fits the
- * largest in-kernel Touch event today). Larger payloads must be split
- * by the caller or queued via the regular K-Core publish path.
+ * Bounded payload size is TOUCH_IRQ_PAYLOAD_MAX (small, fits the largest
+ * in-kernel Touch event today). A larger payload is cut, and the K-Core
+ * says so; split it at the caller or use the regular K-Core publish path.
  *
  * Tag handles MUST be obtained outside IRQ context (via TouchTagResolve
  * during driver init) and cached. TouchTagResolve takes registry locks
@@ -256,17 +257,6 @@ void   TouchPublish(const char *tag, const void *kpayload, uint32_t plen);
 void   TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
                            const void *payload, uint16_t plen,
                            uint32_t source_pid, uint16_t flags);
-
-/* Diagnostic: number of times the static slot ring has wrapped past its
- * power-of-2 boundary. Each wrap is a STARTING POINT for potential drops
- * — a drop happens IFF the K-Core consumer has not yet drained the slot
- * that the producer just claimed. Counting the precise drop figure would
- * require per-slot generation atomics on the producer side, which adds
- * unwanted overhead to every IRQ-context publish; the wrap count is the
- * honest observable proxy and stays at 0 under realistic IRQ rates
- * (PS/2 ~30 Hz, xHCI ~Hz, ACPI rare-event) because irq_defer drains the
- * ring in microseconds while wraps take seconds. Snapshot only. */
-uint64_t TouchPublishIrqWraps(void);
 
 /*
  * TouchWatch — the kernel's own ear.
