@@ -87,8 +87,14 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
 
     if (!KResultPush(target, &result))
     {
-        debug_printf("[EXECUTION] WARNING: PID %u ResultRing full, result dropped\n",
-                     target->pid);
+        /* KResultPush has already said why. This is the answer to a submit
+         * the strand is waiting on, and a refusal here is the whole of the
+         * "work taken, answer never promised" stall — it used to be a
+         * debug_printf, which is compiled to nothing. */
+        kprintf("[EXECUTION] DEFECT: the answer to pid %u's submit (token 0x%06x, "
+                "rc=%u) was refused by its reply ring\n",
+                (unsigned int)target->pid, (unsigned int)PocketCookie24(pocket),
+                (unsigned int)pocket->error_code);
         return -1;
     }
     return 0;
