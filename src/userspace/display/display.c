@@ -24,10 +24,12 @@
  * — the program edits its own line and echoes through its own lane. A lane
  * listens for exactly as long as its program reads (DISP_CMD_LISTEN with 1
  * pushes it to the top, with 0 gives the ear back); a lane that closes is
- * dropped wherever it stands, and the one beneath hears again. Keys typed
- * while nobody listens are NOT consumed — the kernel TouchRing and the
- * per-strand tag stash bank them for whoever reads next, so type-ahead
- * needs no third buffer.
+ * dropped wherever it stands, and the one beneath hears again — and so is a
+ * lane whose reader nobody can find: the kernel says how many heard each
+ * key, and a key nobody heard drops the ear on top and is said again to the
+ * next. Keys typed while nobody listens are NOT consumed — the kernel
+ * TouchRing and the per-strand tag stash bank them for whoever reads next,
+ * so type-ahead needs no third buffer.
  *
  * process:died closes what the dead leave behind: granted-but-never-
  * attached lanes are revoked, attached lanes are drained to the last frame
@@ -379,15 +381,39 @@ static bool lanes_step(void)
  * the TouchRing/stash as type-ahead for whoever listens next. (The stash
  * matters: death_step's tag-selective pop parks any keys it runs into
  * there, so this must always pull by tag, never gate on ring emptiness.)
- * Each key is the daemon's own Touch on the lane's tag, payload as heard. */
+ * Each key is the daemon's own Touch on the lane's tag, payload as heard.
+ *
+ * The kernel says how many heard it. Nobody means the lane on top has no
+ * reader any more — it died in the middle of its reading, or gave its claim
+ * up without giving the ear back — and its ear is dropped right here, before
+ * the daemon has heard of the death by any other road. The key is not lost
+ * with it: it stays in hand and is said again to whoever is beneath, or, when
+ * nobody is, to the next lane that listens — ahead of everything typed after
+ * it, which is still banked in the ring. One key in hand at most: the next
+ * is not taken until this one has been heard. */
+static Touch g_key;           /* taken from the keyboard, not yet heard by anyone */
+static bool  g_key_in_hand;
+
 static bool kb_step(void)
 {
-    bool  did = false;
-    Touch t;
-    while (g_ear && touch_try_pop_tag(g_kb, &t)) {
+    bool did = false;
+    while (g_ear) {
+        if (!g_key_in_hand) {
+            if (!touch_try_pop_tag(g_kb, &g_key)) break;
+            did = true;
+            if (g_key.payload_len < sizeof(kb_event_t)) continue;
+            g_key_in_hand = true;
+        }
+        int heard = touch_send(g_ear->lane->ear, g_key.payload, g_key.payload_len, 0);
+        if (heard > 0) {
+            g_key_in_hand = false;
+            continue;
+        }
+        /* Nobody wears the tag of the lane on top: its reader is gone. The
+         * lane itself closes by its own road (STREAM_CLOSED, process:died);
+         * only the ear goes now, so the key finds the next listener. */
+        EarDrop(g_ear->lane);
         did = true;
-        if (t.payload_len < sizeof(kb_event_t)) continue;
-        touch_send(g_ear->lane->ear, t.payload, t.payload_len, 0);
     }
     return did;
 }

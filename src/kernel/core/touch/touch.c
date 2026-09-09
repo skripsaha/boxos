@@ -866,12 +866,15 @@ typedef struct {
 
 enum { TOUCH_SNAP_STACK = 64 };
 
-static void deliver_one(TouchSnap *e, TouchTag tag_id,
+/* One subscriber. Returns whether the event was handed to it: a subscriber
+ * that is being destroyed hears nothing; every other outcome — pushed, owed,
+ * latched for it, reacted — is a hand-over. */
+static bool deliver_one(TouchSnap *e, TouchTag tag_id,
                         const void *kpayload, uint32_t plen,
                         uint32_t source_pid, uint16_t flags,
                         TouchPolicy policy)
 {
-    if (e->proc->destroying) return;
+    if (e->proc->destroying) return false;
 
     if (policy == TOUCH_POLICY_LATCHED) {
         /* Atomic test-and-set of has_pending so concurrent publishes don't
@@ -882,7 +885,7 @@ static void deliver_one(TouchSnap *e, TouchTag tag_id,
         if (!__atomic_compare_exchange_n(&e->sub->has_pending, &expected, 1,
                                          false, __ATOMIC_ACQ_REL,
                                          __ATOMIC_RELAXED)) {
-            return; /* drop — keep existing pending */
+            return true; /* drop — keep existing pending: it still holds one for them */
         }
         e->sub->pending_plen = plen > sizeof(e->sub->pending_payload)
                                ? (uint32_t)sizeof(e->sub->pending_payload)
@@ -934,6 +937,7 @@ static void deliver_one(TouchSnap *e, TouchTag tag_id,
                                 source_pid, flags);
         break;
     }
+    return true;
 }
 
 /* Snapshot-then-call, exactly as the process side does it. The bucket lock is
@@ -976,16 +980,16 @@ static void touch_watch_deliver(TouchBucket *b, TouchTag tag_id,
     if (snap != stack) kfree(snap);
 }
 
-void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
-                    uint32_t source_pid, uint16_t flags)
+uint32_t TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
+                        uint32_t source_pid, uint16_t flags)
 {
     TouchBucket *b = touch_bucket_lookup(tag_id);
-    if (!b) return;
+    if (!b) return 0;
 
     TouchPolicy     policy = (TouchPolicy)b->policy;
     TouchCapability cap    = (TouchCapability)b->capability;
 
-    if (cap == TOUCH_CAP_KERNEL_ONLY && source_pid != 0) return;
+    if (cap == TOUCH_CAP_KERNEL_ONLY && source_pid != 0) return 0;
 
     /* LEVEL state must be updated even when nobody subscribes yet — future
      * subscribers see the latched state via SysTouchAwait's on-claim sync.
@@ -994,17 +998,17 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
         uint8_t new_state = (plen > 0 && kpayload)
                             ? ((const uint8_t *)kpayload)[0] : 0;
         b->level_state = new_state;
-        if (new_state == 0) return;
+        if (new_state == 0) return 0;
     }
 
     uint32_t n_subs   = __atomic_load_n(&b->sub_count,   __ATOMIC_ACQUIRE);
     uint32_t n_watches = __atomic_load_n(&b->watch_count, __ATOMIC_ACQUIRE);
-    if (n_subs == 0 && n_watches == 0) return;
+    if (n_subs == 0 && n_watches == 0) return 0;
 
     __atomic_add_fetch(&g_touch_publish_calls, 1, __ATOMIC_RELAXED);
 
     if (n_watches != 0) touch_watch_deliver(b, tag_id, kpayload, plen, source_pid);
-    if (n_subs == 0) return;
+    if (n_subs == 0) return 0;
 
     TouchSnap stack[TOUCH_SNAP_STACK];
     TouchSnap *snap = stack;
@@ -1058,11 +1062,13 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
     }
 
     /* Phase 2: deliver outside lock. */
+    uint32_t handed = 0;
     if (owners_ok) {
         for (uint32_t i = 0; i < snap_n; i++) {
             __atomic_add_fetch(&g_touch_subscribers_visited, 1, __ATOMIC_RELAXED);
-            deliver_one(&snap[i], tag_id, kpayload, plen,
-                        source_pid, flags, policy);
+            if (deliver_one(&snap[i], tag_id, kpayload, plen,
+                            source_pid, flags, policy))
+                handed++;
         }
     }
 
@@ -1071,16 +1077,19 @@ void TouchPublishId(TouchTag tag_id, const void *kpayload, uint32_t plen,
         process_ref_dec(snap[i].proc);
     }
     if (snap != stack) kfree(snap);
+    return handed;
 }
 
-void TouchPublishPair(TouchTag full_id, TouchTag bare_id,
-                      const void *kpayload, uint32_t plen,
-                      uint32_t source_pid, uint16_t flags)
+uint32_t TouchPublishPair(TouchTag full_id, TouchTag bare_id,
+                          const void *kpayload, uint32_t plen,
+                          uint32_t source_pid, uint16_t flags)
 {
+    uint32_t handed = 0;
     if (full_id != TOUCH_TAG_INVALID)
-        TouchPublishId(full_id, kpayload, plen, source_pid, flags);
+        handed += TouchPublishId(full_id, kpayload, plen, source_pid, flags);
     if (bare_id != TOUCH_TAG_INVALID && bare_id != full_id)
-        TouchPublishId(bare_id, kpayload, plen, source_pid, flags);
+        handed += TouchPublishId(bare_id, kpayload, plen, source_pid, flags);
+    return handed;
 }
 
 void TouchPublish(const char *tag, const void *kpayload, uint32_t plen)

@@ -207,7 +207,7 @@ static void role_level_claim(uint32_t parent_pid)
 static void role_no_tag_send(uint32_t parent_pid)
 {
     int rc = touch_send(TOUCH_TAG_PAIR(TAG_OWNERS), "x", 1, 0);
-    uint8_t denied = (rc != 0) ? 1 : 0;
+    uint8_t denied = (rc < 0) ? 1 : 0;
     send(parent_pid, &denied, 1);
     exit(0);
 }
@@ -509,7 +509,11 @@ static void test8(void)
 
     proc_tag_add(TAG_OWNERS);
 
-    int child_has = spawn_role(ROLE_HAS_TAG_SEND);
+    /* The sender must wear the tag ITSELF: a child inherits nothing from its
+     * spawner, so it is boarded with the tag. (This half used to pass with a
+     * plain spawn because a kernel refusal came back as a positive code and
+     * read as success — touch_send reports a failure as < 0 now.) */
+    int child_has = spawn_role_tagged(ROLE_HAS_TAG_SEND, TAG_OWNERS);
     if (child_has < 0) { fail(8, "spawn has-tag failed"); return; }
 
     bool got_has = false;
@@ -1139,7 +1143,7 @@ static void test22(void)
 
     uint32_t sent = 0;
     for (uint32_t i = 0; i < OWED_EVENTS; i++) {
-        if (touch_send(g_owed_pair, &i, sizeof(i), 0) != 0) break;
+        if (touch_send(g_owed_pair, &i, sizeof(i), 0) < 0) break;
         sent++;
     }
     __atomic_store_n(&g_owed_release, 1, __ATOMIC_RELEASE);

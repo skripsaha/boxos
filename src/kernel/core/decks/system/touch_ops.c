@@ -138,6 +138,8 @@ static int SysTouchRelease(const ManifestOp *op, Crate *crates,
 /* SYSTEM_OP_TOUCH_SEND
  *   in_crate:  payload (optional, NONE = no payload)
  *   params:    [u16 full_id][u16 bare_id][u32 after_ms]  (8 bytes)
+ *   out_crate (optional, 4 bytes): u32 — how many subscribers were handed
+ *              the event (0 for a delayed send: nobody has heard it yet).
  *
  * Caller publishes to BOTH full_id and bare_id buckets so wildcard
  * subscribers see the event. Either may be TOUCH_TAG_INVALID.
@@ -192,8 +194,15 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
     }
 
     if (after_ms == 0) {
-        TouchPublishPair(full_id, bare_id, payload, plen,
-                         ctx->proc->pid, TOUCH_FLAG_USER);
+        /* How many heard it, for a sender that asked (a 4-byte out crate).
+         * A delayed send says 0: nobody has heard it yet. */
+        uint32_t handed = TouchPublishPair(full_id, bare_id, payload, plen,
+                                           ctx->proc->pid, TOUCH_FLAG_USER);
+        if (op->out_crate != CRATE_INDEX_NONE) {
+            Crate *out = &crates[op->out_crate];
+            if (out->capacity >= sizeof(uint32_t))
+                (void)crate_write(out, ctx, &handed, sizeof(uint32_t));
+        }
     } else {
         /* Clock-domain rule: dispatcher reads g_global_tick (250 Hz fixed
          * derived from hpet_now_us), NOT pit_get_ticks (dynamic PIT freq +
