@@ -56,10 +56,12 @@
  * Concurrency
  * -----------
  * The request ring is a static 32-slot CAS-claim pool (no allocation,
- * IRQ-safe producer). A claimed slot is handed to irq_defer() — the
- * existing MPMC bottom-half pipeline. Slots are released as soon as the
- * worker has copied the parameters into its stack, so back-pressure is
- * minimal even when several #MC events fire in quick succession.
+ * IRQ-safe producer). A claimed slot passes its own baton to the drain
+ * core (baton.h) — allocation-free and never dropped; only the pool itself
+ * can run out, and that is counted and said by the next worker. Slots are
+ * released as soon as the worker has copied the parameters into its stack,
+ * so back-pressure is minimal even when several #MC events fire in quick
+ * succession.
  *
  * Hardware references
  * -------------------
@@ -80,7 +82,7 @@
 /* Initialize the migration subsystem. Resolves Touch tag handles +
  * zeroes the per-CPU nesting state. Must be called AFTER:
  *   - MemTagInit() — needs the MemRegion registry alive
- *   - irq_defer_init() — uses irq_defer() to defer to K-Core
+ *   - BatonInit() — the slot's baton is passed from #MC
  *   - guide_init() / MemTagEnableTouchPublish() — needs Touch usable
  * Idempotent: second call is a no-op. Safe to skip if mce_init refused
  * to bring up (CPUID lacked MCA). */
@@ -91,8 +93,8 @@ bool mce_migrate_is_initialized(void);
 /* Request migration of `phys` (page-aligned) on behalf of an MCE event.
  * Called from inside #MC handler context (IST stack) — must remain
  * IRQ-safe (no kmalloc, no spinlock that could be held by a non-IRQ
- * caller). Implementation reserves a slot from a static ring and hands
- * the (phys, sev, status) tuple to irq_defer() for K-Core execution.
+ * caller). Implementation reserves a slot from a static ring and passes
+ * the slot's baton with the (phys, sev, status) tuple to the drain core.
  *
  * Returns true if the request was queued, false if the ring was full
  * (back-pressure → drop, counted in stats). A dropped request is

@@ -23,7 +23,7 @@
 #include "logbook.h"
 #include "mce_migrate.h"
 #include "mce.h"
-#include "irq_defer.h"
+#include "baton.h"
 #include "cpuid.h"
 
 /* TSC-frequency getter — published by cpu calibration into the cpu_caps
@@ -118,10 +118,16 @@ typedef struct {
     /* Per-source counters. */
     volatile uint64_t events;
     volatile uint64_t errors;
+    /* The NMI's one pass to a K-Core for this source (baton.h, Knock): an
+     * NMI notices the block and knocks; the walk runs where locks are
+     * allowed. A burst of NMIs for one block is one walk. */
+    Knock     knock;
 } apei_ghes_source_t;
 
 #define SRC_IN_USE   (1u << 0)
 #define SRC_V2       (1u << 1)
+
+static void nmi_worker(void *ctx);
 
 static apei_ghes_source_t g_sources[APEI_GHES_MAX_RUNTIME_SOURCES];
 static volatile uint32_t  g_source_count = 0;
@@ -280,6 +286,7 @@ error_t apei_ghes_register_source(uint16_t source_id, bool v2,
     slot->read_ack_write     = read_ack_write;
     slot->events             = 0;
     slot->errors             = 0;
+    KnockInit(&slot->knock, nmi_worker, slot);
 
     debug_printf("[APEI] runtime source registered: id=%u %s notify=%u "
                  "poll=%u ms gesb=0x%lx (%u B) v2=%d\n",
@@ -479,19 +486,14 @@ void apei_ghes_poll_tick(void) {
 
 /* ─── Delivery: NMI ─────────────────────────────────────────────── */
 
-/* Per-CPU NMI marker so the worker can do the heavy walk in K-Core. */
-typedef struct { apei_ghes_source_t *src; } nmi_work_t;
-
+/* The walk, on a K-Core, once per knock on the source. The door opens
+ * first: an NMI that lands during the walk brings another visit, and a visit
+ * that finds the block already acknowledged returns at once. */
 static void nmi_worker(void *ctx) {
-    nmi_work_t *w = (nmi_work_t *)ctx;
-    if (!w || !w->src) return;
-    (void)process_source_gesb(w->src);
+    apei_ghes_source_t *src = (apei_ghes_source_t *)ctx;
+    KnockOpen(&src->knock);
+    (void)process_source_gesb(src);
 }
-
-/* Static work-slot ring — one slot per (source × outstanding count). */
-#define APEI_NMI_RING  16u
-static nmi_work_t  g_nmi_ring[APEI_NMI_RING];
-static volatile uint32_t g_nmi_ring_head = 0;
 
 bool apei_ghes_nmi_check(void) {
     if (!g_initialized) return false;
@@ -506,10 +508,9 @@ bool apei_ghes_nmi_check(void) {
         volatile gesb_header_t *hdr = (volatile gesb_header_t *)src->gesb_va;
         if (__atomic_load_n((uint32_t *)&hdr->block_status, __ATOMIC_ACQUIRE) == 0) continue;
         any = true;
-        uint32_t idx = __atomic_fetch_add(&g_nmi_ring_head, 1, __ATOMIC_RELAXED)
-                       & (APEI_NMI_RING - 1u);
-        g_nmi_ring[idx].src = src;
-        irq_defer(nmi_worker, &g_nmi_ring[idx]);
+        /* The source's own knock: allocation-free, never dropped, and a
+         * burst of NMIs for one block is one walk. */
+        KnockOn(&src->knock);
     }
     return any;
 }

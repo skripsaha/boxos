@@ -13,25 +13,27 @@
  *      │     read STATUS (clears drive-side INTRQ per ATA-7 §6.2.5)
  *      │     classify status (BMISR.ERROR / STATUS.ERR → ERR_IO)
  *      │     reset BMIDE engine, W1C BMISR.ERROR|IRQ
- *      │     defer the heavy work via irq_defer
+ *      │     stamp the channel's `landing` slot with the completed cmd
  *      └── EOI handled by IDT dispatcher
  *
- *    irq_defer pump (K-Core) → ata_complete_deferred
+ *    the waiting caller (ata_dma_sync) claims `landing` → ata_run_completion
  *      ├── if read & OK: memcpy DMA staging → user_buf
  *      ├── lock channel, pop next wait_head → in_flight; unlock; kick_dma
- *      ├── invoke cb (Touch publish here if needed)
- *      └── kfree AtaCmd (skip if sync-wait, caller owns)
+ *      ├── on error: say it on "storage:ata:error" through the Touch IRQ ring
+ *      └── publish done — the caller owns the stack cmd
  *
  *  Single-channel cap of one in-flight cmd matches PATA hardware: master
  *  and slave share the bus and only one ATA command may be outstanding
  *  at a time. Submits past that point queue up; the bottom-half pops the
- *  next one when the current retires.
+ *  next one when the current retires. Every command has a waiting caller:
+ *  there is no fire-and-forget path here, because nothing in the kernel
+ *  asked for one, and a path nobody rides is a path nobody proves.
  *
- *  Pre-multicore boot path: the IRQ infrastructure isn't viable until
- *  irq_defer_init runs and a K-Core exists to pump deferred slots, so
- *  ata_dma_sync transparently falls back to a polled BMIDE engine for
- *  that narrow window (tagfs mount, fsck). The polled path keeps nIEN=1
- *  so it never collides with the IRQ-driven path that is enabled later.
+ *  Pre-multicore boot path: the IRQ-driven path is taken only multi-core, as
+ *  it — with its watchdog and SRST recovery — was built and proven; before
+ *  that, and on one core, ata_dma_sync transparently drives a polled BMIDE
+ *  engine (tagfs mount, fsck). The polled path keeps nIEN=1 so it never
+ *  collides with the IRQ-driven path that is enabled later.
  *
  *  References:
  *    Intel BMIDE Spec Rev 1.0 §3 (register layout, completion semantics)
@@ -52,7 +54,7 @@
 #include "boxos_memory.h"
 #include "ahci.h"
 #include "amp.h"
-#include "irq_defer.h"
+#include "logbook.h"     /* TouchLogbookResolve — the error report's name, once */
 #include "idt.h"
 #include "irqchip.h"
 #include "touch.h"
@@ -103,11 +105,7 @@ typedef struct AtaCmd {
     uint16_t       count;
     uint64_t       lba;
     bool           is_write;
-    bool           is_sync_wait;
     void          *user_buf;     /* kernel-mapped src (write) or dst (read) */
-
-    AtaAsyncCb     cb;
-    void          *cb_ctx;
 
     volatile uint32_t done;      /* 0 = in-flight, 1 = completed */
     volatile error_t  sync_rc;
@@ -122,18 +120,6 @@ typedef struct AtaCmd {
 
     struct AtaCmd *next;
 } AtaCmd;
-
-/* Staged error info for the deferred (K-Core) Touch publish — see
- * ata_run_completion / ata_err_worker. Kept off the completing spinner
- * because that spinner may hold tagfs write_lock, and TouchPublish takes
- * subscriber locks (a REACT subscriber can take write_lock → inversion). */
-typedef struct AtaErrEv {
-    uint8_t  drive;
-    bool     is_write;
-    uint16_t count;
-    error_t  rc;
-    uint64_t lba;
-} AtaErrEv;
 
 typedef struct AtaAsyncCh {
     bool        enabled;
@@ -154,16 +140,14 @@ typedef struct AtaAsyncCh {
     volatile uint64_t cmds_failed;
     volatile uint64_t spurious_irqs;
 
-    /* Ф26 landing — per-channel single-slot NEVER-DROP completion mailbox
-     * for the SYNC path. The IRQ stamps the completed cmd here (RELEASE);
-     * the waiting spinner claims it (ACQ_REL XCHG) and runs the bottom-half
-     * itself, so a sync BMIDE completion can never be dropped the way
-     * irq_defer could. ≤1 in-flight per channel ⇒ one slot suffices; the
-     * async fire-and-forget path (no spinner) still rides irq_defer. */
+    /* Ф26 landing — per-channel single-slot NEVER-DROP completion mailbox.
+     * The IRQ stamps the completed cmd here (RELEASE); the waiting caller
+     * claims it (ACQ_REL XCHG) and runs the bottom-half itself, so a
+     * completion can never be dropped for want of a slot. ≤1 in-flight per
+     * channel ⇒ one slot suffices. */
     AtaCmd   *volatile landing;
     volatile uint64_t  landing_clobber;   /* invariant tripwire — must stay 0 */
     volatile uint8_t   clobber_warned;    /* one-shot: loud print on first clobber */
-    AtaErrEv           err_ev;            /* staged for deferred error publish */
 
     /* Ф26 BMIDE watchdog. On a genuine wedge the PIT-tick scan CASes
      * `recovering` 0->1 (coalescing repeat detections into one) and posts
@@ -290,7 +274,7 @@ static void bmide_kick(AtaAsyncCh *aa, AtaCmd *cmd) {
     cmd->submit_tsc = rdtsc();
 }
 
-/* Polled fallback. Used only when irq_defer isn't yet up (early init /
+/* Polled fallback. Used before the IRQ-driven path is viable (early init /
  * single-core boots). Local nIEN=1 keeps the IRQ silent so we don't
  * confuse the K-Core-less startup. After completion we always restore
  * nIEN=0 because that is the steady-state ata_async_init established
@@ -391,8 +375,17 @@ static AtaCmd *queue_pop_head(AtaAsyncCh *aa) {
 }
 
 /* ---------------------------------------------------------------------
- *  Bottom half — runs on K-Core via irq_defer pump
+ *  Bottom half — runs on the waiting caller (landing claim) or on the
+ *  K-Core recovery worker
  * ------------------------------------------------------------------ */
+
+/* The error report's name, resolved once at init (Touch is up by then) and
+ * cached: the report is published where the completion runs, and that may
+ * be a caller holding a TagFS write lock — a context that can claim a slot
+ * in the Touch IRQ ring and knock, but must not resolve a name or take a
+ * bucket lock. */
+static volatile TouchTag g_ata_err_full = TOUCH_TAG_INVALID;
+static volatile TouchTag g_ata_err_bare = TOUCH_TAG_INVALID;
 
 static void touch_publish_error(uint8_t drive_idx, error_t status,
                                 uint64_t lba, uint16_t count, bool is_write) {
@@ -411,24 +404,18 @@ static void touch_publish_error(uint8_t drive_idx, error_t status,
         .lba       = lba,
         .tsc       = rdtsc(),
     };
-    TouchPublish("storage:ata:error", &ev, sizeof(ev));
+    TouchPublishIrqPair(__atomic_load_n(&g_ata_err_full, __ATOMIC_ACQUIRE),
+                        __atomic_load_n(&g_ata_err_bare, __ATOMIC_ACQUIRE),
+                        &ev, sizeof(ev), 0, TOUCH_FLAG_KERNEL);
 }
 
-/* Deferred error publish: runs on a K-Core (irq_defer), so it never holds
- * tagfs write_lock and TouchPublish's subscriber locks are order-safe. */
-static void ata_err_worker(void *ctx) {
-    AtaAsyncCh *aa = (AtaAsyncCh *)ctx;
-    AtaErrEv e = aa->err_ev;   /* snapshot */
-    touch_publish_error(e.drive, e.rc, e.lba, e.count, e.is_write);
-}
-
-/* Shared completion bottom-half. Invoked by the SYNC-path spinner (via a
- * landing claim) AND by the ASYNC-path irq_defer trampoline. Straight-line,
- * never blocks: memcpy-out, kick the next queued cmd, then signal the
- * spinner (sync) or fire the callback + free (async). Because the sync
- * caller may run this while holding tagfs write_lock, the error Touch
- * publish is DEFERRED to a K-Core (ata_err_worker) — the actual I/O error
- * is still returned to the caller via cmd->sync_rc regardless. */
+/* Shared completion bottom-half. Invoked by the waiting caller (via a
+ * landing claim) and by the watchdog's recovery worker. Straight-line,
+ * never blocks: memcpy-out, kick the next queued cmd, say an error, then
+ * publish done so the waiter returns. The error is said through the Touch
+ * IRQ ring precisely because this may run under a TagFS write lock: the
+ * ring's claim and knock take no lock, and the K-Core that reads the ring
+ * publishes where subscriber locks are order-safe. */
 static void ata_run_completion(AtaAsyncCh *aa, AtaCmd *cmd) {
     /* Read path: copy DMA staging into the caller's buffer BEFORE the next
      * kick reuses the shared staging page. */
@@ -446,31 +433,13 @@ static void ata_run_completion(AtaAsyncCh *aa, AtaCmd *cmd) {
 
     if (cmd->sync_rc != OK) {
         atomic_fetch_add_u64(&aa->cmds_failed, 1);
-        aa->err_ev = (AtaErrEv){ .drive = cmd->drive_idx, .is_write = cmd->is_write,
-                                 .count = cmd->count, .rc = cmd->sync_rc, .lba = cmd->lba };
-        irq_defer(ata_err_worker, aa);   /* best-effort telemetry, off the spinner */
+        touch_publish_error(cmd->drive_idx, cmd->sync_rc, cmd->lba,
+                            cmd->count, cmd->is_write);
     }
     atomic_fetch_add_u64(&aa->cmds_completed, 1);
 
-    if (cmd->cb) {
-        cmd->cb(cmd->drive_idx, cmd->sync_rc, cmd->cb_ctx);
-    }
-
-    if (cmd->is_sync_wait) {
-        /* Caller owns the stack cmd. Publish done; the spinner returns. */
-        __atomic_store_n(&cmd->done, 1u, __ATOMIC_RELEASE);
-    } else {
-        kfree(cmd);
-    }
-}
-
-/* irq_defer trampoline for the async fire-and-forget path (no spinner).
- * Kept so the async submit API stays a working seam for a future
- * IDE-only user-async backend; the live (sync) path uses landing. */
-static void ata_complete_deferred(void *ctx) {
-    AtaCmd *cmd = (AtaCmd *)ctx;
-    if (!cmd) return;
-    ata_run_completion(&g_ata_async[cmd->channel], cmd);
+    /* The caller owns the stack cmd. Publish done; the waiter returns. */
+    __atomic_store_n(&cmd->done, 1u, __ATOMIC_RELEASE);
 }
 
 /* ---------------------------------------------------------------------
@@ -483,11 +452,9 @@ static void ata_complete_deferred(void *ctx) {
  *  completion is retired by exactly one of them (whoever W1Cs the engine
  *  first clears BMISR.IRQ; the other then reads it clear and no-ops).
  *
- *  For a SYNC cmd it stamps the never-drop `landing` slot and returns NULL.
- *  For an ASYNC cmd it returns the cmd so the caller can irq_defer it AFTER
- *  releasing cmd_lock (never nest cmd_lock -> irq_defer's ring lock).
+ *  It stamps the never-drop `landing` slot; the waiting caller claims it.
  * ------------------------------------------------------------------ */
-static AtaCmd *bmide_complete_locked(AtaAsyncCh *aa, uint8_t bmsr) {
+static void bmide_complete_locked(AtaAsyncCh *aa, uint8_t bmsr) {
     AtaCmd *cmd = aa->in_flight;
 
     /* ATA-7 §6.2.5: reading STATUS clears the drive-side IRQ latch. */
@@ -508,23 +475,18 @@ static AtaCmd *bmide_complete_locked(AtaAsyncCh *aa, uint8_t bmsr) {
     cmd->sync_rc = rc;
     __atomic_store_n(&cmd->reconciled, 1u, __ATOMIC_RELAXED);
 
-    /* SYNC cmds (all live traffic): stamp the per-channel landing slot — a
-     * live spinner claims it (XCHG) and runs the bottom-half itself, so this
-     * can NEVER be dropped. The ≤1-in-flight invariant guarantees landing is
-     * NULL here (the prior completion was claimed before its next cmd could be
-     * kicked); a non-NULL means the invariant broke upstream — count it, never
-     * overwrite (that would strand a live spinner). RELEASE publishes sync_rc
-     * to the claimer's ACQUIRE. in_flight stays set: the read-staging page is
-     * copied out in ata_run_completion before the next kick. ASYNC fire-and-
-     * forget cmds (no spinner) keep riding irq_defer, drained on a K-Core. */
-    if (cmd->is_sync_wait) {
-        if (__atomic_load_n(&aa->landing, __ATOMIC_RELAXED) != NULL)
-            atomic_fetch_add_u64(&aa->landing_clobber, 1);
-        else
-            __atomic_store_n(&aa->landing, cmd, __ATOMIC_RELEASE);
-        return NULL;
-    }
-    return cmd;   /* async — caller irq_defers after unlocking */
+    /* Stamp the per-channel landing slot — the waiting caller claims it
+     * (XCHG) and runs the bottom-half itself, so this can NEVER be dropped.
+     * The ≤1-in-flight invariant guarantees landing is NULL here (the prior
+     * completion was claimed before its next cmd could be kicked); a non-NULL
+     * means the invariant broke upstream — count it, never overwrite (that
+     * would strand a live waiter). RELEASE publishes sync_rc to the claimer's
+     * ACQUIRE. in_flight stays set: the read-staging page is copied out in
+     * ata_run_completion before the next kick. */
+    if (__atomic_load_n(&aa->landing, __ATOMIC_RELAXED) != NULL)
+        atomic_fetch_add_u64(&aa->landing_clobber, 1);
+    else
+        __atomic_store_n(&aa->landing, cmd, __ATOMIC_RELEASE);
 }
 
 /* ---------------------------------------------------------------------
@@ -570,9 +532,8 @@ static void ata_channel_irq_process(uint8_t ch_idx) {
         return;
     }
 
-    AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+    bmide_complete_locked(aa, bmsr);
     spin_unlock(&aa->cmd_lock);
-    if (defer) irq_defer(ata_complete_deferred, defer);
 }
 
 static void ata_irq_handler(void) {
@@ -613,10 +574,9 @@ static void ata_recover_worker(void *ctx) {
     AtaCmd *cmd  = aa->in_flight;
     if (cmd && !__atomic_load_n(&cmd->reconciled, __ATOMIC_RELAXED) &&
         (bmsr & BMISR_IRQ)) {
-        AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+        bmide_complete_locked(aa, bmsr);
         __atomic_store_n(&aa->recovering, 0u, __ATOMIC_RELEASE);
         spin_unlock(&aa->cmd_lock);
-        if (defer) irq_defer(ata_complete_deferred, defer);
         return;
     }
     spin_unlock(&aa->cmd_lock);
@@ -648,17 +608,9 @@ static void ata_recover_worker(void *ctx) {
     if (wedged) {
         wedged->sync_rc = ERR_IO;
         atomic_fetch_add_u64(&aa->cmds_failed, 1);
-        aa->err_ev = (AtaErrEv){ .drive = wedged->drive_idx, .is_write = wedged->is_write,
-                                 .count = wedged->count, .rc = ERR_IO, .lba = wedged->lba };
-        irq_defer(ata_err_worker, aa);      /* best-effort telemetry, off this path */
-        if (wedged->cb) {
-            wedged->cb(wedged->drive_idx, ERR_IO, wedged->cb_ctx);
-        }
-        if (wedged->is_sync_wait) {
-            __atomic_store_n(&wedged->done, 1u, __ATOMIC_RELEASE);
-        } else {
-            kfree(wedged);
-        }
+        touch_publish_error(wedged->drive_idx, ERR_IO, wedged->lba,
+                            wedged->count, wedged->is_write);
+        __atomic_store_n(&wedged->done, 1u, __ATOMIC_RELEASE);
     }
 }
 
@@ -703,9 +655,8 @@ void bmide_watchdog_scan(void) {
          * the CPU IRQ never ran (edge dropped / misrouted on legacy IDE).
          * Retire it now via the same body the IRQ handler uses. Pure event. */
         if (bmsr & BMISR_IRQ) {
-            AtaCmd *defer = bmide_complete_locked(aa, bmsr);
+            bmide_complete_locked(aa, bmsr);
             spin_unlock(&aa->cmd_lock);
-            if (defer) irq_defer(ata_complete_deferred, defer);
             continue;
         }
 
@@ -764,64 +715,16 @@ static error_t submit_internal(AtaCmd *cmd) {
 static bool async_path_viable(void) {
     if (!__atomic_load_n(&g_ata_async_ready, __ATOMIC_ACQUIRE)) return false;
     if (!__atomic_load_n(&g_ata_irq_armed,   __ATOMIC_ACQUIRE)) return false;
-    /* irq_defer pump only exists on multi-core (the BSP runs userspace on
-     * single-core and never drains the ring). */
+    /* Multi-core only, as the IRQ-driven wait, its watchdog and the SRST
+     * recovery were built and proven; on one core the BSP drives the channel
+     * polled. */
     if (g_amp.total_cores < 2) return false;
-    extern volatile uint8_t g_irq_defer_ready;
-    if (!__atomic_load_n(&g_irq_defer_ready, __ATOMIC_ACQUIRE)) return false;
     return true;
 }
 
-static error_t do_submit_async(uint8_t drive_idx, uint64_t lba, uint16_t count,
-                               bool is_write, void *user_buf,
-                               AtaAsyncCb cb, void *cb_ctx) {
-    if (!cb) return ERR_INVALID_ARGUMENT;
-    if (drive_idx >= ATA_DRIVE_COUNT) return ERR_INVALID_ARGUMENT;
-    if (!user_buf || count == 0 || count > ATA_DMA_MAX_SECTORS)
-        return ERR_INVALID_ARGUMENT;
-    if (!ata_async_usable(drive_idx)) return ERR_DEVICE_NOT_READY;
-    if (!async_path_viable())         return ERR_DEVICE_NOT_READY;
-
-    ATADevice *d = &g_ata_devices[drive_idx];
-    if (!d->exists) return ERR_DEVICE_NOT_READY;
-    if (lba + count > d->total_sectors) return ERR_INVALID_ARGUMENT;
-
-    AtaCmd *cmd = (AtaCmd *)kmalloc(sizeof(*cmd));
-    if (!cmd) return ERR_IO;
-    memset(cmd, 0, sizeof(*cmd));
-    cmd->drive_idx    = drive_idx;
-    cmd->channel      = drive_channel(drive_idx);
-    cmd->lba          = lba;
-    cmd->count        = count;
-    cmd->is_write     = is_write;
-    cmd->user_buf     = user_buf;
-    cmd->cb           = cb;
-    cmd->cb_ctx       = cb_ctx;
-    cmd->is_sync_wait = false;
-    cmd->sync_rc      = OK;
-
-    error_t rc = submit_internal(cmd);
-    if (rc != OK) {
-        kfree(cmd);
-    }
-    return rc;
-}
-
-error_t ata_submit_read_async(uint8_t drive_idx, uint64_t lba,
-                              uint16_t count, void *user_buf,
-                              AtaAsyncCb cb, void *cb_ctx) {
-    return do_submit_async(drive_idx, lba, count, false, user_buf, cb, cb_ctx);
-}
-
-error_t ata_submit_write_async(uint8_t drive_idx, uint64_t lba,
-                               uint16_t count, const void *user_buf,
-                               AtaAsyncCb cb, void *cb_ctx) {
-    return do_submit_async(drive_idx, lba, count, true,
-                           (void *)(uintptr_t)user_buf, cb, cb_ctx);
-}
-
 /* ---------------------------------------------------------------------
- *  Sync wrapper — submit + IRQ-wait, polled fallback when irq_defer down
+ *  Sync wrapper — submit + IRQ-wait, polled fallback before the IRQ path
+ *  is viable
  * ------------------------------------------------------------------ */
 int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
                  bool is_write, void *buf)
@@ -839,14 +742,11 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
     cmd.count        = count;
     cmd.is_write     = is_write;
     cmd.user_buf     = buf;
-    cmd.cb           = NULL;
-    cmd.cb_ctx       = NULL;
-    cmd.is_sync_wait = true;
     cmd.sync_rc      = OK;
 
     if (!async_path_viable()) {
-        /* irq_defer / multi-core not ready — drive the channel polled,
-         * with nIEN temporarily set so the IRQ path stays silent. */
+        /* Not multi-core, or the IRQ side not armed — drive the channel
+         * polled, with nIEN temporarily set so the IRQ path stays silent. */
         return bmide_transfer_polled(&cmd);
     }
 
@@ -864,14 +764,14 @@ int ata_dma_sync(uint8_t drive_idx, uint64_t lba, uint16_t count,
      * so the IRQ can reach the BSP and stamp `landing`.
      *
      * Never-drop delivery: the completion IRQ stamps this channel's `landing`
-     * slot (the sync path no longer rides irq_defer), and we CLAIM it here via
+     * slot, and we CLAIM it here via
      * an ACQ_REL XCHG and run the bottom-half ourselves. Because the lock-
      * holder drains its own completion, a BSP stuck spinning on a lock this
      * caller holds can never strand it — the textbook BMIDE × write_lock
      * deadlock is structurally impossible, with one atomic word instead of an
      * MPMC ring. The claimed `c` may be ANOTHER waiter's cmd on this channel
      * (we drain whatever landed, not necessarily our own) — correct and
-     * necessary, exactly what the old irq_defer_pump(bsp) did.
+     * necessary: whoever is awake runs the completion that landed.
      *
      * No deadline / no timeout: the stack `cmd` is valid until we observe
      * done; a wedged drive spins forever (orthogonal — the SRST watchdog is a
@@ -1004,6 +904,16 @@ void ata_async_init(void) {
 
     memset(g_ata_async, 0, sizeof(g_ata_async));
 
+    /* The error report's name, once: ata_init runs after guide_init, so the
+     * registry is up, and the completion paths that say an error must not
+     * resolve anything themselves (touch_publish_error). */
+    {
+        TouchTag full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+        TouchLogbookResolve("storage:ata:error", &full, &bare);
+        __atomic_store_n(&g_ata_err_full, full, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_ata_err_bare, bare, __ATOMIC_RELEASE);
+    }
+
     /* AHCI owns block I/O — legacy BMIDE engine stays dormant. */
     if (ahci_is_initialized()) {
         debug_printf("[ATA_ASYNC] AHCI active — BMIDE async engine skipped\n");
@@ -1122,7 +1032,6 @@ error_t bmide_watchdog_selftest(void) {
     cmd.count        = 1;
     cmd.is_write     = false;
     cmd.user_buf     = buf;
-    cmd.is_sync_wait = true;
     cmd.sync_rc      = OK;
 
     /* Simulate a dropped IDE INTRQ: mask the channel's IOAPIC pin. The drive
@@ -1210,7 +1119,6 @@ error_t bmide_wedge_selftest(void) {
     fake.count        = 1;
     fake.is_write     = false;
     fake.user_buf     = vbuf;
-    fake.is_sync_wait = true;
     fake.sync_rc      = OK;
     fake.submit_tsc   = rdtsc();
 

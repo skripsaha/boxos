@@ -20,7 +20,7 @@
  * xhci_irq_handler runs in MSI/MSI-X / legacy-INTx context. Resolving a
  * tag string at IRQ time would take the TagFS registry lock and possibly
  * kmalloc a fresh intern entry — both of which violate IRQ-context lock
- * ordering on this kernel (see project memory `irq_defer_done_2026_05_17`).
+ * ordering on this kernel (the AHCI/SCI variant of it was the first closed).
  *
  * Four tags are cached: a connect/disconnect pair about the socket, and an
  * arrived/left pair about the device in it.
@@ -234,8 +234,8 @@ static void xhci_scan_ports(xhci_controller_t* ctrl)
              * each of a couple of dozen root ports at boot would be noise
              * standing exactly where a real fault has to be readable. */
 
-            /* IRQ context: hand off to K-Core via the static-ring +
-             * irq_defer path. See touch.c TouchPublishIrqPair block. */
+            /* IRQ context: hand off to the K-Core through the Touch IRQ
+             * ring and its knock. See touch.c TouchPublishIrqPair block. */
             TouchTag full = __atomic_load_n(&g_xhci_touch_disconnect_full,
                                            __ATOMIC_ACQUIRE);
             TouchTag bare = __atomic_load_n(&g_xhci_touch_disconnect_bare,

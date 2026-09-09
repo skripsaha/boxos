@@ -32,15 +32,15 @@
  * Optimization Reference Manual, Cache & Memory Subsystem chapter
  * (false sharing & RFO storms). Cache line is 64 B on every shipping
  * Intel/AMD x86_64 part; verified at runtime via CPUID.05H monitor-
- * line probe (cpuid.c). The same fix landed for irq_defer in commit
- * `3cdc79c`.
+ * line probe (cpuid.c). The same fix landed for the deferred-work ring of
+ * the day in commit `3cdc79c`.
  *
  * Producer model — MPSC
  * ---------------------
  * Multiple K-Cores can land in KTouchPush concurrently for the same
- * target (Touch publishes from acpi_touch_deferred, ata_err_worker,
- * the irq-defer keyboard/xhci fan-out, plus synchronous storage_ops
- * paths — all racing for one cabin's ring).
+ * target (the IRQ ring's reader on the drain core — keyboard, xHCI, ACPI,
+ * ATA errors — plus synchronous storage_ops paths — all racing for one
+ * cabin's ring).
  *
  * Producer side uses a Vyukov-style per-slot generation counter (slot.seq)
  * that gates BOTH the slot's metadata header AND its inline payload:

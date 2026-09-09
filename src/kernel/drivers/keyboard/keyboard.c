@@ -58,9 +58,9 @@ static uint8_t kb_mods_now(void)
 
 /* Every key the machine hears leaves here as one Touch on the "keyboard"
  * tag. IRQ context (PS/2 IRQ1, xHCI HID, PIT IRQ0 for repeats): the publish
- * is deferred through the static ring + irq_defer, because TouchPublish
- * would take the TagFS registry lock and per-bucket spinlocks with IF=0 —
- * the deadlock pattern irq_defer exists to break. */
+ * goes through the Touch IRQ ring and a knock, because TouchPublish would
+ * take the TagFS registry lock and per-bucket spinlocks with IF=0 — the
+ * deadlock pattern the ring exists to break. */
 static void kb_publish_event(const kb_event_t *ev)
 {
     TouchTag full = __atomic_load_n(&g_kbd_touch_full, __ATOMIC_ACQUIRE);
@@ -91,7 +91,7 @@ static KbRepeatState kb_repeat = {0};
  * keypress and an injected byte are indistinguishable to whoever listens.
  * Deferred (IRQ-safe) publish is mandatory: keyboard_inject runs in the COM1
  * IRQ handler, same as the PS/2 site — a direct TouchPublish would take TagFS
- * registry locks with IF=0 (the irq_defer deadlock pattern). scancode 0 says
+ * registry locks with IF=0 (the deadlock pattern the ring exists to break). scancode 0 says
  * the key is synthetic. */
 void keyboard_inject(const char *chars, uint32_t count)
 {

@@ -435,6 +435,12 @@ void acpi_apei_consume(void);
  * when ACPI is not initialised or sci_interrupt is zero. */
 void acpi_sci_register(void);
 
+/* Unmask the SCI — after Touch is up (guide_init) and the APEI runtime is
+ * initialised: the handler says its events under names it must already hold,
+ * and an interrupt cannot resolve one. A level-triggered SCI raised before
+ * this waits in the IOAPIC. Also arms the power button. */
+void acpi_sci_arm(void);
+
 /* Enter ACPI sleep state `s` ∈ {1..5}. Reads \_Sx package from AML
  * namespace to derive SLP_TYPa/SLP_TYPb, calls _PTS(s) and _BFS(s)
  * (when present) before writing PM1a/b CNT with SLP_TYP + SLP_EN.

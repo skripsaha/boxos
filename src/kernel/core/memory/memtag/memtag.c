@@ -167,7 +167,7 @@ static void SeedReservedTags(void) {
     MarkInternReserved("mce:fault:fatal");
     /* MCE page migration (mce_migrate.c) — phys → MemRegion attach
      * chain → per-cabin PTE swap with TLB shootdown. Published from
-     * K-Core context (the worker runs via irq_defer, not on the IST
+     * K-Core context (the worker runs off the slot's baton, not on the IST
      * stack — so TouchPublishId is OK; mce.c's IST-only tags above
      * use TouchPublishIrqPair). */
     MarkInternReserved("mce:migration:completed");
