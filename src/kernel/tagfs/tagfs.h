@@ -518,6 +518,11 @@ bool tagfs_key_is_reserved(const char *key);
 int  tagfs_query_files(const char* query_strings[], uint32_t count,
                        uint32_t* out_file_ids, uint32_t max_results);
 int  tagfs_list_all_files(uint32_t* out_file_ids, uint32_t max_results);
+/* The number no file id of this volume reaches. Room for "every file that
+ * matches" is this many, and the volume's own count is the only honest size
+ * for such a buffer — any smaller number turns the file past it into one
+ * that is "not found". 0 when no volume is mounted. */
+uint32_t tagfs_file_ceiling(void);
 
 TagFSFileHandle* tagfs_open(uint32_t file_id, uint32_t flags);
 void             tagfs_close(TagFSFileHandle* handle);
