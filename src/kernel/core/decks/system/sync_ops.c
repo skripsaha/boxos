@@ -269,21 +269,27 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     AddrWaitBucket *bucket = AddrWaitGetBucket(phys);
     if (!bucket) return OK;
 
-    /* Claim up to `count` entries under the lock. Claiming a waiter means
-     * setting done=1 AND unlinking it atomically (here, under this lock) — the
-     * claimer then OWNS that waiter's single completion Result. Unlinking on
-     * claim (rather than leaving the parked side to self-remove) is what makes
-     * a later claimer — a stale park-timeout, or a re-park — unable to match an
-     * already-completed waiter. We snapshot ref-counted proc pointers and
-     * deliver outside the lock to keep the critical section short. */
-#define ADDR_WAKE_MAX_BATCH  256u
-    process_t *to_wake[ADDR_WAKE_MAX_BATCH];
-    uint32_t   to_wake_cookie[ADDR_WAKE_MAX_BATCH];
-    uint32_t   wake_count = 0;
+    /* Claim every waiter parked on THIS address now — up to `count`, all of
+     * them for 0 — under one hold of the bucket lock, and deliver outside it.
+     * Claiming a waiter means setting done=1 AND unlinking it atomically
+     * (here, under this lock) — the claimer then OWNS that waiter's single
+     * completion Result. Unlinking on claim (rather than leaving the parked
+     * side to self-remove) is what makes a later claimer — a stale
+     * park-timeout, or a re-park — unable to match an already-completed
+     * waiter.
+     *
+     * The claimed entries ride to their delivery on their own link
+     * (claimed_next): no tray between the claim and the push, so nothing to
+     * size. What stood here was a stack array of 256 and a walk that stopped
+     * when it was full — a notify_all with more sleepers than that woke the
+     * first 256 and left the rest asleep for ever, and nothing said so. */
+    AddrWaitEntry  *claimed      = NULL;
+    AddrWaitEntry **claimed_tail = &claimed;
+    uint32_t        wake_count   = 0;
 
     spin_lock(&bucket->lock);
     AddrWaitEntry *e = bucket->head;
-    while (e && (count == 0 || wake_count < count) && wake_count < ADDR_WAKE_MAX_BATCH)
+    while (e && (count == 0 || wake_count < count))
     {
         AddrWaitEntry *next = e->next;   /* save: AddrWaitUnlink nulls e->next */
         /* The bucket is a HASH of the physical address ((phys>>3)&0xFFFF), so a
@@ -295,8 +301,10 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
             /* Claimed — we own this waiter's one completion, and its chit is
              * DUE from here (AddrWaitClaimLocked marks it under this lock). */
             process_ref_inc(e->proc);
-            to_wake_cookie[wake_count] = e->submit_cookie;
-            to_wake[wake_count++]      = e->proc;
+            e->claimed_next = NULL;
+            *claimed_tail   = e;
+            claimed_tail    = &e->claimed_next;
+            wake_count++;
         }
         e = next;
     }
@@ -305,8 +313,15 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
     /* Fire wakes outside the bucket lock — mirrors touch_queue_fire_wake
      * (touch_queue.c:105-119) exactly. */
     uint32_t waker_pid = ctx->proc->pid;
-    for (uint32_t i = 0; i < wake_count; i++) {
-        process_t *target = to_wake[i];
+    while (claimed) {
+        /* Everything this delivery needs is read BEFORE the push. The Result
+         * is the only thing that lets the parked strand run again — the
+         * timeout arm finds the entry already claimed and pushes nothing —
+         * and its next park rewrites this entry, link included. */
+        AddrWaitEntry *next   = claimed->claimed_next;
+        process_t     *target = claimed->proc;
+        uint32_t       cookie = claimed->submit_cookie;
+        claimed = next;
 
         if (!target->destroying) {
             /* We won the claim, so we OWN this waiter's completion: deliver
@@ -321,7 +336,7 @@ static int SysAddrWake(const ManifestOp *op, Crate *crates,
             r.sender_pid = 0;
             /* Echo the PARK's own cloakroom token — this Result answers the
              * parked strand's submit, and its paired wait adopts only that. */
-            r.context    = KCTX_PACK24(KCTX_GUIDE, to_wake_cookie[i]);
+            r.context    = KCTX_PACK24(KCTX_GUIDE, cookie);
             KResultPush(target, &r);
 
             /* The target's armed timeout (TouchQueueWakeAfter) is left in place;

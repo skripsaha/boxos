@@ -4154,6 +4154,164 @@ run_handsetmut() {
 }
 
 
+# ===========================================================================
+# brigade — one wake for more sleepers than any tray
+# ===========================================================================
+#
+# SysAddrWake used to claim its waiters into a stack array of 256 and stop
+# when it was full: a notify_all with more sleepers than that woke 256 and
+# left the rest asleep for ever, and nothing said so. The claimed entries now
+# ride to their delivery on their own link, so there is nothing to size.
+#
+# strandpark part 3 is the instrument: 300 strands park on one word with no
+# deadline, main learns of every park from the kernel's own strand:parked
+# Touch, then changes the word and wakes all parked on it — once. Every
+# sleeper must come back.
+util_boot() {
+    # util_boot NAME "RUN-BG ARGS" COMMAND DONE_REGEX LOOKS
+    local name=$1 args=$2 cmd=$3 done_re=$4 looks=$5
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    i=0
+    while [ $i -lt "$looks" ]; do
+        sleep 2
+        tail -n +$((MARK + 1)) build/serial.log | grep -qE "$done_re" && break
+        i=$((i+1))
+    done
+    sleep 2
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_brigade() {
+    echo "== brigade: 300 strands parked on one word, one wake, all 300 back =="
+    build
+    if ! util_boot brigade "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; then
+        bad "brigade: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.brigade.log"
+    grep -q "\[SPK\] PASS: brigade of 300 parked, one wake, 300 back" "$L" \
+        && ok "brigade: one wake reached all 300 sleepers" \
+        || bad "brigade: $(grep -m1 '\[SPK\] FAIL' "$L" || echo 'no verdict from strandpark at all')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "brigade: the kernel spoke of a stall or fault" \
+        || ok "brigade: no verdict, no panic"
+}
+
+# The oracle measured against itself: put the tray of 256 back, and 44
+# sleepers must be left behind — and the oracle must see them.
+brigade_tray_on() {
+    cp src/kernel/core/decks/system/sync_ops.c "$SCRATCH/sync_ops.c.brigade.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/decks/system/sync_ops.c"
+s = open(p).read()
+anchor = "    while (e && (count == 0 || wake_count < count))\n"
+assert s.count(anchor) == 1, "brigade mutation anchor missing"
+s = s.replace(anchor, "    while (e && (count == 0 || wake_count < count) && wake_count < 256u)   /* logcheck mutation: the tray of 256 */\n", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/decks/system/sync_ops.c || { echo "brigade mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+
+brigade_tray_off() {
+    [ -f "$SCRATCH/sync_ops.c.brigade.bak" ] && cp "$SCRATCH/sync_ops.c.brigade.bak" src/kernel/core/decks/system/sync_ops.c
+    sleep 1; touch src/kernel/core/decks/system/sync_ops.c
+}
+
+run_brigademut() {
+    echo "== brigademut: the tray of 256 put back, and 44 sleepers must be left behind =="
+    brigade_tray_on; build
+    util_boot brigademut "STRICT=on CORES=16 MEM=8G" strandpark "\[SPK\] (PASS|FAIL): brigade" 60; local booted=$?
+    brigade_tray_off
+    if [ $booted -ne 0 ]; then bad "brigademut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.brigademut.log"
+    if grep -q "\[SPK\] FAIL: brigade: one wake reached 256 of 300 sleepers" "$L"; then
+        ok "brigademut: the tray left 44 asleep — and the oracle sees them"
+    else
+        bad "brigademut: the tray put back and the brigade STILL all woke — the oracle cannot see that defect ($(grep -m1 '\[SPK\] .*brigade' "$L" || echo 'no verdict'))"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# headcount — every carrier of a tag is told once, and every one answers
+# ===========================================================================
+#
+# system.broadcast used to take the carriers of a tag into a stack tray of
+# 256 and stop when it was full: the 257th carrier was never told, and
+# nothing said so. The snapshot is now made for the count the walk found,
+# and made again if the list grew in between.
+#
+# headcount is the instrument: 300 children carry the crew tag from boarding,
+# the parent says one word to the tag, and every child answers with a Touch.
+run_headcount() {
+    echo "== headcount: one word to 300 carriers of a tag, 300 answers =="
+    build
+    if ! util_boot headcount "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)" 90; then
+        bad "headcount: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.headcount.log"
+    grep -q "\[HEADCOUNT\] PASS: one word to 300, 300 answered" "$L" \
+        && ok "headcount: every carrier of the tag was told" \
+        || bad "headcount: $(grep -m1 '\[HEADCOUNT\] FAIL' "$L" || echo 'no verdict from headcount at all')"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "headcount: the kernel spoke of a stall or fault" \
+        || ok "headcount: no verdict, no panic"
+}
+
+headcount_tray_on() {
+    cp src/kernel/core/decks/system/system_ops.c "$SCRATCH/system_ops.c.headcount.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/decks/system/system_ops.c"
+s = open(p).read()
+anchor = "            if (pid_count < pid_cap) pid_list[pid_count] = iter->pid;\n"
+assert s.count(anchor) == 1, "headcount mutation anchor missing"
+s = s.replace(anchor, "            if (pid_count >= 256u) break;   /* logcheck mutation: the tray of 256 */\n" + anchor, 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/decks/system/system_ops.c || { echo "headcount mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/system/system_ops.c
+}
+
+headcount_tray_off() {
+    [ -f "$SCRATCH/system_ops.c.headcount.bak" ] && cp "$SCRATCH/system_ops.c.headcount.bak" src/kernel/core/decks/system/system_ops.c
+    sleep 1; touch src/kernel/core/decks/system/system_ops.c
+}
+
+run_headcountmut() {
+    echo "== headcountmut: the tray of 256 put back, and 44 carriers must go untold =="
+    headcount_tray_on; build
+    util_boot headcountmut "STRICT=on CORES=16 MEM=8G" headcount "\[HEADCOUNT\] (PASS|FAIL)" 90; local booted=$?
+    headcount_tray_off
+    if [ $booted -ne 0 ]; then bad "headcountmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.headcountmut.log"
+    if grep -q "\[HEADCOUNT\] FAIL: one word to 300, 256 answered" "$L"; then
+        ok "headcountmut: the tray left 44 untold — and the oracle sees them"
+    else
+        bad "headcountmut: the tray put back and all 300 STILL answered — the oracle cannot see that defect ($(grep -m1 '\[HEADCOUNT\]' "$L" || echo 'no verdict'))"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
@@ -4176,6 +4334,10 @@ case "${1:-both}" in
     rollcallmut) run_rollcallmut ;;
     handset)    run_handset ;;
     handsetmut) run_handsetmut ;;
+    brigade)    run_brigade ;;
+    brigademut) run_brigademut ;;
+    headcount)  run_headcount ;;
+    headcountmut) run_headcountmut ;;
     sleepsmut)  run_sleepsmut ;;
     kcoreclaim) run_kcoreclaim ;;
     kcoreclaimmut) run_kcoreclaimmut ;;
@@ -4198,7 +4360,7 @@ case "${1:-both}" in
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_brigade; echo; run_headcount; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
     *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 

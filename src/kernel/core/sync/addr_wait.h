@@ -28,6 +28,12 @@ struct process_t;
 typedef struct AddrWaitEntry {
     struct AddrWaitEntry *next;
     struct AddrWaitEntry *prev;
+    /* The wake's own list. A wake claims every waiter on its address under
+     * one hold of the bucket lock and delivers outside it; a claimed entry is
+     * already off the chain, and this link is how it rides to its delivery
+     * — no tray of N entries between the claim and the push, so there is no
+     * N. Written only by the claimer, between the claim and the push. */
+    struct AddrWaitEntry *claimed_next;
     struct process_t     *proc;
     uintptr_t             phys_addr;
     /* Recorded for Nightwatch. Without these three a parked entry cannot be

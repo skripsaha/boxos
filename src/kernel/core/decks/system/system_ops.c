@@ -58,7 +58,6 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
 #include "strand_pool_abi.h" /* StrandPool — _Alignof for the bind alignment check */
 
-#define MAX_BROADCAST_TARGETS  256u
 #define BROADCAST_TAG_MAX      64u
 
 
@@ -194,27 +193,45 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     /* Phase 1: snapshot matching pids under process_list_lock so the
      * iter->next chain cannot mutate mid-walk (process_destroy unlinks
      * under the same lock). Tag check is the inline bitfield path —
-     * no nested lock acquisition. */
-    uint32_t pid_list[MAX_BROADCAST_TARGETS];
-    uint16_t pid_count = 0;
-    process_list_lock();
-    for (process_t *iter = process_get_first();
-         iter && pid_count < MAX_BROADCAST_TARGETS;
-         iter = iter->next)
-    {
-        if (iter->pid == ctx->proc->pid)        continue;
-        process_state_t s = iter->state;
-        if (s == PROC_CRASHED || s == PROC_DONE) continue;
-        if (!process_has_tag_id(iter, tid))      continue;
-        pid_list[pid_count++] = iter->pid;
+     * no nested lock acquisition, and nothing is allocated under the lock
+     * either: the walk counts first, the room is made for that count, and
+     * the walk fills it — if the list grew past the count in between, room
+     * is made again for what it is now. What stood here was a stack tray of
+     * 256 and a walk that stopped when it was full: the 257th carrier of the
+     * tag was never told, and nothing said so. */
+    uint32_t *pid_list  = NULL;
+    uint32_t  pid_cap   = 0;
+    uint32_t  pid_count = 0;
+    for (;;) {
+        pid_count = 0;
+        process_list_lock();
+        for (process_t *iter = process_get_first(); iter; iter = iter->next)
+        {
+            if (iter->pid == ctx->proc->pid)        continue;
+            process_state_t s = iter->state;
+            if (s == PROC_CRASHED || s == PROC_DONE) continue;
+            if (!process_has_tag_id(iter, tid))      continue;
+            if (pid_count < pid_cap) pid_list[pid_count] = iter->pid;
+            pid_count++;
+        }
+        process_list_unlock();
+
+        if (pid_count <= pid_cap) break;          /* the room held every one */
+        if (pid_list) kfree(pid_list);
+        pid_cap  = pid_count;
+        pid_list = (uint32_t *)kmalloc(pid_cap * sizeof(uint32_t));
+        if (!pid_list) return ERR_NO_MEMORY;
     }
-    process_list_unlock();
+    if (pid_count == 0) {
+        if (pid_list) kfree(pid_list);
+        return ERR_ROUTE_NO_SUBSCRIBERS;
+    }
 
     /* Phase 2: pin each target via process_find_ref before any cabin or
      * result_ring dereference; release the ref before moving on. This
      * is the same UAF-closing pattern as SysRoute. */
     uint32_t delivered = 0;
-    for (uint16_t i = 0; i < pid_count; i++) {
+    for (uint32_t i = 0; i < pid_count; i++) {
         process_t *target = process_find_ref(pid_list[i]);
         if (!target) continue;
 
@@ -237,8 +254,8 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
             delivered++;
         }
         process_ref_dec(target);
-        if (delivered >= MAX_BROADCAST_TARGETS) break;
     }
+    kfree(pid_list);
     return delivered > 0 ? OK : ERR_ROUTE_NO_SUBSCRIBERS;
 }
 
