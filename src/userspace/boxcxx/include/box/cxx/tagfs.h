@@ -68,6 +68,7 @@
 #include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
 #include "box/cxx/error.h"    // box::result / box::status / box::error / box_errno_of
 #include "box/cxx/touch.h"    // box::tag, box::touch, box::subscription (anchor observer)
+#include "box/memory.h"       // free — query_all hands back a list the caller frees
 
 namespace box {
 
@@ -460,17 +461,26 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
 
 // ── tag query → range of files ──────────────────────────────────────────
 // tagspec == nullptr lists every file. Compose richer (non-tag) predicates
-// over the result with std::views. Returns up to 255 files (boxlib limit).
-inline std::vector<file> query(const char *tagspec)
+// over the result with std::views. Every match: the kernel says how many
+// there are and boxlib sizes the list to that (query_all), so no file is
+// past the end of the answer.
+namespace _detail {
+inline std::vector<file> files_of(int n, std::uint32_t *ids)
 {
-    std::uint32_t      ids[255];
-    int               n = ::query(tagspec, ids, 255);
     std::vector<file> out;
     if (n > 0) {
         out.reserve(static_cast<std::size_t>(n));
         for (int i = 0; i < n; ++i) out.emplace_back(ids[i]);
     }
+    ::free(ids);
     return out;
+}
+} // namespace _detail
+inline std::vector<file> query(const char *tagspec)
+{
+    std::uint32_t *ids = nullptr;
+    int            n   = ::query_all(tagspec, &ids);
+    return _detail::files_of(n, ids);
 }
 inline std::vector<file> all() { return query(nullptr); }
 
@@ -479,14 +489,9 @@ inline std::vector<file> all() { return query(nullptr); }
 // same question of everything on the volume. See box/cxx/use.h.
 inline std::vector<file> query_everywhere(const char *tagspec)
 {
-    std::uint32_t      ids[255];
-    int               n = ::query_everywhere(tagspec, ids, 255);
-    std::vector<file> out;
-    if (n > 0) {
-        out.reserve(static_cast<std::size_t>(n));
-        for (int i = 0; i < n; ++i) out.emplace_back(ids[i]);
-    }
-    return out;
+    std::uint32_t *ids = nullptr;
+    int            n   = ::query_all_everywhere(tagspec, &ids);
+    return _detail::files_of(n, ids);
 }
 inline std::vector<file> all_everywhere() { return query_everywhere(nullptr); }
 
@@ -517,32 +522,35 @@ inline box::result<file> create_everywhere(const char *name, const char *tagspec
 // On success the first matching record; the error arm separates the two no-result
 // outcomes — a failed lookup (n < 0) surfaces its recovered cause, while a clean
 // "no file by that name" (n == 0) is file_not_found, a queryable cause rather
-// than a transport error. (For the same-named matches — up to 8 — use find_all.)
+// than a transport error. (For every same-named match use find_all.)
 inline box::result<record> find(const char *name)
 {
-    std::uint32_t ids[8];
-    file_info_t   infos[8];
-    int           n = ::find_file_by_name(name, ids, infos, 8);
+    std::uint32_t ids[1];
+    file_info_t   infos[1];
+    int           n = ::find_file_by_name(name, ids, infos, 1);
     if (n > 0) return record(ids[0], infos[0]);
     if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
     return std::unexpected(box::error{box::errc::file_not_found});
 }
-// Every same-named match as a record. The descriptor buffers live on the heap
-// (256 × file_info_t ≈ 45 KiB, too large for the stack) so find_all enumerates
-// every match the kernel can hand back: find_file_by_name scans at most 255 files
-// (its internal query cap), the true ceiling here — no arbitrary userspace cap
-// below it. A transport failure is reported as an empty range, consistent with
+// Every same-named match as a record. find_file_by_name returns how many files
+// carry the name and writes as many as there is room for, so the count is asked
+// first and the buffers sized to it; a file created between the two asks makes
+// the second answer larger, and the ask is repeated with room for it. A
+// transport failure is reported as an empty range, consistent with
 // query()/all(); use find() when you need the recovered cause of a lookup.
 inline std::vector<record> find_all(const char *name)
 {
-    constexpr std::size_t      cap = 256;  // find_file_by_name scans <= 255 files
-    std::vector<std::uint32_t> ids(cap);
-    std::vector<file_info_t>   infos(cap);
-    int                 n = ::find_file_by_name(name, ids.data(), infos.data(), cap);
     std::vector<record> out;
-    if (n > 0) {
-        out.reserve(static_cast<std::size_t>(n));
-        for (int i = 0; i < n; ++i) out.emplace_back(ids[i], infos[i]);
+    int n = ::find_file_by_name(name, nullptr, nullptr, 0);
+    while (n > 0) {
+        std::vector<std::uint32_t> ids(static_cast<std::size_t>(n));
+        std::vector<file_info_t>   infos(static_cast<std::size_t>(n));
+        int got = ::find_file_by_name(name, ids.data(), infos.data(), ids.size());
+        if (got <= n) {
+            for (int i = 0; i < got; ++i) out.emplace_back(ids[i], infos[i]);
+            break;
+        }
+        n = got;
     }
     return out;
 }

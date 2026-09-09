@@ -5,12 +5,6 @@
 #include "box/string.h"
 #include "box/system.h"
 
-/* Per-process scratch arrays. file_info_t ≈ 176B; an array of 256 occupies
- * ~45 KB which would be hostile to the 64 KB user stack — keep it in BSS. */
-#define FILES_MAX 256
-static uint32_t    s_file_ids[FILES_MAX];
-static file_info_t s_file_infos[FILES_MAX];
-
 int main(void)
 {
     int argc = (int)luggage_word_count();
@@ -40,7 +34,10 @@ int main(void)
         query_tags[pos] = '\0';
     }
 
-    int count = query(query_tags, s_file_ids, FILES_MAX);
+    /* Every file that answers, however many: the kernel says how many there
+     * are and the list is sized to that. */
+    uint32_t *s_file_ids = NULL;
+    int count = query_all(query_tags, &s_file_ids);
     free(query_tags);
 
     if (count < 0)
@@ -49,16 +46,19 @@ int main(void)
         exit(1);
         return 1;
     }
-    if (count > FILES_MAX)
-    {
-        println("Warning: Too many files, showing first 256");
-        count = FILES_MAX;
-    }
     if (count == 0)
     {
         println("No files found");
         exit(0);
         return 0;
+    }
+
+    file_info_t *s_file_infos = malloc((size_t)count * sizeof(file_info_t));
+    if (!s_file_infos)
+    {
+        println("Error: no memory for the file list");
+        exit(1);
+        return 1;
     }
 
     println("Files:");
@@ -71,10 +71,7 @@ int main(void)
         }
     }
 
-    /* Insertion sort by filename — O(n²) but stable, in-place, no extra
-     * stack frame per swap (the previous bubble copied a 176-byte struct
-     * twice per swap). For ≤256 entries this beats both bubble and qsort
-     * given our memory budget. */
+    /* Insertion sort by filename — stable and in place. */
     for (int i = 1; i < count; i++)
     {
         file_info_t key_info = s_file_infos[i];

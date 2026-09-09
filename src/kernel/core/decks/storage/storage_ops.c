@@ -869,9 +869,26 @@ static int ObjGetInfo(const ManifestOp *op,
     uint8_t *kp = crate_out_alloc(out, need);
     if (!kp) { tagfs_metadata_free(&md); return ERR_INVALID_ADDRESS; }
 
+    /* trashed and hidden are tags, not bits the kernel ever set in the
+     * record — so the flags a program read said "not trashed" of every file,
+     * and `erase <name>` refused every file as not trashed yet. The record
+     * carries the bits; the tags decide them. */
+    uint32_t flags = md.flags;
+    {
+        const WellKnownTags *wk = tagfs_get_well_known_tags();
+        uint16_t trashed_id = (wk && wk->trashed)
+                              ? (uint16_t)__builtin_ctzll(wk->trashed) : TAGFS_INVALID_TAG_ID;
+        uint16_t hidden_id  = (wk && wk->hidden)
+                              ? (uint16_t)__builtin_ctzll(wk->hidden)  : TAGFS_INVALID_TAG_ID;
+        for (uint16_t i = 0; i < md.tag_count; i++) {
+            if (md.tag_ids[i] == trashed_id) flags |= TAGFS_FILE_TRASHED;
+            if (md.tag_ids[i] == hidden_id)  flags |= TAGFS_FILE_HIDDEN;
+        }
+    }
+
     uint64_t pos = 0;
     memcpy(kp + pos, &md.file_id, 4); pos += 4;
-    memcpy(kp + pos, &md.flags,   4); pos += 4;
+    memcpy(kp + pos, &flags,      4); pos += 4;
     memcpy(kp + pos, &md.size,    8); pos += 8;
     memcpy(kp + pos, &md.tag_count, 2); pos += 2;
     memcpy(kp + pos, &filename_len, 2); pos += 2;
@@ -1001,7 +1018,12 @@ static error_t storage_tags_with_use(uint8_t scope,
 /* STORAGE_TAG_QUERY  params (optional): [u8 scope] — inside the Use Context
  *                    (absent, STORAGE_SCOPE_USE) or STORAGE_SCOPE_EVERYWHERE
  *                    in_crate (optional): comma-separated tag string
- *                    out_crate: [u32 count][u32 file_ids[count]]
+ *                    out_crate: [u32 delivered][u32 total][u32 file_ids[delivered]]
+ *                    `total` is how many files match; `delivered` is how many
+ *                    of them the crate had room for. A caller whose crate was
+ *                    too small is told the true count and can ask again with
+ *                    room for it. It used to be told the smaller number as if
+ *                    that were the whole answer, and nothing said otherwise.
  *                    Inside the context the user's tags are ANDed with the
  *                    caller's: `use code cpp` then "project" asks for files
  *                    that are code AND cpp AND project. */
@@ -1012,7 +1034,7 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < 4) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
     uint8_t scope;
     error_t src_rc = storage_scope_of(op, 0, &scope);
@@ -1047,30 +1069,44 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (mrc != OK) return mrc;
     const char **asked = all_tags ? all_tags : own_tags;
 
-    uint8_t *kp = crate_out_alloc(out, out->capacity);
-    if (!kp) {
-        kfree(all_tags);
-        kfree(use_block);
-        return ERR_INVALID_ADDRESS;
+    /* Room for every file the volume can hold, so the count is the true one
+     * and not the size of the caller's crate. The volume's ceiling — the
+     * number no file id reaches — is the only honest size for such a buffer,
+     * the same one proc_exec asks for. */
+    uint32_t  room    = tagfs_file_ceiling();
+    uint32_t *all_ids = NULL;
+    if (room > 0) {
+        all_ids = kmalloc(room * sizeof(uint32_t));
+        if (!all_ids) {
+            kfree(all_tags);
+            kfree(use_block);
+            return ERR_NO_MEMORY;
+        }
     }
-
-    uint32_t max_results = (uint32_t)((out->capacity - 4) / sizeof(uint32_t));
-    uint32_t *file_ids = (uint32_t *)(kp + 4);
-
-    int count;
-    if (total > 0) {
-        count = tagfs_query_files(asked, total, file_ids, max_results);
-        if (count < 0) count = 0;
-    } else {
-        count = tagfs_list_all_files(file_ids, max_results);
+    int count = 0;
+    if (all_ids) {
+        if (total > 0) count = tagfs_query_files(asked, total, all_ids, room);
+        else           count = tagfs_list_all_files(all_ids, room);
         if (count < 0) count = 0;
     }
     kfree(all_tags);
     kfree(use_block);
 
-    uint32_t cnt32 = (uint32_t)count;
-    memcpy(kp, &cnt32, sizeof(uint32_t));
-    uint64_t out_bytes = 4 + (uint64_t)cnt32 * sizeof(uint32_t);
+    uint32_t max_results = (uint32_t)((out->capacity - 8) / sizeof(uint32_t));
+    uint32_t hdr[2];
+    hdr[0] = (uint32_t)count < max_results ? (uint32_t)count : max_results;  /* delivered */
+    hdr[1] = (uint32_t)count;                                                 /* total     */
+    uint64_t out_bytes = 8 + (uint64_t)hdr[0] * sizeof(uint32_t);
+
+    uint8_t *kp = crate_out_alloc(out, out_bytes);
+    if (!kp) {
+        kfree(all_ids);
+        return ERR_INVALID_ADDRESS;
+    }
+    memcpy(kp, hdr, sizeof(hdr));
+    if (hdr[0] > 0) memcpy(kp + 8, all_ids, hdr[0] * sizeof(uint32_t));
+    kfree(all_ids);
+
     int crc = crate_out_commit(out, ctx, kp, out_bytes);
     crate_buf_free(kp);
     if (crc != OK) return crc;   /* fail closed: leave out->size unset */
