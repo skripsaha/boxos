@@ -198,6 +198,29 @@ static void render_run(const ConsoleRun *f)
     }
 }
 
+/* ‼ A RENDER THAT WAS REFUSED IS NEWS, AND IT USED TO BE SWALLOWED.
+ *
+ * vga_commit fires one Manifest carrying a whole burst of output and returns
+ * the kernel's answer. Nothing here read it. So a batch the kernel would not
+ * finish — an op it refused, a snapshot it had no memory for — went by in
+ * silence, and the screen simply had less on it than the machine had said.
+ * The ops behind the refusal used to be dropped along with it; they are marked
+ * OPTIONAL now (boxlib vga.c) so a refused cell costs its own cell. What is
+ * left is the fact of the refusal, and a console that quietly draws less than
+ * it was told to is exactly the kind of thing nobody finds by looking.
+ *
+ * Said once, with the reason and with how many frames were in flight when it
+ * happened: a screen that is behind does not need a line per cell, and the
+ * first one carries everything the next reader needs. */
+static void render_took(int rc)
+{
+    static bool said = false;
+    if (rc == 0 || said) return;
+    said = true;
+    kdbg_print("[display] the console refused a render (%d) — what it carried "
+               "did not reach the glass", rc);
+}
+
 /* Refill a lane's pending slot from its ring. Marks the lane closed when
  * the drained writer's STREAM_CLOSED surfaces. Returns whether a pending
  * frame is available for the merge. */
@@ -247,12 +270,12 @@ static bool lanes_render(uint32_t budget)
         best->has_pending = false;
         did = true;
         if ((++rendered & 31u) == 0) {
-            vga_commit();
+            render_took(vga_commit());
             kb_step();
             vga_begin();
         }
     }
-    vga_commit();
+    render_took(vga_commit());
     return did;
 }
 
