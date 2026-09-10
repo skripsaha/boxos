@@ -79,10 +79,6 @@ static ConsoleLane *g_lanes;         /* append at tail — grant order */
 static FreeNumber  *g_free_numbers;  /* reuse pool for lane numbers */
 static uint32_t     g_next_number;   /* fresh numbers when the pool is dry */
 
-/* Screen geometry, asked once: STEP frames move the cursor in cells. */
-static uint32_t g_cols;
-static uint32_t g_rows;
-
 /* The daemon's current on-screen pair — frames set it only when it differs. */
 static uint32_t g_cur_fg;
 static uint32_t g_cur_bg;
@@ -158,17 +154,16 @@ static void render_run(const ConsoleRun *f)
         return;
     }
     if (f->kind == CONSOLE_RUN_STEP) {
-        /* Move the cursor by a signed count of cells, across line ends:
-         * the position is linear, row * cols + col. */
+        /* One op, in the same batch as the text around it — the kernel is the
+         * only party that knows where the cursor is, so it does the arithmetic
+         * (hardware_ops.c: HwVgaStepCursor). The daemon used to read the
+         * position, work it out here and write it back: three round trips per
+         * keystroke, a flush of the batch in the middle of a render, an answer
+         * that could be stale by the time it was used, and a screen width that
+         * had to be learned in a byte and was wrong past 255 columns. */
         int32_t delta;
         memcpy(&delta, f->text, sizeof(delta));
-        vga_pos_t pos;
-        if (delta == 0 || g_cols == 0 || vga_getcursor(&pos) != 0) return;
-        int64_t linear = (int64_t)pos.row * g_cols + pos.col + delta;
-        int64_t last   = (int64_t)g_rows * g_cols - 1;
-        if (linear < 0)    linear = 0;
-        if (linear > last) linear = last;
-        vga_setcursor((uint8_t)(linear / g_cols), (uint8_t)(linear % g_cols));
+        vga_step_cursor(delta);
         return;
     }
     if (f->kind != CONSOLE_RUN_TEXT) return;
@@ -570,9 +565,6 @@ static bool ipc_step(void)
 int main(void)
 {
     io_set_mode(IO_MODE_VGA);
-
-    vga_dimensions_t dims;
-    if (vga_getdimensions(&dims) == 0) { g_cols = dims.cols; g_rows = dims.rows; }
 
     g_kb    = touch_pair_choose(touch_intern(TOUCH_TAG_KEYBOARD));
     g_pdied = touch_pair_choose(touch_intern(TOUCH_TAG_PROCESS_DIED));

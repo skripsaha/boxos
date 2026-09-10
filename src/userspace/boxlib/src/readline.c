@@ -10,8 +10,11 @@
  * the ear, so a key typed early waits at the daemon for whoever reads next.
  *
  * Echo travels the road every print takes — the strand's lane — so it keeps
- * its place among everything else the strand said. Moving the cursor inside
- * a line is a step (console_step): Canvas '\b' erases, a step does not.
+ * its place among everything else the strand said. Everything the editor does
+ * to the caret is a STEP (console_step): a signed count of cells, resolved by
+ * the console itself. Nothing here ever sends a '\b' — Canvas's backspace
+ * erases the cell it steps onto but does nothing at column zero, which is
+ * exactly where a line that wrapped past the right edge needs it to work.
  *
  * History is the cabin's, shared by its strands: recalled with Up and Down,
  * kept in order, and it grows with what was typed rather than stopping at a
@@ -20,19 +23,10 @@
 
 #include "box/print.h"
 #include "box/touch.h"
-#include "box/keyboard.h"   /* kb_event_t, KB_MOD_* */
+#include "box/keyboard.h"   /* kb_event_t, KB_MOD_*, KEY_* */
 #include "box/memory.h"
 #include "box/string.h"
 #include "box/sync.h"
-
-/* Set-1 scancodes of the extended (0xE0-prefixed) keys the editor answers. */
-#define KEY_HOME   0x47
-#define KEY_UP     0x48
-#define KEY_LEFT   0x4B
-#define KEY_RIGHT  0x4D
-#define KEY_END    0x4F
-#define KEY_DOWN   0x50
-#define KEY_DELETE 0x53
 
 /* ===========================================================================
  * History — the cabin's, in order, unbounded
@@ -113,12 +107,35 @@ typedef struct EditLine {
     uint32_t draft_len;
 } EditLine;
 
+/* Lay down `n` blanks in as few calls as the road takes.
+ *
+ * One call per blank is free on a lane — the run accumulates — and expensive
+ * without a daemon, where every print_bytes is its own Manifest, its own
+ * Canvas commit and its own blit. Recalling a two-character line over a
+ * three-hundred-character one is 298 of them, which is the crawl this editor
+ * was rewritten to remove. */
+static void EchoBlanks(uint32_t n)
+{
+    /* Not a string: it is never read as one and a NUL would only cost a cell. */
+    static const char spaces[32] = {
+        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+        ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ',
+    };
+    while (n) {
+        uint32_t chunk = n < sizeof(spaces) ? n : (uint32_t)sizeof(spaces);
+        print_bytes(spaces, chunk);
+        n -= chunk;
+    }
+}
+
 static void EchoTail(const EditLine *l, uint32_t from, uint32_t trailing_blanks)
 {
     /* Redraw buf[from..len), then `trailing_blanks` blanks that erase what a
      * shorter line leaves behind, then step back to the cursor. */
     if (l->len > from) print_bytes(l->buf + from, l->len - from);
-    for (uint32_t i = 0; i < trailing_blanks; i++) print_bytes(" ", 1);
+    EchoBlanks(trailing_blanks);
     int32_t back = (int32_t)(l->len - l->cursor) + (int32_t)trailing_blanks;
     console_step(-back);
     io_flush();   /* an echo is seen as it is typed, not when a line is done */
@@ -140,7 +157,12 @@ static void Backspace(EditLine *l)
     memmove(l->buf + l->cursor - 1, l->buf + l->cursor, l->len - l->cursor);
     l->len--;
     l->cursor--;
-    print_bytes("\b", 1);                        /* Canvas: erase and move left */
+    /* A STEP back, not a '\b'. Canvas '\b' erases the cell it steps onto and
+     * does nothing at all at column zero, so on a line that had wrapped past
+     * the right edge one character refused to disappear and every step after
+     * it was one cell out. A step is linear across line ends; the erasing is
+     * done by the blank EchoTail lays down after the tail. */
+    console_step(-1);
     EchoTail(l, l->cursor, 1);
 }
 
@@ -159,16 +181,27 @@ static void MoveTo(EditLine *l, uint32_t where)
     l->cursor = where;
 }
 
-/* Replace the whole line on screen and in the buffer. */
+/* Replace the whole line on screen and in the buffer.
+ *
+ * One step back to the first cell of the line, the new line laid over the old
+ * one, and blanks for whatever the old one had beyond it. The old way walked
+ * backwards one '\b' per character — a frame, a Manifest and a blit each, so
+ * recalling a long line visibly crawled — and it could not erase a line that
+ * had wrapped, because Canvas '\b' does nothing at column zero. */
 static void Replace(EditLine *l, const char *text, uint32_t n)
 {
-    MoveTo(l, l->len);
-    for (uint32_t i = 0; i < l->len; i++) print_bytes("\b", 1);
+    uint32_t was = l->len;
     if (n > l->cap) n = l->cap;
+
+    console_step(-(int32_t)l->cursor);
     memcpy(l->buf, text, n);
     l->len    = n;
     l->cursor = n;
     if (n > 0) print_bytes(l->buf, n);
+
+    uint32_t blanks = was > n ? was - n : 0;
+    EchoBlanks(blanks);
+    if (blanks) console_step(-(int32_t)blanks);
     io_flush();
 }
 
@@ -204,12 +237,28 @@ static void Recall(EditLine *l, bool older)
  * =========================================================================== */
 
 /* Wait for the next key on `ear`. False when the ear is gone (the strand has
- * no way to hear anything any more). */
+ * no way to hear anything any more).
+ *
+ * ‼ WHAT COMES BACK IS CHECKED AGAINST THE EAR IT WAS ASKED FOR.
+ *
+ * touch_await takes a tag and parks the strand for it, but what it hands back
+ * is whatever reached this strand's ring first — the tag governs the park, not
+ * the answer (boxlib touch.c). A cabin that also wears "process:died" gets one
+ * of those in the middle of a reading, and its twelve-byte payload is longer
+ * than a key event, so it used to be copied into one and acted on: a character
+ * nobody typed, or, with the right bit set, a phantom arrow that moves the
+ * caret. Comparing the tag costs nothing and ends that whole class.
+ *
+ * The event of another tag is still consumed here, exactly as it was before —
+ * that part is touch_await's to fix, and it needs a decision about how a bare
+ * claim is supposed to hear its own key:value events. It is written down for
+ * that conversation rather than guessed at here. */
 static bool NextKey(TouchTag ear, kb_event_t *out)
 {
     for (;;) {
         Touch t;
         if (touch_await(ear, &t, 0) != 0) return false;
+        if (t.tag_id != ear) continue;
         if (t.payload_len < sizeof(kb_event_t)) continue;
         memcpy(out, t.payload, sizeof(kb_event_t));
         return true;

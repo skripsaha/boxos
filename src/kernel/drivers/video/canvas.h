@@ -40,13 +40,12 @@
 /* One character cell — full #RRGGBB pair per cell (the Color/Canvas
  * principle: colour is cell metadata, never an in-band byte). The GOP
  * backend renders fg/bg exactly; the VGA text backend quantises the pair
- * to its 16-colour attribute at draw time. */
-typedef struct TextCell {
-    uint32_t fg;        /* #RRGGBB */
-    uint32_t bg;        /* #RRGGBB */
-    char     ch;
-    uint8_t  pad[3];
-} TextCell;
+ * to its 16-colour attribute at draw time.
+ *
+ * The layout is shared with userspace (CanvasPaint / HW_VGA_PAINT hand a
+ * rectangle of these straight across), so it lives in the one header both
+ * sides include. */
+#include "text_cell.h"
 
 typedef enum {
     /* Backend implements Scroll() via a HW path (CRTC offset / pan-display).
@@ -114,13 +113,22 @@ void CanvasNotifyReady(void);
 /* ───── Batch + rendering ───── */
 void CanvasBatchBegin(void);
 void CanvasBatchEnd(void);
-void CanvasFlushPending(void);
 
 /* Panic / fatal-path recovery — forcibly resets the batch counter so a
  * subsequent kprintf commits immediately.  Discards any pending plan. */
 void CanvasForceReset(void);
 
 void CanvasPrintChar(char c, uint32_t fg, uint32_t bg);
+
+/* Lay a rectangle of finished cells into the matrix at (row, col), row-major,
+ * `width` cells per row of the source. Nothing is interpreted: a '\n' in a
+ * cell is a glyph, not a line break, and the cursor does not move — this is a
+ * picture being put down, not a line being said. Returns false when the
+ * rectangle does not fit the screen, so the caller can say so rather than
+ * paint a smaller one and call it done. */
+bool CanvasPaint(uint32_t row, uint32_t col, uint32_t height, uint32_t width,
+                 const TextCell *cells);
+
 void CanvasScrollUp(void);
 void CanvasClearScreen(uint32_t fg, uint32_t bg);
 void CanvasClearLine(int line, uint32_t fg, uint32_t bg);

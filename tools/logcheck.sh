@@ -2304,7 +2304,12 @@ EOF
     grep -q "its GPT is not where the disk says it is" "$BAD_LOG"
     chk $? "a lost primary header is called damage, not an empty disk"
 
-    grep -q "reading the copy at the far end, sector 122325" "$BAD_LOG"
+    # The number is ASKED OF THE DISK, not typed. It used to be 122325 here —
+    # the last sector of the image as it was the day this was written — and the
+    # day the build began sizing the volume from its content, this check failed
+    # for a machine that had done exactly the right thing.
+    LAST=$(( $(stat -f%z "$SCRATCH/gpt-bad.img" 2>/dev/null || stat -c%s "$SCRATCH/gpt-bad.img") / 512 - 1 ))
+    grep -q "reading the copy at the far end, sector $LAST" "$BAD_LOG"
     chk $? "and the far copy is looked for in the last sector of the medium"
 
     grep -q "the copy at the far end is good" "$BAD_LOG"
@@ -4170,6 +4175,784 @@ run_handsetmut() {
 # deadline, main learns of every park from the kernel's own strand:parked
 # Touch, then changes the word and wakes all parked on it — once. Every
 # sleeper must come back.
+# ===========================================================================
+# draft — what was typed is what the volume holds, and a shorter save leaves
+#         no tail of the longer one behind it
+# ===========================================================================
+#
+# TagFS writes only ever GREW a file: rewriting one shorter left the old tail
+# readable behind the new content, and every shorter rewrite in the system was
+# silently wrong until file_truncate existed. An editor is where that shows
+# first and worst — a line deleted and saved would come back on the next read.
+#
+# draft is the instrument, and the whole path is under test: a key becomes a
+# Touch, the Touch becomes a byte in the book, ^S writes the book, truncates
+# to its length and anchors it, and `show` reads the volume back. Ten bytes
+# are typed and saved; five are taken back and saved again; the volume must
+# hold five.
+draft_keys() {
+    # draft_keys KEY...  — straight to the monitor, no echo to wait for: a
+    # painted frame never enters the log ring, so qemu-input's `type` (which
+    # verifies the guest echo) has nothing to see and would give up.
+    local k
+    for k in "$@"; do
+        ./tools/qemu-input.sh raw "sendkey $k 30" >/dev/null 2>&1
+        sleep 0.06
+    done
+}
+
+draft_session() {
+    # draft_session NAME "RUN-BG ARGS" — boots, drives one editing session,
+    # then reads the file back with `show`. Leaves the transcript in
+    # $SCRATCH/serial.NAME.log and the machine stopped.
+    local name=$1 args=$2
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+
+    ./tools/qemu-input.sh type "draft oracle.txt" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+
+    draft_keys a b c d e f g h i j
+    draft_keys ctrl-s
+    sleep 2
+    draft_keys backspace backspace backspace backspace backspace
+    draft_keys ctrl-s
+    sleep 2
+    draft_keys ctrl-q
+    sleep 3
+
+    ./tools/qemu-input.sh type "show oracle.txt" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_draft() {
+    echo "== draft: ten bytes typed and saved, five taken back and saved again =="
+    build
+    if ! draft_session draft "STRICT=on CORES=4 MEM=4G"; then
+        bad "draft: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.draft.log"
+    grep -q "\[DRAFT\] oracle.txt - 1 lines, 5 bytes, saved 2 times" "$L" \
+        && ok "draft: the editor says five bytes over two saves" \
+        || bad "draft: $(grep -m1 '\[DRAFT\]' "$L" || echo 'the editor said nothing at all')"
+    if grep -q "^abcde$" "$L"; then
+        ok "draft: the volume holds exactly what was left on the screen"
+    elif grep -q "abcdefghij" "$L"; then
+        bad "draft: the old tail is still on the volume - the shorter save did not cut it"
+    else
+        bad "draft: the volume did not answer with the draft at all"
+    fi
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "draft: the kernel spoke of a stall or fault" \
+        || ok "draft: no verdict, no panic"
+}
+
+draft_notail_on() {
+    cp src/userspace/utils/draft_file.c "$SCRATCH/draft_file.c.bak"
+    python3 - <<'EOF2'
+p = "src/userspace/utils/draft_file.c"
+s = open(p).read()
+anchor = "    int rc = file_truncate(g_fid, len);"
+assert s.count(anchor) == 1, "draft mutation anchor missing"
+s = s.replace(anchor, "    int rc = 0;   /* logcheck mutation: the tail is left where it was */\n    (void)len;", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/userspace/utils/draft_file.c || { echo "draft mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/utils/draft_file.c
+}
+
+draft_notail_off() {
+    [ -f "$SCRATCH/draft_file.c.bak" ] && cp "$SCRATCH/draft_file.c.bak" src/userspace/utils/draft_file.c
+    sleep 1; touch src/userspace/utils/draft_file.c
+}
+
+run_draftmut() {
+    echo "== draftmut: the truncate taken out, and the old tail must come back =="
+    draft_notail_on; build
+    draft_session draftmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
+    draft_notail_off
+    if [ $booted -ne 0 ]; then bad "draftmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.draftmut.log"
+    if grep -q "abcdefghij" "$L"; then
+        ok "draftmut: without the cut the old tail is read back - and the oracle sees it"
+    else
+        bad "draftmut: the truncate was taken out and the file was STILL five bytes - the oracle cannot see that defect ($(grep -m1 'abcde' "$L" || echo 'no content at all'))"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# paint — a whole frame of colour reaches the glass as ONE op, and says
+#         nothing into the log ring on the way
+# ===========================================================================
+#
+# Before HW_VGA_PAINT the only way to colour a cell was HW_VGA_PUTCHAR, which
+# is one Manifest op per cell AND one LogRingPut per cell — a global spinlock
+# and a wire kick for every one of sixteen thousand cells, twenty-five times a
+# second, burying everything the machine actually says under a screenful of
+# spaces. PAINT lays a rectangle down in one op, one Canvas commit, one blit,
+# and deliberately does not mirror: a picture is not speech.
+#
+# playtime is the instrument: it paints every cell of the screen every frame
+# and stops on a key. The screendump must show a painted screen (a shell
+# prompt is black almost everywhere), and the run must have said nothing but
+# its own one line.
+paint_shot_verdict() {
+    # paint_shot_verdict PPM — prints "painted N" or "bare N", N = the
+    # percentage of sampled pixels that are not the console's black.
+    python3 - "$1" <<'EOF2'
+import sys
+d = open(sys.argv[1], 'rb').read()
+parts = d.split(b'\n', 3)
+w, h = map(int, parts[1].split())
+px = parts[3]
+lit = total = 0
+for y in range(0, h, 4):
+    for x in range(0, w, 4):
+        i = (y * w + x) * 3
+        total += 1
+        if px[i:i+3] != b'\x00\x00\x00':
+            lit += 1
+pct = (100 * lit) // max(total, 1)
+print(("painted " if pct >= 80 else "bare ") + str(pct))
+EOF2
+}
+
+paint_boot() {
+    local name=$1 args=$2
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "playtime" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 6
+    ./tools/qemu-input.sh shot "$SCRATCH/$name.ppm" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key spc >/dev/null 2>&1
+    sleep 3
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_paint() {
+    echo "== paint: one op lays a whole screen of colour, and the log stays quiet =="
+    build
+    if ! paint_boot paint "UEFI=on STRICT=on CORES=4 MEM=4G"; then
+        bad "paint: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.paint.log"
+    V=$(paint_shot_verdict "$SCRATCH/paint.ppm")
+    case "$V" in
+        painted*) ok "paint: the screendump is a painted screen ($V per cent lit)" ;;
+        *)        bad "paint: the screen was not painted ($V per cent lit)" ;;
+    esac
+    FR=$(grep -oE "\[PLAYTIME\] [0-9]+ frames" "$L" | grep -oE "[0-9]+" | head -1)
+    [ -n "$FR" ] && [ "$FR" -gt 10 ] \
+        && ok "paint: $FR frames were laid down and a key stopped them" \
+        || bad "paint: the pour said '$(grep -m1 '\[PLAYTIME\]' "$L" || echo nothing)'"
+    # A painted cell must not enter the log ring. The whole session is allowed
+    # its own lines; a paint that mirrored would put thousands of spaces here.
+    SP=$(tr -d '\n' < "$L" | tr -dc ' ' | wc -c | tr -d ' ')
+    [ "$SP" -lt 4000 ] \
+        && ok "paint: the frames said nothing into the log ring ($SP spaces in the whole session)" \
+        || bad "paint: the log ring carries $SP spaces - the frames are being mirrored into it"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "paint: the kernel spoke of a stall or fault" \
+        || ok "paint: no verdict, no panic"
+}
+
+paint_blind_on() {
+    cp src/kernel/core/decks/hardware/hardware_ops.c "$SCRATCH/hardware_ops.c.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/decks/hardware/hardware_ops.c"
+s = open(p).read()
+anchor = "    console_lock_acquire();\n    bool fit = VideoPaintCells(row, col, height, width, cells);\n    console_lock_release();"
+assert s.count(anchor) == 1, "paint mutation anchor missing"
+s = s.replace(anchor, "    bool fit = true;   /* logcheck mutation: the op takes the frame and drops it */", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/core/decks/hardware/hardware_ops.c || { echo "paint mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+}
+
+paint_blind_off() {
+    [ -f "$SCRATCH/hardware_ops.c.bak" ] && cp "$SCRATCH/hardware_ops.c.bak" src/kernel/core/decks/hardware/hardware_ops.c
+    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+}
+
+run_paintmut() {
+    echo "== paintmut: the op answers OK and paints nothing, and the screen must stay bare =="
+    paint_blind_on; build
+    paint_boot paintmut "UEFI=on STRICT=on CORES=4 MEM=4G"; local booted=$?
+    paint_blind_off
+    if [ $booted -ne 0 ]; then bad "paintmut: never reached a shell"; build; return; fi
+    V=$(paint_shot_verdict "$SCRATCH/paintmut.ppm")
+    case "$V" in
+        bare*) ok "paintmut: nothing was painted and the oracle sees it ($V per cent lit)" ;;
+        *)     bad "paintmut: the op dropped every frame and the screen was STILL painted ($V) - the oracle cannot see that defect" ;;
+    esac
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# finish — the crew of a tag is named, the machine's own cabins are held back,
+#          and the word `anyway` really ends one
+# ===========================================================================
+#
+# `broadcast` has always walked the carriers of a tag to speak to them; until
+# system.proc.crew there was no way to ASK who they are, and killing meant
+# knowing a pid — a seat, which is re-let. finish ends the crew of a tag by
+# (pid, generation) and refuses, without the word `anyway`, to end a cabin
+# wearing the bare `system` tag: the shell, the display daemon and itself.
+#
+# The display daemon is the instrument, because ending it is survivable — the
+# lane dies, boxlib says so and falls back to writing the glass directly, and
+# the shell keeps answering. So all three answers are provable on one boot.
+finish_boot() {
+    local name=$1 args=$2
+    make run-stop >/dev/null 2>&1
+    # shellcheck disable=SC2086
+    make run-bg $args >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 40 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1
+        return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    local cmd
+    for cmd in "finish nobody" "finish display" "finish display anyway" "me"; do
+        ./tools/qemu-input.sh type "$cmd" >/dev/null 2>&1
+        sleep 1
+        ./tools/qemu-input.sh key ret >/dev/null 2>&1
+        sleep 4
+    done
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$name.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_finish() {
+    echo "== finish: nobody wears it, the daemon is held back, and anyway ends it =="
+    build
+    if ! finish_boot finish "STRICT=on CORES=4 MEM=4G"; then
+        bad "finish: never reached a shell"; return
+    fi
+    L="$SCRATCH/serial.finish.log"
+    grep -q "nobody: nothing wears that tag" "$L" \
+        && ok "finish: a tag nobody wears is said plainly" \
+        || bad "finish: an unworn tag was not reported"
+    grep -q "wears system - this machine runs on it" "$L" \
+        && ok "finish: the daemon is named and held back" \
+        || bad "finish: the guard over a system cabin did not speak"
+    grep -q "if that is what you want: finish display anyway" "$L" \
+        && ok "finish: the way past the guard is spelled out" \
+        || bad "finish: the guard did not say how to override it"
+    grep -q "^nothing ended$" "$L" \
+        && ok "finish: nothing was ended while the guard stood" \
+        || bad "finish: something was ended although the guard spoke"
+    grep -q "Processes: 2 live" "$L" \
+        && ok "finish: after the word anyway the daemon is gone and the shell still answers" \
+        || bad "finish: the daemon survived the word anyway, or the shell stopped answering ($(grep -m1 'Processes:' "$L" || echo 'no answer at all'))"
+    grep -qE "VERDICT|PANIC|\[EXCEPTION\]" "$L" \
+        && bad "finish: the kernel spoke of a stall or fault" \
+        || ok "finish: no verdict, no panic"
+}
+
+finish_unguarded_on() {
+    cp src/userspace/utils/finish.c "$SCRATCH/finish.c.bak"
+    python3 - <<'EOF2'
+p = "src/userspace/utils/finish.c"
+s = open(p).read()
+anchor = "        if (!anyway && wears(crew->mates[i].tags, SYSTEM_TAG)) {"
+assert s.count(anchor) == 1, "finish mutation anchor missing"
+s = s.replace(anchor, "        if (false && wears(crew->mates[i].tags, SYSTEM_TAG)) {   /* logcheck mutation: the guard is gone */", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/userspace/utils/finish.c || { echo "finish mutation install FAILED"; exit 1; }
+    sleep 1; touch src/userspace/utils/finish.c
+}
+
+finish_unguarded_off() {
+    [ -f "$SCRATCH/finish.c.bak" ] && cp "$SCRATCH/finish.c.bak" src/userspace/utils/finish.c
+    sleep 1; touch src/userspace/utils/finish.c
+}
+
+run_finishmut() {
+    echo "== finishmut: the guard taken out, and the daemon must fall to a bare finish =="
+    finish_unguarded_on; build
+    finish_boot finishmut "STRICT=on CORES=4 MEM=4G"; local booted=$?
+    finish_unguarded_off
+    if [ $booted -ne 0 ]; then bad "finishmut: never reached a shell"; build; return; fi
+    L="$SCRATCH/serial.finishmut.log"
+    if grep -q "wears system - this machine runs on it" "$L"; then
+        bad "finishmut: the guard was taken out and STILL spoke - the oracle cannot see that defect"
+    else
+        ok "finishmut: without the guard nothing is held back - and the oracle sees the silence"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# caret — there is one cursor on the screen, and it is where the program put it
+# ===========================================================================
+#
+# The caret is the part of a console a person actually watches, and until this
+# was measured nobody could say where it was: the serial mirror carries the
+# TEXT a program said and says nothing at all about the cursor. So this reads
+# the glass itself. A screendump is 8x16 cells of pixels; the GOP backend draws
+# the caret as two solid rows at the bottom of a cell, and the 8x16 font is
+# right here in the tree, so a cell can be told back into the character it
+# carries AND whether a caret is standing on it.
+#
+# Two things are checked, and they are different defects:
+#   ONE caret — a caret is pixels inside the surface, so a scroll carries it up
+#               with the text; erasing it at the row it was PUT in leaves a
+#               ghost on the row it moved to, one per scroll, climbing the
+#               screen. MEASURED 2026-09-10: three presses of Enter left four.
+#   WHERE it is — a cursor move is one op, a single-op Manifest is not wrapped
+#               in a Canvas batch, and CanvasSetCursor used to change the
+#               cursor without committing. Left, Right, Home, End and Backspace
+#               moved the insertion point and left the caret behind.
+
+caret_read() {
+    # caret_read PPM — prints "carets N at r,c r,c ..." and the last screen row
+    # that carries anything, so a verdict can name what it saw.
+    python3 - "$1" <<'EOF2'
+import re, sys, collections
+ROOT = "."
+src = open(ROOT + "/src/kernel/drivers/video/font/vga_font.h").read()
+body = src[src.index("vga_font_8x16[256][16] = {"):]
+rows = re.findall(r"\{([^{}]*)\}", body)
+FONT = []
+for r in rows[:256]:
+    v = [int(x, 0) for x in r.split(",") if x.strip()]
+    if len(v) == 16: FONT.append(tuple(v))
+BY = {}
+TOP = {}
+for code in range(255, -1, -1):
+    # A cell of nothing is a SPACE, not a NUL: the glyphs are identical and the
+    # lower code would win, and then a blank row could not be told from a row
+    # of text by trimming it.
+    if code == 0: continue
+    BY[FONT[code]] = code
+    TOP.setdefault(FONT[code][:14], code)
+
+d = open(sys.argv[1], "rb").read()
+parts = d.split(b"\n", 3)
+w, h = map(int, parts[1].split())
+px = parts[3]
+def pix(x, y):
+    i = (y * w + x) * 3
+    return (px[i], px[i+1], px[i+2])
+
+carets = []
+lines = []
+for r in range(h // 16):
+    line = []
+    for c in range(w // 8):
+        box = [[pix(c*8 + x, r*16 + y) for x in range(8)] for y in range(16)]
+        flat = [p for row in box for p in row]
+        cnt = collections.Counter(flat)
+        bg = cnt.most_common(1)[0][0]
+        bits = tuple(sum(1 << (7-x) for x in range(8) if box[y][x] != bg) for y in range(16))
+        ch = BY.get(bits)
+        caret = False
+        if ch is None:
+            if bits[14] == 0xFF and bits[15] == 0xFF:
+                ch = TOP.get(bits[:14])
+                if ch is not None: caret = True
+        elif bits[14] == 0xFF and bits[15] == 0xFF and not any(bits[:14]):
+            caret = True; ch = 32
+        if ch is None: ch = ord('?')
+        if caret: carets.append((r, c))
+        line.append(chr(ch) if 32 <= ch < 127 else '.')
+    lines.append("".join(line).rstrip())
+
+last = ""
+for i, l in enumerate(lines):
+    if l: last = "%d|%s" % (i, l)
+print("carets %d at %s" % (len(carets), " ".join("%d,%d" % x for x in carets)))
+print("last " + last)
+EOF2
+}
+
+caret_boot() {
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 60 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 3
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null
+}
+
+caret_run() {
+    # caret_run NAME — one scripted editing session; leaves two readings.
+    local n=$1
+    ./tools/qemu-input.sh type "abcdef" >/dev/null 2>&1
+    sleep 1
+    ./tools/qemu-input.sh key left >/dev/null 2>&1
+    ./tools/qemu-input.sh key left >/dev/null 2>&1
+    sleep 2
+    ./tools/qemu-input.sh shot "$SCRATCH/$n.edit.ppm" >/dev/null 2>&1
+    caret_read "$SCRATCH/$n.edit.ppm" > "$SCRATCH/$n.edit.txt" 2>&1
+
+    # then a screenful of output and three scrolls, which is what left ghosts
+    ./tools/qemu-input.sh key home >/dev/null 2>&1
+    ./tools/qemu-input.sh key delete >/dev/null 2>&1 || true
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 2
+    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 4
+    local i
+    for i in 1 2 3; do ./tools/qemu-input.sh key ret >/dev/null 2>&1; sleep 1; done
+    sleep 2
+    ./tools/qemu-input.sh shot "$SCRATCH/$n.scroll.ppm" >/dev/null 2>&1
+    caret_read "$SCRATCH/$n.scroll.ppm" > "$SCRATCH/$n.scroll.txt" 2>&1
+}
+
+run_caret() {
+    echo "== caret: one cursor on the glass, standing where the editor put it =="
+    build
+    if ! caret_boot; then bad "caret: never reached a shell"; make run-stop >/dev/null 2>&1; return; fi
+    caret_run caret
+    make run-stop >/dev/null 2>&1
+
+    local E S EN SN
+    E=$(head -1 "$SCRATCH/caret.edit.txt")
+    S=$(head -1 "$SCRATCH/caret.scroll.txt")
+    EN=$(echo "$E" | awk '{print $2}')
+    SN=$(echo "$S" | awk '{print $2}')
+
+    [ "$EN" = 1 ]
+    chk $? "caret: one cursor while a line is being edited ($E)"
+
+    [ "$SN" = 1 ]
+    chk $? "caret: still one after a screenful of output and three scrolls ($S)"
+
+    # Where it stands: `abcdef` typed, then Left twice, so the caret must be on
+    # the cell holding 'e' — two back from the end of what was typed.
+    local LINE COL WANT
+    LINE=$(tail -1 "$SCRATCH/caret.edit.txt")
+    COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
+    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
+        ok "caret: it sits on the cell the editor is editing (column $COL of \"$(echo "$LINE" | sed 's/^last [0-9]*|//')\")"
+    else
+        bad "caret: the editor is two cells back from the end of \"abcdef\" and the caret is at column $COL, not $WANT"
+    fi
+}
+
+caret_blind_on() {
+    cp src/kernel/drivers/video/canvas.c "$SCRATCH/canvas.c.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/drivers/video/canvas.c"
+s = open(p).read()
+a = """    bool opened = implicit_open_locked(c);
+    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
+    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;
+    implicit_close_locked(c, opened);"""
+assert s.count(a) == 1, "caret mutation anchor missing"
+s = s.replace(a, """    /* logcheck mutation: the cursor moves and the glass is not told */
+    c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
+    c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;""", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/drivers/video/canvas.c || { echo "caret mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/drivers/video/canvas.c
+}
+
+caret_blind_off() {
+    [ -f "$SCRATCH/canvas.c.bak" ] && cp "$SCRATCH/canvas.c.bak" src/kernel/drivers/video/canvas.c
+    sleep 1; touch src/kernel/drivers/video/canvas.c
+}
+
+run_caretmut() {
+    echo "== caretmut: with the commit taken out, the caret must stop following the cursor =="
+    caret_blind_on; build
+    local booted=1
+    caret_boot && booted=0
+    if [ $booted -eq 0 ]; then caret_run caretmut; fi
+    make run-stop >/dev/null 2>&1
+    caret_blind_off
+    if [ $booted -ne 0 ]; then bad "caretmut: never reached a shell"; build; return; fi
+
+    local E COL LINE WANT
+    E=$(head -1 "$SCRATCH/caretmut.edit.txt")
+    LINE=$(tail -1 "$SCRATCH/caretmut.edit.txt")
+    COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
+    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
+        bad "caretmut: the commit was removed and the caret STILL followed the arrows — the oracle cannot see that defect"
+    else
+        ok "caretmut: the caret stayed at column $COL instead of $WANT, and the caret oracle would have caught it"
+    fi
+    build   # leave the tree built from clean sources
+}
+
+# ===========================================================================
+# grow — the volume takes the ground it is given
+# ===========================================================================
+#
+# An image is written to a medium with dd, and the medium is nearly always
+# bigger than the image. Until the Deed could be amended in place, the volume
+# simply did not use the rest: a 90 MiB image on a 64 GB stick left 63 GB of it
+# dark for ever, and nothing said so.
+#
+# The instrument is the image itself. The MBR entry that claims the volume's
+# ground is stretched and the file behind it grown — exactly what writing the
+# image to a bigger medium and enlarging the partition does — and then the
+# machine is booted on it. Nothing inside the volume is touched: whether it
+# takes the ground is the machine's business, which is the whole point.
+
+grow_stretch() {
+    # grow_stretch IMG SECTORS — give the BoxOS partition more ground.
+    python3 - "$1" "$2" <<'EOF2'
+import struct, sys, os
+img, more = sys.argv[1], int(sys.argv[2])
+f = open(img, "r+b")
+f.seek(446); table = f.read(64)
+for i in range(4):
+    e = table[i*16:(i+1)*16]
+    if e[4] == 0x7f:
+        start, count = struct.unpack_from("<II", e, 8)
+        ent = bytearray(e)
+        struct.pack_into("<I", ent, 12, count + more)
+        f.seek(446 + i*16); f.write(bytes(ent))
+        end = (start + count + more) * 512
+        f.seek(0, os.SEEK_END)
+        if f.tell() < end: f.truncate(end)
+        f.close()
+        print("%d %d" % (start, count + more))
+        sys.exit(0)
+f.close(); sys.exit(1)
+EOF2
+}
+
+grow_boot() {
+    # grow_boot NAME — boot the image as it stands and keep the log window.
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 60 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    sleep 2
+    cp build/serial.log "$SCRATCH/serial.$1.log"
+    grep -q "BoxOS Shell" build/serial.log 2>/dev/null
+}
+
+grow_rollback_head() {
+    # Put the PRE-GROWTH head deed back: the state a power cut between the two
+    # writes of a growth leaves behind — a new far copy and an old head.
+    python3 - "$1" "$2" "$3" <<'EOF2'
+import sys
+pristine, img, start = sys.argv[1], sys.argv[2], int(sys.argv[3])
+off = start * 512
+o = open(pristine, "rb"); o.seek(off); head = o.read(4096); o.close()
+f = open(img, "r+b"); f.seek(off); f.write(head); f.close()
+EOF2
+}
+
+run_grow() {
+    echo "== grow: a volume on a bigger medium takes the ground behind it =="
+    rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
+    build
+    make run-stop >/dev/null 2>&1
+    cp build/boxos.img "$SCRATCH/grow.pristine"
+
+    local START
+    START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
+    if [ -z "$START" ]; then bad "grow: the image has no BoxOS partition to stretch"; return; fi
+
+    if ! grow_boot grow; then bad "grow: never reached a shell"; make run-stop >/dev/null 2>&1; build; return; fi
+    local L="$SCRATCH/serial.grow.log"
+
+    grep -q "takes the rest" "$L"
+    chk $? "grow: the volume sees the ground behind it and takes it"
+
+    grep -qE "the volume now runs [0-9]+ sectors; its data run is [0-9]+ blocks, [0-9]+ more" "$L"
+    chk $? "grow: $(grep -oE 'its data run is [0-9]+ blocks, [0-9]+ more than it had' "$L" | tail -1)"
+
+    grep -q "far copy has moved to sector" "$L"
+    chk $? "grow: the far copy moved to the new end"
+
+    grep -q "is inside the data run now and has been erased" "$L"
+    chk $? "grow: the deed that used to sit at the old end was erased"
+
+    grep -q "its far copy agrees — the whole volume is present" "$L"
+    chk $? "grow: both copies agree about the volume it has become"
+
+    # The free count and the data run have to be a possible pair of numbers.
+    local DB FB
+    DB=$(grep -oE "^\[TagFS\] [0-9]+ data blocks" "$L" | tail -1 | grep -oE "[0-9]+" || true)
+    FB=$(grep -oE "[0-9]+ free," "$L" | tail -1 | grep -oE "[0-9]+" || true)
+    if [ -n "$DB" ] && [ -n "$FB" ] && [ "$FB" -le "$DB" ]; then
+        ok "grow: $FB blocks free out of $DB — a volume cannot have more free than it has"
+    else
+        bad "grow: the volume claims $FB free out of $DB data blocks"
+    fi
+
+    grep -qE "MOUNTED — [0-9]+ file" "$L"
+    chk $? "grow: $(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | tail -1)"
+
+    # And a file laid down before the growth still reads.
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "show hello.txt" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 3
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' | grep -q "Hello from BoxOS"
+    chk $? "grow: a file written before the growth still reads afterwards"
+
+    # Boot it again: the volume now fills its ground and says so.
+    if grow_boot grow2; then
+        grep -q "fills the ground it was given" "$SCRATCH/serial.grow2.log"
+        chk $? "grow: the next mount finds nothing left to take, and says so"
+    else
+        bad "grow: the grown volume would not boot a second time"
+    fi
+
+    make run-stop >/dev/null 2>&1
+    cp "$SCRATCH/grow.pristine" build/boxos.img   # leave an unstretched image behind
+}
+
+run_growcut() {
+    echo "== growcut: a growth cut between its two writes still mounts, and finishes =="
+    #
+    # The order is the crash safety: the far copy is written first, the head
+    # second, and the head is the commit point. This puts the machine in the
+    # exact state a power cut between the two leaves — a new far copy and the
+    # old head — by rolling the head deed back on the medium afterwards.
+    rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
+    build
+    make run-stop >/dev/null 2>&1
+    cp build/boxos.img "$SCRATCH/growcut.pristine"
+
+    local START
+    START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
+    if [ -z "$START" ]; then bad "growcut: the image has no BoxOS partition to stretch"; return; fi
+
+    if ! grow_boot growcut1; then bad "growcut: never reached a shell"; make run-stop >/dev/null 2>&1; build; return; fi
+    grep -q "the volume now runs" "$SCRATCH/serial.growcut1.log"
+    chk $? "growcut: the volume grew once, so there is a growth to cut"
+
+    make run-stop >/dev/null 2>&1
+    sleep 1
+    grow_rollback_head "$SCRATCH/growcut.pristine" build/boxos.img "$START"
+
+    if ! grow_boot growcut2; then bad "growcut: a half-written growth would not boot"; make run-stop >/dev/null 2>&1; build; return; fi
+    local L="$SCRATCH/serial.growcut2.log"
+
+    grep -qE "MOUNTED — [0-9]+ file" "$L"
+    chk $? "growcut: the volume mounts whole — $(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | tail -1)"
+
+    grep -q "takes the rest" "$L"
+    chk $? "growcut: and finishes the growth from the head's own numbers"
+
+    local DB FB
+    DB=$(grep -oE "^\[TagFS\] [0-9]+ data blocks" "$L" | tail -1 | grep -oE "[0-9]+" || true)
+    FB=$(grep -oE "[0-9]+ free," "$L" | tail -1 | grep -oE "[0-9]+" || true)
+    if [ -n "$DB" ] && [ -n "$FB" ] && [ "$FB" -le "$DB" ]; then
+        ok "growcut: $FB free out of $DB — the ground taken twice was not counted twice"
+    else
+        bad "growcut: the volume claims $FB free out of $DB data blocks"
+    fi
+
+    grep -qE "PANIC|\[EXCEPTION\]" "$L" \
+        && bad "growcut: the kernel faulted on a half-written growth" \
+        || ok "growcut: no panic, no fault"
+
+    make run-stop >/dev/null 2>&1
+    cp "$SCRATCH/growcut.pristine" build/boxos.img
+}
+
+grow_blind_on() {
+    cp src/kernel/tagfs/tagfs.c "$SCRATCH/tagfs.c.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/tagfs/tagfs.c"
+s = open(p).read()
+anchor = "        volume_take_more_ground(seat, ground_run, &head);"
+assert s.count(anchor) == 1, "grow mutation anchor missing"
+s = s.replace(anchor, "        (void)ground_run;   /* logcheck mutation: the ground is left unclaimed */", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/kernel/tagfs/tagfs.c || { echo "grow mutation install FAILED"; exit 1; }
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+grow_blind_off() {
+    [ -f "$SCRATCH/tagfs.c.bak" ] && cp "$SCRATCH/tagfs.c.bak" src/kernel/tagfs/tagfs.c
+    sleep 1; touch src/kernel/tagfs/tagfs.c
+}
+
+run_growmut() {
+    echo "== growmut: with the taking removed, the volume must leave the ground unclaimed =="
+    rm -f build/boxos.img
+    grow_blind_on; build
+    make run-stop >/dev/null 2>&1
+    grow_stretch build/boxos.img 409600 >/dev/null
+    local booted=1
+    grow_boot growmut && booted=0
+    grow_blind_off
+    if [ $booted -ne 0 ]; then bad "growmut: never reached a shell"; build; return; fi
+
+    local L="$SCRATCH/serial.growmut.log"
+    if grep -q "takes the rest" "$L"; then
+        bad "growmut: the taking was removed and the volume STILL grew — the oracle cannot see that defect"
+    else
+        ok "growmut: nothing was taken, and the grow oracle would have caught it"
+    fi
+    make run-stop >/dev/null 2>&1
+    build   # leave the tree built from clean sources
+}
+
+
 util_boot() {
     # util_boot NAME "RUN-BG ARGS" COMMAND DONE_REGEX LOOKS
     local name=$1 args=$2 cmd=$3 done_re=$4 looks=$5
@@ -5244,9 +6027,20 @@ case "${1:-both}" in
     noexec)   run_noexec ;;
     earlyirq) run_earlyirq ;;
     lastsaid) run_lastsaid ;;
+    draft)    run_draft ;;
+    draftmut) run_draftmut ;;
+    paint)    run_paint ;;
+    paintmut) run_paintmut ;;
+    finish)   run_finish ;;
+    finishmut) run_finishmut ;;
+    caret)    run_caret ;;
+    caretmut) run_caretmut ;;
+    grow)     run_grow ;;
+    growcut)  run_growcut ;;
+    growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo

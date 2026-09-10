@@ -496,10 +496,23 @@ static int SysProcSpawn(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *            [u32 target_pid][i32 code]  (optional 8-byte form; `code` is the
  *                                         self-exit disposition, ignored when
  *                                         killing another process)
+ *            [u32 target_pid][i32 code][u32 generation]
+ *                                        (12-byte form: kill that exact
+ *                                         incarnation, or nothing)
  *   out_crate (optional): u32 killed_pid
  *
  * exit_code semantics (proc_exit.h): a self-exit publishes `code` masked to
- * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1). */
+ * [0, INT32_MAX]; killing another process forces PROC_EXIT_KILLED (-1).
+ *
+ * WHY THE 12-BYTE FORM. A pid is a seat, and seats are re-let. Between
+ * deciding to end a process and saying so, that process can end on its own
+ * and its pid be handed to another — and a killer with the system ensign has
+ * authority over that one too, so the kill lands, on the wrong process, and
+ * reports success. Naming the generation closes it: the incarnation is
+ * either still in the seat or the kill is refused as ERR_PROCESS_NOT_FOUND,
+ * which is the truth. Generation 0 in this form means "any" (never a real
+ * generation), so a caller that has no generation to name is not forced to
+ * invent one. */
 static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -517,6 +530,12 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
         memcpy(&exit_code, (const uint8_t *)op->params + sizeof(uint32_t),
                sizeof(int32_t));
 
+    /* 12-byte form: the exact incarnation, or none. */
+    uint32_t want_gen = 0;
+    if (op->param_size >= 3 * sizeof(uint32_t))
+        memcpy(&want_gen, (const uint8_t *)op->params + 2 * sizeof(uint32_t),
+               sizeof(uint32_t));
+
     bool self_exit = (target_pid == 0);
     if (self_exit) target_pid = ctx->proc->pid;
 
@@ -526,6 +545,13 @@ static int SysProcKill(const ManifestOp *op, Crate *crates, uint16_t crate_count
      * mid-flight. */
     process_t *target = process_find_ref(target_pid);
     if (!target) return ERR_PROCESS_NOT_FOUND;
+
+    /* The seat is taken — but by whom? A named generation that does not match
+     * is a process that already left; say so rather than end its successor. */
+    if (want_gen != 0 && target->generation != want_gen) {
+        process_ref_dec(target);
+        return ERR_PROCESS_NOT_FOUND;
+    }
 
     /* Internal gate (the op stays OP_AUTH_NONE so every process can self-exit):
      * killing ANOTHER process needs authority over it — self-exit always passes
@@ -729,6 +755,147 @@ static int SysProcInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count
     process_ref_dec(target);
     if (crc != OK) return crc;
     out->size = out_bytes;
+    return OK;
+}
+
+/* SYSTEM_OP_PROC_CREW — who wears this tag.
+ *   params:    the tag, as text; param_size is its length, no NUL
+ *   out_crate: [u32 delivered][u32 total] then `delivered` records, each
+ *              [u32 pid][u32 generation][u32 state][u32 tags_len]
+ *              [u64 cpu_us][char tags[tags_len]]   (no NUL, no padding)
+ *
+ * WHY THIS EXISTS. `system.broadcast` has always walked the carriers of a tag
+ * — it is how one word reaches three hundred of them — but it only ever spoke
+ * to them, and told the asker nothing about who they were. Anything that
+ * needed to KNOW had one door: system.proc.info, one pid at a time, so
+ * "who is running?" was four thousand syscalls and a race in the middle
+ * (a pid freed and re-let between two of them names a different process).
+ *
+ * The same walk, answering instead of speaking. `total` is how many wear the
+ * tag and `delivered` how many fitted the crate, so a caller with too little
+ * room learns the true count and asks again with room for it — the shape
+ * storage.tag.query settled on, for the same reason.
+ *
+ * The caller is IN its own answer if it wears the tag. A list of who is
+ * aboard that leaves out the one asking is a list somebody has to correct.
+ *
+ * Each record carries `generation` because a pid is a seat and seats are
+ * re-let: the pair (pid, generation) is what a later kill must be aimed at,
+ * and without it the gap between deciding and doing cannot be closed.
+ */
+/* The kernel bounce for one answer. Sized so that every seat on the machine
+ * (MAX_PROCESSES) can be in it with its tags — the crew of `utility` on a
+ * busy machine is not an edge case, and an answer that silently stopped at a
+ * round number would be the tray headcount already caught once. */
+#define PROC_CREW_ANSWER_MAX  262144u
+#define PROC_CREW_HEADER      8u
+#define PROC_CREW_FIXED       24u
+
+static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                       const OpContext *ctx)
+{
+    (void)crate_count;
+    if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
+    if (op->param_size == 0 || op->param_size > BROADCAST_TAG_MAX) {
+        return ERR_INVALID_ARGUMENT;
+    }
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    char   tag[BROADCAST_TAG_MAX];
+    size_t plen = op->param_size < sizeof(tag) ? op->param_size : sizeof(tag) - 1;
+    memcpy(tag, op->params, plen);
+    tag[plen] = '\0';
+    if (tag[0] == '\0') return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < PROC_CREW_HEADER) return ERR_BUFFER_TOO_SMALL;
+
+    uint64_t alloc_sz = out->capacity > PROC_CREW_ANSWER_MAX
+                        ? PROC_CREW_ANSWER_MAX : out->capacity;
+    uint8_t *kp = crate_out_alloc(out, alloc_sz);
+    if (!kp) return ERR_INVALID_ADDRESS;
+
+    uint32_t delivered = 0;
+    uint32_t total     = 0;
+    uint64_t used      = PROC_CREW_HEADER;
+
+    /* Resolved once, outside the list lock: process_has_tag's string path
+     * re-enters process_lock through process_snapshot_tags and would
+     * self-deadlock (the same rule SysBroadcast keeps). An unknown tag is
+     * nobody wearing it, not a failure — the answer is an honest zero. */
+    uint16_t tid = tagfs_tag_lookup(tag);
+    if (tid != TAGFS_INVALID_TAG_ID) {
+        /* Phase 1: the pids, under the list lock, counted then made room for
+         * then filled — never a fixed tray that silently drops the last one. */
+        uint32_t *pid_list = NULL;
+        uint32_t  pid_cap  = 0;
+        for (;;) {
+            total = 0;
+            process_list_lock();
+            for (process_t *iter = process_get_first(); iter; iter = iter->next) {
+                process_state_t s = iter->state;
+                if (s == PROC_CRASHED || s == PROC_DONE) continue;
+                if (!process_has_tag_id(iter, tid))      continue;
+                if (total < pid_cap) pid_list[total] = iter->pid;
+                total++;
+            }
+            process_list_unlock();
+
+            if (total <= pid_cap) break;
+            if (pid_list) kfree(pid_list);
+            pid_cap  = total;
+            pid_list = (uint32_t *)kmalloc(pid_cap * sizeof(uint32_t));
+            if (!pid_list) { crate_buf_free(kp); return ERR_NO_MEMORY; }
+        }
+
+        /* Phase 2: each one pinned while its record is read, outside the list
+         * lock — process_snapshot_tags takes process_lock itself. */
+        for (uint32_t i = 0; i < total; i++) {
+            if (used + PROC_CREW_FIXED >= alloc_sz) break;   /* no room left */
+
+            process_t *mate = process_find_ref(pid_list[i]);
+            if (!mate) continue;
+
+            uint32_t pid   = mate->pid;
+            uint32_t gen   = mate->generation;
+            uint32_t state = (uint32_t)mate->state;
+            uint64_t cpu   = mate->total_cpu_time;
+
+            uint64_t room  = alloc_sz - used - PROC_CREW_FIXED;
+            size_t   tlen  = process_snapshot_tags(mate,
+                                                   (char *)(kp + used + PROC_CREW_FIXED),
+                                                   (size_t)room);
+            process_ref_dec(mate);
+
+            /* A list that filled the room to its last byte may have been cut
+             * there — process_snapshot_tags stops when the next tag will not
+             * fit and does not say that it did. A cut list is worse than a
+             * missing record: the caller would judge a cabin by tags it does
+             * not know it is missing, and narrowing by one of them would drop
+             * a cabin that wears it. So the record is not delivered at all,
+             * `total` still counts it, and the shortfall sends the caller back
+             * with more room. */
+            if (tlen + 1 >= (size_t)room) break;
+
+            uint32_t tags_len = (uint32_t)tlen;
+            memcpy(kp + used +  0, &pid,      sizeof(uint32_t));
+            memcpy(kp + used +  4, &gen,      sizeof(uint32_t));
+            memcpy(kp + used +  8, &state,    sizeof(uint32_t));
+            memcpy(kp + used + 12, &tags_len, sizeof(uint32_t));
+            memcpy(kp + used + 16, &cpu,      sizeof(uint64_t));
+            used += PROC_CREW_FIXED + tags_len;
+            delivered++;
+        }
+        if (pid_list) kfree(pid_list);
+    }
+
+    memcpy(kp + 0, &delivered, sizeof(uint32_t));
+    memcpy(kp + 4, &total,     sizeof(uint32_t));
+
+    int crc = crate_out_commit(out, ctx, kp, used);
+    crate_buf_free(kp);
+    if (crc != OK) return crc;
+    out->size = used;
     return OK;
 }
 
@@ -1830,6 +1997,9 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },
         { SYSTEM_OP_PROC_KILL,    SysProcKill,    OP_AUTH_NONE,   "system.proc.kill"  },
         { SYSTEM_OP_PROC_INFO,    SysProcInfo,    OP_AUTH_NONE,   "system.proc.info"  },
+        /* crew answers about others, but says nothing system.proc.info would
+         * not say about each of them one at a time — so it is open too. */
+        { SYSTEM_OP_PROC_CREW,    SysProcCrew,    OP_AUTH_NONE,   "system.proc.crew"  },
         { SYSTEM_OP_PROC_CPUTIME, SysProcCpuTime, OP_AUTH_NONE,   "system.proc.cputime"},
         { SYSTEM_OP_TLS_FSBASE,   SysTlsFsbase,   OP_AUTH_NONE,   "system.tls.fsbase" },
         { SYSTEM_OP_PROC_EXEC,    SysProcExec,    OP_AUTH_UTILITY,"system.proc.exec"  },

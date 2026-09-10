@@ -127,8 +127,103 @@ error_t IntegrityInit(void) {
                      g_map_count, start, g_map_entries, MAP_CACHE_SLOTS);
     } else {
         g_map_first_block = first;
+
+        /*
+         * ‼ THE MAP ON THE MEDIUM IS AS BIG AS IT WAS MADE, NOT AS BIG AS THE
+         * VOLUME IS NOW.
+         *
+         * g_map_count above is derived from data_blocks — the size of the
+         * volume TODAY. The region was allocated once and the Ledger records
+         * how many blocks that was. The day a volume grows into the ground
+         * behind it (tagfs.c: volume_take_more_ground) those two numbers
+         * disagree, and believing the derived one is not a wrong number on a
+         * screen: cache_get writes a map page at g_map_first_block + idx, so
+         * every page past the region lands on blocks that belong to FILES.
+         *
+         * The answer is to lay down a region that covers the volume and CARRY
+         * THE OLD ENTRIES INTO THE FRONT OF IT. Every block that already had a
+         * checksum keeps it — the map is indexed by block number and the data
+         * run never moves, so entry N still describes block N — and the blocks
+         * the volume has just gained get room of their own. Starting a fresh
+         * map instead would have thrown away the protection of every file on
+         * the volume in exchange for covering ground that has nothing on it.
+         */
+        uint32_t stored = SB_MAP_COUNT(fs);
+        if (stored != 0 && stored < g_map_count) {
+            uint32_t start = 0;
+            uint8_t *page  = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
+            bool moved = false;
+
+            if (page && tagfs_alloc_blocks(g_map_count, &start) == 0 && start != 0) {
+                moved = true;
+                for (uint32_t i = 0; i < g_map_count && moved; i++) {
+                    if (i < stored) {
+                        if (tagfs_read_block(first + i, page) != OK) { moved = false; break; }
+                    } else {
+                        memset(page, 0, TAGFS_BLOCK_SIZE);
+                    }
+                    if (tagfs_write_block(start + i, page) != OK) moved = false;
+                }
+            }
+            kfree(page);
+
+            if (moved) {
+                /* ‼ THE LEDGER MOVES FIRST; THE OLD RUN IS GIVEN BACK AFTER.
+                 *
+                 * The free is not bookkeeping — it clears the bits and splices
+                 * the run into the free list, so those blocks can be handed to
+                 * a file immediately. Giving them back while the Ledger on the
+                 * medium still NAMES them as the map is a window in which a
+                 * power cut leaves a volume whose next mount reads a file's
+                 * contents as checksums, and then writes map pages over that
+                 * file. The Ledger has to be pointing somewhere else before
+                 * the old somewhere becomes anybody's.
+                 *
+                 * And the commit can refuse. If it does, the map stays exactly
+                 * where the medium says it is and the new run is handed back —
+                 * the volume is then in the state it was in before, which is
+                 * the state the clamp below is written for. */
+                uint32_t was_block = SB_MAP_BLOCK(fs);
+                uint32_t was_count = SB_MAP_COUNT(fs);
+                SB_MAP_BLOCK(fs) = start;
+                SB_MAP_COUNT(fs) = g_map_count;
+                if (tagfs_write_ledger() != OK) {
+                    SB_MAP_BLOCK(fs) = was_block;
+                    SB_MAP_COUNT(fs) = was_count;
+                    tagfs_free_blocks(start, g_map_count);
+                    start = 0;                       /* given back; not ours */
+                    moved = false;
+                    kprintf("[Integrity] a bigger map was laid down and the "
+                            "ledger would not take it — the map stays where it "
+                            "was and the room is given back\n");
+                }
+            }
+
+            if (moved) {
+                tagfs_free_blocks(first, stored);
+                g_map_first_block = start;
+                kprintf("[Integrity] the volume grew, so its map did too: %u "
+                        "block(s) at %u, carrying the %u it already had — every "
+                        "block of %u is covered\n",
+                        g_map_count, start, stored, g_map_entries);
+            } else {
+                /* A run that was allocated and never became the map is given
+                 * back here. The ledger-refusal path above has already handed
+                 * its own back and zeroed `start`, so nothing is freed twice. */
+                if (start) tagfs_free_blocks(start, g_map_count);
+                uint32_t covered = stored * ENTRIES_PER_BLOCK;
+                g_map_count   = stored;
+                g_map_entries = covered;
+                kprintf("[Integrity] the map covers %u block(s) and the volume "
+                        "now has %u — there was no room to lay down a bigger "
+                        "one, so verify-on-read covers the first %u and says "
+                        "nothing about the rest\n",
+                        covered, fs->layout.data_blocks, covered);
+            }
+        }
+
         debug_printf("[Integrity] map at %u (%u blocks, %u-slot paged cache)\n",
-                     first, g_map_count, MAP_CACHE_SLOTS);
+                     g_map_first_block, g_map_count, MAP_CACHE_SLOTS);
         // No full load — pages fault in on demand.
     }
 

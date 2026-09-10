@@ -47,6 +47,12 @@
 #define HW_VGA_SCROLL_UP        0x79
 #define HW_VGA_NEWLINE          0x7A
 #define HW_VGA_GET_DIMENSIONS   0x7B
+/* A rectangle of finished cells, laid down in one op. The others say things;
+ * this one draws, and the difference is load-bearing — see HwVgaPaint. */
+#define HW_VGA_PAINT            0x7C
+/* Move the cursor by a signed count of cells, resolved against the console's
+ * own position — the only party that knows it. See HwVgaStepCursor. */
+#define HW_VGA_STEP_CURSOR      0x7D
 
 #define HW_SYSTEM_REBOOT        0x80
 #define HW_SYSTEM_SHUTDOWN      0x81

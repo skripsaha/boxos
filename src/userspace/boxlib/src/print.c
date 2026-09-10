@@ -1017,9 +1017,11 @@ void console_unlisten(void)
     (void)send(g_display_pid, req, sizeof(req));
 }
 
-/* A cursor step is a frame on the lane, after whatever text is pending, so
- * it lands in the order it was said; without a daemon it is the cursor op
- * itself, with the same linear arithmetic the daemon does. */
+/* A cursor step is a frame on the lane, after whatever text is pending, so it
+ * lands in the order it was said; without a daemon it is the same one op the
+ * daemon would render it into. Nothing here knows, or needs to know, where the
+ * caret is or how wide the screen is: a step says how FAR, and where that
+ * lands is the console's business. */
 void console_step(int32_t delta)
 {
     if (delta == 0) return;
@@ -1041,15 +1043,9 @@ void console_step(int32_t delta)
         /* The daemon died on the way — the fallback below still steps. */
     }
 
-    vga_pos_t        pos;
-    vga_dimensions_t dims;
-    if (vga_getcursor(&pos) != 0 || vga_getdimensions(&dims) != 0 || dims.cols == 0)
-        return;
-    int64_t linear = (int64_t)pos.row * dims.cols + pos.col + delta;
-    int64_t last   = (int64_t)dims.rows * dims.cols - 1;
-    if (linear < 0)    linear = 0;
-    if (linear > last) linear = last;
-    vga_setcursor((uint8_t)(linear / dims.cols), (uint8_t)(linear % dims.cols));
+    /* No daemon: the same one op, straight to the deck. The arithmetic is the
+     * kernel's either way — see hardware_ops.c HwVgaStepCursor. */
+    (void)vga_step_cursor(delta);
 }
 
 /* ===========================================================================

@@ -40,13 +40,19 @@ DEBUG    ?= off
 #   Sector 0        : Stage1 (446 bytes of code, then the MBR partition table)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
 #   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose
-#   Sector 2048+    : the BoxOS partition. Everything inside it is the volume's
-#                     own business and is counted from HERE, not from sector 0:
-#                     its Deed, its Ledger, its DiskBook, its bitmap, its data.
-#                     The kernel finds it by reading this table, exactly as the
-#                     tool that made it did.
-#   Sector 51200+   : EFI System Partition (FAT32) — the UEFI half of the
-#                     medium, appended AFTER the BoxOS partition on purpose
+#   Sector 2048+    : EFI System Partition (FAT32) — as long as the loader it
+#                     carries needs, rounded up to the mebibyte
+#   after the ESP   : the BoxOS partition, LAST on the medium. Everything
+#                     inside it is the volume's own business and is counted
+#                     from HERE, not from sector 0: its Deed, its Ledger, its
+#                     DiskBook, its bitmap, its data. The kernel finds it by
+#                     reading this table, exactly as the tool that made it did.
+#
+# Neither of the last two is a number in this file. The ESP is as long as its
+# own image; the volume is as long as its content plus the room a running
+# machine works in, and create_tagfs --ground is asked how long that is before
+# the medium is made. The volume comes last so that a bigger device can be
+# given to it later without moving anything in front of it.
 #
 # The kernel is a FILE in the volume. It is not written to a sector of its own:
 # the loaders find it through the Deed, which says which block it starts at.
@@ -72,21 +78,34 @@ BOOT_INFO_ADDR      = 0xA000
 BOARDING_PASS_ADDR  = 0xA600
 KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tables dynamically after kernel)
 
-# Where the volume's ground begins. One mebibyte in: the step every
-# partitioning tool has used for fifteen years, and the one every flash
-# translation layer and 4Kn medium is built around. It is also what makes the
-# volume's own 4096-byte grid line up with the medium's — the old layout put
-# the superblock at sector 1034, three sectors into a physical block, so every
-# metadata write cost the device a read, a patch and a write.
-GROUND_START_SECTOR = 2048
-
-# The whole BoxOS region: sector 0 through BOXOS_SECTORS-1. The volume is the
-# part of it from GROUND_START_SECTOR on — 24 MiB exactly.
-BOXOS_SECTORS       = 51200
-
-# Where the ESP begins, immediately after the BoxOS partition and on the same
-# 2048-sector step.
-ESP_START_SECTOR    = 51200
+# ‼ THE ONLY NUMBERS OF THE MEDIUM'S SHAPE THAT ARE TYPED. BOTH ARE GRAINS.
+#
+# One mebibyte in: the step every partitioning tool has used for fifteen years,
+# and the one every flash translation layer and 4Kn medium is built around. It
+# is also what makes the volume's own 4096-byte grid line up with the medium's
+# — the old layout put the superblock at sector 1034, three sectors into a
+# physical block, so every metadata write cost the device a read, a patch and
+# a write.
+#
+# Everything else about the shape is DERIVED, in the image rule below:
+#
+#   sector 0            stage1, and the partition table inside it
+#   sectors 1..16       stage2
+#   sector 2048         the ESP — as long as the loader it carries needs,
+#                       rounded up to the grain
+#   after the ESP       the volume's ground, as far as its CONTENT needs plus
+#                       the room a running machine works in (create_tagfs
+#                       --ground says how far, and says why)
+#
+# ‼ THE VOLUME IS LAST ON THE MEDIUM, AND THAT IS THE WHOLE POINT.
+#
+# It used to be first, with the ESP behind it at a typed sector — so the volume
+# could not be made larger without moving the ESP, and a 24 MiB volume written
+# to a 64 GB stick stayed 24 MiB for ever. A partition that is last is one that
+# can be grown into whatever the device turns out to be, without moving
+# anything, which is what lets the volume take the ground it is given.
+MEDIUM_GRAIN_SECTORS = 2048
+ESP_START_SECTOR     = 2048
 
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
@@ -511,7 +530,8 @@ DISPLAY_BIN = $(DISPLAY_DIR)/display.elf
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = help create show files tag untag name trash erase \
              me info say reboot bye defrag fsck ipc_test memtag hw \
-             timezone logsave lastsaid rgbtest usetest luggagetest headcount
+             timezone logsave lastsaid rgbtest usetest luggagetest headcount \
+             draft playtime lavalamp finish
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -738,10 +758,10 @@ $(STAGE2_BIN): $(STAGE2_SRC) | $(BUILDDIR)
 	    echo "       stage1 would load a truncated stage2 that still passes its signature check."; \
 	    rm -f $@; exit 1; \
 	fi
-	@if [ $$(( 1 + $(STAGE2_SECTORS) )) -gt $(GROUND_START_SECTOR) ]; then \
-	    echo "ERROR: stage2 occupies sectors 1..$$(( $(STAGE2_SECTORS) )) and the volume's"; \
-	    echo "       ground begins at $(GROUND_START_SECTOR) — the loader would be inside the volume,"; \
-	    echo "       and the volume's Deed would be written over it."; \
+	@if [ $$(( 1 + $(STAGE2_SECTORS) )) -gt $(ESP_START_SECTOR) ]; then \
+	    echo "ERROR: stage2 occupies sectors 1..$$(( $(STAGE2_SECTORS) )) and the first"; \
+	    echo "       partition begins at $(ESP_START_SECTOR) — the loader would be inside it,"; \
+	    echo "       and would be written over."; \
 	    exit 1; \
 	fi
 
@@ -876,87 +896,104 @@ $(TESTBIN_EMPTY):
 	@mkdir -p $(@D)
 	@: > $@
 
+# ‼ WHAT GOES ON THE VOLUME — named once, and asked about twice.
+#
+# The image rule asks create_tagfs --ground how far the ground must run to
+# hold exactly this, and then asks it to lay exactly this down. Two questions
+# about one list, so the medium can never be made too small for what is about
+# to go in it. A second copy of the list is how those two answers would come
+# to disagree.
+VOLUME_CONTENT = \
+	$(KERNEL_BIN)   "system" \
+	$(DISPLAY_BIN)  "display,system,utility,autostart" \
+	$(SHELL_BIN)    "utility,system,app,autostart" \
+	$(PROCA_BIN)    "app" \
+	$(PROCB_BIN)    "app" \
+	$(TODAY_BIN)    "app,utility" \
+	$(MEMTEST_BIN)  "app,utility" \
+	$(MTEST_BIN)    "utility,memory" \
+	$(CHAIN_BIN)    "app,utility" \
+	$(DECKS_BIN)    "app,utility" \
+	$(BENCH_BIN)         "app,utility,bench" \
+	$(TOUCH_TEST_BIN)    "app,utility,test" \
+	$(TOUCH_STRESS_BIN)  "app,utility,test" \
+	$(LIFECYCLE_BIN)     "app,utility,test" \
+	$(PERSIST_BIN)       "app,utility,test" \
+	$(WRITE_STRESS_BIN)  "app,utility,test" \
+	$(WRITE_CONC_BIN)    "app,utility,test" \
+	$(WRITE_OBS_BIN)     "app,utility,test" \
+	$(COW_TEST_BIN)      "app,utility,test" \
+	$(ANCHOR_TEST_BIN)   "app,utility,test" \
+	$(BAY_TEST_BIN)      "app,utility,test" \
+	$(BROOK_TEST_BIN)    "app,utility,test" \
+	$(CURRENT_TEST_BIN)  "app,utility,test" \
+	$(HTEST_BIN)         "app,utility,test" \
+	$(CXXTEST_BIN)       "app,utility,test,cxx" \
+	$(STRANDTEST_BIN)    "app,utility,test" \
+	$(BROOKSTRAND_BIN)   "app,utility,test" \
+	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
+	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
+	$(STRANDPARK_BIN)    "app,utility,test" \
+	$(CHILDSPIN_BIN)     "app,utility,test" \
+	$(PRINT_STRESS_BIN)  "app,utility,test" \
+	$(QUIETPRINT_BIN)    "app,utility,test" \
+	$(EXITPATHS_BIN)     "app,utility,test,cxx" \
+	$(UTILS_DIR)/help.elf    "utility" \
+	$(UTILS_DIR)/create.elf  "utility,storage" \
+	$(UTILS_DIR)/show.elf    "utility,storage" \
+	$(UTILS_DIR)/files.elf   "utility,storage" \
+	$(UTILS_DIR)/tag.elf     "utility,storage" \
+	$(UTILS_DIR)/untag.elf   "utility,storage" \
+	$(UTILS_DIR)/name.elf    "utility,storage" \
+	$(UTILS_DIR)/trash.elf   "utility,storage" \
+	$(UTILS_DIR)/erase.elf   "utility,storage" \
+	$(UTILS_DIR)/me.elf      "utility" \
+	$(UTILS_DIR)/info.elf    "utility,storage" \
+	$(UTILS_DIR)/say.elf     "utility" \
+	$(UTILS_DIR)/reboot.elf  "utility,system" \
+	$(UTILS_DIR)/bye.elf     "utility,system" \
+	$(UTILS_DIR)/defrag.elf  "utility,storage" \
+	$(UTILS_DIR)/fsck.elf    "utility,storage" \
+	$(UTILS_DIR)/timezone.elf "utility,system,clock" \
+	$(USERSPACE_DIR)/hello.txt   "message,text" \
+	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
+	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
+	$(UTILS_DIR)/ipc_test.elf "utility" \
+	$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
+	$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
+	$(UTILS_DIR)/usetest.elf "utility,system,test" \
+	$(UTILS_DIR)/luggagetest.elf "utility,test" \
+	$(UTILS_DIR)/logsave.elf "utility,system,log" \
+	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
+	$(UTILS_DIR)/rgbtest.elf "utility,test,display" \
+	$(UTILS_DIR)/rollcall.elf "utility,test" \
+	$(UTILS_DIR)/handset.elf "utility,test" \
+	$(UTILS_DIR)/headcount.elf "utility,test" \
+	$(UTILS_DIR)/draft.elf    "utility,storage" \
+	$(UTILS_DIR)/playtime.elf "utility,display" \
+	$(UTILS_DIR)/lavalamp.elf "utility,display" \
+	$(UTILS_DIR)/finish.elf   "utility,system"
+
 $(IMAGE): $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(SHELL_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
-	@echo "Creating disk image ($$(( $(BOXOS_SECTORS) / 2048 ))MB BoxOS region)..."
-	@dd if=/dev/zero of=$@ bs=512 count=$(BOXOS_SECTORS) status=none
-	@echo "  Writing Stage1 (sector 0, 512 bytes)..."
-	@dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none
-	@echo "  Writing Stage2 (sectors 1-$(STAGE2_SECTORS), $(STAGE2_SECTORS) sectors)..."
-	@dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none
-	@echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."
-	@dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none
-	@echo "  Writing the partition table (the volume's ground, then the ESP)..."
-	@ESP_SECTORS=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
+	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_CONTENT)); \
+	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
+	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
+	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
+	TOTAL=$$(( $$START + $$GROUND )); \
+	echo "Creating disk image: ESP $$(( $$ESP / 2048 )) MiB at sector $(ESP_START_SECTOR), volume $$(( $$GROUND / 2048 )) MiB at sector $$START..."; \
+	dd if=/dev/zero of=$@ bs=512 count=$$TOTAL status=none; \
+	echo "  Writing Stage1 (sector 0, 512 bytes)..."; \
+	dd if=$(STAGE1_BIN) of=$@ bs=512 conv=notrunc status=none; \
+	echo "  Writing Stage2 (sectors 1-$(STAGE2_SECTORS), $(STAGE2_SECTORS) sectors)..."; \
+	dd if=$(STAGE2_BIN) of=$@ bs=512 seek=1 conv=notrunc status=none; \
+	echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."; \
+	dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none; \
+	echo "  Writing the partition table (the ESP, then the volume's ground)..."; \
 	python3 tools/make_mbr.py $@ \
-	    $(GROUND_START_SECTOR),$$(( $(BOXOS_SECTORS) - $(GROUND_START_SECTOR) )),7f,boot \
-	    $(ESP_START_SECTOR),$$ESP_SECTORS,ef
+	    $$START,$$GROUND,7f,boot \
+	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it..."
-	@$(TAGFS_TOOL) $@ \
-		$(KERNEL_BIN)   "system" \
-		$(DISPLAY_BIN)  "display,system,utility,autostart" \
-		$(SHELL_BIN)    "utility,system,app,autostart" \
-		$(PROCA_BIN)    "app" \
-		$(PROCB_BIN)    "app" \
-		$(TODAY_BIN)    "app,utility" \
-		$(MEMTEST_BIN)  "app,utility" \
-		$(MTEST_BIN)    "utility,memory" \
-		$(CHAIN_BIN)    "app,utility" \
-		$(DECKS_BIN)    "app,utility" \
-		$(BENCH_BIN)         "app,utility,bench" \
-		$(TOUCH_TEST_BIN)    "app,utility,test" \
-		$(TOUCH_STRESS_BIN)  "app,utility,test" \
-		$(LIFECYCLE_BIN)     "app,utility,test" \
-		$(PERSIST_BIN)       "app,utility,test" \
-		$(WRITE_STRESS_BIN)  "app,utility,test" \
-		$(WRITE_CONC_BIN)    "app,utility,test" \
-		$(WRITE_OBS_BIN)     "app,utility,test" \
-		$(COW_TEST_BIN)      "app,utility,test" \
-		$(ANCHOR_TEST_BIN)   "app,utility,test" \
-		$(BAY_TEST_BIN)      "app,utility,test" \
-		$(BROOK_TEST_BIN)    "app,utility,test" \
-		$(CURRENT_TEST_BIN)  "app,utility,test" \
-		$(HTEST_BIN)         "app,utility,test" \
-		$(CXXTEST_BIN)       "app,utility,test,cxx" \
-		$(STRANDTEST_BIN)    "app,utility,test" \
-		$(BROOKSTRAND_BIN)   "app,utility,test" \
-		$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
-		$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
-		$(STRANDPARK_BIN)    "app,utility,test" \
-		$(CHILDSPIN_BIN)     "app,utility,test" \
-		$(PRINT_STRESS_BIN)  "app,utility,test" \
-		$(QUIETPRINT_BIN)    "app,utility,test" \
-		$(EXITPATHS_BIN)     "app,utility,test,cxx" \
-		$(UTILS_DIR)/help.elf    "utility" \
-		$(UTILS_DIR)/create.elf  "utility,storage" \
-		$(UTILS_DIR)/show.elf    "utility,storage" \
-		$(UTILS_DIR)/files.elf   "utility,storage" \
-		$(UTILS_DIR)/tag.elf     "utility,storage" \
-		$(UTILS_DIR)/untag.elf   "utility,storage" \
-		$(UTILS_DIR)/name.elf    "utility,storage" \
-		$(UTILS_DIR)/trash.elf   "utility,storage" \
-		$(UTILS_DIR)/erase.elf   "utility,storage" \
-		$(UTILS_DIR)/me.elf      "utility" \
-		$(UTILS_DIR)/info.elf    "utility,storage" \
-		$(UTILS_DIR)/say.elf     "utility" \
-		$(UTILS_DIR)/reboot.elf  "utility,system" \
-		$(UTILS_DIR)/bye.elf     "utility,system" \
-		$(UTILS_DIR)/defrag.elf  "utility,storage" \
-		$(UTILS_DIR)/fsck.elf    "utility,storage" \
-		$(UTILS_DIR)/timezone.elf "utility,system,clock" \
-		$(USERSPACE_DIR)/hello.txt   "message,text" \
-		$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
-		$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
-		$(UTILS_DIR)/ipc_test.elf "utility" \
-		$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
-		$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
-		$(UTILS_DIR)/usetest.elf "utility,system,test" \
-		$(UTILS_DIR)/luggagetest.elf "utility,test" \
-		$(UTILS_DIR)/logsave.elf "utility,system,log" \
-		$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
-		$(UTILS_DIR)/rgbtest.elf "utility,test,display" \
-		$(UTILS_DIR)/rollcall.elf "utility,test" \
-		$(UTILS_DIR)/handset.elf "utility,test" \
-		$(UTILS_DIR)/headcount.elf "utility,test"
+	@$(TAGFS_TOOL) $@ $(VOLUME_CONTENT)
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

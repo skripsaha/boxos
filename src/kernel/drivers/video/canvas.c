@@ -23,20 +23,26 @@
  *   pure pixel/MMIO and never re-enter the kernel logger.
  *
  * Manifest-level coalescing:
- *   ManifestDispatchEnter/Exit bracket the full dispatch loop in
- *   manifest_exec.c.  A render() from the display daemon — which builds
- *   one Manifest with N vga_setcolor / vga_puts / vga_newline ops —
- *   accumulates ALL ops into one Canvas batch and commits once.  Before
- *   this hook, each op committed individually so a 5-newline render
- *   still cost 5 full-frame blits even with per-op coalescing.
+ *   manifest_exec.c wraps a MULTI-op Manifest in one CanvasBatchBegin/End,
+ *   so a render() from the display daemon — one Manifest with N
+ *   vga_setcolor / vga_puts / vga_newline ops — accumulates all of them
+ *   into a single Canvas batch and commits once.  A five-newline render
+ *   used to cost five full-frame blits.
+ *
+ *   A SINGLE-op Manifest gets no wrap, and that is only safe while the
+ *   invariant below holds: every public writer here opens an implicit
+ *   batch of its own, so it commits at its own boundary.  CanvasSetCursor
+ *   was the one that did not, and the caret paid for it — see its comment.
  *
  * Hot-path invariants:
  *   • cells[][] is the single source of truth for visible content.
- *   • Per-character writers (CanvasPrintChar / CanvasScrollUp / Clear*)
- *     modify cells[][] and append damage to the plan; they NEVER touch
- *     the backend surface directly.
- *   • Surface updates happen exclusively inside canvas_commit(), called
- *     from the outermost CanvasBatchEnd / ManifestDispatchExit.
+ *   • EVERY public writer — CanvasPrintChar, CanvasScrollUp, CanvasPaint,
+ *     the Clear* family and CanvasSetCursor — modifies state, appends
+ *     damage to the plan, and opens an implicit batch so a standalone
+ *     call reaches the glass.  None of them touches the backend surface
+ *     directly.
+ *   • Surface updates happen exclusively inside canvas_commit_locked(),
+ *     called from the outermost CanvasBatchEnd.
  *
  * Why lazy: every '\n' past the last row used to do its own 3 MB shadow
  * memmove + full-screen NT blit (UEFI GOP at 1024×768).  Five lines of
@@ -187,6 +193,32 @@ static void dirty_scroll_up(CanvasState *c, uint32_t dy)
  *  Commit (caller holds s_canvas_lock)
  * ========================================================================= */
 
+/* Put the caret on the surface at the logical cursor, and remember where it
+ * was put — the commit erases it from there next time round. False when this
+ * backend has no caret of its own to draw, or the cursor is off the screen.
+ *
+ * Its own function because a surface swap needs it too: DrawCells alone
+ * repaints the glyphs and leaves the new surface with no caret at all. */
+static bool draw_caret_locked(CanvasState *c)
+{
+    DisplayBackend *be = c->be;
+    if (!be->DrawCaret) return false;
+    if (c->row >= c->rows || c->col >= c->cols) return false;
+
+    const TextCell *cell = &c->cells[(size_t)c->row * c->cols + c->col];
+    uint32_t fg = cell->fg;
+    /* A fully zeroed pair is a never-initialised cell (black-on-black was
+     * attr 0x00 before): draw the caret in the default foreground so it stays
+     * visible — same rule as the old code. */
+    if (!fg && !cell->bg) fg = BoxAttrFgRgb(VIDEO_ATTR_DEFAULT);
+
+    be->DrawCaret(be, c->col, c->row, fg);
+    c->caret_col     = c->col;
+    c->caret_row     = c->row;
+    c->caret_visible = true;
+    return true;
+}
+
 static void canvas_commit_locked(CanvasState *c)
 {
     if (!c->ready) return;
@@ -210,19 +242,36 @@ static void canvas_commit_locked(CanvasState *c)
         return;
     }
 
-    /* 1. Erase old caret cell by marking it dirty so DrawCells repaints
-     *    the glyph underneath.  HW-cursor backends (whose DrawCaret moves
-     *    the cursor without leaving residue) absorb a harmless extra
-     *    cell re-render. */
-    if (c->caret_visible &&
-        (c->caret_row != c->row || c->caret_col != c->col || c->plan_scroll > 0)) {
-        mark_cell_dirty(c, c->caret_row, c->caret_col);
+    /* How far step 2 is about to scroll — needed in step 1, which has to
+     * follow the caret through that scroll. */
+    uint32_t dy = c->plan_scroll;
+    if (dy > c->rows) dy = c->rows;
+
+    /* 1. Erase the old caret by marking its cell dirty, so DrawCells repaints
+     *    the glyph underneath.  HW-cursor backends (whose DrawCaret moves the
+     *    cursor without leaving residue) absorb a harmless extra cell
+     *    re-render.
+     *
+     *    ‼ AND IT IS THE CELL THE CARET ENDS UP IN, NOT THE ONE IT WAS PUT IN.
+     *    A backend that draws the caret in pixels puts those pixels inside the
+     *    surface, so a scroll carries them up with everything else: after
+     *    Scroll(dy) the residue sits dy rows above where it was drawn. Marking
+     *    the pre-scroll cell repainted a cell that no longer held the caret,
+     *    and the ghost stayed on the glass — one more of them per scroll,
+     *    each climbing the screen with the text it was left on.
+     *
+     *    MEASURED 2026-09-10, UEFI 1280x800: three presses of Enter left FOUR
+     *    carets on screen, one real and three riding the old prompt lines
+     *    upward. A caret whose row scrolled off the top took its pixels with
+     *    it and needs no erasing, which is what the dy bound says. */
+    if (c->caret_visible && c->caret_row >= dy) {
+        uint32_t residue_row = c->caret_row - dy;
+        if (dy > 0 || residue_row != c->row || c->caret_col != c->col)
+            mark_cell_dirty(c, residue_row, c->caret_col);
     }
 
     /* 2. Coalesced scroll covers every '\n' in the batch. */
-    if (c->plan_scroll > 0) {
-        uint32_t dy = c->plan_scroll;
-        if (dy > c->rows) dy = c->rows;
+    if (dy > 0) {
         be->Scroll(be, dy);
     }
 
@@ -240,28 +289,15 @@ static void canvas_commit_locked(CanvasState *c)
     }
 
     /* 4. Caret at the new position. */
-    if (be->DrawCaret) {
-        uint32_t crow = c->row, ccol = c->col;
-        if (crow < c->rows && ccol < c->cols) {
-            const TextCell *cell = &c->cells[(size_t)crow * c->cols + ccol];
-            uint32_t fg = cell->fg;
-            /* A fully zeroed pair is a never-initialised cell (black-on-
-             * black was attr 0x00 before): draw the caret in the default
-             * foreground so it stays visible — same rule as the old code. */
-            if (!fg && !cell->bg) fg = BoxAttrFgRgb(VIDEO_ATTR_DEFAULT);
-            be->DrawCaret(be, ccol, crow, fg);
-            c->caret_col     = ccol;
-            c->caret_row     = crow;
-            c->caret_visible = true;
-            if (crow < blit_lo)       blit_lo = crow;
-            if (crow + 1u > blit_hi)  blit_hi = crow + 1u;
-        }
+    if (draw_caret_locked(c)) {
+        if (c->caret_row < blit_lo)       blit_lo = c->caret_row;
+        if (c->caret_row + 1u > blit_hi)  blit_hi = c->caret_row + 1u;
     }
 
     /* 5. Present the damage rectangle.  A scroll forces full-text present
      *    (all visible rows changed visually); otherwise present the union
      *    of per-row damage ranges. */
-    if (c->plan_scroll > 0) {
+    if (dy > 0) {
         be->Present(be, 0, c->rows);
     } else if (blit_lo < blit_hi) {
         be->Present(be, blit_lo, blit_hi);
@@ -444,6 +480,10 @@ void CanvasReplaceBackend(DisplayBackend *be)
     s_canvas.be = be;
     for (uint32_t r = 0; r < s_canvas.rows; r++)
         be->DrawCells(be, r, 0, s_canvas.cols, &s_canvas.cells[(size_t)r * s_canvas.cols]);
+    /* A new surface carries no caret: the cells were redrawn, the caret was
+     * not, and the commit's early exit ("nothing dirty, cursor did not move")
+     * would keep it that way until something else printed. */
+    (void)draw_caret_locked(&s_canvas);
     be->Present(be, 0, s_canvas.rows);
     spin_unlock(&s_canvas_lock);
 }
@@ -480,20 +520,6 @@ void CanvasBatchEnd(void)
     if (!s_canvas.ready) return;
     spin_lock(&s_canvas_lock);
     batch_end_locked(&s_canvas);
-    spin_unlock(&s_canvas_lock);
-}
-
-void CanvasFlushPending(void)
-{
-    if (!s_canvas.ready) return;
-    spin_lock(&s_canvas_lock);
-    if (s_canvas.batch_depth > 0) {
-        uint32_t saved = s_canvas.batch_depth;
-        s_canvas.batch_depth = 0;
-        canvas_commit_locked(&s_canvas);
-        s_canvas.batch_depth = saved - 1;
-        if (s_canvas.batch_depth) plan_reset(&s_canvas);
-    }
     spin_unlock(&s_canvas_lock);
 }
 
@@ -552,6 +578,40 @@ void CanvasClearScreen(uint32_t fg, uint32_t bg)
     spin_unlock(&s_canvas_lock);
 }
 
+bool CanvasPaint(uint32_t row, uint32_t col, uint32_t height, uint32_t width,
+                 const TextCell *cells)
+{
+    if (!s_canvas.ready || !cells || height == 0 || width == 0) return false;
+
+    spin_lock(&s_canvas_lock);
+    CanvasState *c = &s_canvas;
+
+    /* Checked inside the lock: rows/cols change when the backend is replaced
+     * (VGA text -> GOP), and a rectangle sized against the old screen must be
+     * refused rather than written past the end of the new one. */
+    if (row >= c->rows || col >= c->cols ||
+        height > c->rows - row || width > c->cols - col) {
+        spin_unlock(&s_canvas_lock);
+        return false;
+    }
+
+    bool opened = implicit_open_locked(c);
+
+    for (uint32_t r = 0; r < height; r++) {
+        memcpy(&c->cells[(size_t)(row + r) * c->cols + col],
+               &cells[(size_t)r * width],
+               sizeof(TextCell) * (size_t)width);
+        /* Both ends of the run: mark_cell_dirty widens [col_lo, col_hi) to
+         * cover everything between them. */
+        mark_cell_dirty(c, row + r, col);
+        mark_cell_dirty(c, row + r, col + width - 1u);
+    }
+
+    implicit_close_locked(c, opened);
+    spin_unlock(&s_canvas_lock);
+    return true;
+}
+
 void CanvasClearLine(int line, uint32_t fg, uint32_t bg)
 {
     if (!s_canvas.ready) return;
@@ -593,6 +653,28 @@ void CanvasClearToEol(uint32_t fg, uint32_t bg)
  *  Cursor + geometry
  * ========================================================================= */
 
+/* Where the next character goes — and therefore where the caret goes, because
+ * the caret is the one part of the console a person is actually watching.
+ *
+ * ‼ THIS MOVED THE CURSOR WITHOUT EVER SHOWING IT.
+ *
+ * Every other public writer in this file opens an implicit batch, so a call
+ * made on its own commits at its own boundary. This one only mutated col/row
+ * and left the glass to whoever committed next. That was invisible for as
+ * long as the line editor lived in the kernel, because the same code path
+ * always printed a character straight afterwards and the print committed for
+ * both. With the editor in boxlib, moving the cursor is a Manifest of ONE op
+ * — and a single-op Manifest is deliberately not wrapped in a Canvas batch
+ * (manifest_exec.c: "the op's own per-call batch already commits at the right
+ * boundary"), which was true of every op except this one. So nothing
+ * committed, and the caret stayed where the last printed character had left
+ * it.
+ *
+ * MEASURED 2026-09-10, UEFI 1280x800: type `abcdef`, press Left twice — the
+ * caret does not move at all; type `X` and the line reads `abcdXef` with the
+ * caret two cells past its end. In draft, whose every frame is a paint
+ * followed by a cursor move, the caret stayed on the previous frame's line.
+ * One defect, both symptoms. */
 void CanvasSetCursor(int x, int y)
 {
     if (!s_canvas.ready) return;
@@ -600,8 +682,10 @@ void CanvasSetCursor(int x, int y)
     if (y < 0) y = 0;
     spin_lock(&s_canvas_lock);
     CanvasState *c = &s_canvas;
+    bool opened = implicit_open_locked(c);
     c->col = (uint32_t)x < c->cols ? (uint32_t)x : c->cols - 1u;
     c->row = (uint32_t)y < c->rows ? (uint32_t)y : c->rows - 1u;
+    implicit_close_locked(c, opened);
     spin_unlock(&s_canvas_lock);
 }
 

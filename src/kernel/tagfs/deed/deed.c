@@ -1,26 +1,17 @@
 #include "deed.h"
+#include "deed_pen.h"
 #include "boardroom.h"
 #include "klib.h"
-#include "crypto.h"
 #include "error.h"
 
 /*
- * How much of the ground a Deed is allowed to occupy.
- *
- * Eight sectors is four kilobytes — one physical block on every medium in use,
- * so reading a Deed is one physical read and writing one is one physical
- * write, with no straddle either way. It is far more room than the stamps
- * defined today need, and a Deed that outgrows it is a Deed that has been
- * asked to carry something that belongs in the volume instead.
+ * How much of the ground a Deed occupies, and the eight bytes that say it is
+ * one, both come from the pen (src/include/deed_pen.h) — the same numbers the
+ * host tool writes with. A reader and a writer that spell the format twice are
+ * a format that will disagree with itself.
  */
-#define DEED_SECTORS  8u
-#define DEED_BYTES    (DEED_SECTORS * VOLUME_DEED_SECTOR_BYTES)
-
-static const uint8_t g_deed_magic[8] = {
-    VOLUME_DEED_MAGIC_0, VOLUME_DEED_MAGIC_1, VOLUME_DEED_MAGIC_2,
-    VOLUME_DEED_MAGIC_3, VOLUME_DEED_MAGIC_4, VOLUME_DEED_MAGIC_5,
-    VOLUME_DEED_MAGIC_6, VOLUME_DEED_MAGIC_7
-};
+#define DEED_SECTORS  DEED_PEN_SECTORS
+#define DEED_BYTES    DEED_PEN_BYTES
 
 static const char *deed_role_name(uint32_t role)
 {
@@ -54,7 +45,7 @@ static error_t deed_validate(uint8_t seat, uint64_t at_sector,
      * on it is news, a bare medium being looked at is not. Every OTHER refusal
      * below speaks, because each of those is a deed that is present and
      * wrong. */
-    if (memcmp(deed.magic, g_deed_magic, sizeof(g_deed_magic)) != 0) {
+    if (!DeedPenMagicIsHere(raw)) {
         return ERR_FILE_NOT_FOUND;
     }
 
@@ -77,7 +68,7 @@ static error_t deed_validate(uint8_t seat, uint64_t at_sector,
     if (!probe) return ERR_NO_MEMORY;
     memcpy(probe, raw, summed_bytes);
     memset(probe + __builtin_offsetof(VolumeDeed, crc32), 0, sizeof(uint32_t));
-    uint32_t have = KCrc32(probe, summed_bytes);
+    uint32_t have = DeedPenSum(probe, summed_bytes);
     kfree(probe);
 
     if (have != deed.crc32) {
@@ -175,10 +166,32 @@ error_t DeedReadTail(uint8_t seat, const MediumGround *ground,
 
     /* Two copies of one volume have to be the same volume. Anything else is
      * two volumes overlapping, which is worse than either being damaged. */
-    if (memcmp(out->head.uuid, head->head.uuid, 16) != 0 ||
-        out->head.sectors != head->head.sectors) {
+    if (memcmp(out->head.uuid, head->head.uuid, 16) != 0) {
         kprintf("[Deed] seat %u: the copy at the far end belongs to a "
                 "different volume than the one at the near end\n", seat);
+        DeedRelease(out);
+        return ERR_CORRUPTED;
+    }
+
+    /* ‼ THE SAME VOLUME, DISAGREEING ABOUT ITS OWN LENGTH, IS A DIFFERENT
+     * PIECE OF NEWS — and until volumes could grow it could not happen, so
+     * both cases shared one line that named the wrong thing.
+     *
+     * A volume takes the ground behind it by writing the far copy first and
+     * the head second (tagfs.c: volume_take_more_ground). Lose power between
+     * the two and this is exactly what is left: one volume, two lengths, the
+     * newer one at the far end. The head is what the machine stands on, so the
+     * volume is its old size and whole — and the growth will be attempted
+     * again on this very mount, from the head's numbers. Nothing is lost and
+     * nothing needs repairing; it is said because a machine that goes quiet
+     * about a half-finished write is a machine nobody can trust. */
+    if (out->head.sectors != head->head.sectors) {
+        kprintf("[Deed] seat %u: the copy at the far end says %llu sectors and "
+                "the one at the near end says %llu — the same volume, caught "
+                "between the two writes of a growth; the head is what this "
+                "machine stands on\n", seat,
+                (unsigned long long)out->head.sectors,
+                (unsigned long long)head->head.sectors);
         DeedRelease(out);
         return ERR_CORRUPTED;
     }

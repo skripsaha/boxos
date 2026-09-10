@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "video_colors.h"
 #include "boxos_color.h"
+#include "text_cell.h"
 
 typedef enum {
     DISPLAY_VGA_TEXT = 0,
@@ -35,6 +36,10 @@ void VideoPrint(const char *str);          /* current colour pair */
 void VideoPrintNewline(void);
 
 /* ───── Screen ops ───── */
+/* Put a finished rectangle of cells on the screen. See CanvasPaint: nothing
+ * is interpreted and the cursor stays where it was. False = it does not fit. */
+bool VideoPaintCells(uint32_t row, uint32_t col, uint32_t height, uint32_t width,
+                     const TextCell *cells);
 void VideoClearScreenRgb(uint32_t fg, uint32_t bg);
 void VideoClearLineRgb(int line, uint32_t fg, uint32_t bg);
 void VideoClearToEol(void);                /* current colour pair */
