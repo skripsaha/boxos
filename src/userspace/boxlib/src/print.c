@@ -177,6 +177,60 @@ static void lane_fail(StrandPrintState *ps)
  *
  * Between the two the strand turns in — the same mark, look, sleep the
  * daemon itself lives by — so a writer waiting for its lane costs nothing. */
+/* Say something to the display daemon, and tell a REFUSAL from a DEATH.
+ *
+ * ‼ A FULL RING IS NOT A FUNERAL.
+ *
+ * `send` is a Manifest op, and the kernel refuses it for reasons that have
+ * nothing to do with whether the daemon exists: its result ring is momentarily
+ * full (ERR_ROUTE_TARGET_FULL, system_ops.c SysRoute), or there was no room to
+ * copy the payload into it (ERR_NO_MEMORY). Both of those mean "not now". Only
+ * ERR_PROCESS_NOT_FOUND means "nobody is there".
+ *
+ * Reading the first as the second is what this closes, and the place it hurt
+ * was the prompt. console_listen runs the instant after a shell prints one —
+ * the busiest moment the daemon has, directly behind a screenful of output —
+ * and on ANY refusal the caller used to conclude the daemon had died: it tore
+ * this strand's lane down, released the Brook with the prompt still sitting
+ * unread inside it, and moved the strand onto the direct-VGA road. So the
+ * prompt printed after a long command sometimes never appeared and the one
+ * after a short command always did. Seen on the board, where a frame takes
+ * long enough for the daemon to fall behind; never once under an emulator,
+ * where it never falls behind at all.
+ *
+ * A refusal is WAITED OUT, not counted: the daemon is running and draining, so
+ * the room comes back, and yield hands it the core to do that with instead of
+ * spinning on the very thing being waited for. The wait ends by itself if the
+ * daemon really goes — the next answer is then ERR_PROCESS_NOT_FOUND, which is
+ * a death and is returned as one. No clock is consulted and no attempt is
+ * counted, because neither of those would be the truth about when the room
+ * comes back. */
+static int daemon_say(const uint8_t *req, uint16_t len)
+{
+    /* Said once per cabin, the first time a word to the daemon has to be
+     * waited for. Not a threshold and not a clock: the FACT that the daemon's
+     * ring was full at all is the news, because until this was found nobody
+     * knew it happened — the refusal was swallowed as a death and the machine
+     * quietly changed how it prints. One line, and the next board run says
+     * whether this road is the one being taken. */
+    static bool waited_before = false;
+
+    for (;;) {
+        int rc = send(g_display_pid, req, len);
+        if (rc == 0) return 0;
+        error_t why = box_errno_of(rc);
+        if (why != ERR_ROUTE_TARGET_FULL && why != ERR_NO_MEMORY) return rc;
+        if (!waited_before) {
+            waited_before = true;
+            kdbg_print("[print] the display daemon would not take a word just "
+                       "now (%s); waiting for room rather than burying it",
+                       why == ERR_ROUTE_TARGET_FULL ? "its ring is full"
+                                                    : "no room for the record");
+        }
+        yield();
+    }
+}
+
 static bool lane_await_grant(char *tag, size_t tag_cap)
 {
     Result  *held     = NULL;
@@ -197,7 +251,7 @@ static bool lane_await_grant(char *tag, size_t tag_cap)
     memcpy(req + 1, &gen, sizeof(gen));
 
     if (g_display_pid != 0) {
-        if (send(g_display_pid, req, sizeof(req)) < 0) done = true;
+        if (daemon_say(req, sizeof(req)) < 0) done = true;
     } else {
         int rc = broadcast("display", req, sizeof(req));
         if (rc < 0 && box_errno_of(rc) == ERR_ROUTE_NO_SUBSCRIBERS) done = true;
@@ -979,10 +1033,12 @@ TouchTag console_listen(void)
         req[0] = DISP_CMD_LISTEN;
         memcpy(req + 1, &gen, sizeof(gen));
         req[5] = 1;
-        if (send(g_display_pid, req, sizeof(req)) == 0) return ps->ear;
+        if (daemon_say(req, sizeof(req)) == 0) return ps->ear;
 
-        /* Nobody at that pid any more: the daemon is gone. Say so the way a
-         * failed push would, and hear the keyboard directly from here on. */
+        /* Nobody at that pid any more: the daemon is gone — daemon_say has
+         * already waited out every refusal that was merely a busy one. Say so
+         * the way a failed push would, and hear the keyboard directly from
+         * here on. */
         Brook *dead = (Brook *)ps->lane;
         ps->lane = NULL;
         lane_fail(ps);
@@ -1014,7 +1070,10 @@ void console_unlisten(void)
     req[0] = DISP_CMD_LISTEN;
     memcpy(req + 1, &gen, sizeof(gen));
     req[5] = 0;
-    (void)send(g_display_pid, req, sizeof(req));
+    /* Given back the same way it was taken: a daemon that is merely behind is
+     * waited for, because a lane that fails to hand the ear back keeps it, and
+     * the next program to read would hear nothing. */
+    (void)daemon_say(req, sizeof(req));
 }
 
 /* A cursor step is a frame on the lane, after whatever text is pending, so it

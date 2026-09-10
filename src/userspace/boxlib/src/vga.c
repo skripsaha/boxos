@@ -268,13 +268,30 @@ int vga_getdimensions(vga_dimensions_t *dims)
  *  Write operations — batched when batch_active(), immediate otherwise.
  * ========================================================================= */
 
-/* Append an op with no input crate to the active batch. Caller has
- * already confirmed batch capacity. */
+/* Append an op to the active batch. Caller has already confirmed capacity.
+ *
+ * ‼ EVERY OP IN A CONSOLE BATCH IS OPTIONAL, AND THAT IS NOT A RELAXATION.
+ *
+ * A Manifest stops at its first refusal: manifest_exec.c breaks out of the
+ * dispatch loop on any op that fails and is not marked OPTIONAL, so every op
+ * BEHIND it is never executed. That rule is right for a Manifest that is one
+ * transaction — do not write the file if the seek failed — and wrong for this
+ * one, which is a rope of independent things said to a screen. The display
+ * daemon packs a whole burst of output into one batch, so a single cell the
+ * kernel would not draw — a rectangle that no longer fits, a snapshot that
+ * found no memory — silently took the entire REST of the burst with it, up to
+ * and including the prompt printed at the end of it. Nothing was said, because
+ * the batch reports its first error and the daemon has no use for it.
+ *
+ * A console op that fails costs its own cell. It must not cost the ones after
+ * it. Where the caller wants to know, the answer is still there: the submit
+ * returns the first error either way (vga_commit), and the daemon now says so.
+ */
 static int batch_add_op(uint16_t opcode,
                         const void *params, uint16_t param_size,
                         uint16_t in_idx)
 {
-    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, 0,
+    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, OP_FLAG_OPTIONAL,
                                 in_idx, CRATE_INDEX_NONE,
                                 params, param_size);
 }

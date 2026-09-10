@@ -183,15 +183,34 @@ static void brook_ring(volatile uint32_t *bell)
      * die the moment the push returns. */
     uint8_t         mbuf[96];
     ManifestBuilder mb;
-    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return;
+    uint8_t         params[4];
+    int             rc = -1;
 
-    uint8_t params[4];
     memcpy(params, &who, sizeof(uint32_t));
-    if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_BELL, 0,
+    if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) == 0 &&
+        ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_BELL, 0,
                              CRATE_INDEX_NONE, CRATE_INDEX_NONE,
-                             params, sizeof(params)) != 0) return;
-    if (ManifestBuilderFinalize(&mb) != 0) return;
-    (void)ManifestSubmitNoWait((const Manifest *)mbuf, NULL, 0, 0);
+                             params, sizeof(params)) == 0 &&
+        ManifestBuilderFinalize(&mb) == 0) {
+        rc = ManifestSubmitNoWait((const Manifest *)mbuf, NULL, 0, 0);
+    }
+
+    /* ‼ A RING THAT DID NOT GO OUT MUST NOT LEAVE THE MARK BEHIND.
+     *
+     * The mark means "a wake has been delivered for this sleep", and every
+     * later push believes it and stays silent. So a submit the kernel refused
+     * — a full ring, no room for the record — used to cost the sleeper the
+     * whole sleep: nobody rang, nobody would ring again, and the frame sat in
+     * the stream until something unrelated woke the reader. On a console that
+     * is a line of output that appears when the next key is pressed.
+     *
+     * Put it back exactly as it was found. If the sleeper has woken in the
+     * meantime it has already taken its bell down, this CAS finds something
+     * else and leaves it alone, which is right: an awake strand needs no
+     * ringing. */
+    if (rc != 0) {
+        (void)brook_cas_u32(bell, who | BROOK_BELL_RUNG, who);
+    }
 }
 
 /* This side's own bell — the one it hangs out — and the peer's, which it

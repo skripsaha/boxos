@@ -4534,6 +4534,146 @@ run_finishmut() {
 }
 
 # ===========================================================================
+# batchfail — one refused op costs its own cell, and nothing behind it
+# ===========================================================================
+#
+# A Manifest stops at its first refusal: manifest_exec.c breaks out of the
+# dispatch loop on an op that fails and is not marked OPTIONAL, so every op
+# BEHIND it never runs. That is right for a Manifest that is one transaction
+# and wrong for the display daemon's, which packs a whole burst of output into
+# one batch — a single cell the kernel would not draw took the entire rest of
+# the burst with it, silently, up to and including the prompt printed at the
+# end. Reported from the board: after `files` there was no prompt, after `me`
+# there was, over and over.
+#
+# The instrument has to MAKE an op refuse, because on a desk nothing does. One
+# PUTSTRING in the middle of the run is made to fail, and the question is what
+# reaches the log ring afterwards — the ring is written by the op as it prints,
+# so it is a faithful witness of what was EXECUTED, not of what was asked.
+#
+#   with the ops OPTIONAL : one line of output is missing and everything after
+#                           it is there, prompt included
+#   without               : the tail of the burst is gone
+
+batchfail_inject_on() {
+    cp src/kernel/core/decks/hardware/hardware_ops.c "$SCRATCH/hw_ops.batchfail.bak"
+    python3 - <<'EOF2'
+p = "src/kernel/core/decks/hardware/hardware_ops.c"
+s = open(p).read()
+a = """    uint32_t fg    = hw_color_param(&op->params[0]);
+    uint32_t bg    = hw_color_param(&op->params[4]);
+    uint8_t  flags = op->params[8];"""
+assert s.count(a) == 1, "batchfail inject anchor missing"
+s = s.replace(a, """    /* logcheck injection: one run in sixteen refuses.
+     * ‼ A REFUSAL COUNTED FROM BOOT IS NOT A REFUSAL INSIDE THE BURST. The
+     * first try failed exactly once, at the tenth run of the session — which
+     * is somewhere in the boot banner, hundreds of runs before the listing
+     * this scenario measures. The mutation caught it: the tail arrived with
+     * the ops made non-optional, because nothing had refused inside that
+     * batch at all. It has to keep refusing, so that a burst of seventy runs
+     * is certain to contain one. */
+    { static uint32_t n; if ((++n % 16u) == 0) return ERR_INVALID_ARGUMENT; }
+""" + a, 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck injection" src/kernel/core/decks/hardware/hardware_ops.c || { echo "batchfail injection FAILED"; exit 1; }
+    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+}
+
+batchfail_inject_off() {
+    [ -f "$SCRATCH/hw_ops.batchfail.bak" ] && cp "$SCRATCH/hw_ops.batchfail.bak" src/kernel/core/decks/hardware/hardware_ops.c
+    sleep 1; touch src/kernel/core/decks/hardware/hardware_ops.c
+}
+
+batchfail_optional_off() {
+    cp src/userspace/boxlib/src/vga.c "$SCRATCH/vga.c.batchfail.bak"
+    python3 - <<'EOF2'
+p = "src/userspace/boxlib/src/vga.c"
+s = open(p).read()
+a = "    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, OP_FLAG_OPTIONAL,"
+assert s.count(a) == 1, "batchfail optional anchor missing"
+s = s.replace(a, "    return ManifestBuilderAddOp(&s_mb, DECK_HARDWARE, opcode, 0,   /* logcheck mutation */", 1)
+open(p, "w").write(s)
+EOF2
+    grep -q "logcheck mutation" src/userspace/boxlib/src/vga.c || { echo "batchfail mutation FAILED"; exit 1; }
+    sleep 1; touch src/userspace/boxlib/src/vga.c
+}
+
+batchfail_optional_on() {
+    [ -f "$SCRATCH/vga.c.batchfail.bak" ] && cp "$SCRATCH/vga.c.batchfail.bak" src/userspace/boxlib/src/vga.c
+    sleep 1; touch src/userspace/boxlib/src/vga.c
+}
+
+batchfail_run() {
+    # batchfail_run NAME — boot, list the volume, keep the window of the log.
+    make run-stop >/dev/null 2>&1
+    make run-bg UEFI=on STRICT=on CORES=4 MEM=4G >/dev/null 2>&1
+    local i=0
+    while [ $i -lt 60 ]; do
+        grep -q "BoxOS Shell" build/serial.log 2>/dev/null && break
+        sleep 1; i=$((i+1))
+    done
+    if ! grep -q "BoxOS Shell" build/serial.log 2>/dev/null; then
+        make run-stop >/dev/null 2>&1; return 1
+    fi
+    sleep 3
+    local MARK
+    MARK=$(wc -l < build/serial.log)
+    ./tools/qemu-input.sh type "files" >/dev/null 2>&1
+    ./tools/qemu-input.sh key ret >/dev/null 2>&1
+    sleep 6
+    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' > "$SCRATCH/serial.$1.log"
+    make run-stop >/dev/null 2>&1
+    return 0
+}
+
+run_batchfail() {
+    echo "== batchfail: a refused op costs its own cell and nothing behind it =="
+    batchfail_inject_on; build
+    local booted=1
+    batchfail_run batchfail && booted=0
+    batchfail_inject_off
+    if [ $booted -ne 0 ]; then bad "batchfail: never reached a shell"; build; return; fi
+
+    local L="$SCRATCH/serial.batchfail.log"
+    local N
+    N=$(grep -c "\.elf" "$L" || true)
+
+    # The count is the proof, and it is a wide gap: with the ops optional a
+    # refusal costs its own run and the rest of the burst arrives; without,
+    # everything behind the first refusal in each batch is gone. Measured on
+    # the same listing: 60 against 30. Naming a particular line instead would
+    # be too strict — with one run in sixteen refused, the casualty can be any
+    # run, including the last one.
+    [ "$N" -ge 50 ]
+    chk $? "batchfail: $N of the volume's programs reached the log with one run in sixteen refused"
+
+    grep -qE "^~" "$L"
+    chk $? "batchfail: and the prompt printed after the burst"
+
+    build   # leave the tree built from clean sources
+}
+
+run_batchfailmut() {
+    echo "== batchfailmut: with the ops not optional, the tail must disappear =="
+    batchfail_inject_on; batchfail_optional_off; build
+    local booted=1
+    batchfail_run batchfailmut && booted=0
+    batchfail_inject_off; batchfail_optional_on
+    if [ $booted -ne 0 ]; then bad "batchfailmut: never reached a shell"; build; return; fi
+
+    local L N
+    L="$SCRATCH/serial.batchfailmut.log"
+    N=$(grep -c "\.elf" "$L" || true)
+    if [ "$N" -ge 50 ]; then
+        bad "batchfailmut: the ops were made non-optional and $N programs STILL arrived - the oracle cannot see that defect"
+    else
+        ok "batchfailmut: the refusal took the rest of the burst with it — only $N programs reached the log, and the oracle sees it"
+    fi
+    build
+}
+
+# ===========================================================================
 # caret — there is one cursor on the screen, and it is where the program put it
 # ===========================================================================
 #
@@ -6033,14 +6173,16 @@ case "${1:-both}" in
     paintmut) run_paintmut ;;
     finish)   run_finish ;;
     finishmut) run_finishmut ;;
+    batchfail) run_batchfail ;;
+    batchfailmut) run_batchfailmut ;;
     caret)    run_caret ;;
     caretmut) run_caretmut ;;
     grow)     run_grow ;;
     growcut)  run_growcut ;;
     growmut)  run_growmut ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_lastsaid; echo; run_draft; echo; run_paint; echo; run_finish; echo; run_batchfail; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_mountfail; echo; run_badpool ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|lastsaid|draft|draftmut|paint|paintmut|finish|finishmut|batchfail|batchfailmut|caret|caretmut|grow|growcut|growmut|mountfail|holdground|returnfail|stranger|latearrival|replug|nofsgsbase|badpool|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|lostwake|lostwakemut|turnin|turninmut|slowdisk|gpt|seal|ctrlgiveup|isoch|both|all]"; exit 2 ;;
 esac
 
 echo
