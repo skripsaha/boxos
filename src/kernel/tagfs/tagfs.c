@@ -2,6 +2,7 @@
 #include "boardroom.h"
 #include "boarding.h"
 #include "deed/deed.h"
+#include "deed_pen.h"
 #include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
 #include "tag_bitmap/tag_bitmap.h"
@@ -698,6 +699,332 @@ static int disk_write_sectors(uint64_t vlba, uint16_t count, const void *buffer)
     return tagfs_volume_write(vlba, count, buffer);
 }
 
+/* A Deed occupies one block wherever it sits — the pen says how many sectors
+ * that is, so the tool and the kernel cannot come to disagree about it. */
+#define VOLUME_DEED_BLOCKS  1u
+
+/* How many data blocks a bitmap of this many blocks can carry a bit for. */
+static uint64_t bitmap_covers_blocks(uint32_t bitmap_blocks)
+{
+    return (uint64_t)bitmap_blocks * (uint64_t)TAGFS_BLOCK_SIZE * 8u;
+}
+
+/*
+ * Every bit for the blocks in [from, to) must read zero.
+ *
+ * This is a PROOF, not a write. The bits past the data run were zeroed when
+ * the volume was made and nothing has been allowed to touch them since — every
+ * writer of a bit is bounded by data_blocks — so a bit that is set there is
+ * the medium telling us this ground is not what the partition table says it
+ * is. Reading is enough to find that out, and reading cannot destroy anything,
+ * which is why growth never writes a bitmap.
+ *
+ * Read a block at a time: the range can be two megabytes on a volume growing
+ * into a 64 GB stick, and a mount is not the place to ask a kernel heap whose
+ * floor is two megabytes for all of it at once.
+ */
+static bool ground_ahead_is_blank(uint32_t from, uint32_t to, uint32_t *out_set)
+{
+    *out_set = 0;
+    if (to <= from) return true;
+
+    uint8_t *buf = (uint8_t *)kmalloc(TAGFS_BLOCK_SIZE);
+    if (!buf) return false;
+
+    uint32_t first_byte = from / 8u;
+    uint32_t last_byte  = (to + 7u) / 8u;         /* exclusive */
+    uint64_t base       = (uint64_t)g_state.layout.block_bitmap_block *
+                          TAGFS_BLOCK_SECTORS;
+
+    for (uint32_t off = first_byte / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE;
+         off < last_byte; off += TAGFS_BLOCK_SIZE) {
+        if (disk_read_sectors(base + off / TAGFS_SECTOR_SIZE,
+                              TAGFS_BLOCK_SECTORS, buf) != 0) {
+            /* Nothing was learned, so nothing is reported: a partial tally
+             * from the blocks read before the failure would have the caller
+             * saying the bitmap has blocks marked used when what happened is
+             * that the medium would not answer. */
+            *out_set = 0;
+            kfree(buf);
+            return false;
+        }
+        for (uint32_t b = 0; b < TAGFS_BLOCK_SIZE; b++) {
+            uint32_t byte_index = off + b;
+            if (byte_index < first_byte || byte_index >= last_byte) continue;
+            if (buf[b] == 0) continue;
+            for (int bit = 0; bit < 8; bit++) {
+                uint32_t block = byte_index * 8u + (uint32_t)bit;
+                if (block < from || block >= to) continue;
+                if (buf[b] & (1u << bit)) (*out_set)++;
+            }
+        }
+    }
+
+    kfree(buf);
+    return *out_set == 0;
+}
+
+/*
+ * ‼ THE VOLUME TAKES THE GROUND IT WAS GIVEN.
+ *
+ * An image is written to a medium with dd, and the medium is nearly always
+ * bigger than the image. Until now the volume simply did not use the rest: a
+ * 90 MiB image on a 64 GB stick left 63 GB of it dark, forever, with nothing
+ * saying so. A volume that cannot take the ground under it is a volume for
+ * image files, not for a machine somebody boots.
+ *
+ * So on every mount the two numbers are compared — how far the partition runs
+ * and how far the Deed says the volume runs — and when there is ground behind
+ * it, the volume takes it. That is three numbers in the Deed and nothing else:
+ * `sectors`, `tail_sector`, and the LAYOUT stamp's `total_blocks`/`data_blocks`.
+ *
+ * ‼ data_block DOES NOT MOVE, and that is the whole reason this is safe. A
+ * block number in a file's metadata is an index into the data run; move where
+ * the run starts and every number on the volume means something else. The run
+ * only ever gets LONGER, at the far end, where nothing was.
+ *
+ * ‼ THE ORDER IS THE CRASH SAFETY, and there is nothing else protecting this.
+ *
+ *   1. prove the new range is blank (a read — nothing is changed)
+ *   2. write the tail Deed at the NEW far end, and read it back
+ *   3. write the head Deed
+ *
+ * The head is the commit point. Cut the power before it and the volume is
+ * exactly what it was: the head still states the old length, and the new free
+ * bits lie beyond the old data_blocks where nobody asks about them. Cut it
+ * after, and the volume is grown, whole, with both copies agreeing. There is
+ * no third state.
+ *
+ * ‼ ONE CORE. Growth is a write, and it runs inside a mount: the boot mount is
+ * the BSP alone (arrivals are gated shut until TagFSBootMountSettled), and
+ * every later mount is under attending_take(). No second core can be here.
+ *
+ * ‼ IT ONLY EVER GROWS. A volume that shrank would be a volume whose file
+ * extents point outside it. The only comparison below is "more than it has".
+ */
+static void volume_take_more_ground(uint8_t seat, uint64_t ground_sectors,
+                                    DeedCopy *head)
+{
+    uint64_t have = head->head.sectors;
+
+    /* Not a byte of room, or not a whole block of it: nothing to take, and it
+     * is said, because "checked and there is nothing" and "never checked" have
+     * to be tellable apart from a screen. */
+    if (ground_sectors <= have + TAGFS_BLOCK_SECTORS) {
+        kprintf("[TagFS] seat %u: the volume fills the ground it was given — "
+                "%llu sectors, all of it\n", seat, (unsigned long long)have);
+        return;
+    }
+
+    /*
+     * ‼ THE MEDIUM HAS TO SAY HOW FAR IT RUNS, OR NOTHING IS TAKEN.
+     *
+     * A partition entry is bounded against the medium's own length only when
+     * the medium answered (ground.c). A medium that will not say leaves the
+     * entry unchecked — and reading past the end of a device is recoverable,
+     * while writing a Deed that permanently claims ground which does not exist
+     * is not: the volume then fails its own extent check on every boot after,
+     * bricked by its own commit.
+     */
+    uint64_t medium = BoardroomSeatSectors(seat);
+    if (medium == 0) {
+        kprintf("[TagFS] seat %u: there is ground behind this volume and the "
+                "medium will not say how far it runs — nothing is taken, "
+                "because a partition table is the only thing claiming that "
+                "ground is there\n", seat);
+        return;
+    }
+    if (g_volume_base + ground_sectors > medium) {
+        kprintf("[TagFS] seat %u: the ground behind this volume ends at sector "
+                "%llu and the medium ends at %llu — nothing is taken\n", seat,
+                (unsigned long long)(g_volume_base + ground_sectors),
+                (unsigned long long)medium);
+        return;
+    }
+
+    uint32_t data_block  = g_state.layout.data_block;
+    uint32_t data_now    = g_state.layout.data_blocks;
+    uint64_t vol_want    = ground_sectors / TAGFS_BLOCK_SECTORS;
+    if (vol_want <= (uint64_t)data_block + VOLUME_DEED_BLOCKS) return;
+
+    uint64_t data_want = vol_want - data_block - VOLUME_DEED_BLOCKS;
+
+    /*
+     * ‼ CLAMPED BY THE BITMAP, AND THE VOLUME SAYS SO.
+     *
+     * The bitmap lies in front of the data run, so it cannot be made bigger
+     * without moving data_block — see above. mkfs lays it down for a growth
+     * ceiling, and this is the volume meeting that ceiling: it takes what its
+     * bitmap can account for and leaves the rest, rather than handing out
+     * blocks it has nowhere to record.
+     */
+    uint64_t cover = bitmap_covers_blocks(g_state.layout.block_bitmap_blocks);
+    bool clamped = false;
+    if (data_want > cover) {
+        data_want = cover;
+        vol_want  = (uint64_t)data_block + data_want + VOLUME_DEED_BLOCKS;
+        clamped   = true;
+    }
+
+    if (data_want <= (uint64_t)data_now) {
+        kprintf("[TagFS] seat %u: the volume fills what its bitmap can account "
+                "for — %u data blocks\n", seat, data_now);
+        return;
+    }
+    /* The layout counts blocks in 32 bits; a volume that outgrew that is a
+     * volume this format cannot describe, and it stops here rather than
+     * wrapping. */
+    if (vol_want > 0xFFFFFFFFull || data_want > 0xFFFFFFFFull) return;
+
+    uint64_t new_sectors = vol_want * TAGFS_BLOCK_SECTORS;
+    uint64_t new_tail    = (vol_want - VOLUME_DEED_BLOCKS) * TAGFS_BLOCK_SECTORS;
+    uint64_t old_tail    = head->head.tail_sector;
+
+    kprintf("[TagFS] seat %u: this volume runs %llu sectors and the ground "
+            "under it runs %llu — it takes the rest\n", seat,
+            (unsigned long long)have, (unsigned long long)ground_sectors);
+    if (clamped) {
+        kprintf("[TagFS] seat %u: its block bitmap accounts for %llu blocks, so "
+                "it takes %llu of them and leaves %llu sectors unclaimed — "
+                "moving the bitmap would move every block number on it\n",
+                seat, (unsigned long long)cover, (unsigned long long)data_want,
+                (unsigned long long)(ground_sectors - new_sectors));
+    }
+
+    /* --- 1. The new ground must be blank ------------------------------- */
+    uint32_t set = 0;
+    if (!ground_ahead_is_blank(data_now, (uint32_t)data_want, &set)) {
+        if (set) {
+            kprintf("[TagFS] seat %u: the bitmap already has %u block(s) marked "
+                    "used past the end of this volume — that ground is not "
+                    "blank and this volume does not take it\n", seat, set);
+        } else {
+            kprintf("[TagFS] seat %u: the bitmap past the end of this volume "
+                    "would not read — nothing is taken\n", seat);
+        }
+        return;
+    }
+
+    /* --- 2. The Deed, amended ------------------------------------------ */
+    uint8_t *keep = (uint8_t *)kmalloc(head->raw_bytes);
+    if (!keep) return;
+    memcpy(keep, head->raw, head->raw_bytes);
+
+    DeedPen pen;
+    if (DeedPenTake(&pen, head->raw, head->raw_bytes) != 0) { kfree(keep); return; }
+
+    uint16_t lay_bytes = 0;
+    void *live = DeedPenFind(&pen, VOLUME_STAMP_LAYOUT, &lay_bytes);
+    if (!live || lay_bytes < sizeof(VolumeLayout)) { kfree(keep); return; }
+
+    VolumeLayout grown;
+    memcpy(&grown, &g_state.layout, sizeof(grown));
+    grown.total_blocks = vol_want;
+    grown.data_blocks  = (uint32_t)data_want;
+    /* Only the fields this build knows: a stamp longer than the struct keeps
+     * whatever a later mkfs put after them. */
+    memcpy(live, &grown, sizeof(grown));
+
+    DeedPenSetGround(&pen, new_sectors, new_tail);
+
+    /* --- The far copy first, and it must read back ---------------------- */
+    DeedPenSetRole(&pen, VOLUME_DEED_ROLE_TAIL);
+    DeedPenSeal(&pen);
+
+    bool far_end_took_it =
+        tagfs_volume_write(new_tail, DEED_PEN_SECTORS, head->raw) == 0 &&
+        BoardroomFlush(seat) == 0;
+
+    if (far_end_took_it) {
+        /* Read it back off the medium. This is the one live proof that the
+         * ground the partition table claims really is there and answers — a
+         * table can lie, a device that returns the bytes cannot. */
+        MediumGround grown_ground = { .start_sector = g_volume_base,
+                                      .sectors      = new_sectors,
+                                      .origin       = GROUND_FROM_MBR,
+                                      .entry        = 0 };
+        DeedCopy proof;
+        DeedCopy asif = *head;
+        asif.head.sectors     = new_sectors;
+        asif.head.tail_sector = new_tail;
+        if (DeedReadTail(seat, &grown_ground, &asif, &proof) == OK) {
+            DeedRelease(&proof);
+        } else {
+            far_end_took_it = false;
+        }
+    }
+
+    if (!far_end_took_it) {
+        memcpy(head->raw, keep, head->raw_bytes);
+        kfree(keep);
+        kprintf("[TagFS] seat %u: the new far end at sector %llu would not take "
+                "its deed and give it back — the volume is left exactly as it "
+                "was\n", seat, (unsigned long long)new_tail);
+        return;
+    }
+
+    /* --- 3. The head. Before this line the volume is old; after it, new. -- */
+    DeedPenSetRole(&pen, VOLUME_DEED_ROLE_HEAD);
+    DeedPenSeal(&pen);
+
+    if (tagfs_volume_write(0, DEED_PEN_SECTORS, head->raw) != 0 ||
+        BoardroomFlush(seat) != 0) {
+        memcpy(head->raw, keep, head->raw_bytes);
+        kfree(keep);
+        kprintf("[TagFS] seat %u: the deed at the head would not be written — "
+                "the volume stands at its old size and will try again on the "
+                "next mount\n", seat);
+        return;
+    }
+    kfree(keep);
+
+    /* Committed. Everything from here on is bookkeeping that costs a number if
+     * it is interrupted, never a block. */
+    memcpy(&g_state.layout, &grown, sizeof(grown));
+    head->head.sectors     = new_sectors;
+    head->head.tail_sector = new_tail;
+    /* The Ledger's free count is NOT touched here, and that is the whole
+     * reason growth needs no repair after an interruption: the count is
+     * derived from the bitmap at the end of every mount (see "THE FREE COUNT
+     * IS DERIVED"), so ground taken shows up in it by itself and ground taken
+     * twice cannot be counted twice. It used to be added here and written, and
+     * a growth that ran again after its head deed was rolled back left a
+     * volume claiming more free blocks than it had blocks. */
+    kprintf("[TagFS] seat %u: the volume now runs %llu sectors; its data run is "
+            "%u blocks, %u more than it had, and its far copy has moved to "
+            "sector %llu\n", seat, (unsigned long long)new_sectors,
+            g_state.layout.data_blocks, (uint32_t)(data_want - data_now),
+            (unsigned long long)new_tail);
+
+    /*
+     * ‼ THE OLD FAR COPY IS ERASED, AND THAT IS SAFETY AND NOT TIDINESS.
+     *
+     * The block the old tail sat in is inside the data run now and marked
+     * free, so it will be written over by the first file that lands on it.
+     * Until then it is a checksum-valid Deed that states the OLD length and
+     * the OLD layout — and DeedReadTailAlone finds a tail by reading the last
+     * block of the ground it is given. Image this volume onto a partition that
+     * happens to end there, lose the head, and the machine mounts on a stale
+     * deed believing an old data run: block numbers handed out over files.
+     */
+    uint8_t *blank = (uint8_t *)kmalloc(DEED_PEN_BYTES);
+    if (blank) {
+        memset(blank, 0, DEED_PEN_BYTES);
+        if (tagfs_volume_write(old_tail, DEED_PEN_SECTORS, blank) == 0) {
+            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
+                    "is inside the data run now and has been erased\n",
+                    seat, (unsigned long long)old_tail);
+        } else {
+            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
+                    "is inside the data run now and would not erase — it will "
+                    "be written over by the first file that lands there\n",
+                    seat, (unsigned long long)old_tail);
+        }
+        kfree(blank);
+    }
+    (void)BoardroomFlush(seat);
+}
+
 /*
  * Stand the volume on its ground.
  *
@@ -720,7 +1047,8 @@ static error_t volume_take_ground(uint8_t seat)
     bool    have_pass = BoardingPassVolume(want);
 
     DeedCopy head;
-    bool     took = false;
+    bool     took          = false;
+    uint64_t ground_run    = 0;   /* how far the partition runs, kept past `g` */
 
     /* Two passes rather than one with a "best so far": the volume named on the
      * pass is the one this kernel came out of, and taking a different one
@@ -744,6 +1072,7 @@ static error_t volume_take_ground(uint8_t seat)
 
             head          = candidate;
             g_volume_base = ground[g].start_sector;
+            ground_run    = ground[g].sectors;
             took          = true;
 
             if (from_tail) {
@@ -852,6 +1181,21 @@ static error_t volume_take_ground(uint8_t seat)
                 seat, g_state.geometry.block_bytes, TAGFS_BLOCK_SIZE);
         DeedRelease(&head);
         return ERR_TAGFS_CORRUPTED;
+    }
+
+    /*
+     * ‼ HERE, AND NOT A LINE LATER.
+     *
+     * Growth belongs after every refusal that could still turn this volume
+     * away — a volume this kernel will not mount must not be written to — and
+     * before the far-copy check below, because growing MOVES the far copy and
+     * that check has to read it where it now is.
+     *
+     * A volume standing on its tail copy is not grown: its head is gone, and
+     * the head is the commit point.
+     */
+    if (head.head.role == VOLUME_DEED_ROLE_HEAD) {
+        volume_take_more_ground(seat, ground_run, &head);
     }
 
     /*
@@ -1833,6 +2177,25 @@ static void free_list_destroy(void)
     g_state.block_bitmap.extent_count = 0;
 }
 
+/* What the Ledger SAID when it was read, kept so the derived count below can
+ * tell "the medium carries a wrong number" from "something already put it
+ * right in memory this mount". The mount-time fsck corrects the count in RAM
+ * and does not write it, so without this the same wrong number came back off
+ * the medium on every boot for ever. */
+static uint64_t g_ledger_free_as_read;
+
+/* How many blocks of the data run are free, counted from the bitmap that was
+ * read off the medium. The bitmap is the truth about whether a block is taken;
+ * everything else is bookkeeping about it. */
+static uint64_t count_free_blocks(void)
+{
+    uint64_t free_blocks = 0;
+    for (uint32_t b = 0; b < g_state.layout.data_blocks; b++) {
+        if (!bitmap_test_bit(g_state.block_bitmap.bitmap, b)) free_blocks++;
+    }
+    return free_blocks;
+}
+
 static void free_list_build(void)
 {
     free_list_destroy();
@@ -2110,11 +2473,7 @@ error_t tagfs_init(void) {
     if (ledger_rc != OK) {
         return ledger_rc;
     }
-
-    kprintf("[TagFS] %u data blocks, %llu free, %llu files\n",
-            g_state.layout.data_blocks,
-            (unsigned long long)g_state.ledger.free_blocks,
-            (unsigned long long)g_state.ledger.total_files);
+    g_ledger_free_as_read = g_state.ledger.free_blocks;
 
     /* --- DiskBook init (CoW redirect log). Replay is deferred until AFTER
      *     CoW init + manifest restore below, so restored redirects attach to
@@ -2310,8 +2669,34 @@ error_t tagfs_init(void) {
     g_state.block_bitmap.free_list = NULL;
     g_state.block_bitmap.extent_count = 0;
 
-    // Read block bitmap from disk
-    uint32_t bm_sector_count = (g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS);
+    /* ‼ ONLY THE PART OF THE BITMAP THAT COVERS THE DATA RUN IS READ.
+     *
+     * The region a volume declares for its bitmap is laid down for the ground
+     * it may one day take, not for the ground it has (create_tagfs: the growth
+     * ceiling). On a 90 MiB volume that is two megabytes of region carrying
+     * three kilobytes of bits. Reading the whole region would mean a
+     * two-megabyte kmalloc and four thousand sectors off the medium at every
+     * mount, to use a thousandth of it — on a kernel heap whose floor is two
+     * megabytes.
+     *
+     * The bits past the data run are zero by construction and mean nothing
+     * until the volume grows into them; when it does, this arithmetic covers
+     * them, because it is derived from data_blocks and not from the region. */
+    uint32_t bm_region_sectors =
+        g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS;
+    uint32_t bm_sector_count =
+        (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
+
+    /* A bitmap region too small to hold a bit for every data block is a volume
+     * that cannot keep track of its own ground. It has never been possible to
+     * make one — mkfs sizes the two together — so this is a deed that has been
+     * damaged or written by something else, and it is not mounted. */
+    if (bm_sector_count > bm_region_sectors) {
+        return mount_refused("its block bitmap region is too small to hold a "
+                             "bit for every block of its data run",
+                             ERR_TAGFS_CORRUPTED);
+    }
+
     uint32_t bm_buf_size = bm_sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (!bm_buf)
@@ -2512,6 +2897,52 @@ error_t tagfs_init(void) {
         }
     }
 
+    /*
+     * ‼ THE FREE COUNT IS DERIVED, NOT REMEMBERED.
+     *
+     * The Ledger carries a count of free blocks, and it used to be believed.
+     * It is the one number on a volume that no single write makes true: it is
+     * added to and taken from on every allocation, so anything that interrupts
+     * a sequence of writes leaves it saying something the bitmap does not.
+     *
+     * MEASURED 2026-09-10: a volume that grew, had its head deed rolled back
+     * to the pre-growth one — the state a power cut between the two writes of
+     * a growth leaves — and then grew again on the next mount, came up
+     * claiming 118764 free blocks in a data run of 73594. More free space than
+     * the volume has, from a number that had been added to twice for the same
+     * ground. The bitmap knew better the whole time, and it has already been
+     * read by this point: every mount reads it, and the free list is built
+     * from it, so counting it costs one walk of memory and no I/O at all.
+     *
+     * So it is counted here and the stored number is corrected when it
+     * disagrees. That makes every mount a repair of it, and takes the whole
+     * class of "the count drifted" out of the system rather than adding
+     * another place that tries to keep it right.
+     */
+    {
+        uint64_t counted = count_free_blocks();
+        g_state.ledger.free_blocks = counted;
+        if (counted != g_ledger_free_as_read) {
+            bool kept = (tagfs_write_ledger() == OK);
+            kprintf("[TagFS] the ledger came off the medium saying %llu blocks "
+                    "were free and the bitmap says %llu — a block is taken in "
+                    "the bitmap, so that is the number kept%s\n",
+                    (unsigned long long)g_ledger_free_as_read,
+                    (unsigned long long)counted,
+                    kept ? ", and it is written back"
+                         : "; the medium would not take it, so it is counted "
+                           "again on the next mount");
+        }
+    }
+
+    /* Said HERE and not beside the Ledger, because until the bitmap has been
+     * read there is nothing to say: the Ledger's own claim is a number the
+     * mount is about to check. */
+    kprintf("[TagFS] %u data blocks, %llu free, %llu files\n",
+            g_state.layout.data_blocks,
+            (unsigned long long)g_state.ledger.free_blocks,
+            (unsigned long long)g_state.ledger.total_files);
+
     // Populate well-known tag bitmasks for O(1) checks
     tagfs_init_well_known_tags();
 
@@ -2586,9 +3017,12 @@ static void tagfs_sync_inside(void)
     IntegrityFlush();
     IntegrityDrainReports();   // publish any pending bit-rot Touch events
 
-    // Write block bitmap to disk
+    /* Written the same way it is read: the sectors that carry bits for the
+     * data run, not the whole region the volume reserved for its growth. The
+     * rest is zero on the medium and stays zero — writing it back every sync
+     * would be two megabytes of traffic to say nothing. */
     uint32_t bitmap_bytes = (g_state.layout.data_blocks + 7) / 8;
-    uint32_t sector_count = (g_state.layout.block_bitmap_blocks * TAGFS_BLOCK_SECTORS);
+    uint32_t sector_count = (bitmap_bytes + TAGFS_SECTOR_SIZE - 1) / TAGFS_SECTOR_SIZE;
     uint32_t bm_buf_size = sector_count * TAGFS_SECTOR_SIZE;
     uint8_t *bm_buf = kmalloc(bm_buf_size);
     if (bm_buf)

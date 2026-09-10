@@ -256,6 +256,108 @@ int proc_kill(uint32_t pid)
     return box_fail(rc);
 }
 
+int proc_finish(uint32_t pid, uint32_t generation)
+{
+    if (generation == 0) return proc_kill(pid);
+    if (pid == 0)                 return -ERR_INVALID_ARGUMENT;
+    if (pid == cabin_info()->pid) return -ERR_INVALID_ARGUMENT;
+
+    /* 12-byte form: [u32 pid][i32 code][u32 generation]. The code is unread
+     * for a kill-other — the one ending never chose it — but it holds the
+     * place the 8-byte form defined, so the three forms stay one layout. */
+    uint32_t params[3] = { pid, 0u, generation };
+    int rc = MfCall1(DECK_SYSTEM, SYS_PROC_KILL,
+                     params, (uint16_t)sizeof(params),
+                     NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+/* Where the crew answer starts and how big a record's fixed half is —
+ * boxos_decks.h SYSTEM_OP_PROC_CREW holds the layout itself. */
+#define PROC_CREW_HEADER  8u
+#define PROC_CREW_FIXED   24u
+/* First ask, and the ceiling the kernel's own bounce keeps. Between them the
+ * ask doubles: a crew of three that answers in 8 KiB costs one syscall, and a
+ * crew of a thousand costs five rather than a guessed allocation. */
+#define PROC_CREW_FIRST_ASK  8192u
+#define PROC_CREW_MAX_ASK    262144u
+
+int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
+{
+    if (!tag || !tag[0] || !out_mates) return -ERR_INVALID_ARGUMENT;
+    *out_mates = NULL;
+    if (out_total) *out_total = 0;
+
+    size_t tag_len = strlen(tag);
+    if (tag_len >= 64) return -ERR_INVALID_ARGUMENT;
+
+    uint32_t cap   = PROC_CREW_FIRST_ASK;
+    uint8_t *blob  = NULL;
+    uint32_t got   = 0;
+    uint32_t delivered = 0, total = 0;
+
+    for (;;) {
+        uint8_t *fresh = (uint8_t *)malloc(cap);
+        if (!fresh) { free(blob); return -ERR_NO_MEMORY; }
+        free(blob);
+        blob = fresh;
+
+        got = 0;
+        int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_PROC_CREW,
+                         tag, (uint16_t)tag_len,
+                         NULL, 0,
+                         blob, cap, &got,
+                         BOX_ANSWER_GUARANTEED, NULL);
+        if (rc != 0) { free(blob); return box_fail(rc); }
+        if (got < PROC_CREW_HEADER) { free(blob); return -ERR_INTERNAL; }
+
+        memcpy(&delivered, blob + 0, sizeof(uint32_t));
+        memcpy(&total,     blob + 4, sizeof(uint32_t));
+
+        /* Everyone who wears the tag is in hand, or the room is at the
+         * ceiling and what came back is what there was room for — said as a
+         * count either way, never as a silent truncation. */
+        if (delivered >= total || cap >= PROC_CREW_MAX_ASK) break;
+        cap = cap * 2u > PROC_CREW_MAX_ASK ? PROC_CREW_MAX_ASK : cap * 2u;
+    }
+
+    if (out_total) *out_total = total;
+    if (delivered == 0) { free(blob); return 0; }
+
+    /* One allocation holds the array and every tag string after it, so the
+     * caller frees once and no member outlives its own name. */
+    size_t names = (size_t)got - PROC_CREW_HEADER
+                 - (size_t)delivered * PROC_CREW_FIXED;
+    size_t bytes = (size_t)delivered * sizeof(ProcMate) + names + delivered;
+    ProcMate *mates = (ProcMate *)malloc(bytes);
+    if (!mates) { free(blob); return -ERR_NO_MEMORY; }
+
+    char    *name_at = (char *)(mates + delivered);
+    uint32_t at      = PROC_CREW_HEADER;
+    for (uint32_t i = 0; i < delivered; i++) {
+        if (at + PROC_CREW_FIXED > got) { free(mates); free(blob); return -ERR_INTERNAL; }
+        uint32_t tags_len = 0;
+        memcpy(&mates[i].pid,        blob + at +  0, sizeof(uint32_t));
+        memcpy(&mates[i].generation, blob + at +  4, sizeof(uint32_t));
+        memcpy(&mates[i].state,      blob + at +  8, sizeof(uint32_t));
+        memcpy(&tags_len,            blob + at + 12, sizeof(uint32_t));
+        memcpy(&mates[i].cpu_us,     blob + at + 16, sizeof(uint64_t));
+        at += PROC_CREW_FIXED;
+        if (at + tags_len > got) { free(mates); free(blob); return -ERR_INTERNAL; }
+
+        memcpy(name_at, blob + at, tags_len);
+        name_at[tags_len] = '\0';
+        mates[i].tags = name_at;
+        name_at += tags_len + 1;
+        at      += tags_len;
+    }
+
+    free(blob);
+    *out_mates = mates;
+    return (int)delivered;
+}
+
 /* =========================================================================
  *  Tags
  * ========================================================================= */

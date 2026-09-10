@@ -78,20 +78,34 @@ static int HwVgaPutChar(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint32_t fg  = hw_color_param(&op->params[3]);
     uint32_t bg  = hw_color_param(&op->params[7]);
 
-    if (row >= (uint8_t)VideoGetRows() || col >= (uint8_t)VideoGetCols()) {
+    /* Compared as the counts they are, not through a byte. The cast was the
+     * same defect as the one HwVgaGetDimensions carried: on a 320-column
+     * console (uint8_t)320 is 64, so every cell from column 64 rightward was
+     * refused as out of range on a screen that had it. */
+    if ((int)row >= VideoGetRows() || (int)col >= VideoGetCols()) {
         return ERR_OUT_OF_RANGE;
     }
 
     console_lock_acquire();
 
-    uint8_t old_x = (uint8_t)VideoGetCursorX();
-    uint8_t old_y = (uint8_t)VideoGetCursorY();
+    /* The cursor is put back where it was, so the cell this op paints does not
+     * disturb the line somebody else is writing. Kept as counts, not bytes:
+     * the borrowed position is the kernel's own and has no business being
+     * squeezed through the ABI's byte on a console wider than 255 cells. */
+    int old_x = VideoGetCursorX();
+    int old_y = VideoGetCursorY();
 
+    /* One batch, and therefore one commit and one blit for the whole op. Its
+     * body moves the cursor twice, and since a cursor move now reaches the
+     * glass on its own (canvas.c: CanvasSetCursor), an unbatched putchar_at
+     * would light the caret at the target cell, paint, and light it again back
+     * home — three presents to put down one character. */
+    VideoBatchBegin();
     VideoSetCursor(col, row);
     VideoPrintCharRgb((char)ch, fg, bg);
     HwVgaMirrorChar((char)ch);
-
     VideoSetCursor(old_x, old_y);
+    VideoBatchEnd();
 
     console_lock_release();
     return OK;
@@ -172,6 +186,65 @@ static int HwVgaPutString(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
+/* HW_VGA_PAINT  params:[u8 row][u8 col][u8 height][u8 width]
+ *               in_crate: height*width TextCell, row-major, `width` per row
+ *
+ * A PICTURE, NOT SPEECH — and that is why nothing here reaches the log ring.
+ * Every other op on this deck mirrors what it puts on screen into the ring so
+ * the serial line and `logsave` carry the machine's account of itself. A
+ * painted frame has no account to give: it is 6144 cells of colour thirty
+ * times a second, and mirroring it would take the ring's global lock a
+ * hundred thousand times a second and bury every word the machine actually
+ * said under a screenful of spaces. What a painting program has to say, it
+ * says in words, through printf, like everything else.
+ *
+ * One op is also one Canvas commit and therefore one Present: the whole
+ * frame reaches the glass in a single blit, with no tear down its middle.
+ * Painted through vga_putchar_at it would have been 6144 ops, ~141 KB of
+ * Manifest, and — past boxlib's 4 KiB builder — a dozen separate blits. */
+static int HwVgaPaint(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                      const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->param_size < 4)               return ERR_INVALID_ARGUMENT;
+    if (op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    uint32_t row    = op->params[0];
+    uint32_t col    = op->params[1];
+    uint32_t height = op->params[2];
+    uint32_t width  = op->params[3];
+    if (height == 0 || width == 0) return ERR_INVALID_ARGUMENT;
+
+    /* The rectangle's size is the contract, not a maximum: a crate that is
+     * one cell short would otherwise be painted with whatever followed it in
+     * the caller's address space. Exact, or refused. */
+    Crate   *src  = &crates[op->in_crate];
+    uint64_t want = (uint64_t)height * width * sizeof(TextCell);
+    if (src->size != want) return ERR_INVALID_ARGUMENT;
+
+    /* Snapshot outside the console lock — the same rule as PUTSTRING: user
+     * memory is page-walked (and any page straddle handled) before any lock
+     * is taken. crate_in_buf caps nothing, and it does not need to: `want` is
+     * bounded by 255*255 cells because the geometry arrives as four bytes. */
+    TextCell *cells = (TextCell *)crate_in_buf(src, ctx);
+    if (!cells) return ERR_INVALID_ADDRESS;
+
+    /* Resolve the sentinels here rather than in boxlib: this is the snapshot,
+     * so the pass is free, and the Canvas keeps its rule that nothing but a
+     * concrete triple ever reaches a cell. */
+    for (uint64_t i = 0, n = (uint64_t)height * width; i < n; i++) {
+        cells[i].fg = BoxColorResolveFg(cells[i].fg);
+        cells[i].bg = BoxColorResolveBg(cells[i].bg);
+    }
+
+    console_lock_acquire();
+    bool fit = VideoPaintCells(row, col, height, width, cells);
+    console_lock_release();
+
+    crate_buf_free(cells);
+    return fit ? OK : ERR_OUT_OF_RANGE;
+}
+
 /* HW_VGA_CLEAR_SCREEN  params:[u32 fg][u32 bg] — every cell becomes a
  * space in this pair; the current colour state is untouched. */
 static int HwVgaClearScreen(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -249,6 +322,67 @@ static int HwVgaSetCursor(const ManifestOp *op, Crate *crates, uint16_t crate_co
     return OK;
 }
 
+/* HW_VGA_STEP_CURSOR  params:[i32 delta]
+ *
+ * ‼ A RELATIVE MOVE IS RESOLVED WHERE THE POSITION LIVES, NOT WHERE IT IS
+ * GUESSED.
+ *
+ * A line editor knows how far the caret must move — one cell left, four cells
+ * back to the start of what it echoed — and it never knows where on the screen
+ * that is: the column belongs to the console, which the kernel, the daemon and
+ * every other program write to as well. Until this op the move was done in two
+ * halves from outside: read the cursor with HW_VGA_GET_CURSOR, do the
+ * arithmetic in userspace, write it back with HW_VGA_SET_CURSOR. Three things
+ * were wrong with that, and this op ends all three.
+ *
+ * It read a position that could be stale by the time it was written. Anything
+ * printed between the two calls — a kprintf from another core, another lane's
+ * output — moved the cursor, and the step then landed relative to somebody
+ * else's text.
+ *
+ * It made the caller do the arithmetic in cells, so it had to know how wide
+ * the screen is. The width travels in a byte (HW_VGA_GET_DIMENSIONS), so on a
+ * console wider than 255 columns the caller's arithmetic was wrong, and a
+ * caller that failed to learn the width at all silently stopped moving the
+ * cursor for the rest of the boot.
+ *
+ * And it cost three synchronous round trips per keystroke where one would do —
+ * a read that had to flush the writer's batch, then the write. Backspace and
+ * the arrow keys were three times heavier than typing a letter.
+ *
+ * The position is linear, row * cols + col, so a step crosses line ends the
+ * way a reader expects, and it is clamped to the screen rather than wrapping
+ * round: a caret cannot be stepped off the console it belongs to. */
+static int HwVgaStepCursor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                           const OpContext *ctx)
+{
+    (void)crates; (void)crate_count; (void)ctx;
+    if (op->param_size < 4) return ERR_INVALID_ARGUMENT;
+
+    int32_t delta;
+    memcpy(&delta, &op->params[0], sizeof(delta));
+    if (delta == 0) return OK;
+
+    console_lock_acquire();
+
+    int cols = VideoGetCols();
+    int rows = VideoGetRows();
+    if (cols <= 0 || rows <= 0) {          /* no console to move a caret on */
+        console_lock_release();
+        return ERR_UNSUPPORTED;
+    }
+
+    int64_t linear = (int64_t)VideoGetCursorY() * cols + VideoGetCursorX() + delta;
+    int64_t last   = (int64_t)rows * cols - 1;
+    if (linear < 0)    linear = 0;
+    if (linear > last) linear = last;
+
+    VideoSetCursor((int)(linear % cols), (int)(linear / cols));
+
+    console_lock_release();
+    return OK;
+}
+
 /* HW_VGA_SET_COLOR  params:[u32 fg][u32 bg]
  *                   out_crate (optional): [u32 old_fg][u32 old_bg] */
 static int HwVgaSetColor(const ManifestOp *op, Crate *crates, uint16_t crate_count,
@@ -319,7 +453,28 @@ static int HwVgaNewline(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* HW_VGA_GET_DIMENSIONS  out_crate:[u8 cols][u8 rows] */
+/* HW_VGA_GET_DIMENSIONS  out_crate:[u8 cols][u8 rows]
+ *
+ * ‼ CLAMPED, NOT TRUNCATED, AND THE DIFFERENCE IS THE WHOLE POINT.
+ *
+ * The geometry travels in two bytes, so a console with more than 255 of
+ * anything cannot be named in full here. This used to answer with a CAST:
+ * a 2560-pixel GOP is 320 columns, and (uint8_t)320 is 64 — so a program
+ * asked how wide the screen was, was told sixty-four, painted a fifth of the
+ * glass and reported success. Worse, the value it was told was not even a
+ * ceiling it could trust: 3840 px answered 224 of 480, and a program checking
+ * for the zero that "too wide" was supposed to produce saw a plausible number
+ * instead, because only an exact multiple of 2048 pixels wraps to zero.
+ *
+ * Clamping says the true thing this ABI can say: "255 is as far as you can
+ * name". A program then paints the part of the screen it can address, and
+ * everything it addresses is really there. A zero now has one meaning left —
+ * there is no console — which is what VideoGetCols answers when the Canvas is
+ * not ready, and that is worth being able to tell apart.
+ *
+ * The widening of the whole VGA ABI to sixteen bits is a separate piece of
+ * work: it moves putchar_at, setcursor, clear_line, paint and this op, plus
+ * every caller of vga_dimensions_t. Until then, this is the honest answer. */
 static int HwVgaGetDimensions(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                               const OpContext *ctx)
 {
@@ -328,9 +483,12 @@ static int HwVgaGetDimensions(const ManifestOp *op, Crate *crates, uint16_t crat
     Crate *out = &crates[op->out_crate];
     if (out->capacity < 2) return ERR_BUFFER_TOO_SMALL;
 
+    int cols = VideoGetCols();
+    int rows = VideoGetRows();
+
     uint8_t blob[2];
-    blob[0] = (uint8_t)VideoGetCols();
-    blob[1] = (uint8_t)VideoGetRows();
+    blob[0] = (uint8_t)(cols > 255 ? 255 : (cols < 0 ? 0 : cols));
+    blob[1] = (uint8_t)(rows > 255 ? 255 : (rows < 0 ? 0 : rows));
     if (crate_write(out, ctx, blob, 2) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
@@ -1116,6 +1274,8 @@ error_t HardwareDeckRegister(void)
         { HW_VGA_SCROLL_UP,      HwVgaScrollUp,      OP_AUTH_NONE,   "hw.vga.scroll"    },
         { HW_VGA_NEWLINE,        HwVgaNewline,       OP_AUTH_NONE,   "hw.vga.newline"   },
         { HW_VGA_GET_DIMENSIONS, HwVgaGetDimensions, OP_AUTH_NONE,   "hw.vga.dims"      },
+        { HW_VGA_PAINT,          HwVgaPaint,         OP_AUTH_NONE,   "hw.vga.paint"     },
+        { HW_VGA_STEP_CURSOR,    HwVgaStepCursor,    OP_AUTH_NONE,   "hw.vga.step"      },
         /* System power: only system-tagged processes can reboot/shutdown. */
         { HW_SYSTEM_REBOOT,      HwSystemReboot,     OP_AUTH_SYSTEM, "hw.system.reboot"  },
         { HW_SYSTEM_SHUTDOWN,    HwSystemShutdown,   OP_AUTH_SYSTEM, "hw.system.shutdown"},

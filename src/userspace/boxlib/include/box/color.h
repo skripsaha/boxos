@@ -65,6 +65,30 @@ typedef uint32_t Color;
 #define COLOR_SLATE         COLOR_RGB(0x60, 0x70, 0x80)
 
 /* ------------------------------------------------------------------------- */
+/* The colour word, said and read.
+ *
+ * "#rrggbb" is how this system spells a colour everywhere — in headers, in
+ * commit messages, and now in what a person types at a program. These four
+ * are the whole vocabulary: read one, write one, take one off the wheel,
+ * and mix two. Integer arithmetic throughout; a cabin has no libm. */
+
+/* "#rrggbb" or "rrggbb", either case, and nothing else — no names, no short
+ * form, no trailing bytes. True on success, and only then is *out written. */
+bool  color_parse(const char *text, Color *out);
+
+/* The other direction. Exactly 7 characters and a NUL, so out[] is 8. */
+void  color_format(Color c, char out[8]);
+
+/* A colour off the wheel. `hue` runs 0..1535 — six sectors of 256, the same
+ * scale the VGA text projection quantises on (boxos_color.h), so a hue that
+ * reads as red on a framebuffer reads as red on a text console. `sat` and
+ * `val` are 0..255; sat 0 is a grey of that value. */
+Color color_wheel(uint16_t hue, uint8_t sat, uint8_t val);
+
+/* `weight` parts of b in 256 parts of the mix, channel by channel. */
+Color color_mix(Color a, Color b, uint8_t weight);
+
+/* ------------------------------------------------------------------------- */
 /* Color state — process-local current text colors. Used by print/println and
  * the printf output path when no inline %color override applies. */
 

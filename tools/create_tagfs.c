@@ -38,6 +38,7 @@
 
 #include "tagfs_reserved.h"  /* shared reserved-tag vocabulary (-I src/include) */
 #include "volume_deed.h"     /* the title; types come from <stdint.h> above    */
+#include "deed_pen.h"        /* and the one pen it is written with              */
 #include "volume_ledger.h"   /* and what is true of the volume today           */
 
 /* ====================================================================
@@ -67,9 +68,11 @@
 #define DISK_BOOK_ENTRY_BLOCKS \
     ((DISK_BOOK_CAPACITY * DISK_BOOK_SECTORS_PER_ENTRY) / TAGFS_BLOCK_SECTORS)
 
-/* A Deed occupies one block wherever it sits — see DEED_SECTORS in deed.c. */
+/* A Deed occupies one block wherever it sits. The sector count is the pen's,
+ * so the tool and the kernel cannot come to disagree about how much of the
+ * ground a Deed takes. */
 #define DEED_BLOCKS   1
-#define DEED_SECTORS  TAGFS_BLOCK_SECTORS
+#define DEED_SECTORS  DEED_PEN_SECTORS
 
 /* What a BoxOS partition looks like from the outside. The MBR type byte and
  * the GPT type GUID are the same two constants the kernel's ground.c reads;
@@ -324,14 +327,9 @@ static int write_file_data(FILE* disk, uint32_t data_start_block, uint32_t block
  * ==================================================================== */
 
 static uint32_t tagfs_crc32(const uint8_t* data, uint32_t len) {
-    uint32_t crc = 0xFFFFFFFF;
-    for (uint32_t i = 0; i < len; i++) {
-        crc ^= data[i];
-        for (int j = 0; j < 8; j++) {
-            crc = (crc >> 1) ^ (0xEDB88320 & (-(crc & 1)));
-        }
-    }
-    return ~crc;
+    /* The pen's, so the routine that signs a Deed and the routine that checks
+     * a partition table are one routine and cannot drift apart. */
+    return DeedPenSum(data, len);
 }
 
 /* ====================================================================
@@ -516,7 +514,34 @@ typedef struct {
     uint64_t tail_sector;       /* where the far copy of the Deed goes   */
 } VolumeShape;
 
-static void compute_layout(uint64_t ground_sectors, VolumeShape* out) {
+/* One bitmap block is 4096 bytes of bits, and a bit is a data block. */
+#define BITMAP_BLOCK_COVERS  ((uint32_t)(TAGFS_BLOCK_SIZE * 8))
+
+/*
+ * ‼ THE BITMAP IS LAID DOWN FOR THE GROUND THIS VOLUME MAY ONE DAY TAKE,
+ * NOT FOR THE GROUND IT IS BORN ON.
+ *
+ * A volume takes the ground behind it when it is mounted — write this image to
+ * a 64 GB stick and the volume grows into the whole stick instead of leaving
+ * 63 GB of it dark. Growing means more data blocks, and more data blocks means
+ * more bits. But the bitmap lies IN FRONT of the data run: making it bigger
+ * later would push `data_block` along, and a block number in a file's metadata
+ * has to mean the same thing for the whole life of the volume. So the room is
+ * taken at birth, once, and growth never has to move anything.
+ *
+ * Sixty-four gibibytes is named because that is the size of the media this
+ * system is written to. It costs one bit per 4096-byte block — 32 KiB of
+ * bitmap per GiB of ceiling, 2 MiB in all — on an image otherwise 90 MiB.
+ * A volume BORN bigger than the ceiling still gets a bitmap that covers it:
+ * the number below is a floor under the bitmap, not a cap on the volume.
+ */
+#define GROWTH_CEILING_BLOCKS \
+    ((uint32_t)((64ull * 1024 * 1024 * 1024) / TAGFS_BLOCK_SIZE))
+#define GROWTH_CEILING_BITMAP_BLOCKS \
+    ((GROWTH_CEILING_BLOCKS + BITMAP_BLOCK_COVERS - 1) / BITMAP_BLOCK_COVERS)
+
+/* 0, or -1 when the ground is too small to lay a volume on at all. */
+static int compute_layout(uint64_t ground_sectors, VolumeShape* out) {
     memset(out, 0, sizeof(*out));
 
     out->volume_blocks    = (uint32_t)(ground_sectors / TAGFS_BLOCK_SECTORS);
@@ -526,25 +551,50 @@ static void compute_layout(uint64_t ground_sectors, VolumeShape* out) {
     out->disk_book_blocks = 2 + DISK_BOOK_ENTRY_BLOCKS;  /* head, backup, records */
     out->bitmap_block     = out->disk_book_block + out->disk_book_blocks;
 
-    /* The bitmap covers the data run and lives in front of it, so its size and
-     * the run's size define each other. Two or three passes settle it; the
-     * loop is bounded because each pass can only shrink the run. */
-    uint32_t bitmap_blocks = 1;
-    for (int i = 0; i < 10; i++) {
-        uint32_t data_block  = out->bitmap_block + bitmap_blocks;
+    /*
+     * The bitmap covers the data run and lies in front of it, so its size and
+     * the run's size define each other. It starts at the growth ceiling and
+     * only ever GROWS from there.
+     *
+     * ‼ ONLY EVER GROWS, AND THAT IS WHAT MAKES IT SETTLE.
+     *
+     * A loop that could also shrink can go round in a two-cycle: N blocks
+     * leave a run that needs N+1, and N+1 blocks take a block off the front so
+     * the run needs only N again. It then runs out of passes and leaves
+     * whichever of the two it was holding — and half the time that is the
+     * smaller one, which is a volume whose data run is a block wider than its
+     * own bitmap can account for. Growing only cannot cycle: a bigger bitmap
+     * makes a shorter run, and a shorter run can only ask for less.
+     */
+    uint32_t bitmap_blocks = GROWTH_CEILING_BITMAP_BLOCKS;
+    for (int i = 0; i < 32; i++) {
+        uint32_t data_block = out->bitmap_block + bitmap_blocks;
+        /* ‼ Checked, because it can now happen. With a two-megabyte bitmap the
+         * front matter is 645 blocks, and a ground smaller than that used to
+         * make this subtraction wrap to four billion and be believed. */
+        if (out->volume_blocks <= data_block + DEED_BLOCKS) return -1;
         uint32_t data_blocks = out->volume_blocks - data_block - DEED_BLOCKS;
         uint32_t need = ((data_blocks + 7) / 8 + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
-        if (need == bitmap_blocks) break;
+        if (need <= bitmap_blocks) break;
         bitmap_blocks = need;
     }
 
     out->bitmap_blocks = bitmap_blocks;
     out->data_block    = out->bitmap_block + bitmap_blocks;
+    if (out->volume_blocks <= out->data_block + DEED_BLOCKS) return -1;
     out->data_blocks   = out->volume_blocks - out->data_block - DEED_BLOCKS;
+
+    /* Said as a fact rather than trusted from the loop above: a volume whose
+     * bitmap cannot hold a bit for every block of its data run is a volume
+     * that cannot keep track of its own ground, and the kernel refuses to
+     * mount one. It must not be possible to MAKE one. */
+    if ((uint64_t)out->data_blocks >
+        (uint64_t)out->bitmap_blocks * BITMAP_BLOCK_COVERS) return -1;
 
     /* The far copy goes in the last block of the volume — as far from the head
      * as the ground allows, which is the whole point of having it. */
     out->tail_sector = (uint64_t)(out->volume_blocks - DEED_BLOCKS) * TAGFS_BLOCK_SECTORS;
+    return 0;
 }
 
 /* ====================================================================
@@ -555,26 +605,6 @@ static void compute_layout(uint64_t ground_sectors, VolumeShape* out) {
  * the one byte that says which is which — and a head read where a tail should
  * be is then a misdirected read that says so, instead of a valid-looking Deed.
  * ==================================================================== */
-
-static const uint8_t g_deed_magic[8] = {
-    VOLUME_DEED_MAGIC_0, VOLUME_DEED_MAGIC_1, VOLUME_DEED_MAGIC_2,
-    VOLUME_DEED_MAGIC_3, VOLUME_DEED_MAGIC_4, VOLUME_DEED_MAGIC_5,
-    VOLUME_DEED_MAGIC_6, VOLUME_DEED_MAGIC_7
-};
-
-/* Lay one stamp down and return where the next one starts. The reader steps to
- * the next four-byte boundary after each payload, so the writer must leave it
- * exactly there — the buffer is already zeroed, so the padding is zeroes and
- * the checksum covers them. */
-static uint32_t append_stamp(uint8_t* buf, uint32_t at, uint16_t kind,
-                             const void* payload, uint16_t bytes) {
-    VolumeStamp s;
-    s.kind  = kind;
-    s.bytes = bytes;
-    memcpy(buf + at, &s, sizeof(s));
-    memcpy(buf + at + sizeof(s), payload, bytes);
-    return (at + (uint32_t)sizeof(s) + bytes + 3u) & ~3u;
-}
 
 static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
                       const uint8_t uuid[16], const VolumeShape* shape,
@@ -616,26 +646,25 @@ static int write_deed(FILE* disk, uint32_t role, uint64_t vsector,
     born.created_unix = (uint64_t)time(NULL);
     memcpy(born.maker, "create_tagfs", 12);
 
-    uint32_t at = sizeof(VolumeDeed);
-    at = append_stamp(block, at, VOLUME_STAMP_GEOMETRY, &geo,    sizeof(geo));
-    at = append_stamp(block, at, VOLUME_STAMP_LAYOUT,   &layout, sizeof(layout));
-    at = append_stamp(block, at, VOLUME_STAMP_BORN,     &born,   sizeof(born));
-    at = append_stamp(block, at, VOLUME_STAMP_BOOT,     boot,    sizeof(*boot));
+    /* The pen zeroes the block, lays the magic and the prologue, and knows
+     * where each stamp goes. Nothing about the FORMAT is spelled here any
+     * more — only which stamps this volume is born with and what they say. */
+    DeedPen pen;
+    DeedPenOpen(&pen, block, sizeof(block));
+    if (DeedPenSay(&pen, VOLUME_STAMP_GEOMETRY, &geo,    sizeof(geo))    != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_LAYOUT,   &layout, sizeof(layout)) != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_BORN,     &born,   sizeof(born))   != 0 ||
+        DeedPenSay(&pen, VOLUME_STAMP_BOOT,     boot,    sizeof(*boot))  != 0) {
+        fprintf(stderr, "The stamps of this Deed do not fit the block it lives in\n");
+        return -1;
+    }
 
-    VolumeDeed deed;
-    memset(&deed, 0, sizeof(deed));
-    memcpy(deed.magic, g_deed_magic, sizeof(g_deed_magic));
-    deed.prologue_bytes = sizeof(VolumeDeed);
-    deed.stamp_bytes    = (uint16_t)(at - sizeof(VolumeDeed));
-    deed.crc32          = 0;
-    memcpy(deed.uuid, uuid, 16);
-    deed.sectors     = (uint64_t)shape->volume_blocks * TAGFS_BLOCK_SECTORS;
-    deed.tail_sector = shape->tail_sector;
-    deed.role        = role;
-
-    memcpy(block, &deed, sizeof(deed));
-    deed.crc32 = tagfs_crc32(block, sizeof(deed) + deed.stamp_bytes);
-    memcpy(block, &deed, sizeof(deed));
+    DeedPenSetUuid(&pen, uuid);
+    DeedPenSetGround(&pen,
+                     (uint64_t)shape->volume_blocks * TAGFS_BLOCK_SECTORS,
+                     shape->tail_sector);
+    DeedPenSetRole(&pen, role);
+    DeedPenSeal(&pen);
 
     return write_at_sector(disk, vsector, block, sizeof(block));
 }
@@ -813,9 +842,93 @@ static void generate_uuid(uint8_t uuid[16]) {
  * Main
  * ==================================================================== */
 
+/* ====================================================================
+ *  --ground: how far the volume's ground must run to hold these files
+ *
+ * ‼ THE SIZE OF A VOLUME IS NOT A NUMBER ANYBODY TYPES.
+ *
+ * It was: the build made a 24 MiB region because 51200 was written in the
+ * Makefile, and the day the files inside came to more than that, the build did
+ * not say "the medium is too small" — it made the volume anyway, with four
+ * hundred kilobytes left, and the C++ suite failed seventy checks because it
+ * had nowhere to write its test files. A ceiling that is discovered by what
+ * breaks under it is not a ceiling, it is a trap.
+ *
+ * So the tool that lays a volume out is asked first how much ground it needs,
+ * and the answer is what the medium is then made to give. Adding a program to
+ * the image grows the image. Nothing has to be raised by hand, ever.
+ *
+ * The answer is the CONTENT plus the ROOM A RUNNING MACHINE WORKS IN — logs
+ * poured by logsave, drafts, CoW snapshots, the files a test suite makes and
+ * deletes. That room is a policy, stated once, here, with its reason: a
+ * machine that cannot write is a machine that cannot be used, and the cost of
+ * being generous is sixty-four mebibytes on a medium that has gigabytes.
+ * ==================================================================== */
+
+/* Sixty-four mebibytes of room, in the volume's own blocks. */
+#define GROUND_WORKING_ROOM_BLOCKS   ((64u * 1024u * 1024u) / TAGFS_BLOCK_SIZE)
+
+/* The metadata pool chains into the data run as records outgrow one block. The
+ * image's own record count settles in two blocks today; eight is the room for
+ * that to double twice without anybody noticing it had a bound. */
+#define GROUND_METADATA_SLACK_BLOCKS 8u
+
+/* Every volume alignment is on the conventional mebibyte — the grain the Deed
+ * records and every flash translation layer is built around. */
+#define GROUND_GRAIN_SECTORS         2048u
+
+static int say_the_ground(int pair_count, char* argv[], int first) {
+    uint64_t data_blocks = 3;   /* registry, file table, metadata pool */
+    data_blocks += GROUND_METADATA_SLACK_BLOCKS;
+
+    for (int i = 0; i < pair_count; i++) {
+        const char* path = argv[first + i * 2];
+        FILE* f = fopen(path, "rb");
+        if (!f) {
+            fprintf(stderr, "create_tagfs --ground: cannot read %s\n", path);
+            return 1;
+        }
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        fclose(f);
+        if (size < 0) size = 0;
+        data_blocks += ((uint64_t)size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
+    }
+
+    data_blocks += GROUND_WORKING_ROOM_BLOCKS;
+
+    /* compute_layout answers the other way round — ground in, data run out —
+     * and the bitmap in between makes it not quite invertible. So the ground
+     * is grown a grain at a time until the run it yields is big enough. It
+     * settles in one or two steps from this start and cannot loop: each step
+     * adds ground, and the run grows with it. */
+    uint64_t ground = (data_blocks + 64) * TAGFS_BLOCK_SECTORS;
+    ground = ((ground + GROUND_GRAIN_SECTORS - 1) / GROUND_GRAIN_SECTORS) * GROUND_GRAIN_SECTORS;
+
+    for (;;) {
+        VolumeShape shape;
+        if (compute_layout(ground, &shape) == 0 && shape.data_blocks >= data_blocks)
+            break;
+        ground += GROUND_GRAIN_SECTORS;
+    }
+
+    printf("%llu\n", (unsigned long long)ground);
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
+    /* --ground answers a question about a file list and touches no medium. */
+    if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
+        if ((argc - 2) % 2 != 0) {
+            fprintf(stderr, "Usage: %s --ground [<file> <tags>] ...\n", argv[0]);
+            return 1;
+        }
+        return say_the_ground((argc - 2) / 2, argv, 2);
+    }
+
     if (argc < 2 || (argc > 2 && (argc - 2) % 2 != 0)) {
         fprintf(stderr, "Usage: %s <disk_image> [<file> <tags>] ...\n", argv[0]);
+        fprintf(stderr, "       %s --ground [<file> <tags>] ...\n", argv[0]);
         fprintf(stderr, "\n");
         fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
         fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
@@ -851,7 +964,14 @@ int main(int argc, char* argv[]) {
 
     /* ---- Compute layout, in the volume's own blocks ---- */
     VolumeShape shape;
-    compute_layout(g_ground_sectors, &shape);
+    if (compute_layout(g_ground_sectors, &shape) != 0) {
+        fprintf(stderr,
+                "The ground claimed for BoxOS is %llu sectors, and a volume's "
+                "front matter alone needs more than that\n",
+                (unsigned long long)g_ground_sectors);
+        fclose(disk);
+        return 1;
+    }
     uint32_t total_blocks      = shape.data_blocks;
     uint32_t data_start_block  = shape.data_block;
 

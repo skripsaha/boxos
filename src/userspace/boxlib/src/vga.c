@@ -58,6 +58,8 @@ static bool    s_dims_valid   = false;
 #define HW_VGA_SCROLL_UP      0x79
 #define HW_VGA_NEWLINE        0x7A
 #define HW_VGA_GET_DIMENSIONS 0x7B
+#define HW_VGA_PAINT          0x7C
+#define HW_VGA_STEP_CURSOR    0x7D
 
 /* Little-endian u32 into an op-param byte stream (params are unaligned). */
 static inline void put_color_param(uint8_t *dst, Color c)
@@ -338,6 +340,35 @@ int vga_setcursor(uint8_t row, uint8_t col)
     return 0;
 }
 
+int vga_step_cursor(int32_t delta)
+{
+    if (delta == 0) return 0;
+
+    uint8_t params[4];
+    memcpy(params, &delta, sizeof(delta));
+
+    /* Batched like any other write, and that is the point of having it: a
+     * backspace is then ONE Manifest — the text that redraws the tail and the
+     * step that puts the caret back — instead of a flush, a synchronous read
+     * and a write. Where the caret ends up is the kernel's answer, so the
+     * cached position no longer stands. */
+    if (batch_active()) {
+        if (!batch_have_capacity(sizeof(params), 0)) {
+            int rc = batch_flush_locked();
+            if (rc != OK) return rc;
+        }
+        s_cursor_valid = false;
+        return batch_add_op(HW_VGA_STEP_CURSOR, params, sizeof(params),
+                            CRATE_INDEX_NONE) == 0 ? OK : -ERR_INVALID_ARGS;
+    }
+
+    s_cursor_valid = false;
+    return MfCall1(DECK_HARDWARE, HW_VGA_STEP_CURSOR,
+                   params, sizeof(params), NULL, 0,
+                   NULL, 0, NULL,
+                   BOX_ANSWER_GUARANTEED, NULL);
+}
+
 /* Current pair for the write ops below. First use without an explicit
  * setcolor fetches the kernel's truth once (another Cabin may have set
  * the console colour before us). */
@@ -507,6 +538,43 @@ int vga_newline(void)
         s_cursor_valid = true;
     }
     return 0;
+}
+
+int vga_paint(uint8_t row, uint8_t col, uint8_t height, uint8_t width,
+              const TextCell *cells)
+{
+    if (!cells || height == 0 || width == 0) return -ERR_INVALID_ARGS;
+
+    /* Never batched, and it does not need to be: a paint is already ONE op.
+     * The staging buffer a batched input crate copies through is 8 KiB and a
+     * frame is ten times that, so batching it would mean either a second copy
+     * of every frame or a silent split. Pending ops go first so the caller's
+     * order survives. */
+    if (batch_active()) {
+        int rc = batch_flush_preserving_depth();
+        if (rc != OK) return rc;
+    }
+
+    /* Sentinels are the one thing this path does NOT resolve before the wire.
+     * Every other op carries one pair and resolving it here costs two
+     * branches; a frame carries six thousand, and resolving them would mean
+     * either walking the caller's buffer (it is const, and theirs) or copying
+     * the whole frame to walk the copy. The kernel already makes one snapshot
+     * of these bytes to get them out of user memory — it resolves as it
+     * paints, so the Canvas still never sees a sentinel. */
+    uint32_t n = (uint32_t)height * (uint32_t)width;
+
+    uint8_t params[4];
+    params[0] = row;
+    params[1] = col;
+    params[2] = height;
+    params[3] = width;
+
+    return MfCall1(DECK_HARDWARE, HW_VGA_PAINT,
+                   params, sizeof(params),
+                   cells, n * (uint32_t)sizeof(TextCell),
+                   NULL, 0, NULL,
+                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
 int vga_clear_rgb(Color fg, Color bg)

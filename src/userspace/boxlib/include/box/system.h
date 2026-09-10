@@ -92,6 +92,50 @@ int proc_exec_gen(const char* line, const char* tags, uint32_t* out_gen);
 int process_gone(uint32_t pid, uint32_t generation, int32_t* out_exit);
 int proc_kill(uint32_t pid);                                  /* kill another process by pid */
 
+/* End the exact incarnation (pid, generation) — the pair that names a
+ * process, since a pid is a seat and seats are re-let. Between learning a
+ * pid and using it the process can leave and its seat be taken; a kill by
+ * pid alone lands on whoever sits there now, and reports success. This one
+ * answers -ERR_PROCESS_NOT_FOUND instead, which is the truth. generation 0
+ * means "whoever is in that seat" and is exactly proc_kill. */
+int proc_finish(uint32_t pid, uint32_t generation);
+
+/* One member of a tag's crew, as proc_crew found them. `tags` points inside
+ * the same allocation as the array: free(mates) frees the names too. */
+typedef struct ProcMate {
+    uint32_t    pid;
+    uint32_t    generation;   /* with pid, the incarnation — pass to proc_finish */
+    uint32_t    state;        /* process_state_t; 4 DONE / 5 CRASHED are gone */
+    uint64_t    cpu_us;       /* processor time this cabin has been given */
+    const char *tags;         /* comma-joined, NUL-terminated */
+} ProcMate;
+
+/* Who wears this tag, right now.
+ *
+ * A tag names a role, not an individual: three hundred processes may wear
+ * one, and `broadcast` has always walked exactly this crew to speak to them.
+ * This asks the same walk to answer instead. Returns how many were DELIVERED
+ * (>= 0) and hands back a malloc'd array of that many — NULL and 0 when
+ * nobody wears it — or a negative -error_t. The caller frees the array.
+ *
+ * `out_total` (optional) receives how many wear it altogether. It differs from
+ * the return only for a crew too large to fit one answer, and then the
+ * difference is the point: a caller that acts on the answer as if it were the
+ * whole crew would leave the rest running and report success. The two numbers
+ * are the same distinction storage's tag query draws, for the same reason.
+ *
+ * The kernel promises two things about the answer: every cabin in it was LIVE
+ * at the moment of the walk (the dead are dropped before the answer is built),
+ * and no member's tag list is ever delivered cut short — a record that would
+ * not fit whole is not delivered at all, and shows up in the shortfall.
+ *
+ * The caller is in its own answer when it wears the tag.
+ *
+ * A member found here may already have left by the time it is used: that is
+ * not a flaw in the answer but the nature of the question, and it is why
+ * each member carries its generation — see proc_finish. */
+int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total);
+
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);
 int proc_tag_check(const char* tag, bool* has_tag);

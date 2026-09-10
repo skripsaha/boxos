@@ -141,9 +141,54 @@ static void op_ActivatePullMap(DisplayBackend *be)
  *  Initialisation
  * ========================================================================= */
 
+/* ‼ THE HIGH BIT OF A BACKGROUND IS A COLOUR HERE, NOT A FLASH.
+ *
+ * An attribute byte is (bg << 4) | fg, and in the mode the firmware leaves
+ * behind, bit 7 — the top bit of the background nibble — does not select a
+ * colour: it makes the cell BLINK. Eight of the sixteen backgrounds were
+ * therefore unusable, and nothing said so. What it cost was measured the day
+ * a program first painted with them: lavalamp's default liquid (#ff3a6b)
+ * projects to light red, so the body of every blob flashed at 2 Hz instead of
+ * glowing, and draft's title bar (dark grey) flashed along with it. A picture
+ * that blinks is not a picture with a bug in its colours — it is a picture
+ * nobody can look at.
+ *
+ * Clearing bit 3 of Attribute Controller index 0x10 hands those eight back as
+ * what they look like they are. Nothing is lost: no part of this system asks
+ * for blinking text, and a cell that wants attention has twenty-four bits of
+ * colour to ask with.
+ *
+ * ‼ THE FLIP-FLOP IS RESET TWICE, AND THE FIRST ATTEMPT HERE RESET IT ONCE.
+ * Port 0x3C0 is index and data through one address, told apart by a flip-flop
+ * that a read of 0x3DA puts into INDEX state and that every write to 0x3C0
+ * toggles. Reading the value at 0x3C1 leaves the flip-flop in DATA state, so a
+ * sequence that writes the index again straight afterwards writes it as DATA —
+ * and the write meant for the data then lands as an INDEX, with bit 5 (PAS)
+ * clear. Clearing PAS disconnects the palette and the screen goes BLACK and
+ * stays black. Measured exactly that way: the console went dark on the first
+ * BIOS boot after this function was added. Hence the second read of 0x3DA
+ * before the write pair — and the index carrying 0x20 on the way in, which is
+ * what puts PAS back.
+ *
+ * Interrupts are not disabled: this runs once, on the BSP, before any other
+ * core exists, and an interrupt that wrote 0x3C0 would already have broken
+ * every other attribute write in the kernel. */
+static void hw_vga_blink_off(void)
+{
+    (void)inb(0x3DA);                 /* flip-flop -> index */
+    outb(0x3C0, 0x10 | 0x20);         /* index 0x10, palette access kept on */
+    uint8_t mode = inb(0x3C1);        /* flip-flop is left in DATA state here */
+
+    (void)inb(0x3DA);                 /* -> index again, for the write pair */
+    outb(0x3C0, 0x10 | 0x20);         /* index                              */
+    outb(0x3C0, (uint8_t)(mode & ~0x08u));   /* data: blink enable cleared  */
+}
+
 DisplayBackend *HwVgaBackendInit(void)
 {
     s_vga.vram = (unsigned char *)HW_VGA_BUF_ADDR;   /* identity at boot */
+
+    hw_vga_blink_off();
 
     s_vga.base.caps  = 0;                            /* HW_SCROLL slot reserved for GPU drivers */
     s_vga.base.cols  = HW_VGA_COLS;

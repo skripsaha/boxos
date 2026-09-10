@@ -132,6 +132,15 @@ void VideoClearLineRgb(int line, uint32_t fg, uint32_t bg)
     CanvasClearLine(line, BoxColorResolveFg(fg), BoxColorResolveBg(bg));
 }
 
+bool VideoPaintCells(uint32_t row, uint32_t col, uint32_t height, uint32_t width,
+                     const TextCell *cells)
+{
+    /* No sentinel resolution here: the pair in a painted cell is already
+     * concrete. Userspace resolves before the wire (box/vga.h), and the
+     * kernel's own callers pass what they mean. */
+    return CanvasPaint(row, col, height, width, cells);
+}
+
 void VideoClearToEol(void)
 {
     CanvasClearToEol(g_cur_fg, g_cur_bg);

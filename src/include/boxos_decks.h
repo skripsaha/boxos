@@ -28,6 +28,20 @@
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
+/* proc.crew — who wears a tag. params = the tag as text (no NUL).
+ * out_crate = [u32 delivered][u32 total] then `delivered` records:
+ * [u32 pid][u32 generation][u32 state][u32 tags_len][u64 cpu_us][char tags[]].
+ * `total` is how many wear it, `delivered` how many fitted — the same
+ * distinction storage.tag.query makes, for the same reason. broadcast has
+ * always walked these carriers to SPEAK to them; this walk answers instead.
+ * The caller is in its own answer when it wears the tag.
+ *
+ * Two promises about what is delivered: every record is a cabin that was LIVE
+ * at the walk (PROC_DONE and PROC_CRASHED are dropped before the answer is
+ * built, so a reader needs no liveness test of its own), and no record's tag
+ * list is ever cut short — one that would not fit whole is left out of
+ * `delivered` entirely and shows up as the shortfall against `total`. */
+#define SYSTEM_OP_PROC_CREW         0x0B
 /* Use Context — what the person at this machine is doing, said in tags.
  * One per machine (core/use_context). set takes a comma-separated tag list in
  * the in_crate (an empty list clears); get writes the tags into the out_crate

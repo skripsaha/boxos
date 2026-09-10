@@ -42,7 +42,6 @@ GPT_ARRAY_SECTORS = (GPT_ENTRIES * GPT_ENTRY_BYTES) // SECTOR   # 32
 # starts at 34 — the first sector that is nobody else's.
 STAGE2_LBA = 34
 STAGE2_SECTORS = 16
-FIRST_USABLE = 2048           # the volume stays exactly where it was
 
 STAGE2_LBA_FIELD = 432        # the field in stage1, see src/boot/stage1/stage1.asm
 
@@ -95,8 +94,8 @@ def main():
 
     src = open(sys.argv[1], 'rb').read()
     total = len(src) // SECTOR
-    if total < FIRST_USABLE:
-        print('the source image is shorter than the volume it should contain')
+    if total < STAGE2_LBA + STAGE2_SECTORS + GPT_ARRAY_SECTORS:
+        print('the source image is shorter than a GPT disk can be')
         return 1
 
     disk = bytearray(src)
@@ -127,21 +126,34 @@ def main():
     disk[SECTOR:SECTOR * (1 + STAGE2_SECTORS)] = b'\0' * (STAGE2_SECTORS * SECTOR)
 
     # ── the GPT ───────────────────────────────────────────────────────────
-    # Everything from the volume on is left exactly where it was; the entries
-    # simply describe it.
-    # The ESP is whatever follows the volume in the source image: the build
-    # puts it at a 2048-aligned sector, and the volume ends where it begins.
-    esp_first = 51200 if total > 51200 else None
+    # Everything is left exactly where it already is; the entries simply
+    # describe it. WHERE that is, is read out of the MBR this image was built
+    # with rather than assumed: the build derives the volume's size from what
+    # goes in it, so a sector typed here would be wrong the first time anybody
+    # added a program to the image. It was: 51200, from the days the volume was
+    # 24 MiB because a Makefile said so.
+    # From the SOURCE, not from `disk`: the protective MBR above has already
+    # replaced the table in the working copy with its one covering entry.
+    mbr = src[446:510]
+    parts = []
+    for i in range(4):
+        e = mbr[i * 16:(i + 1) * 16]
+        ptype, first, count = e[4], struct.unpack('<I', e[8:12])[0], struct.unpack('<I', e[12:16])[0]
+        if ptype and count:
+            parts.append((ptype, first, count))
+
+    boxos = next((p for p in parts if p[0] == 0x7F), None)
+    esp = next((p for p in parts if p[0] == 0xEF), None)
+    if not boxos:
+        raise SystemExit('make_gpt_boot: the source image has no BoxOS partition (MBR type 0x7f)')
 
     entries = [
         gpt_entry(BIOS_BOOT_TYPE, STAGE2_LBA, STAGE2_LBA + STAGE2_SECTORS - 1,
                   'BoxOS loader'),
-        gpt_entry(BOXOS_TYPE, FIRST_USABLE,
-                  (esp_first - 1) if esp_first else (total - 34),
-                  'BoxOS'),
+        gpt_entry(BOXOS_TYPE, boxos[1], boxos[1] + boxos[2] - 1, 'BoxOS'),
     ]
-    if esp_first:
-        entries.append(gpt_entry(ESP_TYPE, esp_first, total - 34, 'EFI'))
+    if esp:
+        entries.append(gpt_entry(ESP_TYPE, esp[1], esp[1] + esp[2] - 1, 'EFI'))
 
     array = b''.join(entries)
     array += b'\0' * (GPT_ENTRIES * GPT_ENTRY_BYTES - len(array))
@@ -168,10 +180,9 @@ def main():
     print(f'  stage1  sector 0, told stage2 is at {STAGE2_LBA}')
     print(f'  stage2  sectors {STAGE2_LBA}..{STAGE2_LBA + STAGE2_SECTORS - 1}'
           f'  (BIOS boot partition)')
-    print(f'  volume  sectors {FIRST_USABLE}..'
-          f'{(esp_first - 1) if esp_first else total - 34}')
-    if esp_first:
-        print(f'  ESP     sectors {esp_first}..{total - 34}')
+    print(f'  volume  sectors {boxos[1]}..{boxos[1] + boxos[2] - 1}')
+    if esp:
+        print(f'  ESP     sectors {esp[1]}..{esp[1] + esp[2] - 1}')
     return 0
 
 

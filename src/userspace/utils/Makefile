@@ -63,7 +63,8 @@ BOXLIB_START = ../build/boxlib_start.o
 
 UTILS = help create show files tag untag name trash erase \
         me info say reboot bye defrag fsck ipc_test memtag hw \
-        timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount
+        timezone logsave lastsaid rgbtest usetest luggagetest rollcall handset headcount \
+        draft playtime lavalamp finish
 
 .PHONY: all clean
 
@@ -74,6 +75,32 @@ include ../nameplate.mk
 
 %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+
+# draft is four parts — the book, the glass, the volume, and what decides —
+# and the pattern rule above links exactly one object, so it names its own.
+draft.elf: $(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) draft.o draft_book.o draft_paint.o draft_file.o $(BOXLIB))
+	@x86_64-elf-objcopy --strip-all $@
+
+# ‼ THE FOUR NEWEST UTILITIES ARE STRIPPED, AND THE REASON IS THE VOLUME.
+#
+# The medium holds 24 MB and the image was already using all but 946 KB of it.
+# These four unstripped came to 530 KB, which left 400 KB — and the C++
+# conformance suite, which CREATES files as it tests <fstream>, then failed
+# seventy checks on a volume with nowhere to put them. Measured: UEFI STRICT 4c
+# went from no cxxtest failures at all to seventy, every one of them in a phase
+# that writes.
+#
+# What is dropped is .symtab and .debug_*, and dropping them costs nothing that
+# can be read from the running machine: the Nameplate linked in above already
+# carries the address-to-name table a crash needs, in a section the loader maps
+# (`tools/nameplate list` still reads all 362 names out of a stripped draft).
+# It must come AFTER the link, because `nameplate verify` reads the symbol
+# table this deletes. cxxtest, timezone and exitpaths are stripped for the same
+# reason and were the precedent.
+$(addsuffix .elf,playtime lavalamp finish): %.elf: $(BOXLIB_START) %.o $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
+	@x86_64-elf-objcopy --strip-all $@
 
 # The zone database is C++, so `timezone` is. An explicit rule, which overrides
 # the pattern rule above: a different driver, and libboxcxx.a BEFORE libbox.a
